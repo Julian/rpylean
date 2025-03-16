@@ -12,5 +12,6 @@ _parse = make_parse_function(regexs, rules, eof=True)
 def parse(source):
     try:
         return _parse(source)
-    except ParseError as e:
-        print (e, e.nice_error_message())
+    except ParseError as error:
+        print error.nice_error_message(__file__, source)
+        raise
