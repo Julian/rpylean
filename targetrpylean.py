@@ -1,9 +1,22 @@
-def debug(msg):
-    print "debug:", msg
+"""
+Execute ./rpylean-c <filename>
+"""
+
+from rpython.rlib.streamio import open_file_as_stream
+
+from rpylean.interpreter import interpret
+
 
 def entry_point(argv):
-    debug("hello world")
+    if not len(argv) == 2:
+        print __doc__
+        return 1
+    f = open_file_as_stream(argv[1])
+    data = f.readall()
+    f.close()
+    interpret(data)
     return 0
+
 
 def target(*args):
     return entry_point
