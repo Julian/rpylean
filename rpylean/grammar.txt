@@ -1,64 +1,66 @@
-File: EXPORT_FORMAT_VERSION Item*
+file: export_format_version item*;
 
 NAT: "[1-9][0-9]*";
+HEXSTRING: "[a-f][0-9]+";
 
-EXPORT_FORMAT_VERSION: NAT "." NAT "." NAT
+export_format_version: NAT "." NAT "." NAT;
 
-Item: Name | Universe | Expr | RecRule | Declaration
+item: name | universe | expr | recrule | declaration;
 
-Declaration: 
-    | Axiom 
-    | Quotient 
-    | Definition 
-    | Theorem 
-    | Inductive 
-    | Constructor 
-    | Recursor
+declaration:
+      axiom 
+    | quotient 
+    | definition 
+    | theorem 
+    | inductive 
+    | constructor 
+    | recursor ;
 
-nidx: NAT
-uidx: NAT
-eidx: NAT
-ridx: NAT
+nidx: NAT;
+uidx: NAT;
+eidx: NAT;
+ridx: NAT;
 
-Name:
-  | nidx "#NS" nidx string
+name:
+    nidx "#NS" nidx HEXSTRING
   | nidx "#NI" nidx NAT
+  ;
 
-Universe:
-  | uidx "#US"  uidx
+universe:
+    uidx "#US"  uidx
   | uidx "#UM"  uidx uidx
   | uidx "#UIM" uidx uidx
   | uidx "#UP"  nidx
+  ;
 
-Expr:
-  | eidx "#EV"  NAT
+expr:
+    eidx "#EV"  NAT
   | eidx "#ES"  uidx
   | eidx "#EC"  nidx uidx*
   | eidx "#EA"  eidx eidx
-  | eidx "#EL"  Info nidx eidx eidx
-  | eidx "#EP"  Info nidx eidx eidx
-  | eidx "#EZ"  Info nidx eidx eidx eidx
+  | eidx "#EL"  info nidx eidx eidx
+  | eidx "#EP"  info nidx eidx eidx
+  | eidx "#EZ"  info nidx eidx eidx eidx
   | eidx "#EJ"  nidx NAT eidx
   | eidx "#ELN" NAT
-  | eidx "#ELS" (hexhex)*
-  #  metadata node w/o extensions
-  | eidx "#EM" mptr eidx
+  | eidx "#ELS" HEXSTRING
+  ;
 
-Info: "#BD" | "#BI" | "#BS" | "#BC"
+info: "#BD" | "#BI" | "#BS" | "#BC";
 
-Hint: "O" | "A" | "R" NAT
+hint: "O" | "A" | "R" NAT;
 
-RecRule: ridx "#RR" nidx NAT eidx
+recrule: ridx "#RR" nidx NAT eidx;
 
-Axiom: "#AX" nidx eidx uidx*
+axiom: "#AX" nidx eidx uidx*;
 
-Def: "#DEF" nidx eidx eidx Hint uidx*
+definition: "#DEF" nidx eidx eidx hint uidx*;
   
-Theorem: "#THM" nidx eidx eidx uidx*
+theorem: "#THM" nidx eidx eidx uidx*;
 
-Quotient: "#QUOT" nidx eidx uidx*
+quotient: "#QUOT" nidx eidx uidx*;
 
-Inductive: 
+inductive: 
   "#IND"
   nidx 
   eidx 
@@ -71,8 +73,9 @@ Inductive:
   NAT 
   nidx NAT* 
   uidx*
+  ;
 
-Constructor: 
+constructor: 
   "#CTOR"
   nidx 
   eidx 
@@ -81,8 +84,9 @@ Constructor:
   NAT
   NAT
   uidx*
+  ;
 
-Recursor: 
+recursor: 
   "#REC"
   nidx
   eidx
@@ -96,3 +100,4 @@ Recursor:
   ridx NAT*
   "1" | "0"
   uidx*
+  ;
