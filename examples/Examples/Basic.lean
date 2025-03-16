@@ -1,1 +1,6 @@
-theorem true_by_rfl: True := True.intro
+prelude
+
+inductive MyTrue : Prop where
+  | intro : MyTrue
+
+theorem true_by_rfl: MyTrue := MyTrue.intro
