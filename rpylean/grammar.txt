@@ -8,12 +8,12 @@ export_format_version: NAT "." NAT "." NAT;
 item: name | universe | expr | recrule | declaration;
 
 declaration:
-      axiom 
-    | quotient 
-    | definition 
-    | theorem 
-    | inductive 
-    | constructor 
+      axiom
+    | quotient
+    | definition
+    | theorem
+    | inductive
+    | constructor
     | recursor ;
 
 nidx: NAT;
@@ -55,38 +55,38 @@ recrule: ridx "#RR" nidx NAT eidx;
 axiom: "#AX" nidx eidx uidx*;
 
 definition: "#DEF" nidx eidx eidx hint uidx*;
-  
+
 theorem: "#THM" nidx eidx eidx uidx*;
 
 quotient: "#QUOT" nidx eidx uidx*;
 
-inductive: 
+inductive:
   "#IND"
-  nidx 
-  eidx 
+  nidx
+  eidx
   "0" | "1"
   "0" | "1"
-  NAT 
+  NAT
   NAT
   NAT
   nidx NAT*
-  NAT 
-  nidx NAT* 
+  NAT
+  nidx NAT*
   uidx*
   ;
 
-constructor: 
+constructor:
   "#CTOR"
-  nidx 
-  eidx 
-  nidx 
+  nidx
+  eidx
+  nidx
   NAT
   NAT
   NAT
   uidx*
   ;
 
-recursor: 
+recursor:
   "#REC"
   nidx
   eidx
