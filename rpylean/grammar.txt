@@ -1,0 +1,93 @@
+File ::= ExportFormatVersion Item*
+
+ExportFormatVersion ::= nat '.' nat '.' nat
+
+Item ::= Name | Universe | Expr | RecRule | Declaration
+
+Declaration ::= 
+    | Axiom 
+    | Quotient 
+    | Definition 
+    | Theorem 
+    | Inductive 
+    | Constructor 
+    | Recursor
+
+nidx, uidx, eidx, ridx ::= nat
+
+Name ::=
+  | nidx "#NS" nidx string
+  | nidx "#NI" nidx nat
+
+Universe ::=
+  | uidx "#US"  uidx
+  | uidx "#UM"  uidx uidx
+  | uidx "#UIM" uidx uidx
+  | uidx "#UP"  nidx
+
+Expr ::=
+  | eidx "#EV"  nat
+  | eidx "#ES"  uidx
+  | eidx "#EC"  nidx uidx*
+  | eidx "#EA"  eidx eidx
+  | eidx "#EL"  Info nidx eidx eidx
+  | eidx "#EP"  Info nidx eidx eidx
+  | eidx "#EZ"  Info nidx eidx eidx eidx
+  | eidx "#EJ"  nidx nat eidx
+  | eidx "#ELN" nat
+  | eidx "#ELS" (hexhex)*
+  -- metadata node w/o extensions
+  | eidx "#EM" mptr eidx
+
+Info ::= "#BD" | "#BI" | "#BS" | "#BC"
+
+Hint ::= "O" | "A" | "R" nat
+
+RecRule ::= ridx "#RR" (ctorName : nidx) (nFields : nat) (val : eidx)
+
+Axiom ::= "#AX" (name : nidx) (type : eidx) (uparams : uidx*)
+
+Def ::= "#DEF" (name : nidx) (type : eidx) (value : eidx) (hint : Hint) (uparams : uidx*)
+  
+Theorem ::= "#THM" (name : nidx) (type : eidx) (value : eidx) (uparams: uidx*)
+
+Quotient ::= "#QUOT" (name : nidx) (type : eidx) (uparams : uidx*)
+
+Inductive ::= 
+  "#IND"
+  (name : nidx) 
+  (type : eidx) 
+  (isRecursive: 0 | 1)
+  (isNested : 0 | 1)
+  (numParams: nat) 
+  (numIndices: nat)
+  (numInductives: nat)
+  (inductiveNames: nidx {numInductives})
+  (numConstructors : nat) 
+  (constructorNames : nidx {numConstructors}) 
+  (uparams: uidx*)
+
+Constructor ::= 
+  "#CTOR"
+  (name : nidx) 
+  (type : eidx) 
+  (parentInductive : nidx) 
+  (constructorIndex : nat)
+  (numParams : nat)
+  (numFields : nat)
+  (uparams: uidx*)
+
+Recursor ::= 
+  "#REC"
+  (name : nidx)
+  (type : eidx)
+  (numInductives : nat)
+  (inductiveNames: nidx {numInductives})
+  (numParams : nat)
+  (numIndices : nat)
+  (numMotives : nat)
+  (numMinors : nat)
+  (numRules : nat)
+  (recRules : ridx {numRules})
+  (k : 1 | 0)
+  (uparams : uidx*)
