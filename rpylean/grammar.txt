@@ -70,8 +70,8 @@ inductive:
   "#IND"
   nidx
   eidx
-  "0" | "1"
-  "0" | "1"
+  NAT
+  NAT
   NAT
   NAT
   NAT
@@ -104,6 +104,6 @@ recursor:
   NAT
   NAT
   ridx NAT*
-  "1" | "0"
+  NAT
   uidx*
   ;
