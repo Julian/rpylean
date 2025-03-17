@@ -79,6 +79,74 @@ class ExprApp(Expr):
     def __repr__(self):
         return "ExprApp(%s, %s)" % (self.function, self.arg)
 
+class Declaration(object):
+    pass
+
+class DeclarationInductive(Declaration):
+    def __init__(self, name, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names, level_params):
+        self.name = name
+        self.expr = expr
+        self.is_rec = is_rec
+        self.is_nested = is_nested
+        self.num_params = num_params
+        self.num_indices = num_indices
+        self.ind_names = ind_names
+        self.ctor_names = ctor_names
+        self.level_params = level_params
+
+    def __repr__(self):
+        return "DeclarationInductive(%s, %s, %s, %s, %s, %s, %s, %s)" % (self.name, self.expr, self.is_rec, self.is_nested, self.num_params, self.num_indices, self.ind_names, self.ctor_names)
+
+class DeclarationCtor(Declaration):
+    def __init__(self, name, ctype, inductive, cidx, num_params, num_fields, level_params):
+        self.name = name
+        self.ctype = ctype
+        self.inductive = inductive
+        self.cidx = cidx
+        self.num_params = num_params
+        self.num_fields = num_fields
+        self.level_params = level_params
+
+    def __repr__(self):
+        return "DeclarationCtor(%s, %s, %s, %s, %s, %s)" % (self.name, self.ctype, self.inductive, self.cidx, self.num_params, self.num_fields)
+
+class DeclarationRecursor(Declaration):
+    def __init__(self, name, expr, k, numParams, numIndices, numMotives, numMinors, indNames, ruleIdxs, levelParams):
+        self.name = name
+        self.expr = expr
+        self.k = k
+        self.numParams = numParams
+        self.numIndices = numIndices
+        self.numMotives = numMotives
+        self.numMinors = numMinors
+        self.indNames = indNames
+        self.ruleIdxs = ruleIdxs
+        self.levelParams = levelParams
+
+    def __repr__(self):
+        return "DeclarationRecursor(%s, %s, %s, %s, %s, %s, %s, %s, %s)" % (self.name, self.expr, self.k, self.numParams, self.numIndices, self.numMotives, self.numMinors, self.indNames, self.ruleIdxs)
+
+class DeclarationDef(Declaration):
+    def __init__(self, name, def_type, def_val, hint, level_params):
+        self.name = name
+        self.def_type = def_type
+        self.def_val = def_val
+        self.hint = hint
+        self.level_params = level_params
+
+    def __repr__(self):
+        return "DeclarationDef(%s, %s, %s, %s, %s)" % (self.name, self.def_type, self.def_val, self.hint, self.level_params)
+
+class DeclarationTheorem(Declaration):
+    def __init__(self, name, def_type, def_val, level_params):
+        self.name = name
+        self.def_type = def_type
+        self.def_val = def_val
+        self.level_params = level_params
+
+    def __repr__(self):
+        return "DeclarationDef(%s, %s, %s, %s)" % (self.name, self.def_type, self.def_val, self.level_params)
+
 class Environment:
     def __init__(self):
         self.levels = {"0": LevelZero()}
@@ -86,6 +154,7 @@ class Environment:
         self.names = {"0": []}
         self.constants = {}
         self.rec_rules = {}
+        self.declarations = {}
 
     def __repr__(self):
         return "Environment()"
@@ -109,6 +178,10 @@ class Environment:
     def add_rec_rule(self, ridx, name, nfields, rhs):
         assert ridx not in self.rec_rules
         self.rec_rules[ridx] = RecRule(name, nfields, rhs)
+
+    def add_declaration(self, name_idx, decl):
+        assert name_idx not in self.declarations
+        self.declarations[name_idx] = decl
 
 
 def interpret(source):
@@ -167,12 +240,90 @@ def interpret(source):
             else:
                 assert False, etype
         elif item.symbol == "declaration":
-            nidx = item.children[0].children[1].children[0].additional_info
-            eidx = item.children[0].children[2].children[0].additional_info
-            name = env.names[nidx]
-            type = env.exprs[eidx]
-            key = ".".join(name)
-            env.add_constant(key, type)
+            dec_kind = item.children[0].children[0].additional_info
+            if dec_kind == "#IND":
+                item = item.children[0]
+                name_idx = item.children[1].children[0].additional_info
+                name = env.names[name_idx]
+                expr = env.exprs[item.children[2].children[0].additional_info]
+                isRec = item.children[3].additional_info
+                isNested = item.children[4].additional_info
+                numParams = item.children[5].additional_info
+                numIndices = item.children[6].additional_info
+                numIndNameIdxs = int(item.children[7].additional_info)
+                if numIndNameIdxs < 0:
+                    raise RuntimeError("numIndNameIdxs must be non-negative")
+                pos = 8
+                indNameIdxs = item.children[pos:(pos + numIndNameIdxs)]
+                pos += numIndNameIdxs
+
+                numCtors = int(item.children[pos].additional_info)
+                if numCtors < 0:
+                    raise RuntimeError("numCtors must be non-negative")
+                pos += 1
+
+                ctorNameIdxs = item.children[pos:(pos + numCtors)]
+                pos += numCtors
+
+                levels = item.children[pos:]
+                env.add_declaration(name_idx, DeclarationInductive(name, expr, isRec, isNested, numParams, numIndices, indNameIdxs, ctorNameIdxs, levels))
+            elif dec_kind == "#CTOR":
+                item = item.children[0]
+                name_idx = item.children[1].children[0].additional_info
+                name = env.names[name_idx]
+                ctype = env.exprs[item.children[2].children[0].additional_info]
+                induct = env.names[item.children[3].children[0].additional_info]
+                cidx = item.children[4].additional_info
+                numParams = item.children[5].additional_info
+                numFields = item.children[6].additional_info
+                levelsParamIds = item.children[7:]
+                env.add_declaration(name_idx, DeclarationCtor(name, ctype, induct, cidx, numParams, numFields, levelsParamIds))
+            elif dec_kind == "#REC":
+                item = item.children[0]
+                name_idx = item.children[1].children[0].additional_info
+                name = env.names[name_idx]
+                expr = env.exprs[item.children[2].children[0].additional_info]
+                numIndNameIdxs = int(item.children[3].additional_info)
+                if numIndNameIdxs < 0:
+                    raise RuntimeError("numIndNameIdxs must be non-negative")
+                pos = 4
+                indNameIdxs = item.children[pos:(pos + numIndNameIdxs)]
+                pos += numIndNameIdxs
+
+                numParams = item.children[pos].additional_info
+                numIndices = item.children[pos + 1].additional_info
+                numMotives = item.children[pos + 2].additional_info
+                numMinors = item.children[pos + 3].additional_info
+                numRuleIdxs = int(item.children[pos + 4].additional_info)
+                if numRuleIdxs < 0:
+                    raise RuntimeError("numRuleIdxs must be non-negative")
+                pos += 5
+
+                ruleIdxs = item.children[pos:(pos + numRuleIdxs)]
+                pos += numRuleIdxs
+
+                k = item.children[pos].additional_info
+                levelParams = item.children[(pos + 1):]
+                env.add_declaration(name_idx, DeclarationRecursor(name, expr, k, numParams, numIndices, numMotives, numMinors, indNameIdxs, ruleIdxs, levelParams))
+            elif dec_kind == "#DEF":
+                item = item.children[0]
+                name_idx = item.children[1].children[0].additional_info
+                name = env.names[name_idx]
+                def_type = env.exprs[item.children[2].children[0].additional_info]
+                def_val = env.exprs[item.children[3].children[0].additional_info]
+                hint = item.children[4]
+                levelParams = item.children[5:]
+                env.add_declaration(name_idx, DeclarationDef(name, def_type, def_val, hint, levelParams))
+            elif dec_kind == "#THM":
+                item = item.children[0]
+                name_idx = item.children[1].children[0].additional_info
+                name = env.names[name_idx]
+                def_type = env.exprs[item.children[2].children[0].additional_info]
+                def_val = env.exprs[item.children[3].children[0].additional_info]
+                levelParams = item.children[4:]
+                env.add_declaration(name_idx, DeclarationTheorem(name, def_type, def_val, levelParams))                
+            else:
+                assert False, "unknown declaration type %s" % (dec_kind,)
         elif item.symbol == "universe":
             target_uidx = item.children[0].children[0].additional_info
             utype = item.children[1]
@@ -198,16 +349,20 @@ def interpret(source):
 
     print("\nEXPRS:")
     for name, value in env.exprs.items():
-        print(name, value)
+        print(name, value.__repr__())
 
     print("\nCONSTANTS:")
     for name, value in env.constants.items():
-        print(name, value)
+        print(name, value.__repr__())
 
     print("\nLEVELS:")
     for name, value in env.levels.items():
-        print(name, value)
+        print(name, value.__repr__())
 
     print("\nRECRULES:")
     for name, value in env.rec_rules.items():
-        print(name, value)
+        print(name, value.__repr__())
+
+    print("\nDECLARATIONS:")
+    for name, value in env.declarations.items():
+        print(name, value.__repr__())
