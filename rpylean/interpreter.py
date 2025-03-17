@@ -199,3 +199,15 @@ def interpret(source):
     print("\nEXPRS:")
     for name, value in env.exprs.items():
         print(name, value)
+
+    print("\nCONSTANTS:")
+    for name, value in env.constants.items():
+        print(name, value)
+
+    print("\nLEVELS:")
+    for name, value in env.levels.items():
+        print(name, value)
+
+    print("\nRECRULES:")
+    for name, value in env.rec_rules.items():
+        print(name, value)
