@@ -5,11 +5,11 @@ from rpylean.parser import parse
 class Level:
     pass
 
-class LevelZero:
+class LevelZero(Level):
     def __repr__(self):
         return "LevelZero()"
 
-class LevelParam:
+class LevelParam(Level):
     def __init__(self, name):
         self.name = name
 
