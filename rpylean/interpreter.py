@@ -37,62 +37,29 @@ class Environment:
     def __repr__(self):
         return "Environment()"
 
-    def add_name(self, nidx, segments):
+    def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names
-        self.names[nidx] = segments
+        parent = self.names[parent_nidx]
+        self.names[nidx] = parent + [name]
 
-    def add_expr(self, eidx, expr):
+    def register_expr(self, eidx, expr):
         assert eidx not in self.exprs
         self.exprs[eidx] = expr
 
-    def add_constant(self, name, type):
+    def register_constant(self, name, type):
         assert name not in self.constants
         self.constants[name] = type
 
 
 def interpret(source):
-    items = parse(source)
-
-    env = Environment()
-
-    for each in items.children:
-        item = each.children[0]
-        if item.symbol == "name":
-            symbol = item.children[0].children[0]
-            new_nidx = symbol.additional_info
-            parent_nidx = item.children[2].children[0].additional_info
-            parent = env.names[parent_nidx]
-
-            name = item.children[3].additional_info
-            env.add_name(new_nidx, parent + [name])
-        elif item.symbol == "expr":
-            etype = item.children[1]
-            if etype.additional_info == "#ES":
-                eidx, etype, uidx = item.children
-                level = env.levels[uidx.children[0].additional_info]
-                env.add_expr(eidx.children[0].additional_info, ExprSort(level))
-            elif etype.additional_info == "#EC":
-                eidx = item.children[0].children[0].additional_info
-                nidx = item.children[2].children[0].additional_info
-                assert len(item.children) == 3, "uidxs present"
-                value = env.names[nidx]
-                env.add_expr(eidx, ExprConst(value))
-            else:
-                assert False, etype
-        elif item.symbol == "declaration":
-            nidx = item.children[0].children[1].children[0].additional_info
-            eidx = item.children[0].children[2].children[0].additional_info
-            name = env.names[nidx]
-            type = env.exprs[eidx]
-            key = ".".join(name)
-            env.add_constant(key, type)
-        else:
-            assert False, each
+    environment = Environment()
+    ast = parse(source)
+    ast.compile(environment)
 
     print("NAMES:")
-    for name, value in env.names.items():
+    for name, value in environment.names.items():
         print(name, value)
 
     print("\nEXPRS:")
-    for name, value in env.exprs.items():
+    for name, value in environment.exprs.items():
         print(name, value)
