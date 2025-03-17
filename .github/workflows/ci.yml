@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - "wip*"
+    tags:
+      - "v*"
+  pull_request:
+  schedule:
+    # Daily at 8:33
+    - cron: "33 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up PyPy 2.7
+      uses: actions/setup-python@v5
+      with:
+        python-version: "pypy-2.7"
+
+    - name: Checkout PyPy
+      uses: actions/checkout@v4
+      with:
+        repository: pypy/pypy
+        path: pypy
+
+    - run: pypy --version
+
+    - name: Run Tests
+      run: |
+        pypy -m pip install pytest
+        PYTHONPATH=pypy pytest rpylean
+
+    - name: Translate
+      run: |
+        pypy pypy/rpython/bin/rpython targetrpylean.py
