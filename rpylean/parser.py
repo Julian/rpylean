@@ -1,5 +1,7 @@
+from __future__ import print_function
+
 from rpython.rlib.parsing.ebnfparse import parse_ebnf, make_parse_function
-from rpython.rlib.parsing.parsing import ParseError
+from rpython.rlib.parsing.tree import RPythonVisitor
 import py
 
 from rpylean import RPYLEAN_DIR
@@ -10,8 +12,6 @@ _parse = make_parse_function(regexs, rules, eof=True)
 
 
 def parse(source):
-    try:
-        return _parse(source)
-    except ParseError as error:
-        print error.nice_error_message(__file__, source)
-        raise
+    ast = ToAST().transform(_parse(source))
+    _, items = ast.children
+    return items

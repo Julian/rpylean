@@ -9,7 +9,7 @@ NAT: "[0-9]*";
 STRING: "[a-zA-Z]*";
 HEXHEX: "[a-f][0-9]";
 
-export_format_version: NAT "." NAT "." NAT;
+export_format_version: NAT ["."] NAT ["."] NAT;
 
 item: name | universe | expr | recrule | declaration;
 
