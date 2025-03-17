@@ -6,7 +6,8 @@ class Level:
     pass
 
 class LevelZero:
-    pass
+    def __repr__(self):
+        return "LevelZero()"
 
 class LevelParam:
     def __init__(self, name):
@@ -36,11 +37,12 @@ class ExprSort(Expr):
 
 
 class ExprConst(Expr):
-    def __init__(self, const):
+    def __init__(self, const, levels):
         self.const = const
+        self.levels = levels
 
     def __repr__(self):
-        return "ExprConst(%s)" % (self.const,)
+        return "ExprConst(%s, %s)" % (self.const, self.levels)
 
 class ExprForallE(Expr):
     def __init__(self, binder_info, binder_name, binder_type, body):
@@ -49,6 +51,9 @@ class ExprForallE(Expr):
         self.binder_type = binder_type
         self.body = body
 
+    def __repr__(self):
+        return "ExprForallE(%s, %s, %s, %s)" % (self.binder_info, self.binder_name, self.binder_type, self.body)
+
 class ExprLambda(Expr):
     def __init__(self, binder_info, binder_name, binder_type, body):
         self.binder_info = binder_info
@@ -56,9 +61,15 @@ class ExprLambda(Expr):
         self.binder_type = binder_type
         self.body = body
 
+    def __repr__(self):
+        return "ExprLambda(%s, %s, %s, %s)" % (self.binder_info, self.binder_name, self.binder_type, self.body)
+
 class ExprBVar(Expr):
     def __init__(self, id):
         self.id = id
+
+    def __repr__(self):
+        return "ExprBVar(%s)" % (self.id,)
 
 class ExprApp(Expr):
     def __init__(self, function, arg):
@@ -67,7 +78,6 @@ class ExprApp(Expr):
 
     def __repr__(self):
         return "ExprApp(%s, %s)" % (self.function, self.arg)
-        # return "ExprApp(%s)" % (self.function,)
 
 class Environment:
     def __init__(self):
@@ -125,9 +135,12 @@ def interpret(source):
             elif etype.additional_info == "#EC":
                 eidx = item.children[0].children[0].additional_info
                 nidx = item.children[2].children[0].additional_info
-                assert len(item.children) == 3, "uidxs present"
+                levels = []
+                for child in item.children[3:]:
+                    level = env.levels[child.children[0].additional_info]
+                    levels.append(level)
                 value = env.names[nidx]
-                env.add_expr(eidx, ExprConst(value))
+                env.add_expr(eidx, ExprConst(value, levels))
             elif etype.additional_info == "#EP":
                 eidx = item.children[0].children[0].additional_info
                 info = item.children[2].children[0].additional_info
