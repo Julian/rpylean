@@ -7,7 +7,11 @@ class LevelZero:
     pass
 
 
-class ExprSort:
+class Expr:
+    pass
+
+
+class ExprSort(Expr):
     def __init__(self, level):
         self.level = level
 
@@ -15,7 +19,7 @@ class ExprSort:
         return "ExprSort(%s)" % (self.level,)
 
 
-class ExprConst:
+class ExprConst(Expr):
     def __init__(self, const):
         self.const = const
 
@@ -42,9 +46,8 @@ class Environment:
         self.exprs[eidx] = expr
 
     def add_constant(self, name, type):
-        key = tuple(name)
-        assert key not in self.constants
-        self.constants[key] = type
+        assert name not in self.constants
+        self.constants[name] = type
 
 
 def interpret(source):
@@ -81,7 +84,8 @@ def interpret(source):
             eidx = item.children[0].children[2].children[0].additional_info
             name = env.names[nidx]
             type = env.exprs[eidx]
-            env.add_constant(name, type)
+            key = ".".join(name)
+            env.add_constant(key, type)
         else:
             assert False, each
 
