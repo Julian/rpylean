@@ -504,7 +504,7 @@ class Transformer(RPythonVisitor):
         num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = node.children[pos:pos + 5]
 
         num_rule_idxs = int(num_rule_idxs_str.additional_info)
-        assert num_ind_name_idxs >= 0
+        assert num_rule_idxs >= 0
         pos += 5
 
         rule_idxs = [

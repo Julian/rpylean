@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from rpython.rlib.objectmodel import we_are_translated
+
 from rpylean.objects import W_LEVEL_ZERO
 from rpylean.parser import parse
 
@@ -47,26 +49,29 @@ def interpret(source):
     ast = parse(source)
     ast.compile(environment)
 
-    print("NAMES:")
-    for name, value in environment.names.items():
-        print(name, value)
+    if we_are_translated():
+        print(environment)
+    else:
+        print("NAMES:")
+        for name, value in environment.names.items():
+            print(name, value)
 
-    print("\nEXPRS:")
-    for name, value in environment.exprs.items():
-        print(name, repr(value))
+        print("\nEXPRS:")
+        for name, value in environment.exprs.items():
+            print(name, repr(value))
 
-    print("\nCONSTANTS:")
-    for name, value in environment.constants.items():
-        print(name, repr(value))
+        print("\nCONSTANTS:")
+        for name, value in environment.constants.items():
+            print(name, repr(value))
 
-    print("\nLEVELS:")
-    for name, value in environment.levels.items():
-        print(name, repr(value))
+        print("\nLEVELS:")
+        for name, value in environment.levels.items():
+            print(name, repr(value))
 
-    print("\nRECRULES:")
-    for name, value in environment.rec_rules.items():
-        print(name, repr(value))
+        print("\nRECRULES:")
+        for name, value in environment.rec_rules.items():
+            print(name, repr(value))
 
-    print("\nDECLARATIONS:")
-    for name, value in environment.declarations.items():
-        print(name, repr(value))
+        print("\nDECLARATIONS:")
+        for name, value in environment.declarations.items():
+            print(name, repr(value))
