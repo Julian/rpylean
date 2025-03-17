@@ -4,7 +4,7 @@ from rpython.rlib.parsing.ebnfparse import parse_ebnf, make_parse_function
 from rpython.rlib.parsing.tree import RPythonVisitor
 import py
 
-from rpylean import RPYLEAN_DIR
+from rpylean import RPYLEAN_DIR, objects
 
 grammar = py.path.local(RPYLEAN_DIR).join("grammar.txt").read("rt")
 regexs, rules, ToAST = parse_ebnf(grammar)
@@ -69,68 +69,94 @@ class UniverseParam(Universe):
         self.nidx = nidx
 
     def compile(self, environment):
-        pass
+        name = environment.names[self.nidx]
+        environment.register_level(self.uidx, objects.W_LevelParam(name=name))
 
 
 class Expr(Node):
+    def __init__(self, eidx, val):
+        self.eidx = eidx
+        self.val = val
+
+    def compile(self, environment):
+        w_expr = self.val.to_w_expr(environment)
+        assert w_expr is not None, self
+        environment.register_expr(self.eidx, w_expr)
+
+
+class ExprVal:
     pass
 
 
-class BVar(Expr):
-    def __init__(self, eidx, id):
-        self.eidx = eidx
+class BVar(ExprVal):
+    def __init__(self, id):
         self.id = id
 
-    def compile(self, environment):
-        pass
+    def to_w_expr(self, environment):
+        return objects.W_BVar(id=self.id)
 
 
-class Sort(Expr):
-    def __init__(self, eidx, uidx):
-        self.eidx = eidx
-        self.uidx = uidx
+class Sort(ExprVal):
+    def __init__(self, level):
+        self.level = level
 
-    def compile(self, environment):
-        # level = environment.levels[self.uidx]
-        # environment.register_expr(self.eidx, level)
-        pass
+    def to_w_expr(self, environment):
+        return objects.W_Sort(level=environment.levels[self.level])
 
 
-class Const(Expr):
-    def __init__(self, eidx, nidx, uidxs):
-        self.eidx = eidx
-        self.nidx = nidx
-        self.uidxs = uidxs
+class Const(ExprVal):
+    def __init__(self, name, levels):
+        self.name = name
+        self.levels = levels
 
-    def compile(self, environment):
-        value = environment.names[self.nidx]
-        environment.register_expr(self.eidx, value) 
+    def to_w_expr(self, environment):
+        return objects.W_Const(
+            name=environment.names[self.name],
+            levels=[environment.levels[level] for level in self.levels],
+        )
 
 
-class App(Expr):
-    def __init__(self, eidx, fn_eidx, arg_eidx):
-        self.eidx = eidx
+class App(ExprVal):
+    def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
         self.arg_eidx = arg_eidx
 
-    def compile(self, environment):
-        pass
+    def to_w_expr(self, environment):
+        fn = environment.exprs[self.fn_eidx]
+        arg = environment.exprs[self.arg_eidx]
+        return objects.W_App(fn=fn, arg=arg)
 
 
-class Lambda(Expr):
-    def __init__(self, eidx):
-        self.eidx = eidx
+class Lambda(ExprVal):
+    def __init__(self, binder_name, binder_type, binder_info, body):
+        self.binder_name = binder_name
+        self.binder_type = binder_type
+        self.binder_info = binder_info
+        self.body = body
 
-    def compile(self, environment):
-        pass
+    def to_w_expr(self, environment):
+        return objects.W_Lambda(
+            binder_name=environment.names[self.binder_name],
+            binder_type=environment.exprs[self.binder_type],
+            binder_info=self.binder_info,
+            body=environment.exprs[self.body],
+        )
 
 
-class ForAll(Expr):
-    def __init__(self, eidx):
-        self.eidx = eidx
+class ForAll(ExprVal):
+    def __init__(self, binder_name, binder_type, binder_info, body):
+        self.binder_name = binder_name
+        self.binder_type = binder_type
+        self.binder_info = binder_info
+        self.body = body
 
-    def compile(self, environment):
-        pass
+    def to_w_expr(self, environment):
+        return objects.W_ForAll(
+            binder_name=environment.names[self.binder_name],
+            binder_type=environment.exprs[self.binder_type],
+            binder_info=self.binder_info,
+            body=environment.exprs[self.body],
+        )
 
 
 class Declaration(Node):
@@ -138,32 +164,161 @@ class Declaration(Node):
         self.decl = decl
 
     def compile(self, environment):
-        pass
+        environment.register_declaration(
+            self.decl.name_idx,
+            self.decl.to_w_decl(environment),
+        )
 
 
 class Definition(Node):
-    pass
+    def __init__(self, name_idx, def_type, def_val, hint, level_params):
+        self.name_idx = name_idx
+        self.def_type = def_type
+        self.def_val = def_val
+        self.hint = hint
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Definition(
+            name=environment.names[self.name_idx],
+            def_type=self.def_type,
+            def_val=self.def_val,
+            hint=self.hint,
+            level_params=self.level_params,
+        )
 
 
 class Theorem(Node):
-    pass
+    def __init__(self, name_idx, def_type, def_val, level_params):
+        self.name_idx = name_idx
+        self.def_type = def_type
+        self.def_val = def_val
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Theorem(
+            name=environment.names[self.name_idx],
+            def_type=self.def_type,
+            def_val=self.def_val,
+            level_params=self.level_params,
+        )
 
 
 class Inductive(Node):
-    pass
+    def __init__(
+        self,
+        name_idx,
+        expr_idx,
+        is_rec,
+        is_nested,
+        num_params,
+        num_indices,
+        ind_name_idxs,
+        ctor_name_idxs,
+        level_params,
+    ):
+        self.name_idx = name_idx
+        self.expr_idx = expr_idx
+        self.is_rec = is_rec
+        self.is_nested = is_nested
+        self.num_params = num_params
+        self.num_indices = num_indices
+        self.ind_name_idxs = ind_name_idxs
+        self.ctor_name_idxs = ctor_name_idxs
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Inductive(
+            name=environment.names[self.name_idx],
+            expr=environment.exprs[self.expr_idx],
+            is_rec=self.is_rec,
+            is_nested=self.is_nested,
+            num_params=self.num_params,
+            num_indices=self.num_indices,
+            ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+            ctor_names=[
+                environment.names[nidx] for nidx in self.ctor_name_idxs
+            ],
+            level_params=self.level_params,
+        )
 
 
 class Constructor(Node):
-    pass
+    def __init__(self, name_idx, ctype, induct, cidx, num_params, num_fields, level_params):
+        self.name_idx = name_idx
+        self.ctype = ctype
+        self.induct = induct
+        self.cidx = cidx
+        self.num_params = num_params
+        self.num_fields = num_fields
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Constructor(
+            name=environment.names[self.name_idx],
+            ctype=self.ctype,
+            induct=self.induct,
+            cidx=self.cidx,
+            num_params=self.num_params,
+            num_fields=self.num_fields,
+            level_params=self.level_params,
+        )
 
 
 class Recursor(Node):
-    pass
+    def __init__(
+        self,
+        name_idx,
+        expr_idx,
+        k,
+        num_params,
+        num_indices,
+        num_motives,
+        num_minors,
+        ind_name_idxs,
+        rule_idxs,
+        level_params,
+    ):
+        self.name_idx = name_idx
+        self.expr_idx = expr_idx
+        self.k = k
+        self.num_params = num_params
+        self.num_indices = num_indices
+        self.num_motives = num_motives
+        self.num_minors = num_minors
+        self.ind_name_idxs = ind_name_idxs
+        self.rule_idxs = rule_idxs
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Recursor(
+            name=environment.names[self.name_idx],
+            expr=environment.exprs[self.expr_idx],
+            k=self.k,
+            num_params=self.num_params,
+            num_indices=self.num_indices,
+            num_motives=self.num_motives,
+            num_minors=self.num_minors,
+            ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+            rule_idxs=self.rule_idxs,
+            level_params=self.level_params,
+        )
 
 
 class RecRule(Node):
+    def __init__(self, ridx, ctor_name, n_fields, val):
+        self.ridx = ridx
+        self.ctor_name = ctor_name
+        self.n_fields = n_fields
+        self.val = val
+
     def compile(self, environment):
-        pass
+        w_recrule = objects.W_RecRule(
+            ctor_name=environment.names[self.ctor_name],
+            n_fields=self.n_fields,
+            val=environment.exprs[self.val]
+        )
+        environment.register_rec_rule(self.ridx, w_recrule)
 
 
 class Transformer(RPythonVisitor):
@@ -195,7 +350,7 @@ class Transformer(RPythonVisitor):
             return NameStr(
                 nidx=nidx.children[0].additional_info,
                 parent_nidx=parent_nidx.children[0].additional_info,
-                name=id,
+                name=id.additional_info,
             )
         elif kind.additional_info == "#NI":
             assert False, "implement #NI"
@@ -218,68 +373,170 @@ class Transformer(RPythonVisitor):
         kind = node.children[1]
         if kind.additional_info == "#EV":
             _, _, id = node.children
-            return BVar(eidx=eidx, id=id)
+            val = BVar(id=id.additional_info)
         elif kind.additional_info == "#ES":
             _, _, uidx = node.children
-            return Sort(
-                eidx=eidx,
-                uidx=uidx.children[0].additional_info,
-            )
+            val = Sort(level=uidx.children[0].additional_info)
         elif kind.additional_info == "#EC":
-            nidx = node.children[2].children[0].additional_info
-            return Const(
-                eidx=eidx,
-                nidx=nidx,
-                uidxs=[
+            name = node.children[2].children[0].additional_info
+            val = Const(
+                name=name,
+                levels=[
                     uidx.children[0].additional_info
                     for uidx in node.children[3:]
                 ],
             )
         elif kind.additional_info == "#EA":
             _, _, fn_eidx, arg_eidx = node.children
-            return App(
-                eidx=eidx,
+            val = App(
                 fn_eidx=fn_eidx.children[0].additional_info,
                 arg_eidx=arg_eidx.children[0].additional_info,
             )
         elif kind.additional_info == "#EL":
-            # XXX: Implement me
-            return Lambda(
-                eidx=eidx,
+            _, _, binder_info, binder_name, binder_type, body = node.children
+            val = Lambda(
+                binder_name=binder_name.children[0].additional_info,
+                binder_type=binder_type.children[0].additional_info,
+                binder_info=binder_info.children[0].additional_info,
+                body=body.children[0].additional_info,
             )
         elif kind.additional_info == "#EP":
-            # XXX: Implement me
-            return ForAll(eidx=eidx)
+            _, _, binder_info, binder_name, binder_type, body = node.children
+            val = ForAll(
+                binder_name=binder_name.children[0].additional_info,
+                binder_type=binder_type.children[0].additional_info,
+                binder_info=binder_info.children[0].additional_info,
+                body=body.children[0].additional_info,
+            )
         else:
             assert False, "unknown expr kind: " + kind.additional_info
+        return Expr(eidx=eidx, val=val)
 
     def visit_declaration(self, node):
         child, = node.children
         return Declaration(self.dispatch(child))
 
     def visit_definition(self, node):
-        # XXX: Implement me
-        return Definition()
+        _, name_idx, def_type, def_val, hint = node.children[:5]
+        return Definition(
+            name_idx=name_idx.children[0].additional_info,
+            def_type=def_type.children[0].additional_info,
+            def_val=def_val.children[0].additional_info,
+            hint=hint.children[0].additional_info,
+            level_params=[
+                each.children[0].additional_info for each in node.children[5:]
+            ],
+        )
 
     def visit_theorem(self, node):
-        # XXX: Implement me
-        return Theorem()
+        _, name_idx, def_type, def_val = node.children[:4]
+        return Theorem(
+            name_idx=name_idx.children[0].additional_info,
+            def_type=def_type.children[0].additional_info,
+            def_val=def_val.children[0].additional_info,
+            level_params=[
+                each.children[0].additional_info for each in node.children[4:]
+            ],
+        )
 
     def visit_inductive(self, node):
-        # XXX: Implement me
-        return Inductive()
+        _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = node.children[:8]
+        num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
+        assert num_ind_name_idxs >= 0
+        pos = 8
+        ind_name_idxs = node.children[pos:pos + num_ind_name_idxs]
+        pos += num_ind_name_idxs
+
+        num_ctors = int(node.children[pos].additional_info)
+        assert num_ctors >= 0
+        pos += 1
+
+        ctor_name_idxs = node.children[pos:pos + num_ctors]
+        pos += num_ctors
+
+        level_params = node.children[pos:]
+        return Inductive(
+            name_idx=nidx.children[0].additional_info,
+            expr_idx=eidx.children[0].additional_info,
+            is_rec=is_rec.additional_info,
+            is_nested=is_nested.additional_info,
+            num_params=num_params.additional_info,
+            num_indices=num_indices.additional_info,
+            ind_name_idxs=[
+                each.children[0].additional_info for each in ind_name_idxs
+            ],
+            ctor_name_idxs=[
+                each.children[0].additional_info for each in ctor_name_idxs
+            ],
+            level_params=[
+                each.children[0].additional_info
+                for each in level_params
+            ],
+        )
 
     def visit_constructor(self, node):
-        # XXX: Implement me
-        return Constructor()
+        _, name_idx, ctype, induct, cidx, num_params, num_fields = node.children[:7]
+        return Constructor(
+            name_idx=name_idx.children[0].additional_info,
+            ctype=ctype.children[0].additional_info,
+            induct=induct.children[0].additional_info,
+            cidx=cidx.additional_info,
+            num_params=num_params.additional_info,
+            num_fields=num_fields.additional_info,
+            level_params=[
+                each.children[0].additional_info for each in node.children[7:]
+            ],
+        )
 
     def visit_recursor(self, node):
-        # XXX: Implement me
-        return Recursor()
+        _, name_idx, expr_idx, num_ind_name_idxs_str = node.children[:4]
+
+        num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
+        assert num_ind_name_idxs >= 0
+
+        pos = 4
+        ind_name_idxs = [
+            nidx.children[0].additional_info
+            for nidx in node.children[pos:(pos + num_ind_name_idxs)]
+        ]
+        pos += num_ind_name_idxs
+
+        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = node.children[pos:pos + 5]
+
+        num_rule_idxs = int(num_rule_idxs_str.additional_info)
+        assert num_ind_name_idxs >= 0
+        pos += 5
+
+        rule_idxs = [
+            rule_idx.children[0].additional_info
+            for rule_idx in node.children[pos:pos + num_rule_idxs]
+        ]
+        pos += num_rule_idxs
+
+        k = node.children[pos].additional_info
+        level_params = node.children[pos + 1:]
+
+        return Recursor(
+            name_idx=name_idx.children[0].additional_info,
+            expr_idx=expr_idx.children[0].additional_info,
+            ind_name_idxs=ind_name_idxs,
+            rule_idxs=rule_idxs,
+            k=k,
+            num_params=num_params.additional_info,
+            num_indices=num_indices.additional_info,
+            num_motives=num_motives.additional_info,
+            num_minors=num_minors.additional_info,
+            level_params=level_params,
+        )
 
     def visit_recrule(self, node):
-        # XXX: Implement me
-        return RecRule()
+        ridx, _, nidx, nat, eidx = node.children
+        return RecRule(
+            ridx=ridx.children[0].additional_info,
+            ctor_name=nidx.children[0].additional_info,
+            n_fields=nat.additional_info,
+            val=eidx.children[0].additional_info,
+        )
 
 
 transformer = Transformer()
