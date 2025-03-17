@@ -30,4 +30,5 @@ def interpret(source):
             name = name_node.children[3].additional_info
             env.add(new_nidx, parent + [name])
 
-    print(env.names)
+    for name, value in env.names.items():
+        print(name, value)
