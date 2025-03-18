@@ -80,7 +80,6 @@ class Expr(Node):
 
     def compile(self, environment):
         w_expr = self.val.to_w_expr(environment)
-        assert w_expr is not None, self
         environment.register_expr(self.eidx, w_expr)
 
 
