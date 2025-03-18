@@ -58,13 +58,13 @@ hint: "O" | "A" | "R" NAT;
 
 recrule: ridx "#RR" nidx NAT eidx;
 
-axiom: "#AX" nidx eidx uidx*;
+axiom: "#AX" nidx eidx nidx*;
 
-definition: "#DEF" nidx eidx eidx hint uidx*;
+definition: "#DEF" nidx eidx eidx hint nidx*;
 
-theorem: "#THM" nidx eidx eidx uidx*;
+theorem: "#THM" nidx eidx eidx nidx*;
 
-quotient: "#QUOT" nidx eidx uidx*;
+quotient: "#QUOT" nidx eidx nidx*;
 
 inductive:
   "#IND"
@@ -78,7 +78,7 @@ inductive:
   nidx NAT*
   NAT
   nidx NAT*
-  uidx*
+  nidx*
   ;
 
 constructor:
@@ -89,7 +89,7 @@ constructor:
   NAT
   NAT
   NAT
-  uidx*
+  nidx*
   ;
 
 recursor:
@@ -105,5 +105,5 @@ recursor:
   NAT
   ridx NAT*
   NAT
-  uidx*
+  nidx*
   ;

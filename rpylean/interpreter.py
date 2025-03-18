@@ -6,11 +6,17 @@ from rpylean.objects import W_LEVEL_ZERO
 from rpylean.parser import parse
 
 
+class Name:
+    def __init__(self, components):
+        self.components = components
+    def __repr__(self):
+        return "<Name %r>" % (self.components,)
+
 class Environment:
     def __init__(self):
         self.levels = {"0": W_LEVEL_ZERO}
         self.exprs = {}
-        self.names = {"0": []}
+        self.names = {"0": Name([])}
         self.constants = {}
         self.rec_rules = {}
         self.declarations = {}
@@ -34,7 +40,7 @@ class Environment:
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names
         parent = self.names[parent_nidx]
-        self.names[nidx] = parent + [name]
+        self.names[nidx] = Name(parent.components + [name])
 
     def register_expr(self, eidx, w_expr):
         assert eidx not in self.exprs
@@ -53,9 +59,11 @@ class Environment:
         self.rec_rules[ridx] = w_recrule
 
     def register_declaration(self, name_idx, decl):
-        assert name_idx not in self.declarations
-        self.declarations[name_idx] = decl
-
+        name = self.names[name_idx]
+        # Declaration names are required to be unique
+        assert name not in self.declarations
+        self.declarations[name] = decl
+        decl.check_declaration(self)
 
 def interpret(source):
     ast = parse(source)

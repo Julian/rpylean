@@ -1,3 +1,5 @@
+from rpylean.check import check_no_duplicate_levels
+
 class W_Item(object):
     def __repr__(self):
         fields = self.__dict__.iteritems()
@@ -75,7 +77,8 @@ class W_RecRule(W_Item):
 
 
 class W_Declaration(W_Item):
-    pass
+    def check_declaration(self, env):
+        pass
 
 
 class W_Definition(W_Declaration):
@@ -85,6 +88,9 @@ class W_Definition(W_Declaration):
         self.def_val = def_val
         self.hint = hint
         self.level_params = level_params
+
+    def check_declaration(self, env):
+        check_no_duplicate_levels(env, self.level_params)
 
 
 class W_Theorem(W_Declaration):
