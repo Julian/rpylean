@@ -18,6 +18,19 @@ class Environment:
     def __repr__(self):
         return "Environment()"
 
+    def dump(self):
+        for attr, value in sorted(self.__dict__.items()):
+            if not value:
+                continue
+
+            print(attr)
+            print("-" * len(attr), end="\n\n")
+
+            for k, v in value.items():
+                print(k, ":", v)
+
+            print("")
+
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names
         parent = self.names[parent_nidx]
@@ -45,33 +58,10 @@ class Environment:
 
 
 def interpret(source):
-    environment = Environment()
     ast = parse(source)
+
+    environment = Environment()
     ast.compile(environment)
 
-    if we_are_translated():
-        print(environment)
-    else:
-        print("NAMES:")
-        for name, value in environment.names.items():
-            print(name, value)
-
-        print("\nEXPRS:")
-        for name, value in environment.exprs.items():
-            print(name, repr(value))
-
-        print("\nCONSTANTS:")
-        for name, value in environment.constants.items():
-            print(name, repr(value))
-
-        print("\nLEVELS:")
-        for name, value in environment.levels.items():
-            print(name, repr(value))
-
-        print("\nRECRULES:")
-        for name, value in environment.rec_rules.items():
-            print(name, repr(value))
-
-        print("\nDECLARATIONS:")
-        for name, value in environment.declarations.items():
-            print(name, repr(value))
+    if not we_are_translated():
+        environment.dump()
