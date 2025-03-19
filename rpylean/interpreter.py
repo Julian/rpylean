@@ -63,7 +63,6 @@ class Environment:
         # Declaration names are required to be unique
         assert name not in self.declarations
         self.declarations[name] = decl
-        decl.check_declaration(self)
 
 def interpret(source):
     ast = parse(source)

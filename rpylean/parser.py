@@ -11,6 +11,10 @@ regexs, rules, ToAST = parse_ebnf(grammar)
 _parse = make_parse_function(regexs, rules, eof=True)
 
 
+class Invalid(Exception):
+    pass
+
+
 class Node(object):
     """
     An AST node.
@@ -178,6 +182,15 @@ class Definition(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
+        seen = {}
+        for nidx in self.level_params:
+            level = environment.names[nidx]
+            if level in seen:
+                raise Invalid(
+                    "%s has duplicate level %s" % (self.name_idx, level),
+                )
+            seen[level] = True
+
         return objects.W_Definition(
             name=environment.names[self.name_idx],
             def_type=self.def_type,
