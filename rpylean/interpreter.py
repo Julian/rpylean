@@ -11,7 +11,9 @@ class Name:
         self.components = components
     def __repr__(self):
         return "<Name %r>" % (self.components,)
-
+    def pretty(self):
+        return '.'.join(self.components)
+    
 class Environment:
     def __init__(self):
         self.levels = {"0": W_LEVEL_ZERO}
@@ -24,7 +26,7 @@ class Environment:
     def __repr__(self):
         return "Environment()"
 
-    def dump(self):
+    def dump(self, pretty=True):
         for attr, value in sorted(self.__dict__.items()):
             if not value:
                 continue
@@ -33,7 +35,10 @@ class Environment:
             print("-" * len(attr), end="\n\n")
 
             for k, v in value.items():
-                print(k, ":", v)
+                if pretty:
+                    print(k, ":", v.pretty())
+                else:
+                    print(k, ":", v)
 
             print("")
 

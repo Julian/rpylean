@@ -193,8 +193,8 @@ class Definition(Node):
 
         return objects.W_Definition(
             name=environment.names[self.name_idx],
-            def_type=self.def_type,
-            def_val=self.def_val,
+            def_type=environment.exprs[self.def_type],
+            def_val=environment.exprs[self.def_val],
             hint=self.hint,
             level_params=self.level_params,
         )
@@ -210,8 +210,8 @@ class Theorem(Node):
     def to_w_decl(self, environment):
         return objects.W_Theorem(
             name=environment.names[self.name_idx],
-            def_type=self.def_type,
-            def_val=self.def_val,
+            def_type=environment.exprs[self.def_type],
+            def_val=environment.exprs[self.def_val],
             level_params=self.level_params,
         )
 
