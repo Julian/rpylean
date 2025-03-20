@@ -8,7 +8,7 @@ class W_Item(object):
             contents,
         )
 
-    def pretty(self):
+    def pretty(self, bvar_context):
         return self.__repr__()
 
 
@@ -27,8 +27,8 @@ class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
 
-    def pretty(self):
-        return self.name.pretty()
+    def pretty(self, bvar_context):
+        return self.name.pretty(bvar_context)
 
 
 class W_Expr(W_Item):
@@ -37,18 +37,21 @@ class W_Expr(W_Item):
 
 class W_BVar(W_Expr):
     def __init__(self, id):
-        self.id = id
+        self.id = int(id)
 
-    def pretty(self):
-        return "(BVar %s)" % str(self.id)
+    def pretty(self, bvar_context):
+        lookup = bvar_context.lookup(self)
+        if lookup is None:
+            return "(BVar [%s])" % (str(self.id))
+        return "{%s}" % (lookup.name.pretty(bvar_context))
 
 
 class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
-    def pretty(self):
-        return "Sort %s" % self.level.pretty()
+    def pretty(self, bvar_context):
+        return "Sort %s" % self.level.pretty(bvar_context)
 
 
 class W_Const(W_Expr):
@@ -56,37 +59,36 @@ class W_Const(W_Expr):
         self.name = name
         self.levels = levels
 
-    def pretty(self):
-        return "`" + self.name.pretty()
+    def pretty(self, bvar_context):
+        return "`" + self.name.pretty(bvar_context)
 
-
-class W_ForAll(W_Expr):
+# Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
+class W_FunBase(W_Expr):
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
         self.binder_info = binder_info
         self.body = body
 
-    def pretty(self):
+class W_ForAll(W_FunBase):
+    def pretty(self, bvar_context):
+        with bvar_context.in_binder(self):
+            body_pretty = self.body.pretty(bvar_context)
         return "(∀ %s : %s, %s)" % (
-            self.binder_name.pretty(),
-            self.binder_type.pretty(),
-            self.body.pretty(),
+            self.binder_name.pretty(bvar_context),
+            self.binder_type.pretty(bvar_context),
+            body_pretty
         )
 
 
-class W_Lambda(W_Expr):
-    def __init__(self, binder_name, binder_type, binder_info, body):
-        self.binder_name = binder_name
-        self.binder_type = binder_type
-        self.binder_info = binder_info
-        self.body = body
-
-    def pretty(self):
+class W_Lambda(W_FunBase):
+    def pretty(self, bvar_context):
+        with bvar_context.in_binder(self):
+            body_pretty = self.body.pretty(bvar_context)
         return "(λ %s : %s => %s)" % (
-            self.binder_name.pretty(),
-            self.binder_type.pretty(),
-            self.body.pretty(),
+            self.binder_name.pretty(bvar_context),
+            self.binder_type.pretty(bvar_context),
+            body_pretty
         )
 
 
@@ -95,8 +97,8 @@ class W_App(W_Expr):
         self.fn = fn
         self.arg = arg
 
-    def pretty(self):
-        return "(%s %s)" % (self.fn.pretty(), self.arg.pretty())
+    def pretty(self, bvar_context):
+        return "(%s %s)" % (self.fn.pretty(bvar_context), self.arg.pretty(bvar_context))
 
 
 class W_RecRule(W_Item):
@@ -105,8 +107,8 @@ class W_RecRule(W_Item):
         self.n_fields = n_fields
         self.val = val
 
-    def pretty(self):
-        return "<RecRule ctor_name='%s' n_fields=%s val=%s>" % (self.ctor_name.pretty(), self.n_fields, self.val.pretty())
+    def pretty(self, bvar_context):
+        return "<RecRule ctor_name='%s' n_fields=%s val=%s>" % (self.ctor_name.pretty(bvar_context), self.n_fields, self.val.pretty(bvar_context))
 
 
 
@@ -122,11 +124,11 @@ class W_Definition(W_Declaration):
         self.hint = hint
         self.level_params = level_params
 
-    def pretty(self):
+    def pretty(self, bvar_context):
         return "<W_Definition name='%s' def_type=%s def_val=%s hint=%s>" % (
-            self.name.pretty(),
-            self.def_type.pretty(),
-            self.def_val.pretty(),
+            self.name.pretty(bvar_context),
+            self.def_type.pretty(bvar_context),
+            self.def_val.pretty(bvar_context),
             self.hint,
         )
 
@@ -138,11 +140,12 @@ class W_Theorem(W_Declaration):
         self.def_val = def_val
         self.level_params = level_params
 
-    def pretty(self):
-        return "<W_Theorem name='%s' def_type=%s def_val=%s>" % (
-            self.name.pretty(),
-            self.def_type.pretty(),
-            self.def_val.pretty(),
+    def pretty(self, bvar_context):
+        return "<W_Theorem name='%s' def_type=%s def_val=%s level_params=%s>" % (
+            self.name.pretty(bvar_context),
+            self.def_type.pretty(bvar_context),
+            self.def_val.pretty(bvar_context),
+            self.level_params,
         )
 
 
@@ -158,16 +161,17 @@ class W_Inductive(W_Declaration):
         self.ctor_names = ctor_names
         self.level_params = level_params
 
-    def pretty(self):
-        return "<W_Inductive name='%s' expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s>" % (
-            self.name.pretty(),
-            self.expr.pretty(),
+    def pretty(self, bvar_context):
+        return "<W_Inductive name='%s' expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s level_params=%s>" % (
+            self.name.pretty(bvar_context),
+            self.expr.pretty(bvar_context),
             self.is_rec,
             self.is_nested,
             self.num_params,
             self.num_indices,
-            map(lambda n: n.pretty(), self.ind_names),
-            map(lambda n: n.pretty(), self.ctor_names),
+            map(lambda n: n.pretty(bvar_context), self.ind_names),
+            map(lambda n: n.pretty(bvar_context), self.ctor_names),
+            self.level_params,
         )
 
 
@@ -206,15 +210,16 @@ class W_Recursor(W_Declaration):
         self.rule_idxs = rule_idxs
         self.level_params = level_params
 
-    def pretty(self):
-        return "<W_Recursor name='%s' expr=%s k=%s num_params=%s num_indices=%s num_motives=%s num_minors=%s ind_names=%s rule_idxs=%s>" % (
-            self.name.pretty(),
-            self.expr.pretty(),
+    def pretty(self, bvar_context):
+        return "<W_Recursor name='%s' expr=%s k=%s num_params=%s num_indices=%s num_motives=%s num_minors=%s ind_names=%s rule_idxs=%s level_params=%s>" % (
+            self.name.pretty(bvar_context),
+            self.expr.pretty(bvar_context),
             self.k,
             self.num_params,
             self.num_indices,
             self.num_motives,
             self.num_minors,
-            map(lambda n: n.pretty(), self.ind_names),
+            map(lambda n: n.pretty(bvar_context), self.ind_names),
             self.rule_idxs,
+            self.level_params
         )

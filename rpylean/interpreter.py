@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+from rpylean.bvar import BVarContext
 from rpython.rlib.objectmodel import we_are_translated
 
 from rpylean.objects import W_LEVEL_ZERO
@@ -11,7 +12,7 @@ class Name:
         self.components = components
     def __repr__(self):
         return "<Name %r>" % (self.components,)
-    def pretty(self):
+    def pretty(self, bvar_context):
         return '.'.join(self.components)
     
 class Environment:
@@ -27,6 +28,7 @@ class Environment:
         return "Environment()"
 
     def dump(self, pretty=True):
+        bvar_context = BVarContext()
         for attr, value in sorted(self.__dict__.items()):
             if not value:
                 continue
@@ -36,7 +38,7 @@ class Environment:
 
             for k, v in value.items():
                 if pretty:
-                    print(k, ":", v.pretty())
+                    print(k, ":", v.pretty(bvar_context))
                 else:
                     print(k, ":", v)
 
