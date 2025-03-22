@@ -7,11 +7,18 @@ from rpylean.objects import W_LEVEL_ZERO
 from rpylean.parser import parse
 
 
+def print_heading(s):
+    print(s)
+    print("-" * len(s), end="\n\n")
+
+
 class Name:
     def __init__(self, components):
         self.components = components
+
     def __repr__(self):
         return "<Name %r>" % (self.components,)
+
     def pretty(self, bvar_context):
         return '.'.join(self.components)
     
@@ -27,22 +34,61 @@ class Environment:
     def __repr__(self):
         return "Environment()"
 
-    def dump(self, pretty=True):
+    def dump(self):
+        print_heading("declarations")
+        for name, decl in self.declarations.items():
+            print(name, "->", decl)
+
+        print_heading("declarations")
+        for name, decl in self.declarations.items():
+            print(name, "->", decl)
+
+        print("")
+        print_heading("exprs")
+        for id, expr in self.exprs.items():
+            print(id, "->", expr)
+
+        print("")
+        print_heading("constants")
+        for id, constant in self.constants.items():
+            print(id, "->", constant)
+
+        print("")
+        print_heading("levels")
+        for id, level in self.levels.items():
+            print(id, "->", level)
+
+        print("")
+        print_heading("rec_rules")
+        for id, rule in self.rec_rules.items():
+            print(id, "->", rule)
+
+    def dump_pretty(self):
         bvar_context = BVarContext()
-        for attr, value in sorted(self.__dict__.items()):
-            if not value:
-                continue
 
-            print(attr)
-            print("-" * len(attr), end="\n\n")
+        print_heading("declarations")
+        for name, decl in self.declarations.items():
+            print(name.pretty(bvar_context), "->", decl.pretty(bvar_context))
 
-            for k, v in value.items():
-                if pretty:
-                    print(k, ":", v.pretty(bvar_context))
-                else:
-                    print(k, ":", v)
+        print("")
+        print_heading("exprs")
+        for id, expr in self.exprs.items():
+            print(id, "->", expr.pretty(bvar_context))
 
-            print("")
+        print("")
+        print_heading("constants")
+        for id, constant in self.constants.items():
+            print(id, "->", constant.pretty(bvar_context))
+
+        print("")
+        print_heading("levels")
+        for id, level in self.levels.items():
+            print(id, "->", level.pretty(bvar_context))
+
+        print("")
+        print_heading("rec_rules")
+        for id, rule in self.rec_rules.items():
+            print(id, "->", rule.pretty(bvar_context))
 
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names
@@ -77,5 +123,4 @@ def interpret(source):
     environment = Environment()
     ast.compile(environment)
 
-    if not we_are_translated():
-        environment.dump()
+    environment.dump_pretty()

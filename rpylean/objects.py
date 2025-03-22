@@ -9,7 +9,7 @@ class W_Item(object):
         )
 
     def pretty(self, bvar_context):
-        return self.__repr__()
+        return "<%s repr error>" % (self.__class__.__name__,)
 
 
 class W_Level(W_Item):
@@ -17,7 +17,8 @@ class W_Level(W_Item):
 
 
 class W_LevelZero(W_Level):
-    pass
+    def pretty(self, _):
+        return "<W_LevelZero>"
 
 
 W_LEVEL_ZERO = W_LevelZero()
@@ -169,8 +170,8 @@ class W_Inductive(W_Declaration):
             self.is_nested,
             self.num_params,
             self.num_indices,
-            map(lambda n: n.pretty(bvar_context), self.ind_names),
-            map(lambda n: n.pretty(bvar_context), self.ctor_names),
+            [each.pretty(bvar_context) for each in self.ind_names],
+            [each.pretty(bvar_context) for each in self.ctor_names],
             self.level_params,
         )
 
@@ -184,6 +185,17 @@ class W_Constructor(W_Declaration):
         self.num_params = num_params
         self.num_fields = num_fields
         self.level_params = level_params
+
+    def pretty(self, bvar_context):
+        return "<W_Constructor name='%s' ctype='%s' induct='%s' cidx=%s num_params=%s num_fields=%s level_params=%s>" % (
+            self.name.pretty(bvar_context),
+            self.ctype,
+            self.induct,
+            self.cidx,
+            self.num_params,
+            self.num_fields,
+            self.level_params,
+        )
 
 
 class W_Recursor(W_Declaration):
@@ -219,7 +231,7 @@ class W_Recursor(W_Declaration):
             self.num_indices,
             self.num_motives,
             self.num_minors,
-            map(lambda n: n.pretty(bvar_context), self.ind_names),
+            [each.pretty(bvar_context) for each in self.ind_names],
             self.rule_idxs,
             self.level_params
         )
