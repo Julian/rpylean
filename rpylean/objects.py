@@ -228,20 +228,22 @@ class W_Declaration(W_Item):
         )
 
 
-class W_DeclarationKind:
+class W_DeclarationKind(object):
     pass
 
-    def get_type(self):
-        raise RuntimeError("W_Declaration.get_type not implemented")
-    
-    def type_check(self, infcx):
-        pass
-        #raise RuntimeError("W_Declaration.type_check not implemented")
-
-class W_Definition(W_DeclarationKind):
-    def __init__(self, def_type, def_val, hint):
+class DefOrTheorem(W_DeclarationKind):
+    def __init__(self, def_type, def_val):
         self.def_type = def_type
         self.def_val = def_val
+
+    def type_check(self, infcx):
+        val_type = self.def_val.infer(infcx)
+        if not infcx.def_eq(self.def_type, val_type):
+            raise RuntimeError("W_Definition.type_check: type mismatch: %s != %s" % (self.def_type, val_type))
+
+class W_Definition(DefOrTheorem):
+    def __init__(self, def_type, def_val, hint):
+        super(W_Definition, self).__init__(def_type, def_val)
         self.hint = hint
 
     def get_type(self):
@@ -255,10 +257,9 @@ class W_Definition(W_DeclarationKind):
         )
 
 
-class W_Theorem(W_DeclarationKind):
+class W_Theorem(DefOrTheorem):
     def __init__(self, def_type, def_val):
-        self.def_type = def_type
-        self.def_val = def_val
+        super(W_Theorem, self).__init__(def_type, def_val)
 
     def pretty(self, bvar_context):
         return "<W_Theorem def_type=%s def_val=%s>" % (
@@ -267,12 +268,6 @@ class W_Theorem(W_DeclarationKind):
         )
     def get_type(self):
         return self.def_type
-    
-    def type_check(self, infcx):
-        val_type = self.def_val.infer(infcx)
-        if not infcx.def_eq(self.def_type, val_type):
-            raise RuntimeError("W_Definition.type_check: type mismatch: %s != %s" % (self.def_type, val_type))
-
 
 class W_Inductive(W_DeclarationKind):
     def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
@@ -286,6 +281,10 @@ class W_Inductive(W_DeclarationKind):
 
     def get_type(self):
         return self.expr
+    
+    def type_check(self, infcx):
+        # TODO - implement type checking
+        pass
 
     def pretty(self, bvar_context):
         return "<W_Inductive expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s>" % (
@@ -305,6 +304,10 @@ class W_Constructor(W_DeclarationKind):
         self.cidx = cidx
         self.num_params = num_params
         self.num_fields = num_fields
+
+    def type_check(self, infcx):
+        # TODO - implement type checking
+        pass
 
     def get_type(self):
         if int(self.num_params) == 0 and int(self.num_fields) == 0:
@@ -340,6 +343,10 @@ class W_Recursor(W_DeclarationKind):
         self.num_minors = num_minors
         self.ind_names = ind_names
         self.rule_idxs = rule_idxs
+
+    def type_check(self, infcx):
+        # TODO - implement type checking
+        pass
 
     def get_type(self):
         return self.expr
