@@ -2,7 +2,7 @@ from __future__ import print_function
 
 from rpylean.bvar import BVarContext
 
-from rpylean.objects import W_LEVEL_ZERO
+from rpylean.objects import W_LEVEL_ZERO, W_Sort
 from rpylean.parser import parse
 
 
@@ -18,7 +18,7 @@ class Name:
     def __repr__(self):
         return "<Name %r>" % (self.components,)
 
-    def pretty(self, bvar_context):
+    def pretty(self, bvar_context, depth=0):
         return '.'.join(self.components)
     
 class Environment:
@@ -115,10 +115,34 @@ class Environment:
         assert name not in self.declarations
         self.declarations[name] = decl
 
+class InferenceContext:
+    def __init__(self, env):
+        self.env = env
+        self.bvar_context = BVarContext()
+
+    # Checks if two expressions are definitionally equal.
+    def def_eq(self, expr1, expr2):
+        return True
+        raise RuntimeError("Not implemented")
+    
+    def infer_sort_of(self, expr):
+        expr_type = expr.infer(self).whnf()
+        print("Inferred %s to have type %s" % (expr, expr_type))
+        if isinstance(expr_type, W_Sort):
+            return expr_type.level
+        raise RuntimeError("Expected Sort, got %s" % expr_type)
+
+
 def interpret(source):
     ast = parse(source)
 
     environment = Environment()
     ast.compile(environment)
 
+    ctx = InferenceContext(environment)
     environment.dump_pretty()
+
+    for name, decl in environment.declarations.items():
+        print("Checking declaration:", name)
+        decl.w_kind.type_check(ctx)
+
