@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 from rpython.rlib.parsing.ebnfparse import parse_ebnf, make_parse_function
+from rpython.rlib.parsing.parsing import ParseError
 from rpython.rlib.parsing.tree import RPythonVisitor
 import py
 
@@ -568,5 +569,11 @@ transformer = Transformer()
 
 
 def parse(source, transformer=transformer):
-    ast = ToAST().transform(_parse(source))
+    try:
+        parsed = _parse(source)
+    except ParseError as error:
+        print(error.nice_error_message(__file__, source), end="\n\n\n")
+        raise
+
+    ast = ToAST().transform(parsed)
     return transformer.visit_file(ast)
