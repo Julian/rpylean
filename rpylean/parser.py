@@ -191,12 +191,14 @@ class Definition(Node):
                 )
             seen[level] = True
 
-        return objects.W_Definition(
+        return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            def_type=environment.exprs[self.def_type],
-            def_val=environment.exprs[self.def_val],
-            hint=self.hint,
             level_params=self.level_params,
+            w_kind=objects.W_Definition(
+                def_type=environment.exprs[self.def_type],
+                def_val=environment.exprs[self.def_val],
+                hint=self.hint,
+            ),
         )
 
 
@@ -208,11 +210,13 @@ class Theorem(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-        return objects.W_Theorem(
+        return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            def_type=environment.exprs[self.def_type],
-            def_val=environment.exprs[self.def_val],
             level_params=self.level_params,
+            w_kind=objects.W_Theorem(
+                def_type=environment.exprs[self.def_type],
+                def_val=environment.exprs[self.def_val],
+            ),
         )
 
 
@@ -240,18 +244,20 @@ class Inductive(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-        return objects.W_Inductive(
+        return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            expr=environment.exprs[self.expr_idx],
-            is_rec=self.is_rec,
-            is_nested=self.is_nested,
-            num_params=self.num_params,
-            num_indices=self.num_indices,
-            ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
-            ctor_names=[
-                environment.names[nidx] for nidx in self.ctor_name_idxs
-            ],
             level_params=self.level_params,
+            w_kind=objects.W_Inductive(
+                expr=environment.exprs[self.expr_idx],
+                is_rec=self.is_rec,
+                is_nested=self.is_nested,
+                num_params=self.num_params,
+                num_indices=self.num_indices,
+                ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+                ctor_names=[
+                    environment.names[nidx] for nidx in self.ctor_name_idxs
+                ],
+            ),
         )
 
 
@@ -266,14 +272,16 @@ class Constructor(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-        return objects.W_Constructor(
+        return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            ctype=self.ctype,
-            induct=self.induct,
-            cidx=self.cidx,
-            num_params=self.num_params,
-            num_fields=self.num_fields,
             level_params=self.level_params,
+            w_kind=objects.W_Constructor(
+                ctype=self.ctype,
+                induct=self.induct,
+                cidx=self.cidx,
+                num_params=self.num_params,
+                num_fields=self.num_fields,
+            ),
         )
 
 
@@ -303,17 +311,19 @@ class Recursor(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-        return objects.W_Recursor(
+        return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            expr=environment.exprs[self.expr_idx],
-            k=self.k,
-            num_params=self.num_params,
-            num_indices=self.num_indices,
-            num_motives=self.num_motives,
-            num_minors=self.num_minors,
-            ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
-            rule_idxs=self.rule_idxs,
             level_params=self.level_params,
+            w_kind=objects.W_Recursor(
+                expr=environment.exprs[self.expr_idx],
+                k=self.k,
+                num_params=self.num_params,
+                num_indices=self.num_indices,
+                num_motives=self.num_motives,
+                num_minors=self.num_minors,
+                ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+                rule_idxs=self.rule_idxs,
+            ),
         )
 
 

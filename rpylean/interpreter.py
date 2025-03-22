@@ -108,7 +108,10 @@ class Environment:
 
     def register_declaration(self, name_idx, decl):
         name = self.names[name_idx]
-        # Declaration names are required to be unique
+        # > the kernel requires that the declaration is not already
+        # > declared in the environment
+        #
+        #  -- from https://ammkrn.github.io/type_checking_in_lean4/kernel_concepts/the_big_picture.html
         assert name not in self.declarations
         self.declarations[name] = decl
 

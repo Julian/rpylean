@@ -43,8 +43,8 @@ class W_BVar(W_Expr):
     def pretty(self, bvar_context):
         lookup = bvar_context.lookup(self)
         if lookup is None:
-            return "(BVar [%s])" % (str(self.id))
-        return "{%s}" % (lookup.name.pretty(bvar_context))
+            return "(BVar [%s])" % (self.id,)
+        return "{%s}" % (lookup.name.pretty(bvar_context),)
 
 
 class W_Sort(W_Expr):
@@ -52,7 +52,7 @@ class W_Sort(W_Expr):
         self.level = level
 
     def pretty(self, bvar_context):
-        return "Sort %s" % self.level.pretty(bvar_context)
+        return "Sort %s" % (self.level.pretty(bvar_context),)
 
 
 class W_Const(W_Expr):
@@ -109,50 +109,59 @@ class W_RecRule(W_Item):
         self.val = val
 
     def pretty(self, bvar_context):
-        return "<RecRule ctor_name='%s' n_fields=%s val=%s>" % (self.ctor_name.pretty(bvar_context), self.n_fields, self.val.pretty(bvar_context))
-
+        return "<RecRule ctor_name='%s' n_fields='%s' val='%s'>" % (
+            self.ctor_name.pretty(bvar_context),
+            self.n_fields,
+            self.val.pretty(bvar_context),
+        )
 
 
 class W_Declaration(W_Item):
+    def __init__(self, name, level_params, w_kind):
+        self.name = name
+        self.level_params = level_params
+        self.w_kind = w_kind
+
+    def pretty(self, bvar_context):
+        return "<W_Declaration name='%s' level_params='%s' kind=%s>" % (
+            self.name.pretty(bvar_context),
+            self.level_params,
+            self.w_kind.pretty(bvar_context),
+        )
+
+
+class W_DeclarationKind:
     pass
 
 
-class W_Definition(W_Declaration):
-    def __init__(self, name, def_type, def_val, hint, level_params):
-        self.name = name
+class W_Definition(W_DeclarationKind):
+    def __init__(self, def_type, def_val, hint):
         self.def_type = def_type
         self.def_val = def_val
         self.hint = hint
-        self.level_params = level_params
 
     def pretty(self, bvar_context):
-        return "<W_Definition name='%s' def_type=%s def_val=%s hint=%s>" % (
-            self.name.pretty(bvar_context),
+        return "<W_Definition def_type='%s' def_val='%s' hint='%s'>" % (
             self.def_type.pretty(bvar_context),
             self.def_val.pretty(bvar_context),
             self.hint,
         )
 
 
-class W_Theorem(W_Declaration):
-    def __init__(self, name, def_type, def_val, level_params):
-        self.name = name
+class W_Theorem(W_DeclarationKind):
+    def __init__(self, def_type, def_val):
         self.def_type = def_type
         self.def_val = def_val
-        self.level_params = level_params
 
     def pretty(self, bvar_context):
-        return "<W_Theorem name='%s' def_type=%s def_val=%s level_params=%s>" % (
-            self.name.pretty(bvar_context),
+        return "<W_Theorem def_type=%s def_val=%s>" % (
             self.def_type.pretty(bvar_context),
             self.def_val.pretty(bvar_context),
-            self.level_params,
         )
 
 
-class W_Inductive(W_Declaration):
-    def __init__(self, name, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names, level_params):
-        self.name = name
+class W_Inductive(W_DeclarationKind):
+    def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
         self.expr = expr
         self.is_rec = is_rec
         self.is_nested = is_nested
@@ -160,11 +169,9 @@ class W_Inductive(W_Declaration):
         self.num_indices = num_indices
         self.ind_names = ind_names
         self.ctor_names = ctor_names
-        self.level_params = level_params
 
     def pretty(self, bvar_context):
-        return "<W_Inductive name='%s' expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s level_params=%s>" % (
-            self.name.pretty(bvar_context),
+        return "<W_Inductive expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s>" % (
             self.expr.pretty(bvar_context),
             self.is_rec,
             self.is_nested,
@@ -172,35 +179,29 @@ class W_Inductive(W_Declaration):
             self.num_indices,
             [each.pretty(bvar_context) for each in self.ind_names],
             [each.pretty(bvar_context) for each in self.ctor_names],
-            self.level_params,
         )
 
 
-class W_Constructor(W_Declaration):
-    def __init__(self, name, ctype, induct, cidx, num_params, num_fields, level_params):
-        self.name = name
+class W_Constructor(W_DeclarationKind):
+    def __init__(self, ctype, induct, cidx, num_params, num_fields):
         self.ctype = ctype
         self.induct = induct
         self.cidx = cidx
         self.num_params = num_params
         self.num_fields = num_fields
-        self.level_params = level_params
 
     def pretty(self, bvar_context):
-        return "<W_Constructor name='%s' ctype='%s' induct='%s' cidx=%s num_params=%s num_fields=%s level_params=%s>" % (
-            self.name.pretty(bvar_context),
+        return "<W_Constructor ctype='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
             self.ctype,
             self.induct,
             self.cidx,
             self.num_params,
             self.num_fields,
-            self.level_params,
         )
 
 
-class W_Recursor(W_Declaration):
+class W_Recursor(W_DeclarationKind):
     def __init__(self,
-        name,
         expr,
         k,
         num_params,
@@ -209,9 +210,7 @@ class W_Recursor(W_Declaration):
         num_minors,
         ind_names,
         rule_idxs,
-        level_params,
     ):
-        self.name = name
         self.expr = expr
         self.k = k
         self.num_params = num_params
@@ -220,11 +219,9 @@ class W_Recursor(W_Declaration):
         self.num_minors = num_minors
         self.ind_names = ind_names
         self.rule_idxs = rule_idxs
-        self.level_params = level_params
 
     def pretty(self, bvar_context):
-        return "<W_Recursor name='%s' expr=%s k=%s num_params=%s num_indices=%s num_motives=%s num_minors=%s ind_names=%s rule_idxs=%s level_params=%s>" % (
-            self.name.pretty(bvar_context),
+        return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' ind_names='%s' rule_idxs='%s'>" % (
             self.expr.pretty(bvar_context),
             self.k,
             self.num_params,
@@ -233,5 +230,4 @@ class W_Recursor(W_Declaration):
             self.num_minors,
             [each.pretty(bvar_context) for each in self.ind_names],
             self.rule_idxs,
-            self.level_params
         )
