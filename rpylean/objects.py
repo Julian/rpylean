@@ -1,6 +1,3 @@
-from warnings import warn
-from rpylean.bvar import BVarContext
-
 class W_Item(object):
     def __repr__(self):
         fields = self.__dict__.iteritems()
@@ -11,7 +8,7 @@ class W_Item(object):
             contents,
         )
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return "<%s repr error>" % (self.__class__.__name__,)
 
 
@@ -20,14 +17,15 @@ class W_Level(W_Item):
 
 
 class W_LevelZero(W_Level):
-    def pretty(self, _, depth=0):
+    def pretty(self, _):
         return "<W_LevelZero>"
+
 
 class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return "(Succ %s)" % self.parent.pretty(bvar_context)
 
 class W_LevelIMax(W_Level):
@@ -42,7 +40,7 @@ class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return self.name.pretty(bvar_context)
 
 
@@ -64,7 +62,7 @@ class W_BVar(W_Expr):
     def infer(self, infcx):
         return infcx.bvar_context.lookup(self).type
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         lookup = bvar_context.lookup(self)
         if lookup is None:
             return "(BVar [%s])" % (self.id,)
@@ -80,7 +78,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return "Sort %s" % self.level.pretty(bvar_context)
     
     def infer(self, infcx):
@@ -92,12 +90,12 @@ class W_Const(W_Expr):
         self.name = name
         self.levels = levels
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return "`" + self.name.pretty(bvar_context)
     
     def infer(self, infcx):
-        if len(self.levels) != 0:
-            warn("W_Const.infer not yet implemented with level params: %s" % self.levels)
+        if self.levels:
+            warn("W_Const.infer not yet implemented with level params: %s" % (self.levels,))
         return infcx.env.declarations[self.name].get_type()
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
@@ -109,12 +107,12 @@ class W_FunBase(W_Expr):
         self.body = body
 
 class W_ForAll(W_FunBase):
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         with bvar_context.in_binder(self):
             body_pretty = self.body.pretty(bvar_context)
         return "(∀ (%s : %s), %s)" % (
-            self.binder_name.pretty(bvar_context, depth),
-            self.binder_type.pretty(bvar_context, depth),
+            self.binder_name.pretty(bvar_context),
+            self.binder_type.pretty(bvar_context),
             body_pretty
         )
     
@@ -132,12 +130,12 @@ class W_ForAll(W_FunBase):
         return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
 
 class W_Lambda(W_FunBase):
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         with bvar_context.in_binder(self):
             body_pretty = self.body.pretty(bvar_context)
         return "(λ %s : %s => \b%s)" % (
-            self.binder_name.pretty(bvar_context, depth),
-            self.binder_type.pretty(bvar_context, depth),
+            self.binder_name.pretty(bvar_context),
+            self.binder_type.pretty(bvar_context),
             body_pretty
         )
     
@@ -161,15 +159,12 @@ class W_App(W_Expr):
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
-        #if isinstance(fn, W_BVar) and isinstance(arg, W_BVar):
-        #    import pdb; pdb.set_trace()
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
         fn_type = fn_type_base.whnf()
         print("Inferred function %s to type %s" % (self.fn, fn_type))
         if not isinstance(fn_type, W_ForAll):
-            #import pdb; pdb.set_trace()
             raise RuntimeError("W_App.infer: expected function type, got %s" % fn_type)
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
@@ -193,7 +188,7 @@ class W_App(W_Expr):
     def instantiate(self, bvar, expr):
         return W_App(self.fn.instantiate(bvar, expr), self.arg.instantiate(bvar, expr))
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self, bvar_context):
         return "(%s %s)" % (self.fn.pretty(bvar_context), self.arg.pretty(bvar_context))
 
 
@@ -231,6 +226,7 @@ class W_Declaration(W_Item):
 class W_DeclarationKind(object):
     pass
 
+
 class DefOrTheorem(W_DeclarationKind):
     def __init__(self, def_type, def_val):
         self.def_type = def_type
@@ -241,9 +237,10 @@ class DefOrTheorem(W_DeclarationKind):
         if not infcx.def_eq(self.def_type, val_type):
             raise RuntimeError("W_Definition.type_check: type mismatch: %s != %s" % (self.def_type, val_type))
 
+
 class W_Definition(DefOrTheorem):
     def __init__(self, def_type, def_val, hint):
-        super(W_Definition, self).__init__(def_type, def_val)
+        DefOrTheorem.__init__(self, def_type, def_val)
         self.hint = hint
 
     def get_type(self):
@@ -258,16 +255,15 @@ class W_Definition(DefOrTheorem):
 
 
 class W_Theorem(DefOrTheorem):
-    def __init__(self, def_type, def_val):
-        super(W_Theorem, self).__init__(def_type, def_val)
-
     def pretty(self, bvar_context):
         return "<W_Theorem def_type=%s def_val=%s>" % (
             self.def_type.pretty(bvar_context),
             self.def_val.pretty(bvar_context),
         )
+
     def get_type(self):
         return self.def_type
+
 
 class W_Inductive(W_DeclarationKind):
     def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
@@ -297,6 +293,7 @@ class W_Inductive(W_DeclarationKind):
             [each.pretty(bvar_context) for each in self.ctor_names],
         )
 
+
 class W_Constructor(W_DeclarationKind):
     def __init__(self, ctype, induct, cidx, num_params, num_fields):
         self.ctype = ctype
@@ -310,9 +307,9 @@ class W_Constructor(W_DeclarationKind):
         pass
 
     def get_type(self):
-        if int(self.num_params) == 0 and int(self.num_fields) == 0:
-            return self.ctype
-        raise RuntimeError("W_Constructor.get_type not yet implemented for num_params=%s num_fields=%s" % (self.num_params, self.num_fields))
+        if self.num_params != 0 or self.num_fields != 0:
+            warn("W_Constructor.get_type not yet implemented for num_params=%s num_fields=%s" % (self.num_params, self.num_fields))
+        return self.ctype
 
     def pretty(self, bvar_context):
         return "<W_Constructor ctype='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
@@ -362,3 +359,7 @@ class W_Recursor(W_DeclarationKind):
             [each.pretty(bvar_context) for each in self.ind_names],
             self.rule_idxs,
         )
+
+
+def warn(message):
+    print("WARNING: %s" % (message,))

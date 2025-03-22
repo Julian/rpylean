@@ -277,11 +277,11 @@ class Constructor(Node):
             name=environment.names[self.name_idx],
             level_params=self.level_params,
             w_kind=objects.W_Constructor(
-                ctype=self.ctype,
+                ctype=environment.exprs[self.ctype],
                 induct=self.induct,
                 cidx=self.cidx,
-                num_params=self.num_params,
-                num_fields=self.num_fields,
+                num_params=int(self.num_params),
+                num_fields=int(self.num_fields),
             ),
         )
 
@@ -396,7 +396,7 @@ class Transformer(RPythonVisitor):
         kind = node.children[1]
         if kind.additional_info == "#EV":
             _, _, id = node.children
-            val = BVar(id=id.additional_info)
+            val = BVar(id=int(id.additional_info))
         elif kind.additional_info == "#ES":
             _, _, uidx = node.children
             val = Sort(level=uidx.children[0].additional_info)
