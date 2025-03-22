@@ -1,3 +1,4 @@
 target*-c
 __pycache__
 *.pyc
+.lake

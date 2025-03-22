@@ -38,7 +38,7 @@ jobs:
     - name: Run Tests
       run: |
         pypy -m pip install pytest
-        PYTHONPATH=pypy pytest rpylean
+        PYTHONPATH=pypy pytest tests
 
     - name: Translate
       run: |

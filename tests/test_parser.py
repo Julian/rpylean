@@ -1,11 +1,10 @@
 import os.path
 
-from rpylean import RPYLEAN_DIR
 from rpylean.parser import parse
+from tests import examples
 
 
-EXAMPLES = os.path.join(os.path.dirname(RPYLEAN_DIR), "examples")
-BASIC = os.path.join(EXAMPLES, "basic_export")
+BASIC = os.path.join(examples.PATH, "Basic/export")
 
 
 def test_it_works():
