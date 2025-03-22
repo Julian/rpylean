@@ -8,6 +8,9 @@ SEPARATOR: "\n";
 NAT: "[0-9]*";
 STRING: "[a-zA-Z]*";
 HEXHEX: "[a-f][0-9]";
+A: "A";
+O: "O";
+R: "R";
 
 export_format_version: NAT ["."] NAT ["."] NAT;
 
@@ -54,7 +57,7 @@ expr:
 
 info: "#BD" | "#BI" | "#BS" | "#BC";
 
-hint: "O" | "A" | "R" NAT;
+hint: O | A | R NAT;
 
 recrule: ridx "#RR" nidx NAT eidx;
 
