@@ -167,9 +167,18 @@ class Declaration(Node):
         self.decl = decl
 
     def compile(self, environment):
+        w_kind = self.decl.to_w_decl(environment)
+        seen = {}
+        for nidx in w_kind.level_params:
+            level = environment.names[nidx]
+            if level in seen:
+                raise Invalid(
+                    "%s has duplicate level %s" % (w_kind.name, level),
+                )
+            seen[level] = True
         environment.register_declaration(
             self.decl.name_idx,
-            self.decl.to_w_decl(environment),
+            w_kind,
         )
 
 
@@ -182,14 +191,6 @@ class Definition(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-        seen = {}
-        for nidx in self.level_params:
-            level = environment.names[nidx]
-            if level in seen:
-                raise Invalid(
-                    "%s has duplicate level %s" % (self.name_idx, level),
-                )
-            seen[level] = True
 
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
