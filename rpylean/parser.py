@@ -538,7 +538,9 @@ class Transformer(RPythonVisitor):
             num_indices=num_indices.additional_info,
             num_motives=num_motives.additional_info,
             num_minors=num_minors.additional_info,
-            level_params=level_params,
+            level_params=[
+                each.children[0].additional_info for each in level_params
+            ],
         )
 
     def visit_recrule(self, node):
