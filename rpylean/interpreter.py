@@ -1,7 +1,6 @@
 from __future__ import print_function
 
 from rpylean.bvar import BVarContext
-from rpython.rlib.objectmodel import we_are_translated
 
 from rpylean.objects import W_LEVEL_ZERO
 from rpylean.parser import parse
@@ -35,10 +34,6 @@ class Environment:
         return "Environment()"
 
     def dump(self):
-        print_heading("declarations")
-        for name, decl in self.declarations.items():
-            print(name, "->", decl)
-
         print_heading("declarations")
         for name, decl in self.declarations.items():
             print(name, "->", decl)
