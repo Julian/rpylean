@@ -17,15 +17,25 @@ permissions:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        arch: [x64, arm64]
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up PyPy 2.7
-      uses: actions/setup-python@v5
-      with:
-        python-version: "pypy-2.7"
+    - name: Install PyPy (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y pypy2
+
+    # setup-python seems broken on ARM64
+    # https://github.com/actions/setup-python/issues/547#issuecomment-2746246844
+    - name: Install PyPy (macOS)
+      if: runner.os == 'macOS'
+      run: brew install pypy
 
     - name: Checkout PyPy
       uses: actions/checkout@v4
@@ -33,16 +43,20 @@ jobs:
         repository: pypy/pypy
         path: pypy
 
-    - run: pypy --version
-
     - name: Install py.test
       run: pypy -m pip install pytest
 
     - name: Run Tests
-      run: PYTHONPATH=pypy pytest tests
+      run: PYTHONPATH=pypy pypy -m pytest tests
 
     - name: Translate
       run: pypy pypy/rpython/bin/rpython targetrpylean.py
 
     - name: Run Post-Translation Tests
-      run: PYTHONPATH=pypy pytest translated-tests
+      run: PYTHONPATH=pypy -m pytest translated-tests
+
+    - name: Upload Translated Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: rpylean-${{ runner.os }}-${{ matrix.arch }}
+        path: ./targetrpylean-c
