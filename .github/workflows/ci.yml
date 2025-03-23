@@ -35,11 +35,14 @@ jobs:
 
     - run: pypy --version
 
+    - name: Install py.test
+      run: pypy -m pip install pytest
+
     - name: Run Tests
-      run: |
-        pypy -m pip install pytest
-        PYTHONPATH=pypy pytest tests
+      run: PYTHONPATH=pypy pytest tests
 
     - name: Translate
-      run: |
-        pypy pypy/rpython/bin/rpython targetrpylean.py
+      run: pypy pypy/rpython/bin/rpython targetrpylean.py
+
+    - name: Run Post-Translation Tests
+      run: PYTHONPATH=pypy pytest translated-tests
