@@ -63,10 +63,27 @@ class NameStr(Node):
     def compile(self, environment):
         environment.register_name(self.nidx, self.parent_nidx, self.name)
 
+class NameId(Node):
+    def __init__(self, nidx, parent_nidx, id):
+        self.nidx = nidx
+        self.parent_nidx = parent_nidx
+        self.id = id
+        
+    def compile(self, environment):
+        # TODO - should we register id names separately (as ints)?
+        environment.register_name(self.nidx, self.parent_nidx, self.id)
 
 class Universe(Node):
     pass
 
+class UniverseSucc(Universe):
+    def __init__(self, uidx, parent):
+        self.uidx = uidx
+        self.parent = parent
+
+    def compile(self, environment):
+        parent = environment.levels[self.parent]
+        environment.register_level(self.uidx, objects.W_LevelSucc(parent))
 
 class UniverseParam(Universe):
     def __init__(self, uidx, nidx):
@@ -377,7 +394,11 @@ class Transformer(RPythonVisitor):
                 name=id.additional_info,
             )
         elif kind.additional_info == "#NI":
-            assert False, "implement #NI"
+            return NameId(
+                nidx=nidx.children[0].additional_info,
+                parent_nidx=parent_nidx.children[0].additional_info,
+                id=id.additional_info,
+            )
         else:
             assert False, "unknown name kind: " + kind.additional_info
 
@@ -389,6 +410,9 @@ class Transformer(RPythonVisitor):
                 uidx=uidx.children[0].additional_info,
                 nidx=nidx.children[0].additional_info,
             )
+        if kind.additional_info == "#US":
+            uidx, _, parent = node.children
+            return UniverseSucc(uidx=uidx.children[0].additional_info, parent=parent.children[0].additional_info)
         else:
             assert False, "unknown name kind: " + kind.additional_info
 
@@ -487,13 +511,13 @@ class Transformer(RPythonVisitor):
             num_params=num_params.additional_info,
             num_indices=num_indices.additional_info,
             ind_name_idxs=[
-                each.children[0].additional_info for each in ind_name_idxs
+                each.additional_info for each in ind_name_idxs
             ],
             ctor_name_idxs=[
-                each.children[0].additional_info for each in ctor_name_idxs
+                each.additional_info for each in ctor_name_idxs
             ],
             level_params=[
-                each.children[0].additional_info
+                each.additional_info
                 for each in level_params
             ],
         )
@@ -520,7 +544,7 @@ class Transformer(RPythonVisitor):
 
         pos = 4
         ind_name_idxs = [
-            nidx.children[0].additional_info
+            nidx.additional_info
             for nidx in node.children[pos:(pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
@@ -532,7 +556,7 @@ class Transformer(RPythonVisitor):
         pos += 5
 
         rule_idxs = [
-            rule_idx.children[0].additional_info
+            rule_idx.additional_info
             for rule_idx in node.children[pos:pos + num_rule_idxs]
         ]
         pos += num_rule_idxs
@@ -551,7 +575,7 @@ class Transformer(RPythonVisitor):
             num_motives=num_motives.additional_info,
             num_minors=num_minors.additional_info,
             level_params=[
-                each.children[0].additional_info for each in level_params
+                each.additional_info for each in level_params
             ],
         )
 

@@ -6,7 +6,7 @@ IGNORE: " ";
 SEPARATOR: "\n";
 
 NAT: "[0-9]*";
-STRING: "[a-zA-Z]+";
+STRING: "[a-zA-Z0-9_@]+";
 HEXHEX: "[a-f][0-9]";
 
 export_format_version: NAT ["."] NAT ["."] NAT;
@@ -70,15 +70,7 @@ inductive:
   "#IND"
   nidx
   eidx
-  NAT
-  NAT
-  NAT
-  NAT
-  NAT
-  nidx NAT*
-  NAT
-  nidx NAT*
-  nidx*
+  NAT+
   ;
 
 constructor:
@@ -97,13 +89,5 @@ recursor:
   nidx
   eidx
   NAT
-  nidx NAT*
-  NAT
-  NAT
-  NAT
-  NAT
-  NAT
-  ridx NAT*
-  NAT
-  nidx*
+  NAT+
   ;
