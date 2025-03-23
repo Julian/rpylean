@@ -14,7 +14,12 @@ permissions:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        arch: [x64, arm64]
 
     steps:
     - uses: actions/checkout@v4
@@ -36,10 +41,16 @@ jobs:
       run: pypy -m pip install pytest
 
     - name: Run Tests
-      run: PYTHONPATH=pypy pytest tests
+      run: PYTHONPATH=pypy pypy -m pytest tests
 
     - name: Translate
       run: pypy pypy/rpython/bin/rpython targetrpylean.py
 
     - name: Run Post-Translation Tests
-      run: PYTHONPATH=pypy pytest translated-tests
+      run: PYTHONPATH=pypy pypy -m pytest translated-tests
+
+    - name: Upload Translated Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: rpylean-${{ runner.os }}-${{ matrix.arch }}
+        path: ./rpylean-c
