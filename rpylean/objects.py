@@ -1,3 +1,14 @@
+class NotDefEq(Exception):
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def __repr__(self):
+        return "NotDefEq(%s, %s)" % (self.lhs, self.rhs)
+    
+    def __str__(self):
+        return "NotDefEq: %s != %s" % (self.lhs, self.rhs)
+
 class W_Item(object):
     def __repr__(self):
         fields = self.__dict__.iteritems()
@@ -8,16 +19,16 @@ class W_Item(object):
             contents,
         )
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<%s repr error>" % (self.__class__.__name__,)
 
-
 class W_Level(W_Item):
-    pass
+    def antisymm_eq(self, other, infcx):
+        return True
 
 
 class W_LevelZero(W_Level):
-    def pretty(self, _):
+    def pretty(self):
         return "<W_LevelZero>"
 
 
@@ -25,8 +36,8 @@ class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
 
-    def pretty(self, bvar_context):
-        return "(Succ %s)" % self.parent.pretty(bvar_context)
+    def pretty(self):
+        return "(Succ %s)" % self.parent.pretty()
 
 class W_LevelIMax(W_Level):
     def __init__(self, lhs, rhs):
@@ -40,8 +51,8 @@ class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
 
-    def pretty(self, bvar_context):
-        return self.name.pretty(bvar_context)
+    def pretty(self):
+        return self.name.pretty()
 
 
 class W_Expr(W_Item):
@@ -50,8 +61,18 @@ class W_Expr(W_Item):
     def whnf(self):
         return self
 
-    # Replaces all occurences of 'bvar' with 'expr'
-    def instantiate(self, bvar, expr):
+    # Replace all BVars with the id 'depth' with 'expr'
+    def instantiate(self, expr, depth):
+        return self
+    
+    def bind_fvar(self, fvar, depth):
+        return self
+    
+    # Increments all free BVars in this expression by 'count'.
+    # For example, 'fun x => BVar(1)' will become 'fun x => BVar(1 + count)',
+    # while 'fun x => BVar(0)' wil be unchanged.
+    # This is used when we add 'count' new binders above this expresssion
+    def incr_free_bvars(self, count, depth):
         return self
 
 
@@ -59,30 +80,83 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = int(id)
 
-    def infer(self, infcx):
-        return infcx.bvar_context.lookup(self).type
-
-    def pretty(self, bvar_context):
-        lookup = bvar_context.lookup(self)
-        if lookup is None:
-            return "(BVar [%s])" % (self.id,)
-        return "{%s [%s]}" % (lookup.name.pretty(bvar_context), str(self.id))
+    def pretty(self):
+        return "(BVar [%s])" % (self.id,)
     
-    def instantiate(self, bvar, expr):
-        if self.id == bvar.id:
-            return expr
+    
+    def instantiate(self, expr, depth):
+        if self.id == depth:
+            incr = expr.incr_free_bvars(depth, 0)
+            return incr
+        elif self.id > depth:
+            # This variable is not bound here (e.g. 'fun x => BVar(1)')
+            # Instantiation has removed the outermost binder, so we need to decrement this
+            # TODO - should we take in a context instead of relying on 'bvar.id'?
+            return W_BVar(self.id - depth)
         return self
+    
+    def incr_free_bvars(self, count, depth):
+        if self.id >= depth:
+            return W_BVar(self.id + count)
+        return self
+
+    
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_BVar)
+        if self.id != other.id:
+            raise NotDefEq(self, other)
+        return True
+
+# RPython prevents mutating global variable bindings, so we need a class instance
+class FVarCounter(object):
+    def __init__(self):
+        self.count = 0
+
+FVAR_COUNTER = FVarCounter()
+
+class W_FVar(W_Expr):
+    def __init__(self, binder):
+        global FVAR_COUNTER
+        self.id = FVAR_COUNTER.count
+        self.binder = binder
+        FVAR_COUNTER.count += 1
+
+    def infer(self, infcx):
+        return self.binder.binder_type
+    
+    def bind_fvar(self, fvar, depth):
+        if self.id == fvar.id:
+            return W_BVar(depth)
+        return self
+
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_FVar)
+        if self.id != other.id:
+            raise NotDefEq(self, other)
+        return True
+    
+    def __repr__(self):
+        return "(FVar %s %s)" % (self.id, self.binder)
+    
+    def pretty(self):
+        return "{%s}" % self.binder.binder_name.pretty()
 
 
 class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
-    def pretty(self, bvar_context):
-        return "Sort %s" % self.level.pretty(bvar_context)
+    def pretty(self):
+        return "Sort %s" % self.level.pretty()
     
     def infer(self, infcx):
         return W_Sort(W_LevelSucc(self.level))
+    
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_Sort)
+        if not self.level.antisymm_eq(other.level, infcx):
+            raise NotDefEq(self, other)
+        return True
 
 
 class W_Const(W_Expr):
@@ -90,13 +164,24 @@ class W_Const(W_Expr):
         self.name = name
         self.levels = levels
 
-    def pretty(self, bvar_context):
-        return "`" + self.name.pretty(bvar_context)
+    def pretty(self):
+        return "`" + self.name.pretty()
     
     def infer(self, infcx):
         if self.levels:
             warn("W_Const.infer not yet implemented with level params: %s" % (self.levels,))
         return infcx.env.declarations[self.name].get_type()
+    
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_Const)
+        if self.name != other.name:
+            raise NotDefEq(self, other)
+        if len(self.levels) != len(other.levels):
+            raise NotDefEq(self, other)
+        for i in range(len(self.levels)):
+            if not self.levels[i].antisymm_eq(other.levels[i], infcx):
+                raise NotDefEq(self, other)
+        return True
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
@@ -105,52 +190,106 @@ class W_FunBase(W_Expr):
         self.binder_type = binder_type
         self.binder_info = binder_info
         self.body = body
+        if self.body is None:
+            raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
 
 class W_ForAll(W_FunBase):
-    def pretty(self, bvar_context):
-        with bvar_context.in_binder(self):
-            body_pretty = self.body.pretty(bvar_context)
+    def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(∀ (%s : %s), %s)" % (
-            self.binder_name.pretty(bvar_context),
-            self.binder_type.pretty(bvar_context),
+            self.binder_name.pretty(),
+            self.binder_type.pretty(),
             body_pretty
         )
     
     def infer(self, infcx):
         binder_sort = infcx.infer_sort_of(self.binder_type)
-        with infcx.bvar_context.in_binder(self):
-            body_sort = infcx.infer_sort_of(self.body)
+        body_sort = infcx.infer_sort_of(self.body.instantiate(W_FVar(self), 0))
         return W_Sort(W_LevelIMax(binder_sort, body_sort))
 
     # TODO - double check this
-    def instantiate(self, bvar, expr):
+    def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        new_binder = self.binder_type.instantiate(bvar, expr)
-        new_body = self.body.instantiate(W_BVar(bvar.id + 1), expr)
+        new_binder = self.binder_type.instantiate(expr, depth)
+        new_body = self.body.instantiate(expr, depth + 1)
         return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
+    
+    def bind_fvar(self, fvar, depth):
+        new_binder = self.binder_type.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
+        return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
+    
+    def incr_free_bvars(self, count, depth):
+        binder_type = self.binder_type.incr_free_bvars(count, depth)
+        body = self.body.incr_free_bvars(count, depth + 1)
+        return W_ForAll(
+            self.binder_name,
+            binder_type,
+            self.binder_info,
+            body
+        )
+
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_ForAll), "expected W_ForAll for %s" % other
+        if not self.binder_type.def_eq(other.binder_type, infcx):
+            raise NotDefEq(self, other)
+        
+        fvar = W_FVar(self)
+        body = self.body.instantiate(fvar, 0)
+        other_body = other.body.instantiate(fvar, 0)
+        return body.def_eq(other_body, infcx)
 
 class W_Lambda(W_FunBase):
-    def pretty(self, bvar_context):
-        with bvar_context.in_binder(self):
-            body_pretty = self.body.pretty(bvar_context)
+    def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(λ %s : %s => \b%s)" % (
-            self.binder_name.pretty(bvar_context),
-            self.binder_type.pretty(bvar_context),
+            self.binder_name.pretty(),
+            self.binder_type.pretty(),
             body_pretty
         )
-    
-    def instantiate(self, bvar, expr):
-        # Don't increment - not yet inside a binder
-        new_binder = self.binder_type.instantiate(bvar, expr)
-        new_body = self.body.instantiate(W_BVar(bvar.id + 1), expr)
+
+    def bind_fvar(self, fvar, depth):
+        new_binder = self.binder_type.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
         return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
+
+    def instantiate(self, expr, depth):
+        # Don't increment - not yet inside a binder
+        new_binder = self.binder_type.instantiate(expr, depth)
+        new_body = self.body.instantiate(expr, depth + 1)
+        return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
+
+    def incr_free_bvars(self, count, depth):
+        binder_type = self.binder_type.incr_free_bvars(count, depth)
+        body = self.body.incr_free_bvars(count, depth + 1)
+        return W_Lambda(
+            self.binder_name,
+            binder_type,
+            self.binder_info,
+            body,
+        )
 
     def infer(self, infcx):
         # Run this for the side effect - throwing an exception if not a Sort
         infcx.infer_sort_of(self.binder_type)
-        with infcx.bvar_context.in_binder(self):
-            body_type = self.body.infer(infcx)
-        return W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
+        fvar = W_FVar(self)
+        body_type_fvar = self.body.instantiate(fvar, 0).infer(infcx)
+        body_type = body_type_fvar.bind_fvar(fvar, 0)
+        if body_type is None:
+            raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
+        res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
+        return res
+    
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_Lambda)
+        if not self.binder_type.def_eq(other.binder_type, infcx):
+            raise NotDefEq(self, other)
+        
+        fvar = W_FVar(self)
+        body = self.body.instantiate(fvar, 0)
+        other_body = other.body.instantiate(fvar, 0)
+        return body.def_eq(other_body, infcx)
+
 
 #(fun (x : N) => Vector.repeat(1, n))
 #'(n: Nat) -> Vector n'
@@ -163,33 +302,39 @@ class W_App(W_Expr):
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
         fn_type = fn_type_base.whnf()
-        print("Inferred function %s to type %s" % (self.fn, fn_type))
         if not isinstance(fn_type, W_ForAll):
             raise RuntimeError("W_App.infer: expected function type, got %s" % fn_type)
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
-        body_type = fn_type.body.instantiate(W_BVar(0), self.arg)
-        print("W_App infer: instantiated %s to %s" % (fn_type.body, body_type))
+        body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
     
     def whnf(self):
         arg = self.arg.whnf()
-        print("Reduced arg %s to %s" % (self.arg, arg))
         if isinstance(self.fn, W_FunBase):
-            res = self.fn.instantiate(W_BVar(0), arg)
-            print("App WHNF: instantiated %s to %s" % (self, res))
+            res = self.fn.instantiate(arg, 0)
             return res
         else:
-            print("Could not reduce %s" % self)
             return W_App(self.fn, arg)
 
+    def bind_fvar(self, fvar, depth):
+        return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
     
-    def instantiate(self, bvar, expr):
-        return W_App(self.fn.instantiate(bvar, expr), self.arg.instantiate(bvar, expr))
+    def instantiate(self, expr, depth):
+        return W_App(self.fn.instantiate(expr, depth), self.arg.instantiate(expr, depth))
+    
+    def incr_free_bvars(self, count, depth):
+        return W_App(self.fn.incr_free_bvars(count, depth), self.arg.incr_free_bvars(count, depth))
 
-    def pretty(self, bvar_context):
-        return "(%s %s)" % (self.fn.pretty(bvar_context), self.arg.pretty(bvar_context))
+    def pretty(self):
+        return "(%s %s)" % (self.fn.pretty(), self.arg.pretty())
+    
+    def def_eq(self, other, infcx):
+        assert isinstance(other, W_App)
+        fn_eq = self.fn.def_eq(other.fn, infcx)
+        arg_eq = self.arg.def_eq(other.arg, infcx)
+        return fn_eq and arg_eq
 
 
 class W_RecRule(W_Item):
@@ -198,11 +343,11 @@ class W_RecRule(W_Item):
         self.n_fields = n_fields
         self.val = val
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<RecRule ctor_name='%s' n_fields='%s' val='%s'>" % (
-            self.ctor_name.pretty(bvar_context),
+            self.ctor_name.pretty(),
             self.n_fields,
-            self.val.pretty(bvar_context),
+            self.val.pretty(),
         )
 
 
@@ -215,11 +360,11 @@ class W_Declaration(W_Item):
     def get_type(self):
         return self.w_kind.get_type()
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Declaration name='%s' level_params='%s' kind=%s>" % (
-            self.name.pretty(bvar_context),
+            self.name.pretty(),
             self.level_params,
-            self.w_kind.pretty(bvar_context),
+            self.w_kind.pretty(),
         )
 
 
@@ -246,19 +391,19 @@ class W_Definition(DefOrTheorem):
     def get_type(self):
         return self.def_type
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Definition def_type='%s' def_val='%s' hint='%s'>" % (
-            self.def_type.pretty(bvar_context),
-            self.def_val.pretty(bvar_context),
+            self.def_type.pretty(),
+            self.def_val.pretty(),
             self.hint,
         )
 
 
 class W_Theorem(DefOrTheorem):
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Theorem def_type=%s def_val=%s>" % (
-            self.def_type.pretty(bvar_context),
-            self.def_val.pretty(bvar_context),
+            self.def_type.pretty(),
+            self.def_val.pretty(),
         )
 
     def get_type(self):
@@ -282,15 +427,15 @@ class W_Inductive(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Inductive expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s>" % (
-            self.expr.pretty(bvar_context),
+            self.expr.pretty(),
             self.is_rec,
             self.is_nested,
             self.num_params,
             self.num_indices,
-            [each.pretty(bvar_context) for each in self.ind_names],
-            [each.pretty(bvar_context) for each in self.ctor_names],
+            [each.pretty() for each in self.ind_names],
+            [each.pretty() for each in self.ctor_names],
         )
 
 
@@ -311,7 +456,7 @@ class W_Constructor(W_DeclarationKind):
             warn("W_Constructor.get_type not yet implemented for num_params=%s num_fields=%s" % (self.num_params, self.num_fields))
         return self.ctype
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Constructor ctype='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
             self.ctype,
             self.induct,
@@ -348,15 +493,15 @@ class W_Recursor(W_DeclarationKind):
     def get_type(self):
         return self.expr
 
-    def pretty(self, bvar_context):
+    def pretty(self):
         return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' ind_names='%s' rule_idxs='%s'>" % (
-            self.expr.pretty(bvar_context),
+            self.expr.pretty(),
             self.k,
             self.num_params,
             self.num_indices,
             self.num_motives,
             self.num_minors,
-            [each.pretty(bvar_context) for each in self.ind_names],
+            [each.pretty() for each in self.ind_names],
             self.rule_idxs,
         )
 

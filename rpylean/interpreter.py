@@ -1,9 +1,8 @@
 from __future__ import print_function
 
-from rpylean.bvar import BVarContext
-
 from rpylean.objects import W_LEVEL_ZERO, W_Sort
 from rpylean.parser import parse
+from rpython.rlib.objectmodel import we_are_translated
 
 
 def print_heading(s):
@@ -18,7 +17,7 @@ class Name:
     def __repr__(self):
         return "<Name %r>" % (self.components,)
 
-    def pretty(self, bvar_context, depth=0):
+    def pretty(self):
         return '.'.join(self.components)
     
 class Environment:
@@ -59,31 +58,29 @@ class Environment:
             print(id, "->", rule)
 
     def dump_pretty(self):
-        bvar_context = BVarContext()
-
         print_heading("declarations")
         for name, decl in self.declarations.items():
-            print(name.pretty(bvar_context), "->", decl.pretty(bvar_context))
+            print(name.pretty(), "->", decl.pretty())
 
         print("")
         print_heading("exprs")
         for id, expr in self.exprs.items():
-            print(id, "->", expr.pretty(bvar_context))
+            print(id, "->", expr.pretty())
 
         print("")
         print_heading("constants")
         for id, constant in self.constants.items():
-            print(id, "->", constant.pretty(bvar_context))
+            print(id, "->", constant.pretty())
 
         print("")
         print_heading("levels")
         for id, level in self.levels.items():
-            print(id, "->", level.pretty(bvar_context))
+            print(id, "->", level.pretty())
 
         print("")
         print_heading("rec_rules")
         for id, rule in self.rec_rules.items():
-            print(id, "->", rule.pretty(bvar_context))
+            print(id, "->", rule.pretty())
 
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names
@@ -118,16 +115,21 @@ class Environment:
 class InferenceContext:
     def __init__(self, env):
         self.env = env
-        self.bvar_context = BVarContext()
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
-        return True
-        raise RuntimeError("Not implemented")
+        if not we_are_translated():
+            assert type(expr1) == type(expr2)
+        try:
+            return expr1.def_eq(expr2, self)
+        except Exception as e:
+            print("Error in def_eq for:")
+            print("  %s" % expr1.pretty())
+            print("  %s" % expr2.pretty())
+            raise
     
     def infer_sort_of(self, expr):
         expr_type = expr.infer(self).whnf()
-        print("Inferred %s to have type %s" % (expr, expr_type))
         if isinstance(expr_type, W_Sort):
             return expr_type.level
         raise RuntimeError("Expected Sort, got %s" % expr_type)
