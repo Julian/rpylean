@@ -187,8 +187,7 @@ class Declaration(Node):
     def compile(self, environment):
         w_kind = self.decl.to_w_decl(environment)
         seen = {}
-        for nidx in w_kind.level_params:
-            level = environment.names[nidx]
+        for level in w_kind.level_params:
             if level in seen:
                 raise Invalid(
                     "%s has duplicate level %s" % (w_kind.name, level),
@@ -212,7 +211,7 @@ class Definition(Node):
 
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            level_params=self.level_params,
+            level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Definition(
                 def_type=environment.exprs[self.def_type],
                 def_val=environment.exprs[self.def_val],
@@ -231,7 +230,7 @@ class Theorem(Node):
     def to_w_decl(self, environment):
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            level_params=self.level_params,
+            level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Theorem(
                 def_type=environment.exprs[self.def_type],
                 def_val=environment.exprs[self.def_val],
@@ -265,7 +264,7 @@ class Inductive(Node):
     def to_w_decl(self, environment):
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            level_params=self.level_params,
+            level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Inductive(
                 expr=environment.exprs[self.expr_idx],
                 is_rec=self.is_rec,
@@ -293,7 +292,7 @@ class Constructor(Node):
     def to_w_decl(self, environment):
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            level_params=self.level_params,
+            level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Constructor(
                 ctype=environment.exprs[self.ctype],
                 induct=self.induct,
@@ -332,7 +331,7 @@ class Recursor(Node):
     def to_w_decl(self, environment):
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
-            level_params=self.level_params,
+            level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Recursor(
                 expr=environment.exprs[self.expr_idx],
                 k=self.k,

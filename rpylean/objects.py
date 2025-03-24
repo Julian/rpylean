@@ -22,9 +22,62 @@ class W_Item(object):
     def pretty(self):
         return "<%s repr error>" % (self.__class__.__name__,)
 
+# Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
+    def simplify(self):
+        if isinstance(self, W_LevelZero) or isinstance(self, W_LevelParam):
+            return self
+        if isinstance(self, W_LevelSucc):
+            return W_LevelSucc(self.parent.simplify())
+        if isinstance(self, W_LevelMax):
+            return W_LevelMax.combining(self.lhs.simplify(), self.rhs.simplify())
+        if isinstance(self, W_LevelIMax):
+            b_simp = self.rhs.simplify()
+            if isinstance(b_simp, W_LevelSucc):
+                return W_LevelMax.combining(self.lhs, b_simp)
+            if isinstance(b_simp, W_LevelZero):
+                return W_LevelZero()
+            return W_LevelIMax(self.lhs.simplify(), b_simp)
+        raise RuntimeError("Unexpected level type: %s" % self)
+            
+
+    # See https://ammkrn.github.io/type_checking_in_lean4/levels.html?highlight=leq#partial-order-on-levels
+    def leq(self, other, infcx, balance=0):
+        if isinstance(self, W_LevelZero) and balance >= 0:
+            return True
+        if isinstance(other, W_LevelZero) and balance < 0:
+            return False
+        if isinstance(self, W_LevelParam) and isinstance(other, W_LevelParam):
+            return self.name == other.name and balance == 0
+        if isinstance(self, W_LevelParam) and isinstance(other, W_LevelZero):
+            return False
+        if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
+            return balance >= 0
+        if isinstance(self, W_LevelSucc):
+            return self.parent.leq(other, infcx, balance - 1)
+        if isinstance(other, W_LevelSucc):
+            return self.leq(other.parent, infcx, balance + 1)
+        
+        if isinstance(self, W_LevelMax):
+            return self.lhs.leq(other, infcx, balance) or self.rhs.leq(other, infcx, balance)
+        
+        if (isinstance(self, W_LevelParam) or isinstance(self, W_LevelZero)) and isinstance(other, W_LevelMax):
+            return self.leq(other.lhs, infcx, balance) or self.leq(other.rhs, infcx, balance)
+        
+        # TODO - what equality is this?
+        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.antisymm_eq(other.lhs, infcx) and self.rhs.antisymm_eq(other.rhs, infcx):
+            return True
+
+        if isinstance(self, W_LevelIMax) and isinstance(self.rhs, W_LevelParam):
+            raise RuntimeError("W_LevelIMax with W_LevelParam not yet implemented")
+        
+        if isinstance(other, W_LevelIMax) and isinstance(other.rhs, W_LevelParam):
+            return self.lhs.leq(other.lhs, infcx) or self.rhs.leq(other.rhs, infcx)
+        
+        raise RuntimeError("Unimplemented level comparison: %s <= %s" % (self, other))
+    
     def antisymm_eq(self, other, infcx):
-        return True
+        return self.leq(other, infcx) and other.leq(self, infcx)
 
 
 class W_LevelZero(W_Level):
@@ -38,6 +91,21 @@ class W_LevelSucc(W_Level):
 
     def pretty(self):
         return "(Succ %s)" % self.parent.pretty()
+
+class W_LevelMax(W_Level):
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @staticmethod
+    def combining(lhs, rhs):
+        if isinstance(lhs, W_LevelSucc) and isinstance(rhs, W_LevelSucc):
+            return W_LevelSucc(W_LevelMax.combining(lhs.parent, rhs.parent))
+        if isinstance(lhs, W_LevelZero):
+            return rhs
+        if isinstance(rhs, W_LevelZero):
+            return lhs
+        return W_LevelMax(lhs, rhs)
 
 class W_LevelIMax(W_Level):
     def __init__(self, lhs, rhs):
@@ -106,6 +174,9 @@ class W_BVar(W_Expr):
         if self.id != other.id:
             raise NotDefEq(self, other)
         return True
+    
+    def subst_levels(self, substs):
+        return self
 
 # RPython prevents mutating global variable bindings, so we need a class instance
 class FVarCounter(object):
@@ -157,6 +228,11 @@ class W_Sort(W_Expr):
         if not self.level.antisymm_eq(other.level, infcx):
             raise NotDefEq(self, other)
         return True
+    
+    def subst_levels(self, substs):
+        if self.level in substs:
+            return W_Sort(substs[self.level])
+        return self
 
 
 class W_Const(W_Expr):
@@ -165,12 +241,21 @@ class W_Const(W_Expr):
         self.levels = levels
 
     def pretty(self):
-        return "`" + self.name.pretty()
+        return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
     
     def infer(self, infcx):
-        if self.levels:
-            warn("W_Const.infer not yet implemented with level params: %s" % (self.levels,))
-        return infcx.env.declarations[self.name].get_type()
+        decl = infcx.env.declarations[self.name]
+        params = decl.level_params
+        if len(params) != len(self.levels):
+            raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(params), len(self.levels)))
+        
+        if len(params) == 0:
+            return decl.get_type()
+
+        substs = {}
+        for i in range(len(params)):
+            substs[W_LevelParam(params[i])] = self.levels[i]
+        return decl.get_type().subst_levels(substs)
     
     def def_eq(self, other, infcx):
         assert isinstance(other, W_Const)
@@ -182,6 +267,13 @@ class W_Const(W_Expr):
             if not self.levels[i].antisymm_eq(other.levels[i], infcx):
                 raise NotDefEq(self, other)
         return True
+    
+    def subst_levels(self, substs):
+        new_levels = []
+        for level in self.levels:
+            new_level = substs.get(level, level)
+            new_levels.append(new_level)
+        return W_Const(self.name, new_levels)
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
@@ -238,6 +330,14 @@ class W_ForAll(W_FunBase):
         body = self.body.instantiate(fvar, 0)
         other_body = other.body.instantiate(fvar, 0)
         return body.def_eq(other_body, infcx)
+    
+    def subst_levels(self, levels):
+        return W_ForAll(
+            self.binder_name,
+            self.binder_type.subst_levels(levels),
+            self.binder_info,
+            self.body.subst_levels(levels)
+        )
 
 class W_Lambda(W_FunBase):
     def pretty(self):
@@ -335,6 +435,12 @@ class W_App(W_Expr):
         fn_eq = self.fn.def_eq(other.fn, infcx)
         arg_eq = self.arg.def_eq(other.arg, infcx)
         return fn_eq and arg_eq
+    
+    def subst_levels(self, substs):
+        return W_App(
+            self.fn.subst_levels(substs),
+            self.arg.subst_levels(substs)
+        )
 
 
 class W_RecRule(W_Item):
