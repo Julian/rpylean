@@ -406,7 +406,7 @@ class Declaration(Node):
         for level in w_kind.level_params:
             if level in seen:
                 raise Invalid(
-                    "%s has duplicate level %s" % (w_kind.name, level),
+                    "%s has duplicate level %s in all kind: %s" % (w_kind.name, level, w_kind.level_params),
                 )
             seen[level] = True
         environment.register_declaration(
@@ -419,13 +419,17 @@ class Definition(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val, hint = tokens[:5]
+        start = 5
+        # TODO actually use the argument to 'R"
+        if hint.text== "R":
+            start += 1
         return Declaration(Definition(
             name_idx=name_idx.text,
             def_type=def_type.text,
             def_val=def_val.text,
             hint=hint.text,
             level_params=[
-                each.text for each in tokens[5:]
+                each.text for each in tokens[start:]
             ],
         ))
     
