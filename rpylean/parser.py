@@ -14,6 +14,12 @@ class ParseError(Exception):
         self.column = column
 
 
+class Token:
+    def __init__(self, text, source_pos):
+        self.text = text
+        self.source_pos = source_pos
+
+
 class ExportVersionError(ParseError):
     """
     The export file version doesn't match one we know how to parse.
@@ -663,8 +669,10 @@ def parse(lines):
             line = next(rest).strip()
         except StopIteration:
             break
-        if line:
-            items.append(line_to_item(lineno, line))
+        if not line:
+            continue
+
+        items.append(line_to_item(lineno, line))
     return items
     #
     # try:
