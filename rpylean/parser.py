@@ -183,7 +183,7 @@ class Expr(Node):
         environment.register_expr(self.eidx, w_expr)
 
 
-class ExprVal:
+class ExprVal(Node):
     pass
 
 

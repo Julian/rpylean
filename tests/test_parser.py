@@ -21,6 +21,17 @@ def test_ns():
     ]
 
 
+def test_es():
+    assert items(
+        """
+        0.1.2
+        0 #ES 0
+        """
+    ) == [
+        parser.Expr(eidx="0", val=parser.Sort(level="0")),
+    ]
+
+
 def test_wrong_version():
     with pytest.raises(parser.ExportVersionError):
         parser.parse("1.2.3\n")
