@@ -301,6 +301,32 @@ class Const(ExprVal):
         )
 
 
+class Let(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _let_token, name_idx, def_type, def_val, body = tokens
+        val = Let(
+            name_idx=name_idx.text,
+            def_type=def_type.text,
+            def_val=def_val.text,
+            body=body.text,
+        )
+        return Expr(eidx=eidx.text, val=val)
+    
+    def __init__(self, name_idx, def_type, def_val, body):
+        self.name_idx = name_idx
+        self.def_type = def_type
+        self.def_val = def_val
+        self.body = body
+
+    def to_w_expr(self, environment):
+        return objects.W_Let(
+            name=environment.names[self.name_idx],
+            def_type=environment.exprs[self.def_type],
+            def_val=environment.exprs[self.def_val],
+            body=environment.exprs[self.body],
+        )
+
 class App(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -1016,6 +1042,7 @@ TOKEN_KINDS = {
     "#ES": Sort,
     "#EV": BVar,
     "#EJ": Proj,
+    "#EZ": Let,
     "#RR": RecRule,
     "#REC": Recursor,
     "#UP": UniverseParam,

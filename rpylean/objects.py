@@ -481,6 +481,13 @@ class W_Lambda(W_FunBase):
 #(fun (x : N) => Vector.repeat(1, n))
 #'(n: Nat) -> Vector n'
 
+class W_Let(W_Expr):
+    def __init__(self, name, def_type, def_val, body):
+        self.name = name
+        self.def_type = def_type
+        self.def_val = def_val
+        self.body = body
+
 class W_App(W_Expr):
     def __init__(self, fn, arg):
         self.fn = fn
