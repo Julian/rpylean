@@ -192,6 +192,14 @@ class Const(ExprVal):
 
 
 class App(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _ea_token, fn_eidx, arg_eidx = tokens
+        return Expr(eidx=eidx, val=App(
+            fn_eidx=fn_eidx.text,
+            arg_eidx=arg_eidx.text,
+        ))
+    
     def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
         self.arg_eidx = arg_eidx
@@ -719,6 +727,7 @@ class RecRule(Node):
 
 TOKEN_KINDS = {
     "#NS": NameStr,
+    "#EA": App,
     "#RR": RecRule,
     "#REC": Recursor,
 }
