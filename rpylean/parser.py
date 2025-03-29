@@ -142,6 +142,15 @@ class UniverseSucc(Universe):
         environment.register_level(self.uidx, objects.W_LevelSucc(parent))
 
 class UniverseMax(Universe):
+    @staticmethod
+    def parse(tokens):
+        uidx, _um_token, lhs, rhs = tokens
+        return UniverseMax(
+            uidx=uidx.text,
+            lhs=lhs.text,
+            rhs=rhs.text,
+        )
+    
     def __init__(self, uidx, lhs, rhs):
         self.uidx = uidx
         self.lhs = lhs
@@ -901,6 +910,7 @@ TOKEN_KINDS = {
     "#REC": Recursor,
     "#UP": UniverseParam,
     "#US": UniverseSucc,
+    "#UM": UniverseMax,
     "#DEF": Definition,
     "#CTOR": Constructor,
     "#IND": Inductive,
