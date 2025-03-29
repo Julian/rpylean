@@ -83,6 +83,15 @@ class Version(Node):
 
 
 class NameStr(Node):
+    @staticmethod
+    def parse(tokens):
+        nidx, _ns_token, parent_nidx, name = tokens
+        return NameStr(
+            nidx=nidx.text,
+            parent_nidx=parent_nidx.text,
+            name=name.text,
+        )
+    
     def __init__(self, nidx, parent_nidx, name):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
@@ -709,6 +718,7 @@ class RecRule(Node):
 #         )
 
 TOKEN_KINDS = {
+    "#NS": NameStr,
     "#RR": RecRule,
     "#REC": Recursor,
 }
