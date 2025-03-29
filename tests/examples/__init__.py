@@ -13,10 +13,19 @@ def export(name):
     return PATH.join(name, "export").readlines()
 
 
-def all_examples():
+def all_examples_from_dir(example_dir):
+
     examples = (
-        each.basename
-        for each in PATH.listdir()
+        each.join("export")
+        for each in PATH.join(example_dir).listdir()
         if each.join("export").isfile()
     )
-    return sorted(export(name) for name in examples)
+
+    return sorted(examples)
+
+
+def all_valid_examples():
+    return all_examples_from_dir("valid")
+
+def all_invalid_examples():
+    return all_examples_from_dir("invalid")
