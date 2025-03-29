@@ -5,5 +5,5 @@ from tests import examples
 
 
 def test_it_works():
-    source = examples.export("Basic")
+    source = examples.export("valid/Basic")
     assert parse(source) != 37
