@@ -1,3 +1,5 @@
+from textwrap import dedent
+
 from rpylean.parser import parse
 from tests import examples
 

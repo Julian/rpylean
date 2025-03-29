@@ -1,3 +1,3 @@
-import os.path
+import py
 
-RPYLEAN_DIR = os.path.dirname(os.path.abspath(__file__))
+RPYLEAN_DIR = py.path.local(__file__).dirpath()

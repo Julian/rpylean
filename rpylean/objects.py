@@ -151,7 +151,6 @@ class W_BVar(W_Expr):
     def pretty(self):
         return "(BVar [%s])" % (self.id,)
     
-    
     def instantiate(self, expr, depth):
         if self.id == depth:
             incr = expr.incr_free_bvars(depth, 0)
@@ -285,6 +284,7 @@ class W_FunBase(W_Expr):
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
 
+
 class W_ForAll(W_FunBase):
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
@@ -338,6 +338,7 @@ class W_ForAll(W_FunBase):
             self.binder_info,
             self.body.subst_levels(levels)
         )
+
 
 class W_Lambda(W_FunBase):
     def pretty(self):

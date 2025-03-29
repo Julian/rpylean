@@ -112,6 +112,7 @@ class Environment:
         assert name not in self.declarations
         self.declarations[name] = decl
 
+
 class InferenceContext:
     def __init__(self, env):
         self.env = env

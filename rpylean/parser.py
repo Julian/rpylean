@@ -73,8 +73,10 @@ class NameId(Node):
         # TODO - should we register id names separately (as ints)?
         environment.register_name(self.nidx, self.parent_nidx, self.id)
 
+
 class Universe(Node):
     pass
+
 
 class UniverseSucc(Universe):
     def __init__(self, uidx, parent):
