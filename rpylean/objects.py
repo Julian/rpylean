@@ -126,7 +126,7 @@ class W_LevelParam(W_Level):
 class W_Expr(W_Item):
     pass
 
-    def whnf(self):
+    def whnf(self, env):
         return self
 
     # Replace all BVars with the id 'depth' with 'expr'
@@ -241,7 +241,7 @@ class W_Const(W_Expr):
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
-    
+
     def infer(self, infcx):
         decl = infcx.env.declarations[self.name]
         params = decl.level_params
@@ -273,6 +273,71 @@ class W_Const(W_Expr):
             new_level = substs.get(level, level)
             new_levels.append(new_level)
         return W_Const(self.name, new_levels)
+    
+class W_Proj(W_Expr):
+    def __init__(self, struct_type, field_idx, struct_expr):
+        self.struct_type = struct_type
+        self.field_idx = field_idx
+        self.struct_expr = struct_expr
+
+    def instantiate(self, expr, depth):
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.instantiate(expr, depth))
+
+    def pretty(self):
+        return "<W_Proj struct_type='%s' field_idx='%s' struct_expr='%s'>" % (
+            self.struct_type.pretty(),
+            self.field_idx,
+            self.struct_expr.pretty(),
+        )
+    
+    def infer(self, infcx):
+        struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx.env)
+
+        # Unfold applications of a base inductive type (e.g. `MyList TypeA TypeB`)
+        apps = []
+        while isinstance(struct_expr_type, W_App):
+            apps.append(struct_expr_type)
+            struct_expr_type = struct_expr_type.fn
+
+        # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
+        assert isinstance(struct_expr_type, W_Const), "Expected W_Const, got %s" % struct_expr_type
+        target_const = infcx.env.declarations[struct_expr_type.name]
+        assert target_const == self.struct_type, "Expected %s, got %s" % (target_const, struct_expr_type)
+
+        assert isinstance(self.struct_type, W_Declaration)
+        assert isinstance(self.struct_type.w_kind, W_Inductive)
+        assert len(self.struct_type.w_kind.ctor_names) == 1
+
+        ctor_decl = infcx.env.declarations[self.struct_type.w_kind.ctor_names[0]]
+        assert isinstance(ctor_decl, W_Declaration)
+        assert isinstance(ctor_decl.w_kind, W_Constructor)
+        # Fields can depend on earlier fields, so the constructor takes in 'proj'
+        # expressions for all of the previous fields ('self.field_idx' is 0-based)
+        assert ctor_decl.w_kind.num_params == len(apps) + (self.field_idx)
+
+        ctor_type = ctor_decl.w_kind.ctype
+
+        # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
+        # so start iteration from the end
+        # TODO: handle levels
+        apps.reverse()
+        for app in apps:
+            ctor_type = ctor_type.whnf(infcx.env)
+            assert isinstance(ctor_type, W_ForAll)
+            new_type = ctor_type.body.instantiate(app.arg, 0)
+            ctor_type = new_type
+        
+        # Substitute in 'proj' expressions for all of the previous fields
+        for i in range(self.field_idx):
+            ctor_type = ctor_type.whnf(infcx.env)
+            assert isinstance(ctor_type, W_ForAll)
+            ctor_type = ctor_type.body.instantiate(W_Proj(self.struct_type, i, self.struct_expr), 0)
+
+        ctor_type = ctor_type.whnf(infcx.env)
+        assert isinstance(ctor_type, W_ForAll)
+        return ctor_type.binder_type
+
+
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
@@ -402,7 +467,7 @@ class W_App(W_Expr):
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
-        fn_type = fn_type_base.whnf()
+        fn_type = fn_type_base.whnf(infcx.env)
         if not isinstance(fn_type, W_ForAll):
             raise RuntimeError("W_App.infer: expected function type, got %s" % fn_type)
         arg_type = self.arg.infer(infcx)
@@ -411,8 +476,8 @@ class W_App(W_Expr):
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
     
-    def whnf(self):
-        arg = self.arg.whnf()
+    def whnf(self, env):
+        arg = self.arg.whnf(env)
         if isinstance(self.fn, W_FunBase):
             res = self.fn.instantiate(arg, 0)
             return res
@@ -475,7 +540,7 @@ class W_Declaration(W_Item):
         )
 
 
-class W_DeclarationKind(object):
+class W_DeclarationKind(W_Item):
     pass
 
 

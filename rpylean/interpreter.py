@@ -4,6 +4,8 @@ from rpylean.objects import W_LEVEL_ZERO, W_Sort
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
 
+import sys; sys.setrecursionlimit(10000)
+
 
 def print_heading(s):
     print(s)
@@ -130,7 +132,7 @@ class InferenceContext:
             raise
     
     def infer_sort_of(self, expr):
-        expr_type = expr.infer(self).whnf()
+        expr_type = expr.infer(self).whnf(self.env)
         if isinstance(expr_type, W_Sort):
             return expr_type.level
         raise RuntimeError("Expected Sort, got %s" % expr_type)

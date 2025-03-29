@@ -181,6 +181,18 @@ class ForAll(ExprVal):
             body=environment.exprs[self.body],
         )
 
+class Proj(ExprVal):
+    def __init__(self, type_name, field_idx, struct_expr):
+        self.type_name = type_name
+        self.field_idx = field_idx
+        self.struct_expr = struct_expr
+
+    def to_w_expr(self, environment):
+        return objects.W_Proj(
+            struct_type=environment.declarations[environment.names[self.type_name]],
+            field_idx=self.field_idx,
+            struct_expr=environment.exprs[self.struct_expr],
+        )
 
 class Declaration(Node):
     def __init__(self, decl):
@@ -271,7 +283,7 @@ class Inductive(Node):
                 expr=environment.exprs[self.expr_idx],
                 is_rec=self.is_rec,
                 is_nested=self.is_nested,
-                num_params=self.num_params,
+                num_params=int(self.num_params),
                 num_indices=self.num_indices,
                 ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
                 ctor_names=[
@@ -337,7 +349,7 @@ class Recursor(Node):
             w_kind=objects.W_Recursor(
                 expr=environment.exprs[self.expr_idx],
                 k=self.k,
-                num_params=self.num_params,
+                num_params=int(self.num_params),
                 num_indices=self.num_indices,
                 num_motives=self.num_motives,
                 num_minors=self.num_minors,
@@ -457,6 +469,11 @@ class Transformer(RPythonVisitor):
                 binder_info=binder_info.children[0].additional_info,
                 body=body.children[0].additional_info,
             )
+        elif kind.additional_info == "#EJ":
+            _, _, type_name, field_idx, struct_expr = node.children
+            val = Proj(type_name=type_name.children[0].additional_info,
+                        field_idx=int(field_idx.additional_info),
+                        struct_expr=struct_expr.children[0].additional_info)
         else:
             assert False, "unknown expr kind: " + kind.additional_info
         return Expr(eidx=eidx, val=val)
@@ -509,7 +526,7 @@ class Transformer(RPythonVisitor):
             expr_idx=eidx.children[0].additional_info,
             is_rec=is_rec.additional_info,
             is_nested=is_nested.additional_info,
-            num_params=num_params.additional_info,
+            num_params=int(num_params.additional_info),
             num_indices=num_indices.additional_info,
             ind_name_idxs=[
                 each.additional_info for each in ind_name_idxs
@@ -530,7 +547,7 @@ class Transformer(RPythonVisitor):
             ctype=ctype.children[0].additional_info,
             induct=induct.children[0].additional_info,
             cidx=cidx.additional_info,
-            num_params=num_params.additional_info,
+            num_params=int(num_params.additional_info),
             num_fields=num_fields.additional_info,
             level_params=[
                 each.children[0].additional_info for each in node.children[7:]
@@ -571,7 +588,7 @@ class Transformer(RPythonVisitor):
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
             k=k,
-            num_params=num_params.additional_info,
+            num_params=int(num_params.additional_info),
             num_indices=num_indices.additional_info,
             num_motives=num_motives.additional_info,
             num_minors=num_minors.additional_info,
