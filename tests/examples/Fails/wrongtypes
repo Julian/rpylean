@@ -1,0 +1,21 @@
+0.1.2
+1 #NS 0 Nat
+2 #NS 1 zero
+3 #NS 1 succ
+1 #US 0
+0 #ES 1
+#IND 1 0 1 0 0 0 1 1 2 2 3
+1 #EC 1
+#CTOR 2 1 1 0 0 0
+4 #NS 0 A
+2 #EC 2
+5 #NS 0 Bool
+6 #NS 5 true
+7 #NS 5 false
+#IND 5 0 0 0 0 0 1 5 2 6 7
+3 #EC 5
+#CTOR 6 3 5 0 0 0
+8 #NS 0 B
+4 #EC 6
+#DEF 4 3 2 R 1
+#DEF 8 1 4 R 1
