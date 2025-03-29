@@ -397,6 +397,16 @@ class Recursor(Node):
 
 
 class RecRule(Node):
+    @classmethod
+    def parse(cls, tokens):
+        ridx = int(tokens[0].text)
+        _rr_token = tokens[1].text
+        ctor_name = tokens[2].text
+        n_fields = int(tokens[3].text)
+        val = tokens[4].text
+        return cls(ridx, ctor_name, n_fields, val)
+
+
     def __init__(self, ridx, ctor_name, n_fields, val):
         self.ridx = ridx
         self.ctor_name = ctor_name
