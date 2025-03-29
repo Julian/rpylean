@@ -1,15 +1,31 @@
 from __future__ import print_function
 
-from rpython.rlib.parsing.ebnfparse import parse_ebnf, make_parse_function
-from rpython.rlib.parsing.parsing import ParseError
-from rpython.rlib.parsing.tree import RPythonVisitor
-import py
+from rpylean import objects
 
-from rpylean import RPYLEAN_DIR, objects
+#: The lean4export format we claim to be able to parse.
+#: Should match https://github.com/ammkrn/lean4export/blob/format2024/Main.lean#L4
+EXPORT_VERSION = "0.1.2"
 
-grammar = py.path.local(RPYLEAN_DIR).join("grammar.txt").read("rt")
-regexs, rules, ToAST = parse_ebnf(grammar)
-_parse = make_parse_function(regexs, rules, eof=True)
+
+class ParseError(Exception):
+    def __init__(self, line, lineno, column=0):
+        Exception.__init__(self, (line, column))
+        self.line = line
+        self.column = column
+
+
+class ExportVersionError(ParseError):
+    """
+    The export file version doesn't match one we know how to parse.
+    """
+    def __init__(self, got):
+        self.got = got
+
+    def __str__(self):
+        return "Expected lean4export version {} but got {}".format(
+            EXPORT_VERSION,
+            self.got,
+        )
 
 
 class Invalid(Exception):
@@ -390,254 +406,276 @@ class RecRule(Node):
         environment.register_rec_rule(self.ridx, w_recrule)
 
 
-class Transformer(RPythonVisitor):
-    def dispatch(self, node):
-        return getattr(self, "visit_%s" % node.symbol)(node)
-
-    def visit_file(self, node):
-        version = self.dispatch(node.children[0])
-        return File(
-            version=version,
-            items=[self.dispatch(each) for each in node.children[1].children]
-        )
-
-    def visit_export_format_version(self, node):
-        major, minor, patch = node.children
-        return Version(
-            major=major.additional_info,
-            minor=minor.additional_info,
-            patch=patch.additional_info,
-        )
-
-    def visit_item(self, node):
-        item, = node.children
-        return self.dispatch(item)
-
-    def visit_name(self, node):
-        nidx, kind, parent_nidx, id = node.children
-        if kind.additional_info == "#NS":
-            return NameStr(
-                nidx=nidx.children[0].additional_info,
-                parent_nidx=parent_nidx.children[0].additional_info,
-                name=id.additional_info,
-            )
-        elif kind.additional_info == "#NI":
-            return NameId(
-                nidx=nidx.children[0].additional_info,
-                parent_nidx=parent_nidx.children[0].additional_info,
-                id=id.additional_info,
-            )
-        else:
-            assert False, "unknown name kind: " + kind.additional_info
-
-    def visit_universe(self, node):
-        kind = node.children[1]
-        if kind.additional_info == "#UP":
-            uidx, _, nidx = node.children
-            return UniverseParam(
-                uidx=uidx.children[0].additional_info,
-                nidx=nidx.children[0].additional_info,
-            )
-        if kind.additional_info == "#US":
-            uidx, _, parent = node.children
-            return UniverseSucc(uidx=uidx.children[0].additional_info, parent=parent.children[0].additional_info)
-        if kind.additional_info == "#UM":
-            uidx, _, lhs, rhs = node.children
-            return UniverseMax(
-                uidx=uidx.children[0].additional_info,
-                lhs=lhs.children[0].additional_info,
-                rhs=rhs.children[0].additional_info,
-            )
-        else:
-            assert False, "unknown universe kind: " + kind.additional_info
-
-    def visit_expr(self, node):
-        eidx = node.children[0].children[0].additional_info
-        kind = node.children[1]
-        if kind.additional_info == "#EV":
-            _, _, id = node.children
-            val = BVar(id=int(id.additional_info))
-        elif kind.additional_info == "#ES":
-            _, _, uidx = node.children
-            val = Sort(level=uidx.children[0].additional_info)
-        elif kind.additional_info == "#EC":
-            name = node.children[2].children[0].additional_info
-            val = Const(
-                name=name,
-                levels=[
-                    uidx.children[0].additional_info
-                    for uidx in node.children[3:]
-                ],
-            )
-        elif kind.additional_info == "#EA":
-            _, _, fn_eidx, arg_eidx = node.children
-            val = App(
-                fn_eidx=fn_eidx.children[0].additional_info,
-                arg_eidx=arg_eidx.children[0].additional_info,
-            )
-        elif kind.additional_info == "#EL":
-            _, _, binder_info, binder_name, binder_type, body = node.children
-            val = Lambda(
-                binder_name=binder_name.children[0].additional_info,
-                binder_type=binder_type.children[0].additional_info,
-                binder_info=binder_info.children[0].additional_info,
-                body=body.children[0].additional_info,
-            )
-        elif kind.additional_info == "#EP":
-            _, _, binder_info, binder_name, binder_type, body = node.children
-            val = ForAll(
-                binder_name=binder_name.children[0].additional_info,
-                binder_type=binder_type.children[0].additional_info,
-                binder_info=binder_info.children[0].additional_info,
-                body=body.children[0].additional_info,
-            )
-        elif kind.additional_info == "#EJ":
-            _, _, type_name, field_idx, struct_expr = node.children
-            val = Proj(type_name=type_name.children[0].additional_info,
-                        field_idx=int(field_idx.additional_info),
-                        struct_expr=struct_expr.children[0].additional_info)
-        else:
-            assert False, "unknown expr kind: " + kind.additional_info
-        return Expr(eidx=eidx, val=val)
-
-    def visit_declaration(self, node):
-        child, = node.children
-        return Declaration(self.dispatch(child))
-
-    def visit_definition(self, node):
-        _, name_idx, def_type, def_val, hint = node.children[:5]
-        return Definition(
-            name_idx=name_idx.children[0].additional_info,
-            def_type=def_type.children[0].additional_info,
-            def_val=def_val.children[0].additional_info,
-            hint=hint.children[0].additional_info,
-            level_params=[
-                each.children[0].additional_info for each in node.children[5:]
-            ],
-        )
-
-    def visit_theorem(self, node):
-        _, name_idx, def_type, def_val = node.children[:4]
-        return Theorem(
-            name_idx=name_idx.children[0].additional_info,
-            def_type=def_type.children[0].additional_info,
-            def_val=def_val.children[0].additional_info,
-            level_params=[
-                each.children[0].additional_info for each in node.children[4:]
-            ],
-        )
-
-    def visit_inductive(self, node):
-        _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = node.children[:8]
-        num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
-        assert num_ind_name_idxs >= 0
-        pos = 8
-        ind_name_idxs = node.children[pos:pos + num_ind_name_idxs]
-        pos += num_ind_name_idxs
-
-        num_ctors = int(node.children[pos].additional_info)
-        assert num_ctors >= 0
-        pos += 1
-
-        ctor_name_idxs = node.children[pos:pos + num_ctors]
-        pos += num_ctors
-
-        level_params = node.children[pos:]
-        return Inductive(
-            name_idx=nidx.children[0].additional_info,
-            expr_idx=eidx.children[0].additional_info,
-            is_rec=is_rec.additional_info,
-            is_nested=is_nested.additional_info,
-            num_params=int(num_params.additional_info),
-            num_indices=num_indices.additional_info,
-            ind_name_idxs=[
-                each.additional_info for each in ind_name_idxs
-            ],
-            ctor_name_idxs=[
-                each.additional_info for each in ctor_name_idxs
-            ],
-            level_params=[
-                each.additional_info
-                for each in level_params
-            ],
-        )
-
-    def visit_constructor(self, node):
-        _, name_idx, ctype, induct, cidx, num_params, num_fields = node.children[:7]
-        return Constructor(
-            name_idx=name_idx.children[0].additional_info,
-            ctype=ctype.children[0].additional_info,
-            induct=induct.children[0].additional_info,
-            cidx=cidx.additional_info,
-            num_params=int(num_params.additional_info),
-            num_fields=num_fields.additional_info,
-            level_params=[
-                each.children[0].additional_info for each in node.children[7:]
-            ],
-        )
-
-    def visit_recursor(self, node):
-        _, name_idx, expr_idx, num_ind_name_idxs_str = node.children[:4]
-
-        num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
-        assert num_ind_name_idxs >= 0
-
-        pos = 4
-        ind_name_idxs = [
-            nidx.additional_info
-            for nidx in node.children[pos:(pos + num_ind_name_idxs)]
-        ]
-        pos += num_ind_name_idxs
-
-        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = node.children[pos:pos + 5]
-
-        num_rule_idxs = int(num_rule_idxs_str.additional_info)
-        assert num_rule_idxs >= 0
-        pos += 5
-
-        rule_idxs = [
-            rule_idx.additional_info
-            for rule_idx in node.children[pos:pos + num_rule_idxs]
-        ]
-        pos += num_rule_idxs
-
-        k = node.children[pos].additional_info
-        level_params = node.children[pos + 1:]
-
-        return Recursor(
-            name_idx=name_idx.children[0].additional_info,
-            expr_idx=expr_idx.children[0].additional_info,
-            ind_name_idxs=ind_name_idxs,
-            rule_idxs=rule_idxs,
-            k=k,
-            num_params=int(num_params.additional_info),
-            num_indices=num_indices.additional_info,
-            num_motives=num_motives.additional_info,
-            num_minors=num_minors.additional_info,
-            level_params=[
-                each.additional_info for each in level_params
-            ],
-        )
-
-    def visit_recrule(self, node):
-        ridx, _, nidx, nat, eidx = node.children
-        return RecRule(
-            ridx=ridx.children[0].additional_info,
-            ctor_name=nidx.children[0].additional_info,
-            n_fields=nat.additional_info,
-            val=eidx.children[0].additional_info,
-        )
-
-
-transformer = Transformer()
+# class Transformer(RPythonVisitor):
+#     def dispatch(self, node):
+#         return getattr(self, "visit_%s" % node.symbol)(node)
+#
+#     def visit_file(self, node):
+#         version = self.dispatch(node.children[0])
+#         return File(
+#             version=version,
+#             items=[self.dispatch(each) for each in node.children[1].children]
+#         )
+#
+#     def visit_export_format_version(self, node):
+#         major, minor, patch = node.children
+#         return Version(
+#             major=major.additional_info,
+#             minor=minor.additional_info,
+#             patch=patch.additional_info,
+#         )
+#
+#     def visit_item(self, node):
+#         item, = node.children
+#         return self.dispatch(item)
+#
+#     def visit_name(self, node):
+#         nidx, kind, parent_nidx, id = node.children
+#         if kind.additional_info == "#NS":
+#             return NameStr(
+#                 nidx=nidx.children[0].additional_info,
+#                 parent_nidx=parent_nidx.children[0].additional_info,
+#                 name=id.additional_info,
+#             )
+#         elif kind.additional_info == "#NI":
+#             return NameId(
+#                 nidx=nidx.children[0].additional_info,
+#                 parent_nidx=parent_nidx.children[0].additional_info,
+#                 id=id.additional_info,
+#             )
+#         else:
+#             assert False, "unknown name kind: " + kind.additional_info
+#
+#     def visit_universe(self, node):
+#         kind = node.children[1]
+#         if kind.additional_info == "#UP":
+#             uidx, _, nidx = node.children
+#             return UniverseParam(
+#                 uidx=uidx.children[0].additional_info,
+#                 nidx=nidx.children[0].additional_info,
+#             )
+#         if kind.additional_info == "#US":
+#             uidx, _, parent = node.children
+#             return UniverseSucc(uidx=uidx.children[0].additional_info, parent=parent.children[0].additional_info)
+#         if kind.additional_info == "#UM":
+#             uidx, _, lhs, rhs = node.children
+#             return UniverseMax(
+#                 uidx=uidx.children[0].additional_info,
+#                 lhs=lhs.children[0].additional_info,
+#                 rhs=rhs.children[0].additional_info,
+#             )
+#         else:
+#             assert False, "unknown universe kind: " + kind.additional_info
+#
+#     def visit_expr(self, node):
+#         eidx = node.children[0].children[0].additional_info
+#         kind = node.children[1]
+#         if kind.additional_info == "#EV":
+#             _, _, id = node.children
+#             val = BVar(id=int(id.additional_info))
+#         elif kind.additional_info == "#ES":
+#             _, _, uidx = node.children
+#             val = Sort(level=uidx.children[0].additional_info)
+#         elif kind.additional_info == "#EC":
+#             name = node.children[2].children[0].additional_info
+#             val = Const(
+#                 name=name,
+#                 levels=[
+#                     uidx.children[0].additional_info
+#                     for uidx in node.children[3:]
+#                 ],
+#             )
+#         elif kind.additional_info == "#EA":
+#             _, _, fn_eidx, arg_eidx = node.children
+#             val = App(
+#                 fn_eidx=fn_eidx.children[0].additional_info,
+#                 arg_eidx=arg_eidx.children[0].additional_info,
+#             )
+#         elif kind.additional_info == "#EL":
+#             _, _, binder_info, binder_name, binder_type, body = node.children
+#             val = Lambda(
+#                 binder_name=binder_name.children[0].additional_info,
+#                 binder_type=binder_type.children[0].additional_info,
+#                 binder_info=binder_info.children[0].additional_info,
+#                 body=body.children[0].additional_info,
+#             )
+#         elif kind.additional_info == "#EP":
+#             _, _, binder_info, binder_name, binder_type, body = node.children
+#             val = ForAll(
+#                 binder_name=binder_name.children[0].additional_info,
+#                 binder_type=binder_type.children[0].additional_info,
+#                 binder_info=binder_info.children[0].additional_info,
+#                 body=body.children[0].additional_info,
+#             )
+#         elif kind.additional_info == "#EJ":
+#             _, _, type_name, field_idx, struct_expr = node.children
+#             val = Proj(type_name=type_name.children[0].additional_info,
+#                         field_idx=int(field_idx.additional_info),
+#                         struct_expr=struct_expr.children[0].additional_info)
+#         else:
+#             assert False, "unknown expr kind: " + kind.additional_info
+#         return Expr(eidx=eidx, val=val)
+#
+#     def visit_declaration(self, node):
+#         child, = node.children
+#         return Declaration(self.dispatch(child))
+#
+#     def visit_definition(self, node):
+#         _, name_idx, def_type, def_val, hint = node.children[:5]
+#         return Definition(
+#             name_idx=name_idx.children[0].additional_info,
+#             def_type=def_type.children[0].additional_info,
+#             def_val=def_val.children[0].additional_info,
+#             hint=hint.children[0].additional_info,
+#             level_params=[
+#                 each.children[0].additional_info for each in node.children[5:]
+#             ],
+#         )
+#
+#     def visit_theorem(self, node):
+#         _, name_idx, def_type, def_val = node.children[:4]
+#         return Theorem(
+#             name_idx=name_idx.children[0].additional_info,
+#             def_type=def_type.children[0].additional_info,
+#             def_val=def_val.children[0].additional_info,
+#             level_params=[
+#                 each.children[0].additional_info for each in node.children[4:]
+#             ],
+#         )
+#
+#     def visit_inductive(self, node):
+#         _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = node.children[:8]
+#         num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
+#         assert num_ind_name_idxs >= 0
+#         pos = 8
+#         ind_name_idxs = node.children[pos:pos + num_ind_name_idxs]
+#         pos += num_ind_name_idxs
+#
+#         num_ctors = int(node.children[pos].additional_info)
+#         assert num_ctors >= 0
+#         pos += 1
+#
+#         ctor_name_idxs = node.children[pos:pos + num_ctors]
+#         pos += num_ctors
+#
+#         level_params = node.children[pos:]
+#         return Inductive(
+#             name_idx=nidx.children[0].additional_info,
+#             expr_idx=eidx.children[0].additional_info,
+#             is_rec=is_rec.additional_info,
+#             is_nested=is_nested.additional_info,
+#             num_params=int(num_params.additional_info),
+#             num_indices=num_indices.additional_info,
+#             ind_name_idxs=[
+#                 each.additional_info for each in ind_name_idxs
+#             ],
+#             ctor_name_idxs=[
+#                 each.additional_info for each in ctor_name_idxs
+#             ],
+#             level_params=[
+#                 each.additional_info
+#                 for each in level_params
+#             ],
+#         )
+#
+#     def visit_constructor(self, node):
+#         _, name_idx, ctype, induct, cidx, num_params, num_fields = node.children[:7]
+#         return Constructor(
+#             name_idx=name_idx.children[0].additional_info,
+#             ctype=ctype.children[0].additional_info,
+#             induct=induct.children[0].additional_info,
+#             cidx=cidx.additional_info,
+#             num_params=int(num_params.additional_info),
+#             num_fields=num_fields.additional_info,
+#             level_params=[
+#                 each.children[0].additional_info for each in node.children[7:]
+#             ],
+#         )
+#
+#     def visit_recursor(self, node):
+#         _, name_idx, expr_idx, num_ind_name_idxs_str = node.children[:4]
+#
+#         num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
+#         assert num_ind_name_idxs >= 0
+#
+#         pos = 4
+#         ind_name_idxs = [
+#             nidx.additional_info
+#             for nidx in node.children[pos:(pos + num_ind_name_idxs)]
+#         ]
+#         pos += num_ind_name_idxs
+#
+#         num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = node.children[pos:pos + 5]
+#
+#         num_rule_idxs = int(num_rule_idxs_str.additional_info)
+#         assert num_rule_idxs >= 0
+#         pos += 5
+#
+#         rule_idxs = [
+#             rule_idx.additional_info
+#             for rule_idx in node.children[pos:pos + num_rule_idxs]
+#         ]
+#         pos += num_rule_idxs
+#
+#         k = node.children[pos].additional_info
+#         level_params = node.children[pos + 1:]
+#
+#         return Recursor(
+#             name_idx=name_idx.children[0].additional_info,
+#             expr_idx=expr_idx.children[0].additional_info,
+#             ind_name_idxs=ind_name_idxs,
+#             rule_idxs=rule_idxs,
+#             k=k,
+#             num_params=int(num_params.additional_info),
+#             num_indices=num_indices.additional_info,
+#             num_motives=num_motives.additional_info,
+#             num_minors=num_minors.additional_info,
+#             level_params=[
+#                 each.additional_info for each in level_params
+#             ],
+#         )
+#
+#     def visit_recrule(self, node):
+#         ridx, _, nidx, nat, eidx = node.children
+#         return RecRule(
+#             ridx=ridx.children[0].additional_info,
+#             ctor_name=nidx.children[0].additional_info,
+#             n_fields=nat.additional_info,
+#             val=eidx.children[0].additional_info,
+#         )
 
 
-def parse(source, transformer=transformer):
+def parse(lines):
+    rest = iter(lines)
+
     try:
-        parsed = _parse(source)
-    except ParseError as error:
-        print(error.nice_error_message(__file__, source), end="\n\n\n")
-        raise
+        version = next(rest)
+    except StopIteration:
+        raise ExportVersionError(None)
+    else:
+        if version.strip() != EXPORT_VERSION:
+            raise ExportVersionError(version)
 
-    ast = ToAST().transform(parsed)
-    return transformer.visit_file(ast)
+    lineno, items = 0, []
+    while True:
+        lineno += 1
+        try:
+            line = next(rest).strip()
+        except StopIteration:
+            break
+        if line:
+            items.append(item_to_line(lineno, line))
+    return items
+    #
+    # try:
+    #     parsed = _parse(source)
+    # except ParseError as error:
+    #     print(error.nice_error_message(__file__, source), end="\n\n\n")
+    #     raise
+    #
+    # ast = ToAST().transform(parsed)
+    # return transformer.visit_file(ast)
+
+
+def item_to_line(lineno, line):
+    raise ParseError(line, lineno)

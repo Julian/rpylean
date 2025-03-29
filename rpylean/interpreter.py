@@ -4,8 +4,6 @@ from rpylean.objects import W_LEVEL_ZERO, W_Sort
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
 
-import sys; sys.setrecursionlimit(10000)
-
 
 def print_heading(s):
     print(s)
@@ -138,11 +136,10 @@ class InferenceContext:
         raise RuntimeError("Expected Sort, got %s" % expr_type)
 
 
-def interpret(source):
-    ast = parse(source)
-
+def interpret(lines):
     environment = Environment()
-    ast.compile(environment)
+    for item in parse(lines):
+        item.compile(environment)
 
     ctx = InferenceContext(environment)
     environment.dump_pretty()
@@ -150,4 +147,3 @@ def interpret(source):
     for name, decl in environment.declarations.items():
         print("Checking declaration:", name)
         decl.w_kind.type_check(ctx)
-

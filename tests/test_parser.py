@@ -1,9 +1,28 @@
 from textwrap import dedent
 
-from rpylean.parser import parse
-from tests import examples
+from rpylean.parser import ExportVersionError, parse
+import pytest
 
 
-def test_it_works():
-    source = examples.export("Basic")
-    assert parse(source) != 37
+def items(source):
+    return list(parse(dedent(source).lstrip("\n").splitlines()))
+
+
+def test_ns():
+    assert items(
+        """
+        0.1.2
+        1 #NS 0 MyTrue
+        """
+    ) == [
+    ]
+
+
+def test_wrong_version():
+    with pytest.raises(ExportVersionError):
+        parse("1.2.3\n")
+
+
+def test_empty():
+    with pytest.raises(ExportVersionError):
+        parse("")
