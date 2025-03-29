@@ -226,6 +226,13 @@ class W_FVar(W_Expr):
     def pretty(self):
         return "{%s}" % self.binder.binder_name.pretty()
 
+class W_LitStr(W_Expr):
+    def __init__(self, val):
+        self.val = val
+
+class W_LitNat(W_Expr):
+    def __init__(self, val):
+        self.val = val
 
 class W_Sort(W_Expr):
     def __init__(self, level):

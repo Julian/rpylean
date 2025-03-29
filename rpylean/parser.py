@@ -209,6 +209,36 @@ class BVar(ExprVal):
     def to_w_expr(self, environment):
         return objects.W_BVar(id=self.id)
 
+class LitStr(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx = tokens[0]
+        _els_tok  = tokens[1]
+        hex_tokens = tokens[2:]
+        lit_val = "".join([token.text for token in hex_tokens]).decode(encoding="hex")
+        val = LitStr(val=lit_val)
+        return Expr(eidx=eidx.text, val=val)
+    
+    def __init__(self, val):
+        self.val = val
+
+    def to_w_expr(self, environment):
+        return objects.W_LitStr(val=self.val)
+    
+class LitNat(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _eli_token, val = tokens
+        val = LitNat(val=int(val.text))
+        assert val.val >= 0
+        return Expr(eidx=eidx.text, val=val)
+    
+    def __init__(self, val):
+        self.val = val
+
+    def to_w_expr(self, environment):
+        return objects.W_LitNat(val=self.val)
+
 
 class Sort(ExprVal):
     @staticmethod
@@ -927,6 +957,8 @@ TOKEN_KINDS = {
     "#EL": Lambda,
     "#EP": ForAll,
     "#EC": Const,
+    "#ELS": LitStr,
+    "#ELN": LitNat,
     "#ES": Sort,
     "#EV": BVar,
     "#EJ": Proj,
