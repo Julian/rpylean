@@ -1,0 +1,1 @@
+* Check that inside of a declaration, all of the LevelParams referenced declared universe parameters
