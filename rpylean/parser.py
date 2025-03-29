@@ -19,6 +19,12 @@ class Token:
         self.text = text
         self.source_pos = source_pos
 
+    def __repr__(self):
+        return "<Token text={!r} source_pos={!r}>".format(
+            self.text,
+            self.source_pos,
+        )
+
 
 class ExportVersionError(ParseError):
     """
@@ -661,6 +667,21 @@ class RecRule(Node):
 #         )
 
 
+def tokenize(line, lineno):
+    tokens = []
+    column = 0
+
+    while True:
+        rest = line.split(" ", 1)
+        text = rest[0]
+        tokens.append(Token(text=text, source_pos=(lineno, column)))
+        if len(rest) != 2:
+            return tokens
+        line = rest[1]
+        column += len(text)
+    return tokens
+
+
 def parse(lines):
     rest = iter(lines)
 
@@ -682,6 +703,7 @@ def parse(lines):
         if not line:
             continue
 
+        tokens = tokenize(line, lineno=lineno)
         items.append(line_to_item(lineno, line))
     return items
     #
