@@ -6,7 +6,7 @@ IGNORE: " ";
 SEPARATOR: "\n";
 
 NAT: "[0-9]*";
-STRING: "[a-zA-Z0-9_@]+";
+STRING: "[a-zA-Z0-9_@α₁σεβδγ₄₅'=>]+";
 HEXHEX: "[a-f][0-9]";
 
 export_format_version: NAT ["."] NAT ["."] NAT;
@@ -17,6 +17,7 @@ declaration:
       axiom
     | quotient
     | definition
+    | opaque
     | theorem
     | inductive
     | constructor
@@ -61,6 +62,7 @@ recrule: ridx "#RR" nidx NAT eidx;
 axiom: "#AX" nidx eidx nidx*;
 
 definition: "#DEF" nidx eidx eidx hint nidx*;
+opaque: "#OPAQ" nidx eidx eidx nidx*;
 
 theorem: "#THM" nidx eidx eidx nidx*;
 

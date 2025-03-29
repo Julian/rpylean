@@ -248,6 +248,23 @@ class Definition(Node):
             ),
         )
 
+class Opaque(Node):
+    def __init__(self, name_idx, def_type, def_val, level_params):
+        self.name_idx = name_idx
+        self.def_type = def_type
+        self.def_val = def_val
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Declaration(
+            name=environment.names[self.name_idx],
+            level_params=[environment.names[nidx] for nidx in self.level_params],
+            w_kind=objects.W_Opaque(
+                def_type=environment.exprs[self.def_type],
+                def_val=environment.exprs[self.def_val],
+            ),
+        )    
+
 
 class Theorem(Node):
     def __init__(self, name_idx, def_type, def_val, level_params):
@@ -503,6 +520,17 @@ class Transformer(RPythonVisitor):
     def visit_declaration(self, node):
         child, = node.children
         return Declaration(self.dispatch(child))
+    
+    def visit_opaque(self, node):
+        _, name_idx, def_type, def_val = node.children[:4]
+        return Opaque(
+            name_idx=name_idx.children[0].additional_info,
+            def_type=def_type.children[0].additional_info,
+            def_val=def_val.children[0].additional_info,
+            level_params=[
+                each.children[0].additional_info for each in node.children[4:]
+            ],
+        )        
 
     def visit_definition(self, node):
         _, name_idx, def_type, def_val, hint = node.children[:5]

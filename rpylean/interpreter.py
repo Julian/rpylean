@@ -16,6 +16,15 @@ class Name:
     def __init__(self, components):
         self.components = components
 
+    def __hash__(self):
+        hash_val = 0
+        for c in self.components:
+            hash_val = hash_val ^ hash(c)
+        return hash_val
+    
+    def __eq__(self, other):
+        return self.components == other.components
+
     def __repr__(self):
         return "<Name %r>" % (self.components,)
 

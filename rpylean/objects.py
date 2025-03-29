@@ -91,11 +91,23 @@ class W_LevelSucc(W_Level):
 
     def pretty(self):
         return "(Succ %s)" % self.parent.pretty()
+    
+    def subst_levels(self, substs):
+        new_parent = self.parent.subst_levels(substs)
+        return W_LevelSucc(new_parent)
 
 class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+
+    def pretty(self):
+        return "(Max %s %s)" % (self.lhs.pretty(), self.rhs.pretty())
+    
+    def subst_levels(self, substs):
+        new_lhs = self.lhs.subst_levels(substs)
+        new_rhs = self.rhs.subst_levels(substs)
+        return W_LevelMax(new_lhs, new_rhs)
 
     @staticmethod
     def combining(lhs, rhs):
@@ -121,6 +133,9 @@ class W_LevelParam(W_Level):
 
     def pretty(self):
         return self.name.pretty()
+    
+    def subst_levels(self, substs):
+        return substs.get(self.name, self)
 
 
 class W_Expr(W_Item):
@@ -229,10 +244,7 @@ class W_Sort(W_Expr):
         return True
     
     def subst_levels(self, substs):
-        if self.level in substs:
-            return W_Sort(substs[self.level])
-        return self
-
+        return W_Sort(self.level.subst_levels(substs))
 
 class W_Const(W_Expr):
     def __init__(self, name, levels):
@@ -253,8 +265,10 @@ class W_Const(W_Expr):
 
         substs = {}
         for i in range(len(params)):
-            substs[W_LevelParam(params[i])] = self.levels[i]
-        return decl.get_type().subst_levels(substs)
+            substs[params[i]] = self.levels[i]
+        decl_type = decl.get_type()
+        res = decl_type.subst_levels(substs)
+        return res
     
     def def_eq(self, other, infcx):
         assert isinstance(other, W_Const)
@@ -270,7 +284,7 @@ class W_Const(W_Expr):
     def subst_levels(self, substs):
         new_levels = []
         for level in self.levels:
-            new_level = substs.get(level, level)
+            new_level = level.subst_levels(substs)
             new_levels.append(new_level)
         return W_Const(self.name, new_levels)
     
@@ -569,7 +583,18 @@ class W_Definition(DefOrTheorem):
             self.def_val.pretty(),
             self.hint,
         )
+    
+class W_Opaque(W_Definition):
+    def __init__(self, def_type, def_val):
+        # An Opaque is like a definition with hint 'opaque', but even
+        # stronger (we will never unfold it)
+        W_Definition.__init__(self, def_type, def_val, hint="O")
 
+    def pretty(self):
+        return "<W_Opaque def_type='%s' def_val='%s'>" % (
+            self.def_type.pretty(),
+            self.def_val.pretty(),
+        )
 
 class W_Theorem(DefOrTheorem):
     def pretty(self):
