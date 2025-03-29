@@ -664,7 +664,7 @@ def parse(lines):
         except StopIteration:
             break
         if line:
-            items.append(item_to_line(lineno, line))
+            items.append(line_to_item(lineno, line))
     return items
     #
     # try:
@@ -677,5 +677,5 @@ def parse(lines):
     # return transformer.visit_file(ast)
 
 
-def item_to_line(lineno, line):
+def line_to_item(lineno, line):
     raise ParseError(line, lineno)
