@@ -1,6 +1,7 @@
 from textwrap import dedent
 
 from rpylean import parser
+from tests import examples
 import pytest
 
 
@@ -40,3 +41,11 @@ def test_wrong_version():
 def test_empty():
     with pytest.raises(parser.ExportVersionError):
         parser.parse("")
+
+
+@pytest.mark.parametrize("example_path", examples.all_valid_examples())
+def test_valid_examples_parse_successfully(example_path):
+    """
+    We don't get parse errors from our examples.
+    """
+    parser.parse(example_path.readlines())
