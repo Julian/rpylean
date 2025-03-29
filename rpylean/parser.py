@@ -101,6 +101,15 @@ class NameStr(Node):
         environment.register_name(self.nidx, self.parent_nidx, self.name)
 
 class NameId(Node):
+    @staticmethod
+    def parse(tokens):
+        nidx, _ni_token, parent_nidx, id = tokens
+        return NameId(
+            nidx=nidx.text,
+            parent_nidx=parent_nidx.text,
+            id=id.text,
+        )
+    
     def __init__(self, nidx, parent_nidx, id):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
@@ -772,6 +781,7 @@ class RecRule(Node):
 
 TOKEN_KINDS = {
     "#NS": NameStr,
+    "#NI": NameId,
     "#EA": App,
     "#EL": Lambda,
     "#EP": ForAll,
