@@ -192,7 +192,7 @@ class BVar(ExprVal):
     def parse(tokens):
         eidx, _bval_tok, id = tokens
         val = BVar(id=int(id.text))
-        return Expr(eidx=eidx, val=val)
+        return Expr(eidx=eidx.text, val=val)
     
     def __init__(self, id):
         self.id = id
@@ -206,7 +206,7 @@ class Sort(ExprVal):
     def parse(tokens):
         eidx, _sort_tok, level = tokens
         val = Sort(level=level.text)
-        return Expr(eidx=eidx, val=val)
+        return Expr(eidx=eidx.text, val=val)
     
     def __init__(self, level):
         self.level = level
@@ -226,7 +226,7 @@ class Const(ExprVal):
                 for level in tokens[3:]
             ],
         )
-        return Expr(eidx=eidx, val=val)       
+        return Expr(eidx=eidx.text, val=val)       
     def __init__(self, name, levels):
         self.name = name
         self.levels = levels
@@ -242,7 +242,7 @@ class App(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _ea_token, fn_eidx, arg_eidx = tokens
-        return Expr(eidx=eidx, val=App(
+        return Expr(eidx=eidx.text, val=App(
             fn_eidx=fn_eidx.text,
             arg_eidx=arg_eidx.text,
         ))
@@ -267,7 +267,7 @@ class Lambda(ExprVal):
             binder_info=binder_info.text,
             body=body.text,
         )
-        return Expr(eidx=eidx, val=val)
+        return Expr(eidx=eidx.text, val=val)
         
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -294,7 +294,7 @@ class ForAll(ExprVal):
             binder_info=binder_info.text,
             body=body.text,
         )
-        return Expr(eidx=eidx, val=val)
+        return Expr(eidx=eidx.text, val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -311,6 +311,16 @@ class ForAll(ExprVal):
         )
 
 class Proj(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _ej_token, type_name, field_idx, struct_expr = tokens
+        val = Proj(
+            type_name=type_name.text,
+            field_idx=int(field_idx.text),
+            struct_expr=struct_expr.text,
+        )
+        return Expr(eidx=eidx.text, val=val)
+    
     def __init__(self, type_name, field_idx, struct_expr):
         self.type_name = type_name
         self.field_idx = field_idx
@@ -803,6 +813,7 @@ TOKEN_KINDS = {
     "#EC": Const,
     "#ES": Sort,
     "#EV": BVar,
+    "#EJ": Proj,
     "#RR": RecRule,
     "#REC": Recursor,
     "#UP": UniverseParam,
