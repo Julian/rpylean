@@ -3,7 +3,6 @@ Execute ./rpylean-c <filename>
 """
 from __future__ import print_function
 import errno
-import sys
 
 from rpython.rlib.streamio import open_file_as_stream
 from rpython.rlib.rfile import RFile, c_stderr
@@ -26,7 +25,8 @@ def main(argv):
         stderr.write("%s does not exist.\n" % (path,))
         return 1
 
-    data = f.readall()
-    f.close()
-    interpret(data)
+    try:
+        interpret(f.readall().splitlines())
+    finally:
+        f.close()
     return 0

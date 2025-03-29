@@ -10,7 +10,7 @@ def export(name):
     The lean4export for the example with the given name.
     """
 
-    return PATH.join(name, "export").read("rt")
+    return PATH.join(name, "export").readlines()
 
 
 def all_examples():
