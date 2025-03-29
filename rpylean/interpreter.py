@@ -83,24 +83,24 @@ class Environment:
             print(id, "->", rule.pretty())
 
     def register_name(self, nidx, parent_nidx, name):
-        assert nidx not in self.names
+        assert nidx not in self.names, nidx
         parent = self.names[parent_nidx]
         self.names[nidx] = Name(parent.components + [name])
 
     def register_expr(self, eidx, w_expr):
-        assert eidx not in self.exprs
+        assert eidx not in self.exprs, eidx
         self.exprs[eidx] = w_expr
 
     def register_constant(self, name, type):
-        assert name not in self.constants
+        assert name not in self.constants, name
         self.constants[name] = type
 
     def register_level(self, uidx, level):
-        assert uidx not in self.levels
+        assert uidx not in self.levels, uidx
         self.levels[uidx] = level
 
     def register_rec_rule(self, ridx, w_recrule):
-        assert ridx not in self.rec_rules
+        assert ridx not in self.rec_rules, ridx
         self.rec_rules[ridx] = w_recrule
 
     def register_declaration(self, name_idx, decl):
