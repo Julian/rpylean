@@ -211,6 +211,17 @@ class App(ExprVal):
 
 
 class Lambda(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
+        val = Lambda(
+            binder_name=binder_name.text,
+            binder_type=binder_type.text,
+            binder_info=binder_info.text,
+            body=body.text,
+        )
+        return Expr(eidx=eidx, val=val)
+        
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
@@ -728,6 +739,7 @@ class RecRule(Node):
 TOKEN_KINDS = {
     "#NS": NameStr,
     "#EA": App,
+    "#EL": Lambda,
     "#RR": RecRule,
     "#REC": Recursor,
 }
