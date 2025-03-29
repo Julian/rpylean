@@ -1,10 +1,9 @@
+import pytest
 from rpylean.interpreter import interpret
 from tests import examples
 
-def test_interpret_basic():
-    source = examples.export("Basic")
+@pytest.mark.parametrize("export_name", examples.examples_dirs)
+def test_interpret(export_name):
+    source = examples.export(export_name)
     interpret(source)
 
-def test_interpet_sepxr():
-    source = examples.export("Sexpr")
-    interpret(source)
