@@ -164,6 +164,12 @@ class ExprVal:
 
 
 class BVar(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _bval_tok, id = tokens
+        val = BVar(id=int(id.text))
+        return Expr(eidx=eidx, val=val)
+    
     def __init__(self, id):
         self.id = id
 
@@ -764,6 +770,7 @@ TOKEN_KINDS = {
     "#EL": Lambda,
     "#EP": ForAll,
     "#EC": Const,
+    "#EV": BVar,
     "#RR": RecRule,
     "#REC": Recursor,
 }
