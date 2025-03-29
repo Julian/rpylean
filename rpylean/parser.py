@@ -407,7 +407,7 @@ class Theorem(Node):
 class Inductive(Node):
     @staticmethod
     def parse(tokens):
-        _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:8]
+        _, target_nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:8]
         num_ind_name_idxs = int(num_ind_name_idxs_str.text)
         assert num_ind_name_idxs >= 0
         pos = 8
@@ -432,7 +432,7 @@ class Inductive(Node):
         ]
 
         return Declaration(Inductive(
-            name_idx=nidx.text,
+            name_idx=target_nidx.text,
             expr_idx=eidx.text,
             is_rec=is_rec.text,
             is_nested=is_nested.text,
