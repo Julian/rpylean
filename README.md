@@ -30,3 +30,8 @@ There are some tests for `rpylean` which can be run via:
 pypy <pypy-checkout>/pytest.py <rpylean-checkout>/tests
 
 ```
+
+## Resources
+
+* [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/) by [@ammkrn](https://github.com/ammkrn)
+* [lean4export (format2024 version)](https://github.com/ammkrn/lean4export/tree/format2024)
