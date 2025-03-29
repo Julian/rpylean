@@ -165,6 +165,30 @@ class UniverseMax(Universe):
             ),
         )
 
+class UniverseIMax(Universe):
+    @staticmethod
+    def parse(tokens):
+        uidx, _um_token, lhs, rhs = tokens
+        return UniverseMax(
+            uidx=uidx.text,
+            lhs=lhs.text,
+            rhs=rhs.text,
+        )
+    
+    def __init__(self, uidx, lhs, rhs):
+        self.uidx = uidx
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def compile(self, environment):
+        environment.register_level(
+            self.uidx,
+            objects.W_LevelIMax(
+                lhs=environment.levels[self.lhs],
+                rhs=environment.levels[self.rhs],
+            ),
+        )
+
 class UniverseParam(Universe):
     @staticmethod
     def parse(tokens):
@@ -480,6 +504,32 @@ class Theorem(Node):
             w_kind=objects.W_Theorem(
                 def_type=environment.exprs[self.def_type],
                 def_val=environment.exprs[self.def_val],
+            ),
+        )
+
+class Axiom(Node):
+    @staticmethod
+    def parse(tokens):
+        _, name_idx, def_type = tokens[:3]
+        return Declaration(Axiom(
+            name_idx=name_idx.text,
+            def_type=def_type.text,
+            level_params=[
+                each.text for each in tokens[3:]
+            ],
+        ))
+    
+    def __init__(self, name_idx, def_type, level_params):
+        self.name_idx = name_idx
+        self.def_type = def_type
+        self.level_params = level_params
+
+    def to_w_decl(self, environment):
+        return objects.W_Declaration(
+            name=environment.names[self.name_idx],
+            level_params=[environment.names[nidx] for nidx in self.level_params],
+            w_kind=objects.W_Axiom(
+                def_type=environment.exprs[self.def_type],
             ),
         )
 
@@ -967,11 +1017,13 @@ TOKEN_KINDS = {
     "#UP": UniverseParam,
     "#US": UniverseSucc,
     "#UM": UniverseMax,
+    "#UIM": UniverseIMax,
     "#DEF": Definition,
     "#THM": Theorem,
     "#CTOR": Constructor,
     "#IND": Inductive,
     "#OPAQ": Opaque,
+    "#AX": Axiom,
 }
 
 def tokenize(line, lineno):

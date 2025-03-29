@@ -613,6 +613,9 @@ class W_Theorem(DefOrTheorem):
     def get_type(self):
         return self.def_type
 
+class W_Axiom(W_DeclarationKind):
+    def __init__(self, def_type):
+        self.def_type = def_type
 
 class W_Inductive(W_DeclarationKind):
     def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
