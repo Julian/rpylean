@@ -564,7 +564,7 @@ class W_Constructor(W_DeclarationKind):
 
     def pretty(self):
         return "<W_Constructor ctype='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
-            self.ctype,
+            self.ctype.pretty(),
             self.induct,
             self.cidx,
             self.num_params,
