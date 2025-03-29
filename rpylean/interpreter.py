@@ -114,7 +114,6 @@ class Environment:
 
     def register_declaration(self, name_idx, decl):
         name = self.names[name_idx]
-        print("Registering declaration: %s to %s" % (name.pretty(), decl.pretty()))
         # > the kernel requires that the declaration is not already
         # > declared in the environment
         #
