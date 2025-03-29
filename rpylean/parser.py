@@ -178,6 +178,12 @@ class BVar(ExprVal):
 
 
 class Sort(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _sort_tok, level = tokens
+        val = Sort(level=level.text)
+        return Expr(eidx=eidx, val=val)
+    
     def __init__(self, level):
         self.level = level
 
@@ -770,6 +776,7 @@ TOKEN_KINDS = {
     "#EL": Lambda,
     "#EP": ForAll,
     "#EC": Const,
+    "#ES": Sort,
     "#EV": BVar,
     "#RR": RecRule,
     "#REC": Recursor,
