@@ -238,6 +238,17 @@ class Lambda(ExprVal):
 
 
 class ForAll(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
+        val = ForAll(
+            binder_name=binder_name.text,
+            binder_type=binder_type.text,
+            binder_info=binder_info.text,
+            body=body.text,
+        )
+        return Expr(eidx=eidx, val=val)
+
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
@@ -740,6 +751,7 @@ TOKEN_KINDS = {
     "#NS": NameStr,
     "#EA": App,
     "#EL": Lambda,
+    "#EP": ForAll,
     "#RR": RecRule,
     "#REC": Recursor,
 }
