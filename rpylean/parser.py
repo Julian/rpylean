@@ -180,6 +180,17 @@ class Sort(ExprVal):
 
 
 class Const(ExprVal):
+    @staticmethod
+    def parse(tokens):
+        eidx, _ec_token, name = tokens[:3]
+        val = Const(
+            name=name.text,
+            levels=[
+                level.text
+                for level in tokens[3:]
+            ],
+        )
+        return Expr(eidx=eidx, val=val)       
     def __init__(self, name, levels):
         self.name = name
         self.levels = levels
@@ -752,6 +763,7 @@ TOKEN_KINDS = {
     "#EA": App,
     "#EL": Lambda,
     "#EP": ForAll,
+    "#EC": Const,
     "#RR": RecRule,
     "#REC": Recursor,
 }
