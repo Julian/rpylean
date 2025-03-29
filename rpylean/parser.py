@@ -353,6 +353,19 @@ class Declaration(Node):
 
 
 class Definition(Node):
+    @staticmethod
+    def parse(tokens):
+        _, name_idx, def_type, def_val, hint = tokens[:5]
+        return Declaration(Definition(
+            name_idx=name_idx.text,
+            def_type=def_type.text,
+            def_val=def_val.text,
+            hint=hint.text,
+            level_params=[
+                each.text for each in tokens[5:]
+            ],
+        ))
+    
     def __init__(self, name_idx, def_type, def_val, hint, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -392,6 +405,44 @@ class Theorem(Node):
 
 
 class Inductive(Node):
+    @staticmethod
+    def parse(tokens):
+        _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:8]
+        num_ind_name_idxs = int(num_ind_name_idxs_str.text)
+        assert num_ind_name_idxs >= 0
+        pos = 8
+        ind_name_idxs = [
+            nidx.text
+            for nidx in tokens[pos:(pos + num_ind_name_idxs)]
+        ]
+        pos += num_ind_name_idxs
+
+        num_ctors = int(tokens[pos].text)
+        assert num_ctors >= 0
+        pos += 1
+
+        ctor_name_idxs = [
+            nidx.text
+            for nidx in tokens[pos:(pos + num_ctors)]
+        ]
+        pos += num_ctors
+
+        level_params = [
+            each.text for each in tokens[pos:]
+        ]
+
+        return Declaration(Inductive(
+            name_idx=nidx.text,
+            expr_idx=eidx.text,
+            is_rec=is_rec.text,
+            is_nested=is_nested.text,
+            num_params=int(num_params.text),
+            num_indices=num_indices.text,
+            ind_name_idxs=ind_name_idxs,
+            ctor_name_idxs=ctor_name_idxs,
+            level_params=level_params,
+        ))
+    
     def __init__(
         self,
         name_idx,
@@ -433,6 +484,21 @@ class Inductive(Node):
 
 
 class Constructor(Node):
+    @staticmethod
+    def parse(tokens):
+        _, name_idx, ctype, induct, cidx, num_params, num_fields = tokens[:7]
+        return Declaration(Constructor(
+            name_idx=name_idx.text,
+            ctype=ctype.text,
+            induct=induct.text,
+            cidx=cidx.text,
+            num_params=int(num_params.text),
+            num_fields=int(num_fields.text),
+            level_params=[
+                each.text for each in tokens[7:]
+            ],
+        ))
+    
     def __init__(self, name_idx, ctype, induct, cidx, num_params, num_fields, level_params):
         self.name_idx = name_idx
         self.ctype = ctype
@@ -818,6 +884,9 @@ TOKEN_KINDS = {
     "#REC": Recursor,
     "#UP": UniverseParam,
     "#US": UniverseSucc,
+    "#DEF": Definition,
+    "#CTOR": Constructor,
+    "#IND": Inductive,
 }
 
 def tokenize(line, lineno):
