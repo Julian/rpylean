@@ -395,6 +395,18 @@ class Definition(Node):
         )
 
 class Opaque(Node):
+    @staticmethod
+    def parse(tokens):
+        _, name_idx, def_type, def_val = tokens[:4]
+        return Declaration(Opaque(
+            name_idx=name_idx.text,
+            def_type=def_type.text,
+            def_val=def_val.text,
+            level_params=[
+                each.text for each in tokens[4:]
+            ],
+        ))
+    
     def __init__(self, name_idx, def_type, def_val, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -927,6 +939,7 @@ TOKEN_KINDS = {
     "#THM": Theorem,
     "#CTOR": Constructor,
     "#IND": Inductive,
+    "#OPAQ": Opaque,
 }
 
 def tokenize(line, lineno):
