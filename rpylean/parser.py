@@ -361,6 +361,48 @@ class Constructor(Node):
 
 
 class Recursor(Node):
+    @classmethod
+    def parse(cls, tokens):
+        _rec_token, name_idx, expr_idx, num_ind_name_idxs_str = tokens[:4]
+
+        num_ind_name_idxs = int(num_ind_name_idxs_str.text)
+        assert num_ind_name_idxs >= 0
+
+        pos = 4
+        ind_name_idxs = [
+            nidx.text
+            for nidx in tokens[pos:(pos + num_ind_name_idxs)]
+        ]
+        pos += num_ind_name_idxs
+
+        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[pos:pos + 5]
+
+        num_rule_idxs = int(num_rule_idxs_str.text)
+        assert num_rule_idxs >= 0
+        pos += 5
+
+        rule_idxs = [
+            rule_idx.text
+            for rule_idx in tokens[pos:pos + num_rule_idxs]
+        ]
+        pos += num_rule_idxs
+
+        k = tokens[pos].text
+        level_params = [param.text for param in tokens[(pos + 1):]]
+
+        return cls(
+            name_idx=name_idx.text,
+            expr_idx=expr_idx.text,
+            ind_name_idxs=ind_name_idxs,
+            rule_idxs=rule_idxs,
+            k=k,
+            num_params=int(num_params.text),
+            num_indices=num_indices.text,
+            num_motives=num_motives.text,
+            num_minors=num_minors.text,
+            level_params=level_params
+        )
+#         
     def __init__(
         self,
         name_idx,
