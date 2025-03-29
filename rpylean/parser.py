@@ -805,7 +805,7 @@ def parse(lines):
             continue
 
         tokens = tokenize(line, lineno=lineno)
-        item = line_to_item(lineno, line)
+        item = to_item(tokens)
         if item:
             items.append(item)
     return items
@@ -820,11 +820,7 @@ def parse(lines):
     # return transformer.visit_file(ast)
 
 
-def line_to_item(lineno, line):
-    tokens = []
-    for text in line.split(" "):
-        # TODO - get column position
-        tokens.append(Token(text, (lineno, 0)))
+def to_item(tokens):
     try:
         if tokens[0].text.isdigit():
             token_type = TOKEN_KINDS[tokens[1].text]
