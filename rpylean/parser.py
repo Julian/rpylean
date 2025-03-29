@@ -486,7 +486,7 @@ class Recursor(Node):
         k = tokens[pos].text
         level_params = [param.text for param in tokens[(pos + 1):]]
 
-        return Recursor(
+        return Declaration(Recursor(
             name_idx=name_idx.text,
             expr_idx=expr_idx.text,
             ind_name_idxs=ind_name_idxs,
@@ -497,7 +497,7 @@ class Recursor(Node):
             num_motives=num_motives.text,
             num_minors=num_minors.text,
             level_params=level_params
-        )
+        ))
 #         
     def __init__(
         self,
