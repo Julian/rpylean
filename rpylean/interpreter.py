@@ -109,7 +109,7 @@ class Environment:
         # > declared in the environment
         #
         #  -- from https://ammkrn.github.io/type_checking_in_lean4/kernel_concepts/the_big_picture.html
-        assert name not in self.declarations
+        assert name not in self.declarations, name
         self.declarations[name] = decl
 
 
