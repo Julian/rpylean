@@ -1,6 +1,6 @@
 file: export_format_version >items?< [EOF];
 
-items: [SEPARATOR]* item ([SEPARATOR]+ item)*;
+items: [SEPARATOR]* item ([SEPARATOR]+ item)* [SEPARATOR]*;
 
 IGNORE: " ";
 SEPARATOR: "\n";
