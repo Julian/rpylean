@@ -624,6 +624,10 @@ class W_Axiom(W_DeclarationKind):
     def __init__(self, def_type):
         self.def_type = def_type
 
+    def type_check(self, infcx):
+        # TODO - implement type checking
+        pass
+
 class W_Inductive(W_DeclarationKind):
     def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
         self.expr = expr
