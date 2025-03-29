@@ -87,6 +87,21 @@ class UniverseSucc(Universe):
         parent = environment.levels[self.parent]
         environment.register_level(self.uidx, objects.W_LevelSucc(parent))
 
+class UniverseMax(Universe):
+    def __init__(self, uidx, lhs, rhs):
+        self.uidx = uidx
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def compile(self, environment):
+        environment.register_level(
+            self.uidx,
+            objects.W_LevelMax(
+                lhs=environment.levels[self.lhs],
+                rhs=environment.levels[self.rhs],
+            ),
+        )
+
 class UniverseParam(Universe):
     def __init__(self, uidx, nidx):
         self.uidx = uidx
@@ -426,8 +441,15 @@ class Transformer(RPythonVisitor):
         if kind.additional_info == "#US":
             uidx, _, parent = node.children
             return UniverseSucc(uidx=uidx.children[0].additional_info, parent=parent.children[0].additional_info)
+        if kind.additional_info == "#UM":
+            uidx, _, lhs, rhs = node.children
+            return UniverseMax(
+                uidx=uidx.children[0].additional_info,
+                lhs=lhs.children[0].additional_info,
+                rhs=rhs.children[0].additional_info,
+            )
         else:
-            assert False, "unknown name kind: " + kind.additional_info
+            assert False, "unknown universe kind: " + kind.additional_info
 
     def visit_expr(self, node):
         eidx = node.children[0].children[0].additional_info
