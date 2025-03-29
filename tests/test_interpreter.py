@@ -16,7 +16,6 @@ def test_interpret_invalid_export(example_path):
         pytest.xfail("UndeclaredUniv is expected to fail with current state")
 
     example_contents = example_path.read("rt")
-    
+
     with pytest.raises(Exception):
         interpret(example_contents)
-
