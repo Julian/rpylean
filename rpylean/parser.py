@@ -125,6 +125,14 @@ class Universe(Node):
 
 
 class UniverseSucc(Universe):
+    @staticmethod
+    def parse(tokens):
+        uidx, _us_token, parent = tokens
+        return UniverseSucc(
+            uidx=uidx.text,
+            parent=parent.text,
+        )
+    
     def __init__(self, uidx, parent):
         self.uidx = uidx
         self.parent = parent
@@ -149,6 +157,13 @@ class UniverseMax(Universe):
         )
 
 class UniverseParam(Universe):
+    @staticmethod
+    def parse(tokens):
+        uidx, _up_token, nidx = tokens
+        return UniverseParam(
+            uidx=uidx.text,
+            nidx=nidx.text,
+        )
     def __init__(self, uidx, nidx):
         self.uidx = uidx
         self.nidx = nidx
@@ -790,6 +805,8 @@ TOKEN_KINDS = {
     "#EV": BVar,
     "#RR": RecRule,
     "#REC": Recursor,
+    "#UP": UniverseParam,
+    "#US": UniverseSucc,
 }
 
 def tokenize(line, lineno):
