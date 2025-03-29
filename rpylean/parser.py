@@ -586,6 +586,12 @@ class Inductive(Node):
             for nidx in tokens[pos:(pos + num_ctors)]
         ]
         pos += num_ctors
+        # Hack for double space in the case of 0 ctors
+        if num_ctors == 0:
+            # If we have no level params, then we'll be at the end of the line
+            if pos < len(tokens):
+                assert tokens[pos].text == ""
+            pos += 1
 
         level_params = [
             each.text for each in tokens[pos:]
