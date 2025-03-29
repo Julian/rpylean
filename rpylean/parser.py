@@ -169,7 +169,7 @@ class UniverseIMax(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
-        return UniverseMax(
+        return UniverseIMax(
             uidx=uidx.text,
             lhs=lhs.text,
             rhs=rhs.text,
@@ -239,7 +239,7 @@ class LitStr(ExprVal):
         eidx = tokens[0]
         _els_tok  = tokens[1]
         hex_tokens = tokens[2:]
-        lit_val = "".join([token.text for token in hex_tokens]).decode(encoding="hex")
+        lit_val = "".join([chr(int(token.text, 16)) for token in hex_tokens]).decode('utf-8')
         val = LitStr(val=lit_val)
         return Expr(eidx=eidx.text, val=val)
     
