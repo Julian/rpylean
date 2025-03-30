@@ -417,7 +417,17 @@ class W_LitNat(W_Expr):
     def syntactic_eq(self, other):
         return isinstance(other, W_LitNat) and self.val == other.val
     
+    def build_nat_expr(self):
+        print("Building nat expr for %s" % self)
+        expr = NAT_ZERO
+        i = rbigint.fromint(0)
+        while i.lt(self.val):
+            expr = W_App(NAT_SUCC, expr)
+            i = i.add(rbigint.fromint(1))
+        return expr
+
     def strong_reduce_step(self, infcx):
+        return (False, self)
         if self.val == rbigint.fromint(0):
             return (True, NAT_ZERO)
         
@@ -730,6 +740,7 @@ class W_App(W_Expr):
             args.append(target.arg)
             target = target.fn
 
+    
         if not isinstance(target, W_Const):
             return False, self
         
@@ -752,6 +763,13 @@ class W_App(W_Expr):
         if major_idx < 0:
             return False, self
         major_premise = args[major_idx]
+
+        # We try to delay materializing LitNat expressions as late as possible,
+        # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
+        # However, we need an actual constructor and application for iota reduction.
+        # Hopefully we won't reach this spot with any especially large literals.
+        if isinstance(major_premise, W_LitNat):
+            major_premise = major_premise.build_nat_expr()
         
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')

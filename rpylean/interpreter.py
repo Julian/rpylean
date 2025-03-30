@@ -6,7 +6,7 @@ from rpython.rlib.objectmodel import r_dict, we_are_translated
 import os
 
 import sys
-sys.setrecursionlimit(1000)
+sys.setrecursionlimit(5000)
 
 
 def print_heading(s):
@@ -149,10 +149,6 @@ class InferenceContext:
             if all_match:
                 return True
 
-        
-        # TODO - when should we perform this check?
-        if expr1.syntactic_eq(expr2):
-            return True
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
@@ -176,6 +172,21 @@ class InferenceContext:
         expr1_eta = self.try_eta_expand(expr2, expr1)
         if expr1_eta is not None:
             return self.def_eq(expr1_eta, expr2)
+
+
+        # Perform this check late, as it can be very slow for large nested App expressiosn
+        if expr1.syntactic_eq(expr2):
+            return True
+        
+        # As the *very* last step, try converting NatLit exprs
+        # In order to be able to type check things like 'UInt32.size',
+        # we need to try everything else before actually calling 'build_nat_expr'
+        # (so that checks like syntactic equality can succeed and prevent us from
+        # building up ~4 billion `Nat` expressions)
+        if isinstance(expr1, W_LitNat):
+            return self.def_eq(expr1.build_nat_expr(), expr2)
+        elif isinstance(expr2, W_LitNat):
+            return self.def_eq(expr1, expr2.build_nat_expr())
 
         raise NotDefEq(expr1, expr2)
 
