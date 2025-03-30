@@ -4,6 +4,8 @@ from rpylean import parser
 from tests import examples
 import pytest
 
+from rpython.rlib.rbigint import rbigint
+
 
 def items(source):
     return list(parser.parse(dedent(source).lstrip("\n").splitlines()))
@@ -30,6 +32,17 @@ def test_es():
         """
     ) == [
         parser.Expr(eidx="0", val=parser.Sort(level="0")),
+    ]
+
+
+def test_large_litnat():
+    assert items(
+        """
+        0.1.2
+        0 #ELN 18446744073709551616
+        """
+    ) == [
+        parser.Expr(eidx="0", val=parser.LitNat(val=rbigint.fromlong(18446744073709551616))),
     ]
 
 

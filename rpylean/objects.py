@@ -1,3 +1,5 @@
+from rpython.rlib.rbigint import rbigint
+
 class NotDefEq(Exception):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -87,7 +89,7 @@ class W_Level(W_Item):
 class W_LevelZero(W_Level):
     def pretty(self):
         return "<W_LevelZero>"
-    
+
     def subst_levels(self, substs):
         return self
 
@@ -146,7 +148,6 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(W_Item):
-    pass
 
     def whnf(self, env):
         return self
@@ -255,7 +256,7 @@ class W_Const(W_Expr):
         val = decl.w_kind.get_delta_reduce_target()
         if val is None:
             return None
-        
+
 
         # TODO - deduplicate this
         params = decl.level_params
@@ -280,7 +281,7 @@ class W_Const(W_Expr):
         decl_type = decl.get_type()
         res = decl_type.subst_levels(substs)
         return res
-    
+
     def subst_levels(self, substs):
         new_levels = []
         for level in self.levels:
@@ -449,7 +450,7 @@ class W_Lambda(W_FunBase):
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
         res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
         return res
-    
+
     def subst_levels(self, substs):
         return W_Lambda(
             self.binder_name,
@@ -578,7 +579,7 @@ class W_Definition(DefOrTheorem):
 
     def get_type(self):
         return self.def_type
-    
+
     def get_delta_reduce_target(self):
         return self.def_val
 
