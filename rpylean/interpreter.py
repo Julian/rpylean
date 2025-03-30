@@ -181,12 +181,12 @@ class InferenceContext:
             return self.def_eq(expr1, expr2)
 
         if isinstance(expr1, W_Const):
-            expr1_reduced = expr1.try_delta_reduce(self)
+            expr1_reduced = expr1.try_delta_reduce(self.env)
             if expr1_reduced is not None:
                 expr1 = expr1_reduced
                 progress = True
         if isinstance(expr2, W_Const):
-            expr2_reduced = expr2.try_delta_reduce(self)
+            expr2_reduced = expr2.try_delta_reduce(self.env)
             if expr2_reduced is not None:
                 expr2 = expr2_reduced
                 progress = True

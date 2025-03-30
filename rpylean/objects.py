@@ -247,8 +247,8 @@ class W_Const(W_Expr):
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
 
-    def try_delta_reduce(self, infcx):
-        decl = infcx.env.declarations.get(self.name)
+    def try_delta_reduce(self, env):
+        decl = env.declarations.get(self.name)
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_val()
         if val is None:
@@ -447,6 +447,14 @@ class W_Lambda(W_FunBase):
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
         res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
         return res
+    
+    def subst_levels(self, substs):
+        return W_Lambda(
+            self.binder_name,
+            self.binder_type.subst_levels(substs),
+            self.binder_info,
+            self.body.subst_levels(substs)
+        )
 
 
 #(fun (x : N) => Vector.repeat(1, n))
@@ -478,9 +486,17 @@ class W_App(W_Expr):
     def whnf(self, env):
         fn = self.fn.whnf(env)
         arg = self.arg.whnf(env)
+
+        # TODO - should we only delta reduce abbrevs here?
+        if isinstance(fn, W_Const):
+            reduced = fn.try_delta_reduce(env)
+            if reduced is not None:
+                fn = reduced
+
         if isinstance(fn, W_FunBase):
             res = fn.body.instantiate(arg, 0)
-            return res
+            return res.whnf(env)
+
         else:
             return self
 
