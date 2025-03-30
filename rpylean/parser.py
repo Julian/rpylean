@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from rpython.rlib.rbigint import rbigint
+
 from rpylean import objects
 
 #: The lean4export format we claim to be able to parse.
@@ -253,8 +255,8 @@ class LitNat(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _eli_token, val = tokens
-        val = LitNat(val=int(val.text))
-        assert val.val >= 0
+        val = LitNat(val=rbigint.fromstr(val.text))
+        assert val.val.int_ge(0)
         return Expr(eidx=eidx.text, val=val)
 
     def __init__(self, val):

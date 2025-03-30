@@ -142,13 +142,13 @@ class InferenceContext:
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
             if not self.def_eq(expr1.binder_type, expr2.binder_type):
                 raise NotDefEq(expr1, expr2)
-            
+
             fvar = W_FVar(expr1)
             body = expr1.body.instantiate(fvar, 0)
             other_body = expr2.body.instantiate(fvar, 0)
             return self.def_eq(body, other_body)
 
-        
+
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
         if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name == expr2.name:
             # A given constant always has the same number of universe parameters
@@ -160,7 +160,7 @@ class InferenceContext:
                     break
             if all_match:
                 return True
-            
+
         # At this point, we've exhausted all of the simple cases, and we now need to perform some kind of reduction
         # For now, we don't handle all of the needed cases, so we'll sometimes raise a spurious `NotDefEq` exception.
 
@@ -193,7 +193,7 @@ class InferenceContext:
 
         if progress:
             return self.def_eq(expr1, expr2)
-        
+
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
