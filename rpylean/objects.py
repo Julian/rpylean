@@ -78,7 +78,8 @@ class W_Level(W_Item):
             warn("W_LevelIMax with W_LevelParam not yet implemented")
             return True
 
-        raise RuntimeError("Unimplemented level comparison: %s <= %s" % (self, other))
+        warn("Unimplemented level comparison: %s <= %s" % (self, other))
+        return True
 
     def antisymm_eq(self, other, infcx):
         lhs = self.simplify()
@@ -151,6 +152,17 @@ class W_Expr(W_Item):
 
     def whnf(self, env):
         return self
+    
+    # Tries to perform a single step of strong reduction.
+    # Currently implemented reduction steps:
+    # * Delta reduction (definition unfolding)
+    # * Beta reduction (function application)
+    # * Iota reduction: simplification of ('InductiveType.recursor arg0 .. argN InductiveType.ctorName') using matching RecursorRule
+    # 
+    # Return (progress, new_expr), where `progress` indicates whether any reduction was performed
+    def strong_reduce_step(self, infcx):
+        return (False, self)
+
 
     # Replace all BVars with the id 'depth' with 'expr'
     def instantiate(self, expr, depth):
@@ -214,7 +226,7 @@ class W_FVar(W_Expr):
         if self.id == fvar.id:
             return W_BVar(depth)
         return self
-
+    
     def __repr__(self):
         return "(FVar %s %s)" % (self.id, self.binder)
 
@@ -242,6 +254,17 @@ class W_Sort(W_Expr):
     def subst_levels(self, substs):
         return W_Sort(self.level.subst_levels(substs))
 
+# Takes the level params from 'const', and substitutes them into 'target'
+def apply_const_level_params(const, target, env):
+    decl = env.declarations.get(const.name)
+    if len(decl.level_params) != len(const.levels):
+        raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.level_params), len(const.levels)))
+    params = decl.level_params
+    substs = {}
+    for i in range(len(params)):
+        substs[params[i]] = const.levels[i]
+    return target.subst_levels(substs)
+
 class W_Const(W_Expr):
     def __init__(self, name, levels):
         self.name = name
@@ -250,36 +273,33 @@ class W_Const(W_Expr):
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
 
-    def try_delta_reduce(self, env):
+    def strong_reduce_step(self, infcx):
+        reduced = self.try_delta_reduce(infcx.env)
+        if reduced is not None:
+            return (True, reduced)
+        return (False, self)
+
+    def try_delta_reduce(self, env, only_abbrev=False):
         decl = env.declarations.get(self.name)
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_delta_reduce_target()
+        if not isinstance(decl.w_kind, W_Definition):
+            return None
+        
         if val is None:
             return None
-
-
-        # TODO - deduplicate this
-        params = decl.level_params
-        substs = {}
-        for i in range(len(params)):
-            substs[params[i]] = self.levels[i]
-        val = val.subst_levels(substs)
+        
+        val = apply_const_level_params(self, val, env)
         return val
 
     def infer(self, infcx):
         decl = infcx.env.declarations[self.name]
         params = decl.level_params
-        if len(params) != len(self.levels):
-            raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(params), len(self.levels)))
 
         if len(params) == 0:
             return decl.get_type()
 
-        substs = {}
-        for i in range(len(params)):
-            substs[params[i]] = self.levels[i]
-        decl_type = decl.get_type()
-        res = decl_type.subst_levels(substs)
+        res = apply_const_level_params(self, decl.get_type(), infcx.env)
         return res
 
     def subst_levels(self, substs):
@@ -363,8 +383,23 @@ class W_FunBase(W_Expr):
         self.body = body
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
+        if isinstance(self.binder_type, tuple):
+            import pdb; pdb.set_trace()
 
 
+    def strong_reduction_helper(self, infcx):
+        progress, binder_type = self.binder_type.strong_reduce_step(infcx)
+        if progress:
+            return (True, (self.binder_name, binder_type, self.binder_info, self.body))
+        
+        fvar = W_FVar(self)
+        open_body = self.body.instantiate(fvar, 0)
+        progress, open_body = open_body.strong_reduce_step(infcx)
+        new_body = open_body.bind_fvar(fvar, 0)
+        if progress:
+            return (True, (self.binder_name, binder_type, self.binder_info, new_body))
+        return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
+    
 class W_ForAll(W_FunBase):
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
@@ -401,6 +436,10 @@ class W_ForAll(W_FunBase):
             body
         )
 
+    def strong_reduce_step(self, infcx):
+        progress, args = self.strong_reduction_helper(infcx)
+        return (progress, W_ForAll(*args))
+
     def subst_levels(self, levels):
         return W_ForAll(
             self.binder_name,
@@ -408,6 +447,7 @@ class W_ForAll(W_FunBase):
             self.binder_info,
             self.body.subst_levels(levels)
         )
+
 
 
 class W_Lambda(W_FunBase):
@@ -450,6 +490,10 @@ class W_Lambda(W_FunBase):
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
         res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
         return res
+    
+    def strong_reduce_step(self, infcx):
+        progress, args = self.strong_reduction_helper(infcx)
+        return (progress, W_Lambda(*args))
 
     def subst_levels(self, substs):
         return W_Lambda(
@@ -485,6 +529,85 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
+    
+    def try_iota_reduce(self, infcx):
+        args = []
+        target = self
+        while isinstance(target, W_App):
+            args.append(target.arg)
+            target = target.fn
+
+        if not isinstance(target, W_Const):
+            return False, self
+        
+        decl = infcx.env.declarations.get(target.name)
+        if not isinstance(decl.w_kind, W_Recursor):
+            return False, self
+        
+        if decl.w_kind.num_motives != 1:
+            warn("W_App.try_iota_reduce: unimplemented case num_motives != 1 for %s" % target.name)
+            return False, self
+        
+        skip_count = decl.w_kind.num_params + decl.w_kind.num_indices + decl.w_kind.num_minors + decl.w_kind.num_motives
+        major_idx = len(args) - 1 - skip_count
+
+        for rec_rule_id in decl.w_kind.rule_idxs:
+            rec_rule = infcx.env.rec_rules[rec_rule_id]
+
+        # Not enough arguments in our current app - we cannot reduce, since we need to know the major premise
+        # to pick the recursor rule to apply
+        if major_idx < 0:
+            return False, self
+        major_premise = args[major_idx]
+        
+        # If the inductive type has parameters, we need to extract them from the major premise
+        # (e.g. the 'p' in 'Decidable.isFalse p')
+        # and add then as arguments to the recursor rule application (before the motive)
+        major_premise_ctor = major_premise
+        all_ctor_args = []
+        while isinstance(major_premise_ctor, W_App):
+            all_ctor_args.append(major_premise_ctor.arg)
+            major_premise_ctor = major_premise_ctor.fn
+
+        all_ctor_args.reverse()
+        num_params = decl.w_kind.num_params
+        assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
+        # Get the fields, which come after the type-level parametesr
+        # e.g. '(h : ¬p)' in 'Decidable.isFalse'
+        ctor_fields = all_ctor_args[num_params:]
+
+        if not isinstance(major_premise_ctor, W_Const):
+            return False, self
+
+        new_args = list(args)
+        new_args.reverse()
+        new_args.pop()
+
+        # TODO - consider storing these by recursor name
+        for rec_rule_id in decl.w_kind.rule_idxs:
+            rec_rule = infcx.env.rec_rules[rec_rule_id]
+            if rec_rule.ctor_name == major_premise_ctor.name:
+                # Construct an application of the recursor rule, using all of the parameters except the major premise
+                # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
+                new_app = rec_rule.val
+                # The rec rule value uses the level parameters from the corresponding inductive type declaration,
+                # so apply the parameters from our recursor call
+                new_app = apply_const_level_params(target, new_app, infcx.env)
+
+                for arg in new_args:
+                    new_app = W_App(new_app, arg)
+
+                for ctor_field in ctor_fields:
+                    new_app = W_App(new_app, ctor_field)
+
+                # Type check the new application, to ensure that all of our args have the right types
+                new_app_ty = new_app.infer(infcx)
+                new_app = new_app.whnf(infcx.env)
+                return True, new_app
+
+
+        return False, self
+        
 
     def whnf(self, env):
         fn = self.fn.whnf(env)
@@ -492,7 +615,7 @@ class W_App(W_Expr):
 
         # TODO - should we only delta reduce abbrevs here?
         if isinstance(fn, W_Const):
-            reduced = fn.try_delta_reduce(env)
+            reduced = fn.try_delta_reduce(env, only_abbrev=True)
             if reduced is not None:
                 fn = reduced
 
@@ -502,7 +625,33 @@ class W_App(W_Expr):
 
         else:
             return self
-
+        
+    def strong_reduce_step(self, infcx):
+        # First, try beta reduction
+        if isinstance(self.fn, W_FunBase):
+            body = self.fn.body.instantiate(self.arg, 0)
+            return (True, body)
+        
+        # Next, try strong reduction with the fn and body
+        # After this, it might become possible to do beta
+        # reduction (if the fn gets reduced to a W_FunBase)
+        # We don't check for this case here - it will get checked when
+        # `strong_reduce_step` is called on the new `W_App`, if the top-level
+        # code decides to perform another strong reduction step.
+        progress, new_fn = self.fn.strong_reduce_step(infcx)
+        if progress:
+            return (True, W_App(new_fn, self.arg))
+        
+        progress, new_arg = self.arg.strong_reduce_step(infcx)
+        if progress:
+            return (True, W_App(new_fn, new_arg))
+        
+        # Finally, try iota reduction after we've reduced everthing else as much as possible
+        # This allows us to find a recursor constant and constructor constant
+        # (both can be produced by earlier reduction steps, but neither can be further reduced
+        # without iota reduction)
+        return self.try_iota_reduce(infcx)
+        
     def bind_fvar(self, fvar, depth):
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
 

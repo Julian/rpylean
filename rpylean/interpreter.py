@@ -3,6 +3,10 @@ from __future__ import print_function
 from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_Sort
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
+import os
+
+import sys
+sys.setrecursionlimit(1000)
 
 
 def print_heading(s):
@@ -128,8 +132,6 @@ class InferenceContext:
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
-        print("Considering: %s vs %s" % (expr1.pretty(), expr2.pretty()))
-
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             if expr1.id != expr2.id:
@@ -146,6 +148,7 @@ class InferenceContext:
             fvar = W_FVar(expr1)
             body = expr1.body.instantiate(fvar, 0)
             other_body = expr2.body.instantiate(fvar, 0)
+
             return self.def_eq(body, other_body)
 
 
@@ -161,39 +164,16 @@ class InferenceContext:
             if all_match:
                 return True
 
-        # At this point, we've exhausted all of the simple cases, and we now need to perform some kind of reduction
-        # For now, we don't handle all of the needed cases, so we'll sometimes raise a spurious `NotDefEq` exception.
-
-        # Naive approach - try a single round of delta reduction on both expressions
-        # If either reduction makes progress, then retry with the new expressions.
-        # Otherwise, give up
-        progress = False
-        expr1_reduced = expr1.whnf(self.env)
-        expr2_reduced = expr2.whnf(self.env)
-        if expr1_reduced != expr1:
-            expr1 = expr1_reduced
-            progress = True
-        if expr2_reduced != expr2:
-            expr2 = expr2_reduced
-            progress = True
-
+        # Try a reduction step
+        progress, expr1_reduced = expr1.strong_reduce_step(self)
         if progress:
-            return self.def_eq(expr1, expr2)
-
-        if isinstance(expr1, W_Const):
-            expr1_reduced = expr1.try_delta_reduce(self.env)
-            if expr1_reduced is not None:
-                expr1 = expr1_reduced
-                progress = True
-        if isinstance(expr2, W_Const):
-            expr2_reduced = expr2.try_delta_reduce(self.env)
-            if expr2_reduced is not None:
-                expr2 = expr2_reduced
-                progress = True
-
+            return self.def_eq(expr1_reduced, expr2)
+        
+        progress, expr2_reduced = expr2.strong_reduce_step(self)
         if progress:
-            return self.def_eq(expr1, expr2)
-
+            # If expr2 made progress, retry with the new expr2
+            return self.def_eq(expr1, expr2_reduced)
+        
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
@@ -216,8 +196,11 @@ def interpret(lines):
         item.compile(environment)
 
     ctx = InferenceContext(environment)
-    environment.dump_pretty()
+    show_env = os.environ.get('SHOW_ENV') or 'true'
+    if show_env.lower() == 'true':
+        environment.dump_pretty()
 
-    for name, decl in environment.declarations.items():
-        print("Checking declaration:", name)
+    total_decls = len(environment.declarations)
+    for (i, (name, decl)) in enumerate(environment.declarations.items()):
+        print("Checking declaration [%s/%s] '%s' of type %s" % (i, total_decls, name.pretty(), decl.w_kind.pretty()))
         decl.w_kind.type_check(ctx)

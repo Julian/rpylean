@@ -608,7 +608,7 @@ class Inductive(Node):
             is_rec=is_rec.text,
             is_nested=is_nested.text,
             num_params=int(num_params.text),
-            num_indices=num_indices.text,
+            num_indices=int(num_indices.text),
             ind_name_idxs=ind_name_idxs,
             ctor_name_idxs=ctor_name_idxs,
             level_params=level_params,
@@ -645,7 +645,7 @@ class Inductive(Node):
                 is_rec=self.is_rec,
                 is_nested=self.is_nested,
                 num_params=int(self.num_params),
-                num_indices=self.num_indices,
+                num_indices=int(self.num_indices),
                 ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
                 ctor_names=[
                     environment.names[nidx] for nidx in self.ctor_name_idxs
@@ -737,9 +737,9 @@ class Recursor(Node):
             rule_idxs=rule_idxs,
             k=k,
             num_params=int(num_params.text),
-            num_indices=num_indices.text,
-            num_motives=num_motives.text,
-            num_minors=num_minors.text,
+            num_indices=int(num_indices.text),
+            num_motives=int(num_motives.text),
+            num_minors=int(num_minors.text),
             level_params=level_params
         ))
 
@@ -775,11 +775,11 @@ class Recursor(Node):
                 expr=environment.exprs[self.expr_idx],
                 k=self.k,
                 num_params=int(self.num_params),
-                num_indices=self.num_indices,
-                num_motives=self.num_motives,
-                num_minors=self.num_minors,
+                num_indices=int(self.num_indices),
+                num_motives=int(self.num_motives),
+                num_minors=int(self.num_minors),
                 ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
-                rule_idxs=self.rule_idxs,
+                rule_idxs=[int(ridx) for ridx in self.rule_idxs],
             ),
         )
 
