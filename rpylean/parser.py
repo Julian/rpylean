@@ -593,9 +593,12 @@ class Inductive(Node):
                 assert tokens[pos].text == ""
             pos += 1
 
-        level_params = [
-            each.text for each in tokens[pos:]
-        ]
+        if pos > len(tokens):
+            level_params = []
+        else:
+            level_params = [
+                each.text for each in tokens[pos:]
+            ]
 
         return Declaration(Inductive(
             name_idx=target_nidx.text,
