@@ -91,7 +91,7 @@ class NameStr(Node):
             parent_nidx=parent_nidx.text,
             name=name.text,
         )
-    
+
     def __init__(self, nidx, parent_nidx, name):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
@@ -109,12 +109,12 @@ class NameId(Node):
             parent_nidx=parent_nidx.text,
             id=id.text,
         )
-    
+
     def __init__(self, nidx, parent_nidx, id):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
         self.id = id
-        
+
     def compile(self, environment):
         # TODO - should we register id names separately (as ints)?
         environment.register_name(self.nidx, self.parent_nidx, self.id)
@@ -132,7 +132,7 @@ class UniverseSucc(Universe):
             uidx=uidx.text,
             parent=parent.text,
         )
-    
+
     def __init__(self, uidx, parent):
         self.uidx = uidx
         self.parent = parent
@@ -150,7 +150,7 @@ class UniverseMax(Universe):
             lhs=lhs.text,
             rhs=rhs.text,
         )
-    
+
     def __init__(self, uidx, lhs, rhs):
         self.uidx = uidx
         self.lhs = lhs
@@ -174,7 +174,7 @@ class UniverseIMax(Universe):
             lhs=lhs.text,
             rhs=rhs.text,
         )
-    
+
     def __init__(self, uidx, lhs, rhs):
         self.uidx = uidx
         self.lhs = lhs
@@ -226,7 +226,7 @@ class BVar(ExprVal):
         eidx, _bval_tok, id = tokens
         val = BVar(id=int(id.text))
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, id):
         self.id = id
 
@@ -242,13 +242,13 @@ class LitStr(ExprVal):
         lit_val = "".join([chr(int(token.text, 16)) for token in hex_tokens]).decode('utf-8')
         val = LitStr(val=lit_val)
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, val):
         self.val = val
 
     def to_w_expr(self, environment):
         return objects.W_LitStr(val=self.val)
-    
+
 class LitNat(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -256,7 +256,7 @@ class LitNat(ExprVal):
         val = LitNat(val=int(val.text))
         assert val.val >= 0
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, val):
         self.val = val
 
@@ -270,7 +270,7 @@ class Sort(ExprVal):
         eidx, _sort_tok, level = tokens
         val = Sort(level=level.text)
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, level):
         self.level = level
 
@@ -289,7 +289,7 @@ class Const(ExprVal):
                 for level in tokens[3:]
             ],
         )
-        return Expr(eidx=eidx.text, val=val)       
+        return Expr(eidx=eidx.text, val=val)
     def __init__(self, name, levels):
         self.name = name
         self.levels = levels
@@ -312,7 +312,7 @@ class Let(ExprVal):
             body=body.text,
         )
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, name_idx, def_type, def_val, body):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -335,7 +335,7 @@ class App(ExprVal):
             fn_eidx=fn_eidx.text,
             arg_eidx=arg_eidx.text,
         ))
-    
+
     def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
         self.arg_eidx = arg_eidx
@@ -357,7 +357,7 @@ class Lambda(ExprVal):
             body=body.text,
         )
         return Expr(eidx=eidx.text, val=val)
-        
+
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
@@ -409,7 +409,7 @@ class Proj(ExprVal):
             struct_expr=struct_expr.text,
         )
         return Expr(eidx=eidx.text, val=val)
-    
+
     def __init__(self, type_name, field_idx, struct_expr):
         self.type_name = type_name
         self.field_idx = field_idx
@@ -458,7 +458,7 @@ class Definition(Node):
                 each.text for each in tokens[start:]
             ],
         ))
-    
+
     def __init__(self, name_idx, def_type, def_val, hint, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -490,7 +490,7 @@ class Opaque(Node):
                 each.text for each in tokens[4:]
             ],
         ))
-    
+
     def __init__(self, name_idx, def_type, def_val, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -505,7 +505,7 @@ class Opaque(Node):
                 def_type=environment.exprs[self.def_type],
                 def_val=environment.exprs[self.def_val],
             ),
-        )    
+        )
 
 
 class Theorem(Node):
@@ -520,7 +520,7 @@ class Theorem(Node):
                 each.text for each in tokens[4:]
             ],
         ))
-    
+
     def __init__(self, name_idx, def_type, def_val, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -548,7 +548,7 @@ class Axiom(Node):
                 each.text for each in tokens[3:]
             ],
         ))
-    
+
     def __init__(self, name_idx, def_type, level_params):
         self.name_idx = name_idx
         self.def_type = def_type
@@ -608,7 +608,7 @@ class Inductive(Node):
             ctor_name_idxs=ctor_name_idxs,
             level_params=level_params,
         ))
-    
+
     def __init__(
         self,
         name_idx,
@@ -664,7 +664,7 @@ class Constructor(Node):
                 each.text for each in tokens[7:]
             ],
         ))
-    
+
     def __init__(self, name_idx, ctype, induct, cidx, num_params, num_fields, level_params):
         self.name_idx = name_idx
         self.ctype = ctype
@@ -730,7 +730,7 @@ class Recursor(Node):
             num_minors=num_minors.text,
             level_params=level_params
         ))
-#         
+
     def __init__(
         self,
         name_idx,
@@ -797,244 +797,6 @@ class RecRule(Node):
         )
         environment.register_rec_rule(self.ridx, w_recrule)
 
-
-# class Transformer(RPythonVisitor):
-#     def dispatch(self, node):
-#         return getattr(self, "visit_%s" % node.symbol)(node)
-#
-#     def visit_file(self, node):
-#         version = self.dispatch(node.children[0])
-#         return File(
-#             version=version,
-#             items=[self.dispatch(each) for each in node.children[1].children]
-#         )
-#
-#     def visit_export_format_version(self, node):
-#         major, minor, patch = node.children
-#         return Version(
-#             major=major.additional_info,
-#             minor=minor.additional_info,
-#             patch=patch.additional_info,
-#         )
-#
-#     def visit_item(self, node):
-#         item, = node.children
-#         return self.dispatch(item)
-#
-#     def visit_name(self, node):
-#         nidx, kind, parent_nidx, id = node.children
-#         if kind.additional_info == "#NS":
-#             return NameStr(
-#                 nidx=nidx.children[0].additional_info,
-#                 parent_nidx=parent_nidx.children[0].additional_info,
-#                 name=id.additional_info,
-#             )
-#         elif kind.additional_info == "#NI":
-#             return NameId(
-#                 nidx=nidx.children[0].additional_info,
-#                 parent_nidx=parent_nidx.children[0].additional_info,
-#                 id=id.additional_info,
-#             )
-#         else:
-#             assert False, "unknown name kind: " + kind.additional_info
-#
-#     def visit_universe(self, node):
-#         kind = node.children[1]
-#         if kind.additional_info == "#UP":
-#             uidx, _, nidx = node.children
-#             return UniverseParam(
-#                 uidx=uidx.children[0].additional_info,
-#                 nidx=nidx.children[0].additional_info,
-#             )
-#         if kind.additional_info == "#US":
-#             uidx, _, parent = node.children
-#             return UniverseSucc(uidx=uidx.children[0].additional_info, parent=parent.children[0].additional_info)
-#         if kind.additional_info == "#UM":
-#             uidx, _, lhs, rhs = node.children
-#             return UniverseMax(
-#                 uidx=uidx.children[0].additional_info,
-#                 lhs=lhs.children[0].additional_info,
-#                 rhs=rhs.children[0].additional_info,
-#             )
-#         else:
-#             assert False, "unknown universe kind: " + kind.additional_info
-#
-#     def visit_expr(self, node):
-#         eidx = node.children[0].children[0].additional_info
-#         kind = node.children[1]
-#         if kind.additional_info == "#EV":
-#             _, _, id = node.children
-#             val = BVar(id=int(id.additional_info))
-#         elif kind.additional_info == "#ES":
-#             _, _, uidx = node.children
-#             val = Sort(level=uidx.children[0].additional_info)
-#         elif kind.additional_info == "#EC":
-#             name = node.children[2].children[0].additional_info
-#             val = Const(
-#                 name=name,
-#                 levels=[
-#                     uidx.children[0].additional_info
-#                     for uidx in node.children[3:]
-#                 ],
-#             )
-#         elif kind.additional_info == "#EA":
-#             _, _, fn_eidx, arg_eidx = node.children
-#             val = App(
-#                 fn_eidx=fn_eidx.children[0].additional_info,
-#                 arg_eidx=arg_eidx.children[0].additional_info,
-#             )
-#         elif kind.additional_info == "#EL":
-#             _, _, binder_info, binder_name, binder_type, body = node.children
-#             val = Lambda(
-#                 binder_name=binder_name.children[0].additional_info,
-#                 binder_type=binder_type.children[0].additional_info,
-#                 binder_info=binder_info.children[0].additional_info,
-#                 body=body.children[0].additional_info,
-#             )
-#         elif kind.additional_info == "#EP":
-#             _, _, binder_info, binder_name, binder_type, body = node.children
-#             val = ForAll(
-#                 binder_name=binder_name.children[0].additional_info,
-#                 binder_type=binder_type.children[0].additional_info,
-#                 binder_info=binder_info.children[0].additional_info,
-#                 body=body.children[0].additional_info,
-#             )
-#         elif kind.additional_info == "#EJ":
-#             _, _, type_name, field_idx, struct_expr = node.children
-#             val = Proj(type_name=type_name.children[0].additional_info,
-#                         field_idx=int(field_idx.additional_info),
-#                         struct_expr=struct_expr.children[0].additional_info)
-#         else:
-#             assert False, "unknown expr kind: " + kind.additional_info
-#         return Expr(eidx=eidx, val=val)
-#
-#     def visit_declaration(self, node):
-#         child, = node.children
-#         return Declaration(self.dispatch(child))
-#
-#     def visit_definition(self, node):
-#         _, name_idx, def_type, def_val, hint = node.children[:5]
-#         return Definition(
-#             name_idx=name_idx.children[0].additional_info,
-#             def_type=def_type.children[0].additional_info,
-#             def_val=def_val.children[0].additional_info,
-#             hint=hint.children[0].additional_info,
-#             level_params=[
-#                 each.children[0].additional_info for each in node.children[5:]
-#             ],
-#         )
-#
-#     def visit_theorem(self, node):
-#         _, name_idx, def_type, def_val = node.children[:4]
-#         return Theorem(
-#             name_idx=name_idx.children[0].additional_info,
-#             def_type=def_type.children[0].additional_info,
-#             def_val=def_val.children[0].additional_info,
-#             level_params=[
-#                 each.children[0].additional_info for each in node.children[4:]
-#             ],
-#         )
-#
-#     def visit_inductive(self, node):
-#         _, nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = node.children[:8]
-#         num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
-#         assert num_ind_name_idxs >= 0
-#         pos = 8
-#         ind_name_idxs = node.children[pos:pos + num_ind_name_idxs]
-#         pos += num_ind_name_idxs
-#
-#         num_ctors = int(node.children[pos].additional_info)
-#         assert num_ctors >= 0
-#         pos += 1
-#
-#         ctor_name_idxs = node.children[pos:pos + num_ctors]
-#         pos += num_ctors
-#
-#         level_params = node.children[pos:]
-#         return Inductive(
-#             name_idx=nidx.children[0].additional_info,
-#             expr_idx=eidx.children[0].additional_info,
-#             is_rec=is_rec.additional_info,
-#             is_nested=is_nested.additional_info,
-#             num_params=int(num_params.additional_info),
-#             num_indices=num_indices.additional_info,
-#             ind_name_idxs=[
-#                 each.additional_info for each in ind_name_idxs
-#             ],
-#             ctor_name_idxs=[
-#                 each.additional_info for each in ctor_name_idxs
-#             ],
-#             level_params=[
-#                 each.additional_info
-#                 for each in level_params
-#             ],
-#         )
-#
-#     def visit_constructor(self, node):
-#         _, name_idx, ctype, induct, cidx, num_params, num_fields = node.children[:7]
-#         return Constructor(
-#             name_idx=name_idx.children[0].additional_info,
-#             ctype=ctype.children[0].additional_info,
-#             induct=induct.children[0].additional_info,
-#             cidx=cidx.additional_info,
-#             num_params=int(num_params.additional_info),
-#             num_fields=num_fields.additional_info,
-#             level_params=[
-#                 each.children[0].additional_info for each in node.children[7:]
-#             ],
-#         )
-#
-#     def visit_recursor(self, node):
-#         _, name_idx, expr_idx, num_ind_name_idxs_str = node.children[:4]
-#
-#         num_ind_name_idxs = int(num_ind_name_idxs_str.additional_info)
-#         assert num_ind_name_idxs >= 0
-#
-#         pos = 4
-#         ind_name_idxs = [
-#             nidx.additional_info
-#             for nidx in node.children[pos:(pos + num_ind_name_idxs)]
-#         ]
-#         pos += num_ind_name_idxs
-#
-#         num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = node.children[pos:pos + 5]
-#
-#         num_rule_idxs = int(num_rule_idxs_str.additional_info)
-#         assert num_rule_idxs >= 0
-#         pos += 5
-#
-#         rule_idxs = [
-#             rule_idx.additional_info
-#             for rule_idx in node.children[pos:pos + num_rule_idxs]
-#         ]
-#         pos += num_rule_idxs
-#
-#         k = node.children[pos].additional_info
-#         level_params = node.children[pos + 1:]
-#
-#         return Recursor(
-#             name_idx=name_idx.children[0].additional_info,
-#             expr_idx=expr_idx.children[0].additional_info,
-#             ind_name_idxs=ind_name_idxs,
-#             rule_idxs=rule_idxs,
-#             k=k,
-#             num_params=int(num_params.additional_info),
-#             num_indices=num_indices.additional_info,
-#             num_motives=num_motives.additional_info,
-#             num_minors=num_minors.additional_info,
-#             level_params=[
-#                 each.additional_info for each in level_params
-#             ],
-#         )
-#
-#     def visit_recrule(self, node):
-#         ridx, _, nidx, nat, eidx = node.children
-#         return RecRule(
-#             ridx=ridx.children[0].additional_info,
-#             ctor_name=nidx.children[0].additional_info,
-#             n_fields=nat.additional_info,
-#             val=eidx.children[0].additional_info,
-#         )
 
 TOKEN_KINDS = {
     "#NS": NameStr,
@@ -1104,15 +866,6 @@ def parse(lines):
         if item:
             items.append(item)
     return items
-    #
-    # try:
-    #     parsed = _parse(source)
-    # except ParseError as error:
-    #     print(error.nice_error_message(__file__, source), end="\n\n\n")
-    #     raise
-    #
-    # ast = ToAST().transform(parsed)
-    # return transformer.visit_file(ast)
 
 
 def to_item(tokens):
@@ -1124,5 +877,5 @@ def to_item(tokens):
     except KeyError as e:
         print("Unimplemented token kind: %s" % e)
         return None
-    
+
     return token_type.parse(tokens)
