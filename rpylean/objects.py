@@ -72,12 +72,14 @@ class W_Level(W_Item):
             raise RuntimeError("W_LevelIMax with W_LevelParam not yet implemented")
 
         if isinstance(other, W_LevelIMax) and isinstance(other.rhs, W_LevelParam):
-            return self.lhs.leq(other.lhs, infcx) or self.rhs.leq(other.rhs, infcx)
+            raise RuntimeError("W_LevelIMax with W_LevelParam not yet implemented")
 
         raise RuntimeError("Unimplemented level comparison: %s <= %s" % (self, other))
 
     def antisymm_eq(self, other, infcx):
-        return self.leq(other, infcx) and other.leq(self, infcx)
+        lhs = self.simplify()
+        rhs = other.simplify()
+        return lhs.leq(rhs, infcx) and rhs.leq(lhs, infcx)
 
 
 class W_LevelZero(W_Level):
