@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_Sort
+from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Sort, Name
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
 import os
@@ -13,25 +13,6 @@ def print_heading(s):
     print(s)
     print("-" * len(s), end="\n\n")
 
-
-class Name:
-    def __init__(self, components):
-        self.components = components
-
-    def __hash__(self):
-        hash_val = 0
-        for c in self.components:
-            hash_val = hash_val ^ hash(c)
-        return hash_val
-
-    def __eq__(self, other):
-        return self.components == other.components
-
-    def __repr__(self):
-        return "<Name %r>" % (self.components,)
-
-    def pretty(self):
-        return '.'.join(self.components)
 
 class Environment:
     def __init__(self):
@@ -150,6 +131,11 @@ class InferenceContext:
             other_body = expr2.body.instantiate(fvar, 0)
 
             return self.def_eq(body, other_body)
+        # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
+        elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+            if expr1.val != expr2.val:
+                raise NotDefEq(expr1, expr2)
+            return True
 
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal

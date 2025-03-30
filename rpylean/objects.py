@@ -1,5 +1,24 @@
 from rpython.rlib.rbigint import rbigint
 
+class Name:
+    def __init__(self, components):
+        self.components = components
+
+    def __hash__(self):
+        hash_val = 0
+        for c in self.components:
+            hash_val = hash_val ^ hash(c)
+        return hash_val
+
+    def __eq__(self, other):
+        return self.components == other.components
+
+    def __repr__(self):
+        return "<Name %r>" % (self.components,)
+
+    def pretty(self):
+        return '.'.join(self.components)
+
 class NotDefEq(Exception):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -237,9 +256,6 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         self.val = val
 
-class W_LitNat(W_Expr):
-    def __init__(self, val):
-        self.val = val
 
 class W_Sort(W_Expr):
     def __init__(self, level):
@@ -308,6 +324,18 @@ class W_Const(W_Expr):
             new_level = level.subst_levels(substs)
             new_levels.append(new_level)
         return W_Const(self.name, new_levels)
+
+NAT_CONST = W_Const(Name(["Nat"]), [])
+
+class W_LitNat(W_Expr):
+    def __init__(self, val):
+        self.val = val
+
+    def pretty(self):
+        return "(LitNat %s)" % (self.val.str())
+
+    def infer(self, infcx):
+        return NAT_CONST
 
 class W_Proj(W_Expr):
     def __init__(self, struct_type, field_idx, struct_expr):
