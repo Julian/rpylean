@@ -2,7 +2,7 @@ from __future__ import print_function
 
 from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
 from rpylean.parser import parse
-from rpython.rlib.objectmodel import we_are_translated
+from rpython.rlib.objectmodel import r_dict, we_are_translated
 import os
 
 import sys
@@ -19,9 +19,9 @@ class Environment:
         self.levels = {"0": W_LEVEL_ZERO}
         self.exprs = {}
         self.names = {"0": Name([])}
-        self.constants = {}
+        self.constants = r_dict(Name.__eq__, Name.__hash__)
         self.rec_rules = {}
-        self.declarations = {}
+        self.declarations = r_dict(Name.__eq__, Name.__hash__)
 
     def __repr__(self):
         return "Environment()"

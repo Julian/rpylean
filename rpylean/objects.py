@@ -1,4 +1,5 @@
 from rpython.rlib.rbigint import rbigint
+from rpython.rlib.objectmodel import compute_hash
 
 class Name:
     def __init__(self, components):
@@ -7,7 +8,7 @@ class Name:
     def __hash__(self):
         hash_val = 0
         for c in self.components:
-            hash_val = hash_val ^ hash(c)
+            hash_val = hash_val ^ compute_hash(c)
         return hash_val
 
     def __eq__(self, other):
@@ -308,7 +309,7 @@ class W_Sort(W_Expr):
 
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
-    decl = env.declarations.get(const.name)
+    decl = env.declarations[const.name]
     if len(decl.level_params) != len(const.levels):
         raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.level_params), len(const.levels)))
     params = decl.level_params
@@ -356,7 +357,10 @@ class W_Const(W_Expr):
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
-        decl = env.declarations.get(self.name)
+        decl = env.declarations[self.name]
+        if decl is None:
+            print("Missing decl: %s" % self.name.components)
+            raise RuntimeError("Missing decl: %s" % self.pretty())
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_delta_reduce_target()
         if not isinstance(decl.w_kind, W_Definition):
@@ -720,7 +724,7 @@ class W_App(W_Expr):
         if not isinstance(target, W_Const):
             return False, self
         
-        decl = infcx.env.declarations.get(target.name)
+        decl = infcx.env.declarations[target.name]
         if not isinstance(decl.w_kind, W_Recursor):
             return False, self
         
@@ -754,7 +758,10 @@ class W_App(W_Expr):
         assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
         # Get the fields, which come after the type-level parametesr
         # e.g. '(h : ¬p)' in 'Decidable.isFalse'
-        ctor_fields = all_ctor_args[num_params:]
+        if num_params >= len(all_ctor_args):
+            ctor_fields = []
+        else:
+            ctor_fields = all_ctor_args[num_params:]
 
         if not isinstance(major_premise_ctor, W_Const):
             return False, self
