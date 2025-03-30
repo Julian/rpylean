@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Sort, Name
+from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
 import os
@@ -137,7 +137,6 @@ class InferenceContext:
                 raise NotDefEq(expr1, expr2)
             return True
 
-
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
         if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name == expr2.name:
             # A given constant always has the same number of universe parameters
@@ -151,14 +150,13 @@ class InferenceContext:
                 return True
 
         # Try a reduction step
-        progress, expr1_reduced = expr1.strong_reduce_step(self)
-        if progress:
-            return self.def_eq(expr1_reduced, expr2)
-        
-        progress, expr2_reduced = expr2.strong_reduce_step(self)
-        if progress:
+        progress1, expr1_reduced = expr1.strong_reduce_step(self)
+        progress2, expr2_reduced = expr2.strong_reduce_step(self)
+        if progress1 or progress2:
             # If expr2 made progress, retry with the new expr2
-            return self.def_eq(expr1, expr2_reduced)
+            return self.def_eq(expr1_reduced, expr2_reduced)
+        expr1 = expr1_reduced
+        expr2 = expr2_reduced
         
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
@@ -166,6 +164,10 @@ class InferenceContext:
            fn_eq = self.def_eq(expr1.fn, expr2.fn)
            arg_eq = self.def_eq(expr1.arg, expr2.arg)
            return fn_eq and arg_eq
+        
+        # TODO - when should we perform this check?
+        if expr1.syntactic_eq(expr2):
+            return True
 
         raise NotDefEq(expr1, expr2)
 

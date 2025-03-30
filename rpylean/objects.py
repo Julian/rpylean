@@ -112,6 +112,9 @@ class W_LevelZero(W_Level):
 
     def subst_levels(self, substs):
         return self
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_LevelZero)
 
 
 class W_LevelSucc(W_Level):
@@ -124,6 +127,9 @@ class W_LevelSucc(W_Level):
     def subst_levels(self, substs):
         new_parent = self.parent.subst_levels(substs)
         return W_LevelSucc(new_parent)
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_LevelSucc) and self.parent.syntactic_eq(other.parent)
 
 class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
@@ -137,6 +143,11 @@ class W_LevelMax(W_Level):
         new_lhs = self.lhs.subst_levels(substs)
         new_rhs = self.rhs.subst_levels(substs)
         return W_LevelMax(new_lhs, new_rhs)
+    
+    def syntactic_eq(self, other):
+        if not isinstance(other, W_LevelMax):
+            return False
+        return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
 
     @staticmethod
     def combining(lhs, rhs):
@@ -153,6 +164,11 @@ class W_LevelIMax(W_Level):
         self.lhs = lhs
         self.rhs = rhs
 
+    def syntactic_eq(self, other):
+        if not isinstance(other, W_LevelIMax):
+            return False
+        return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
+
 W_LEVEL_ZERO = W_LevelZero()
 
 
@@ -162,16 +178,15 @@ class W_LevelParam(W_Level):
 
     def pretty(self):
         return self.name.pretty()
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_LevelParam) and self.name == other.name
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
 
 
 class W_Expr(W_Item):
-
-    def whnf(self, env):
-        return self
-    
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
     # * Delta reduction (definition unfolding)
@@ -183,27 +198,18 @@ class W_Expr(W_Item):
         return (False, self)
 
 
-    # Replace all BVars with the id 'depth' with 'expr'
-    def instantiate(self, expr, depth):
-        return self
-
-    def bind_fvar(self, fvar, depth):
-        return self
-
-    # Increments all free BVars in this expression by 'count'.
-    # For example, 'fun x => BVar(1)' will become 'fun x => BVar(1 + count)',
-    # while 'fun x => BVar(0)' wil be unchanged.
-    # This is used when we add 'count' new binders above this expresssion
-    def incr_free_bvars(self, count, depth):
-        return self
-
-
 class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = int(id)
 
     def pretty(self):
         return "(BVar [%s])" % (self.id,)
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_BVar) and self.id == other.id
+    
+    def bind_fvar(self, fvar, depth):
+        return self
 
     def instantiate(self, expr, depth):
         if self.id == depth:
@@ -238,6 +244,18 @@ class W_FVar(W_Expr):
         self.binder = binder
         FVAR_COUNTER.count += 1
 
+    def incr_free_bvars(self, count, depth):
+        return self
+    
+    def instantiate(self, expr, depth):
+        return self
+    
+    def whnf(self, env):
+        return self
+
+    def syntactic_eq(self, other):
+        return isinstance(other, W_FVar) and self.id == other.id and self.binder.syntactic_eq(other.binder)
+
     def infer(self, infcx):
         return self.binder.binder_type
 
@@ -250,16 +268,31 @@ class W_FVar(W_Expr):
         return "(FVar %s %s)" % (self.id, self.binder)
 
     def pretty(self):
-        return "{%s}" % self.binder.binder_name.pretty()
+        return "{%s@%s}" % (self.binder.binder_name.pretty(), self.id)
 
 class W_LitStr(W_Expr):
     def __init__(self, val):
         self.val = val
 
+    def syntactic_eq(self, other):
+        return isinstance(other, W_LitStr) and self.val == other.val
+
 
 class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
+
+    def whnf(self, env):
+        return self
+    
+    def incr_free_bvars(self, count, depth):
+        return self
+    
+    def bind_fvar(self, fvar, depth):
+        return self
+    
+    def instantiate(self, expr, depth):
+        return self
 
     def pretty(self):
         return "Sort %s" % self.level.pretty()
@@ -269,6 +302,9 @@ class W_Sort(W_Expr):
 
     def subst_levels(self, substs):
         return W_Sort(self.level.subst_levels(substs))
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
 
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
@@ -288,12 +324,36 @@ class W_Const(W_Expr):
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
+    
+    def syntactic_eq(self, other):
+        if not isinstance(other, W_Const):
+            return False
+        if self.name != other.name:
+            return False
+        
+        assert len(self.levels) == len(other.levels), "W_Const syntactic_eq: levels length mismatch: %s vs %s" % (self.levels, other.levels)
+        for i in range(len(self.levels)):
+            if not self.levels[i].syntactic_eq(other.levels[i]):
+                return False
+        return True
 
     def strong_reduce_step(self, infcx):
         reduced = self.try_delta_reduce(infcx.env)
         if reduced is not None:
             return (True, reduced)
         return (False, self)
+    
+    def bind_fvar(self, fvar, depth):
+        return self
+
+    def instantiate(self, expr, depth):
+        return self
+    
+    def incr_free_bvars(self, count, depth):
+        return self
+    
+    def whnf(self, env):
+        return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
         decl = env.declarations.get(self.name)
@@ -333,6 +393,18 @@ class W_LitNat(W_Expr):
 
     def pretty(self):
         return "(LitNat %s)" % (self.val.str())
+    
+    def instantiate(self, expr, depth):
+        return self
+    
+    def subst_levels(self, substs):
+        return self
+    
+    def syntactic_eq(self, other):
+        return isinstance(other, W_LitNat) and self.val == other.val
+    
+    def incr_free_bvars(self, count, depth):
+        return self
 
     def infer(self, infcx):
         return NAT_CONST
@@ -343,9 +415,24 @@ class W_Proj(W_Expr):
         self.field_idx = field_idx
         self.struct_expr = struct_expr
 
+    def strong_reduce_step(self, infcx):
+        progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
+        if progress:
+            return (True, W_Proj(self.struct_type, self.field_idx, new_struct_expr))
+
+        # Now try to infer the type of the struct_expr and return the appropriate field
+        # This will also handle cases where 'struct_expr' is a constant that can be reduced
+        # to a constructor
+        return (False, self)
+
+    def incr_free_bvars(self, count, depth):
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
+    
+    def bind_fvar(self, fvar, depth):
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
+
     def instantiate(self, expr, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.instantiate(expr, depth))
-
     def pretty(self):
         return "<W_Proj struct_type='%s' field_idx='%s' struct_expr='%s'>" % (
             self.struct_type.pretty(),
@@ -359,6 +446,11 @@ class W_Proj(W_Expr):
             self.field_idx, 
             self.struct_expr.subst_levels(substs)
         )
+    
+    def syntactic_eq(self, other):
+        # Our 'struct_type' is a 'W_Item' (which is only constructed once, during parsing),
+        # so we can compare by object identity with '=='
+        return isinstance(other, W_Proj) and self.struct_type == other.struct_type and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
 
     def infer(self, infcx):
         struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx.env)
@@ -421,6 +513,22 @@ class W_FunBase(W_Expr):
         if isinstance(self.binder_type, tuple):
             import pdb; pdb.set_trace()
 
+    # Weak head normal form stops at forall/lambda
+    def whnf(self, env):
+        return self
+    
+    def syntactic_eq(self, other):
+        # TODO - does syntactic equality really care about binder_info/name?
+        if not isinstance(other, W_FunBase):
+            return False
+        if self.binder_name != other.binder_name:
+            return False
+        if not self.binder_type.syntactic_eq(other.binder_type):
+            return False
+        if self.binder_info != other.binder_info:
+            return False
+        # Compare the body expressions
+        return self.body.syntactic_eq(other.body)
 
     def strong_reduction_helper(self, infcx):
         progress, binder_type = self.binder_type.strong_reduce_step(infcx)
@@ -437,11 +545,10 @@ class W_FunBase(W_Expr):
     
 class W_ForAll(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(∀ (%s : %s), %s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            body_pretty
+            self.body.pretty()
         )
 
     def infer(self, infcx):
@@ -487,11 +594,10 @@ class W_ForAll(W_FunBase):
 
 class W_Lambda(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(λ %s : %s => \b%s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            body_pretty
+            self.body.pretty()
         )
 
     def bind_fvar(self, fvar, depth):
@@ -564,6 +670,11 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
+    
+    def syntactic_eq(self, other):
+        if not isinstance(other, W_App):
+            return False
+        return self.fn.syntactic_eq(other.fn) and self.arg.syntactic_eq(other.arg)
     
     def try_iota_reduce(self, infcx):
         args = []
