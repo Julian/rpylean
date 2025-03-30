@@ -138,7 +138,7 @@ class InferenceContext:
             return True
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
-        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name == expr2.name:
+        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name.__eq__(expr2.name):
             # A given constant always has the same number of universe parameters
             assert len(expr1.levels) == len(expr2.levels)
             all_match = True

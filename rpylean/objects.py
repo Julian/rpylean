@@ -12,7 +12,12 @@ class Name:
         return hash_val
 
     def __eq__(self, other):
-        return self.components == other.components
+        if len(self.components) != len(other.components):
+            return False
+        for i in range(len(self.components)):
+            if self.components[i] != other.components[i]:
+                return False
+        return True
 
     def __repr__(self):
         return "<Name %r>" % (self.components,)
@@ -70,7 +75,7 @@ class W_Level(W_Item):
         if isinstance(other, W_LevelZero) and balance < 0:
             return False
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelParam):
-            return self.name == other.name and balance == 0
+            return self.name.__eq__(other.name) and balance == 0
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelZero):
             return False
         if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
@@ -181,7 +186,7 @@ class W_LevelParam(W_Level):
         return self.name.pretty()
     
     def syntactic_eq(self, other):
-        return isinstance(other, W_LevelParam) and self.name == other.name
+        return isinstance(other, W_LevelParam) and self.name.__eq__(other.name)
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
@@ -773,7 +778,7 @@ class W_App(W_Expr):
         # TODO - consider storing these by recursor name
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
-            if rec_rule.ctor_name == major_premise_ctor.name:
+            if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
                 # Construct an application of the recursor rule, using all of the parameters except the major premise
                 # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
                 new_app = rec_rule.val
