@@ -411,18 +411,19 @@ class W_LitNat(W_Expr):
     def subst_levels(self, substs):
         return self
     
+    def whnf(self, env):
+        return self
+    
     def syntactic_eq(self, other):
         return isinstance(other, W_LitNat) and self.val == other.val
     
     def strong_reduce_step(self, infcx):
-        print("Building nat expr for %s" % self)
-        expr = NAT_ZERO
-        i = rbigint.fromint(0)
-        while i.lt(self.val):
-            expr = W_App(NAT_SUCC, expr)
-            i = i.add(rbigint.fromint(1))
-        print("Built lit %s to %s" % (self.pretty(), expr.pretty()))
-        return (True, expr)
+        if self.val == rbigint.fromint(0):
+            return (True, NAT_ZERO)
+        
+        # Add a single 'Succ'
+        sub = self.val.sub(rbigint.fromint(1))
+        return (True, W_App(NAT_SUCC, W_LitNat(sub)))
     
     def bind_fvar(self, fvar, depth):
         return self
@@ -467,6 +468,9 @@ class W_Proj(W_Expr):
         target_arg = args[num_params + self.field_idx]
 
         return (True, target_arg)
+
+    def whnf(self, env):
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(env))
 
     def incr_free_bvars(self, count, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
