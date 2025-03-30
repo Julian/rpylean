@@ -9,7 +9,7 @@ from rpylean.interpreter import interpret
 
 def main(argv):
     if len(argv) != 2:
-        print(__doc__)
+        print("Run %s <export-file>." % (argv[0],))
         return 1
 
     path = argv[1]
