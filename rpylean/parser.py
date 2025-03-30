@@ -832,6 +832,9 @@ TOKEN_KINDS = {
     "#AX": Axiom,
 }
 
+for token, cls in TOKEN_KINDS.items():
+    cls.parse.func_name += "_" + cls.__name__
+
 def tokenize(line, lineno):
     tokens = []
     column = 0
