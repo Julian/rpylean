@@ -9,7 +9,7 @@ import subprocess
 
 def test_no_such_file():
     process = subprocess.Popen(
-        ["targetrpylean-c", "nonexistent/path"],
+        ["rpylean-c", "nonexistent/path"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=dict(os.environ, PATH=".:" + os.environ.get("PATH", ""))

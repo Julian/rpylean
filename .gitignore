@@ -1,4 +1,4 @@
-target*-c
+*rpylean-c
 __pycache__
 *.pyc
 .lake

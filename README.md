@@ -20,7 +20,7 @@ To translate `rpylean` (and build a binary) run:
 pypy <pypy-checkout>/rpython/bin/rpython targetrpylean.py
 ```
 
-which will output a `targetrpylean-c` binary (which you can use as above with a [`lean4export`](https://github.com/ammkrn/lean4export/) file).
+which will output an `rpylean-c` binary (which you can use as above with a [`lean4export`](https://github.com/ammkrn/lean4export/) file).
 
 ### Testing
 

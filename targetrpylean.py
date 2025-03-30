@@ -1,5 +1,6 @@
-from rpylean.cli import main
+from rpylean import cli
 
 
-def target(*args):
-    return main
+def target(driver, args):
+    driver.exe_name = "rpylean-%(backend)s"
+    return cli.main
