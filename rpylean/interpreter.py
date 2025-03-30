@@ -19,7 +19,7 @@ class Name:
         for c in self.components:
             hash_val = hash_val ^ hash(c)
         return hash_val
-    
+
     def __eq__(self, other):
         return self.components == other.components
 
@@ -28,7 +28,7 @@ class Name:
 
     def pretty(self):
         return '.'.join(self.components)
-    
+
 class Environment:
     def __init__(self):
         self.levels = {"0": W_LEVEL_ZERO}
@@ -137,7 +137,7 @@ class InferenceContext:
             print("  %s" % expr1.pretty())
             print("  %s" % expr2.pretty())
             raise
-    
+
     def infer_sort_of(self, expr):
         expr_type = expr.infer(self).whnf(self.env)
         if isinstance(expr_type, W_Sort):
