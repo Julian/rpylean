@@ -128,9 +128,7 @@ class InferenceContext:
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
-        expr1 = expr1.whnf(self.env)
-        expr2 = expr2.whnf(self.env)
-
+        print("Considering: %s vs %s" % (expr1.pretty(), expr2.pretty()))
 
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
@@ -149,11 +147,7 @@ class InferenceContext:
             body = expr1.body.instantiate(fvar, 0)
             other_body = expr2.body.instantiate(fvar, 0)
             return self.def_eq(body, other_body)
-        # TODO - when do we want to apply this?
-        elif isinstance(expr1, W_App) and isinstance(expr2, W_App):
-           fn_eq = self.def_eq(expr1.fn, expr2.fn)
-           arg_eq = self.def_eq(expr1.arg, expr2.arg)
-           return fn_eq and arg_eq
+
         
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
         if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name == expr2.name:
@@ -174,6 +168,18 @@ class InferenceContext:
         # If either reduction makes progress, then retry with the new expressions.
         # Otherwise, give up
         progress = False
+        expr1_reduced = expr1.whnf(self.env)
+        expr2_reduced = expr2.whnf(self.env)
+        if expr1_reduced != expr1:
+            expr1 = expr1_reduced
+            progress = True
+        if expr2_reduced != expr2:
+            expr2 = expr2_reduced
+            progress = True
+
+        if progress:
+            return self.def_eq(expr1, expr2)
+
         if isinstance(expr1, W_Const):
             expr1_reduced = expr1.try_delta_reduce(self)
             if expr1_reduced is not None:
@@ -188,6 +194,13 @@ class InferenceContext:
         if progress:
             return self.def_eq(expr1, expr2)
         
+        # Only perform this check after we've already tried reduction,
+        # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
+        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
+           fn_eq = self.def_eq(expr1.fn, expr2.fn)
+           arg_eq = self.def_eq(expr1.arg, expr2.arg)
+           return fn_eq and arg_eq
+
         raise NotDefEq(expr1, expr2)
 
     def infer_sort_of(self, expr):

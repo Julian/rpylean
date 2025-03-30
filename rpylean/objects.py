@@ -474,12 +474,13 @@ class W_App(W_Expr):
         return body_type
 
     def whnf(self, env):
+        fn = self.fn.whnf(env)
         arg = self.arg.whnf(env)
-        if isinstance(self.fn, W_FunBase):
-            res = self.fn.body.instantiate(arg, 0)
+        if isinstance(fn, W_FunBase):
+            res = fn.body.instantiate(arg, 0)
             return res
         else:
-            return W_App(self.fn, arg)
+            return self
 
     def bind_fvar(self, fvar, depth):
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
