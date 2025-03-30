@@ -352,6 +352,13 @@ class W_Proj(W_Expr):
             self.field_idx,
             self.struct_expr.pretty(),
         )
+    
+    def subst_levels(self, substs):
+        return W_Proj(
+            self.struct_type,
+            self.field_idx, 
+            self.struct_expr.subst_levels(substs)
+        )
 
     def infer(self, infcx):
         struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx.env)
@@ -372,11 +379,8 @@ class W_Proj(W_Expr):
         assert len(self.struct_type.w_kind.ctor_names) == 1
 
         ctor_decl = infcx.env.declarations[self.struct_type.w_kind.ctor_names[0]]
-        assert isinstance(ctor_decl, W_Declaration)
+        assert isinstance(ctor_decl, W_Declaration) 
         assert isinstance(ctor_decl.w_kind, W_Constructor)
-        # Fields can depend on earlier fields, so the constructor takes in 'proj'
-        # expressions for all of the previous fields ('self.field_idx' is 0-based)
-        assert ctor_decl.w_kind.num_params == len(apps) + (self.field_idx)
 
         ctor_type = ctor_decl.w_kind.ctype
 
@@ -389,6 +393,9 @@ class W_Proj(W_Expr):
             assert isinstance(ctor_type, W_ForAll)
             new_type = ctor_type.body.instantiate(app.arg, 0)
             ctor_type = new_type
+
+        # Fields can depend on earlier fields, so the constructor takes in 'proj'
+        # expressions for all of the previous fields ('self.field_idx' is 0-based)
 
         # Substitute in 'proj' expressions for all of the previous fields
         for i in range(self.field_idx):
@@ -403,7 +410,7 @@ class W_Proj(W_Expr):
 
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
-class W_FunBase(W_Expr):
+class W_FunBase(W_Expr): 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
