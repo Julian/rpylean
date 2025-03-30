@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from rpylean.objects import W_LEVEL_ZERO, W_Sort
+from rpylean.objects import W_LEVEL_ZERO, NotDefEq, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_Sort
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import we_are_translated
 
@@ -128,15 +128,67 @@ class InferenceContext:
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
-        if not we_are_translated():
-            assert type(expr1) == type(expr2)
-        try:
-            return expr1.def_eq(expr2, self)
-        except Exception as e:
-            print("Error in def_eq for:")
-            print("  %s" % expr1.pretty())
-            print("  %s" % expr2.pretty())
-            raise
+        expr1 = expr1.whnf(self.env)
+        expr2 = expr2.whnf(self.env)
+
+
+        # Simple cases - expressions are the same type, so we just recurse
+        if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
+            if expr1.id != expr2.id:
+                raise NotDefEq(expr1, expr2)
+            return True
+        elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
+            if not expr1.level.antisymm_eq(expr2.level, self):
+                raise NotDefEq(expr1, expr2)
+            return True
+        elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
+            if not self.def_eq(expr1.binder_type, expr2.binder_type):
+                raise NotDefEq(expr1, expr2)
+            
+            fvar = W_FVar(expr1)
+            body = expr1.body.instantiate(fvar, 0)
+            other_body = expr2.body.instantiate(fvar, 0)
+            return self.def_eq(body, other_body)
+        # TODO - when do we want to apply this?
+        elif isinstance(expr1, W_App) and isinstance(expr2, W_App):
+           fn_eq = self.def_eq(expr1.fn, expr2.fn)
+           arg_eq = self.def_eq(expr1.arg, expr2.arg)
+           return fn_eq and arg_eq
+        
+        # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
+        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name == expr2.name:
+            # A given constant always has the same number of universe parameters
+            assert len(expr1.levels) == len(expr2.levels)
+            all_match = True
+            for i in range(len(expr1.levels)):
+                if not expr1.levels[i].antisymm_eq(expr2.levels[i], self):
+                    all_match = False
+                    break
+            if all_match:
+                return True
+            
+        # At this point, we've exhausted all of the simple cases, and we now need to perform some kind of reduction
+        # For now, we don't handle all of the needed cases, so we'll sometimes raise a spurious `NotDefEq` exception.
+
+        # Naive approach - try a single round of delta reduction on both expressions
+        # If either reduction makes progress, then retry with the new expressions.
+        # Otherwise, give up
+        progress = False
+        if isinstance(expr1, W_Const):
+            expr1_reduced = expr1.try_delta_reduce(self)
+            if expr1_reduced is not None:
+                expr1 = expr1_reduced
+                progress = True
+        if isinstance(expr2, W_Const):
+            expr2_reduced = expr2.try_delta_reduce(self)
+            if expr2_reduced is not None:
+                expr2 = expr2_reduced
+                progress = True
+
+        if progress:
+            return self.def_eq(expr1, expr2)
+        
+        raise NotDefEq(expr1, expr2)
 
     def infer_sort_of(self, expr):
         expr_type = expr.infer(self).whnf(self.env)

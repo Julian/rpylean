@@ -7,7 +7,7 @@ class NotDefEq(Exception):
         return "NotDefEq(%s, %s)" % (self.lhs, self.rhs)
 
     def __str__(self):
-        return "NotDefEq: %s != %s" % (self.lhs, self.rhs)
+        return "NotDefEq:\nlhs=%s\nrhs=%s" % (self.lhs.pretty(), self.rhs.pretty())
 
 class W_Item(object):
     def __repr__(self):
@@ -83,6 +83,9 @@ class W_Level(W_Item):
 class W_LevelZero(W_Level):
     def pretty(self):
         return "<W_LevelZero>"
+    
+    def subst_levels(self, substs):
+        return self
 
 
 class W_LevelSucc(W_Level):
@@ -182,13 +185,6 @@ class W_BVar(W_Expr):
             return W_BVar(self.id + count)
         return self
 
-
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_BVar)
-        if self.id != other.id:
-            raise NotDefEq(self, other)
-        return True
-
     def subst_levels(self, substs):
         return self
 
@@ -214,12 +210,6 @@ class W_FVar(W_Expr):
             return W_BVar(depth)
         return self
 
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_FVar)
-        if self.id != other.id:
-            raise NotDefEq(self, other)
-        return True
-
     def __repr__(self):
         return "(FVar %s %s)" % (self.id, self.binder)
 
@@ -244,12 +234,6 @@ class W_Sort(W_Expr):
     def infer(self, infcx):
         return W_Sort(W_LevelSucc(self.level))
 
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_Sort)
-        if not self.level.antisymm_eq(other.level, infcx):
-            raise NotDefEq(self, other)
-        return True
-
     def subst_levels(self, substs):
         return W_Sort(self.level.subst_levels(substs))
 
@@ -260,6 +244,22 @@ class W_Const(W_Expr):
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
+
+    def try_delta_reduce(self, infcx):
+        decl = infcx.env.declarations.get(self.name)
+        # TODO - use hint to decide whether to delta reduce or not
+        val = decl.w_kind.get_val()
+        if val is None:
+            return None
+        
+
+        # TODO - deduplicate this
+        params = decl.level_params
+        substs = {}
+        for i in range(len(params)):
+            substs[params[i]] = self.levels[i]
+        val = val.subst_levels(substs)
+        return val
 
     def infer(self, infcx):
         decl = infcx.env.declarations[self.name]
@@ -276,18 +276,7 @@ class W_Const(W_Expr):
         decl_type = decl.get_type()
         res = decl_type.subst_levels(substs)
         return res
-
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_Const)
-        if self.name != other.name:
-            raise NotDefEq(self, other)
-        if len(self.levels) != len(other.levels):
-            raise NotDefEq(self, other)
-        for i in range(len(self.levels)):
-            if not self.levels[i].antisymm_eq(other.levels[i], infcx):
-                raise NotDefEq(self, other)
-        return True
-
+    
     def subst_levels(self, substs):
         new_levels = []
         for level in self.levels:
@@ -407,16 +396,6 @@ class W_ForAll(W_FunBase):
             body
         )
 
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_ForAll), "expected W_ForAll for %s" % other
-        if not self.binder_type.def_eq(other.binder_type, infcx):
-            raise NotDefEq(self, other)
-
-        fvar = W_FVar(self)
-        body = self.body.instantiate(fvar, 0)
-        other_body = other.body.instantiate(fvar, 0)
-        return body.def_eq(other_body, infcx)
-
     def subst_levels(self, levels):
         return W_ForAll(
             self.binder_name,
@@ -467,16 +446,6 @@ class W_Lambda(W_FunBase):
         res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
         return res
 
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_Lambda)
-        if not self.binder_type.def_eq(other.binder_type, infcx):
-            raise NotDefEq(self, other)
-
-        fvar = W_FVar(self)
-        body = self.body.instantiate(fvar, 0)
-        other_body = other.body.instantiate(fvar, 0)
-        return body.def_eq(other_body, infcx)
-
 
 #(fun (x : N) => Vector.repeat(1, n))
 #'(n: Nat) -> Vector n'
@@ -507,7 +476,7 @@ class W_App(W_Expr):
     def whnf(self, env):
         arg = self.arg.whnf(env)
         if isinstance(self.fn, W_FunBase):
-            res = self.fn.instantiate(arg, 0)
+            res = self.fn.body.instantiate(arg, 0)
             return res
         else:
             return W_App(self.fn, arg)
@@ -524,11 +493,6 @@ class W_App(W_Expr):
     def pretty(self):
         return "(%s %s)" % (self.fn.pretty(), self.arg.pretty())
 
-    def def_eq(self, other, infcx):
-        assert isinstance(other, W_App)
-        fn_eq = self.fn.def_eq(other.fn, infcx)
-        arg_eq = self.arg.def_eq(other.arg, infcx)
-        return fn_eq and arg_eq
 
     def subst_levels(self, substs):
         return W_App(
@@ -569,7 +533,10 @@ class W_Declaration(W_Item):
 
 
 class W_DeclarationKind(W_Item):
-    pass
+    # Returns the value associated with this declaration kind.
+    # This is the def value for a Definition, and `None` for things like Inductive
+    def get_val(self):
+        return None
 
 
 class DefOrTheorem(W_DeclarationKind):
@@ -590,6 +557,9 @@ class W_Definition(DefOrTheorem):
 
     def get_type(self):
         return self.def_type
+    
+    def get_val(self):
+        return self.def_val
 
     def pretty(self):
         return "<W_Definition def_type='%s' def_val='%s' hint='%s'>" % (
