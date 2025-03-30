@@ -386,6 +386,8 @@ class W_Const(W_Expr):
         return W_Const(self.name, new_levels)
 
 NAT_CONST = W_Const(Name(["Nat"]), [])
+NAT_ZERO = W_Const(Name(["Nat", "zero"]), [])
+NAT_SUCC = W_Const(Name(["Nat", "succ"]), [])
 
 class W_LitNat(W_Expr):
     def __init__(self, val):
@@ -403,6 +405,19 @@ class W_LitNat(W_Expr):
     def syntactic_eq(self, other):
         return isinstance(other, W_LitNat) and self.val == other.val
     
+    def strong_reduce_step(self, infcx):
+        print("Building nat expr for %s" % self)
+        expr = NAT_ZERO
+        i = rbigint.fromint(0)
+        while i.lt(self.val):
+            expr = W_App(NAT_SUCC, expr)
+            i = i.add(rbigint.fromint(1))
+        print("Built lit %s to %s" % (self.pretty(), expr.pretty()))
+        return (True, expr)
+    
+    def bind_fvar(self, fvar, depth):
+        return self
+    
     def incr_free_bvars(self, count, depth):
         return self
 
@@ -419,11 +434,30 @@ class W_Proj(W_Expr):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
         if progress:
             return (True, W_Proj(self.struct_type, self.field_idx, new_struct_expr))
+        
 
-        # Now try to infer the type of the struct_expr and return the appropriate field
-        # This will also handle cases where 'struct_expr' is a constant that can be reduced
-        # to a constructor
-        return (False, self)
+        # Look for a projection of a constructor, which allows us to just pick
+        # out the argument corresponding to 'field_idx'
+
+        args = []
+        struct_expr = new_struct_expr
+        while isinstance(struct_expr, W_App):
+            # Collect arguments until we reach the base type
+            args.append(struct_expr.arg)
+            struct_expr = struct_expr.fn
+
+        if not isinstance(struct_expr, W_Const):
+            return (False, self)
+        
+        ctor_decl = infcx.env.declarations[struct_expr.name]
+        if not isinstance(ctor_decl.w_kind, W_Constructor):
+            return (False, self)
+        
+        num_params = ctor_decl.w_kind.num_params
+        args.reverse()
+        target_arg = args[num_params + self.field_idx]
+
+        return (True, target_arg)
 
     def incr_free_bvars(self, count, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))

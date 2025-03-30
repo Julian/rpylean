@@ -149,6 +149,11 @@ class InferenceContext:
             if all_match:
                 return True
 
+        
+        # TODO - when should we perform this check?
+        if expr1.syntactic_eq(expr2):
+            return True
+
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
         progress2, expr2_reduced = expr2.strong_reduce_step(self)
@@ -164,12 +169,28 @@ class InferenceContext:
            fn_eq = self.def_eq(expr1.fn, expr2.fn)
            arg_eq = self.def_eq(expr1.arg, expr2.arg)
            return fn_eq and arg_eq
-        
-        # TODO - when should we perform this check?
-        if expr1.syntactic_eq(expr2):
-            return True
+
+        expr2_eta = self.try_eta_expand(expr1, expr2)
+        if expr2_eta is not None:
+            return self.def_eq(expr1, expr2_eta)
+        expr1_eta = self.try_eta_expand(expr2, expr1)
+        if expr1_eta is not None:
+            return self.def_eq(expr1_eta, expr2)
 
         raise NotDefEq(expr1, expr2)
+
+    def try_eta_expand(self, expr1, expr2):
+        if isinstance(expr1, W_Lambda):
+            expr2_ty = expr2.infer(self).whnf(self.env)
+            if isinstance(expr2_ty, W_ForAll):
+                # Turn 'f' into 'fun x => f x'
+                return W_Lambda(
+                    binder_name=expr2_ty.binder_name,
+                    binder_info=expr2_ty.binder_info,
+                    binder_type=expr2_ty.binder_type,
+                    body=W_App(expr2, W_BVar(0))
+                )
+        return None
 
     def infer_sort_of(self, expr):
         expr_type = expr.infer(self).whnf(self.env)
