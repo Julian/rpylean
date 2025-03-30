@@ -69,10 +69,12 @@ class W_Level(W_Item):
             return True
 
         if isinstance(self, W_LevelIMax) and isinstance(self.rhs, W_LevelParam):
-            raise RuntimeError("W_LevelIMax with W_LevelParam not yet implemented")
+            warn("W_LevelIMax with W_LevelParam not yet implemented")
+            return True
 
         if isinstance(other, W_LevelIMax) and isinstance(other.rhs, W_LevelParam):
-            raise RuntimeError("W_LevelIMax with W_LevelParam not yet implemented")
+            warn("W_LevelIMax with W_LevelParam not yet implemented")
+            return True
 
         raise RuntimeError("Unimplemented level comparison: %s <= %s" % (self, other))
 
@@ -250,7 +252,7 @@ class W_Const(W_Expr):
     def try_delta_reduce(self, env):
         decl = env.declarations.get(self.name)
         # TODO - use hint to decide whether to delta reduce or not
-        val = decl.w_kind.get_val()
+        val = decl.w_kind.get_delta_reduce_target()
         if val is None:
             return None
         
@@ -554,7 +556,7 @@ class W_Declaration(W_Item):
 class W_DeclarationKind(W_Item):
     # Returns the value associated with this declaration kind.
     # This is the def value for a Definition, and `None` for things like Inductive
-    def get_val(self):
+    def get_delta_reduce_target(self):
         return None
 
 
@@ -577,7 +579,7 @@ class W_Definition(DefOrTheorem):
     def get_type(self):
         return self.def_type
     
-    def get_val(self):
+    def get_delta_reduce_target(self):
         return self.def_val
 
     def pretty(self):
