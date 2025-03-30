@@ -715,6 +715,13 @@ class Recursor(Node):
         ]
         pos += num_rule_idxs
 
+        # Hack for double space in the case of 0 rules
+        if num_rule_idxs == 0:
+            # If we have no level params, then we'll be at the end of the line
+            if pos < len(tokens):
+                assert tokens[pos].text == ""
+            pos += 1
+
         k = tokens[pos].text
         level_params = [param.text for param in tokens[(pos + 1):]]
 
