@@ -602,10 +602,11 @@ class W_FunBase(W_Expr):
     
 class W_ForAll(W_FunBase):
     def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(∀ (%s : %s), %s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            self.body.pretty()
+            body_pretty
         )
 
     def infer(self, infcx):
@@ -651,10 +652,11 @@ class W_ForAll(W_FunBase):
 
 class W_Lambda(W_FunBase):
     def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(λ %s : %s => \b%s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            self.body.pretty()
+            body_pretty
         )
 
     def bind_fvar(self, fvar, depth):
@@ -764,6 +766,33 @@ class W_App(W_Expr):
             return False, self
         major_premise = args[major_idx]
 
+        # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
+        # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
+        if decl.w_kind.k == 1:
+            major_premise_ty = major_premise.infer(infcx)
+            print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
+            k_like_args = []
+            while isinstance(major_premise_ty, W_App):
+                k_like_args.append(major_premise_ty.arg)
+                major_premise_ty = major_premise_ty.fn
+
+            k_like_args.reverse()
+            print("Unwrapped: %s" % major_premise_ty.pretty())
+            assert isinstance(major_premise_ty, W_Const)
+            base_decl = infcx.env.declarations[major_premise_ty.name]
+            assert isinstance(base_decl.w_kind, W_Inductive)
+            assert len(base_decl.w_kind.ctor_names) == 1
+            print("Ctor name: %s" % base_decl.w_kind.ctor_names[0])
+
+            ctor_decl = infcx.env.declarations[base_decl.w_kind.ctor_names[0]]
+
+            major_premise_ctor = W_Const(base_decl.w_kind.ctor_names[0], major_premise_ty.levels)
+            for arg in k_like_args[0:ctor_decl.w_kind.num_params]:
+                major_premise_ctor = W_App(major_premise_ctor, arg)
+            print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
+            major_premise = major_premise_ctor
+            #import pdb; pdb.set_trace()
+
         # We try to delay materializing LitNat expressions as late as possible,
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
         # However, we need an actual constructor and application for iota reduction.
@@ -780,27 +809,36 @@ class W_App(W_Expr):
             all_ctor_args.append(major_premise_ctor.arg)
             major_premise_ctor = major_premise_ctor.fn
 
-        all_ctor_args.reverse()
-        num_params = decl.w_kind.num_params
-        assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
-        # Get the fields, which come after the type-level parametesr
-        # e.g. '(h : ¬p)' in 'Decidable.isFalse'
-        if num_params >= len(all_ctor_args):
-            ctor_fields = []
-        else:
-            ctor_fields = all_ctor_args[num_params:]
-
         if not isinstance(major_premise_ctor, W_Const):
             return False, self
 
-        new_args = list(args)
-        new_args.reverse()
-        new_args.pop()
-
+        all_ctor_args.reverse()
         # TODO - consider storing these by recursor name
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
+                print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))
+
+                # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                # import pdb; pdb.set_trace()
+                # assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
+                # # Get the fields, which come after the type-level parametesr
+                # # e.g. '(h : ¬p)' in 'Decidable.isFalse'
+                # if num_params >= len(all_ctor_args):
+                #     ctor_fields = []
+                # else:
+                #     ctor_fields = all_ctor_args[num_params:]
+                
+                # if not isinstance(major_premise_ctor, W_Const):
+                #     return False, self
+
+                # new_args = list(args)
+                # new_args.reverse()
+                # # Remove the major premise
+                # #new_args.pop()
+
+
+
                 # Construct an application of the recursor rule, using all of the parameters except the major premise
                 # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
                 new_app = rec_rule.val
@@ -808,13 +846,20 @@ class W_App(W_Expr):
                 # so apply the parameters from our recursor call
                 new_app = apply_const_level_params(target, new_app, infcx.env)
 
-                for arg in new_args:
-                    new_app = W_App(new_app, arg)
+                new_args = list(args)
+                new_args.reverse()
 
-                for ctor_field in ctor_fields:
+                total_args = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                for arg in new_args[:total_args]:
+                    new_app = W_App(new_app, arg)
+                # We want to include all of the arguments up to the motive (which is the major premise)
+
+                for ctor_field in all_ctor_args[decl.w_kind.num_params:(decl.w_kind.num_params+rec_rule.n_fields)]:
                     new_app = W_App(new_app, ctor_field)
 
                 # Type check the new application, to ensure that all of our args have the right types
+                if decl.w_kind.k == 1:
+                    import pdb; pdb.set_trace()
                 new_app_ty = new_app.infer(infcx)
                 new_app = new_app.whnf(infcx.env)
                 return True, new_app

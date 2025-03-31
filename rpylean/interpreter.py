@@ -188,6 +188,7 @@ class InferenceContext:
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
+        import pdb; pdb.set_trace()
         raise NotDefEq(expr1, expr2)
 
     def try_eta_expand(self, expr1, expr2):

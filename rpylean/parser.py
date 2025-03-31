@@ -735,7 +735,7 @@ class Recursor(Node):
             expr_idx=expr_idx.text,
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
-            k=k,
+            k=int(k),
             num_params=int(num_params.text),
             num_indices=int(num_indices.text),
             num_motives=int(num_motives.text),
@@ -773,7 +773,7 @@ class Recursor(Node):
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Recursor(
                 expr=environment.exprs[self.expr_idx],
-                k=self.k,
+                k=int(self.k),
                 num_params=int(self.num_params),
                 num_indices=int(self.num_indices),
                 num_motives=int(self.num_motives),
