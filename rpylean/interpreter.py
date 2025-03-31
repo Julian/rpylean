@@ -195,12 +195,13 @@ class InferenceContext:
         if isinstance(expr1, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self.env)
             if isinstance(expr2_ty, W_ForAll):
+                print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return W_Lambda(
                     binder_name=expr2_ty.binder_name,
                     binder_info=expr2_ty.binder_info,
                     binder_type=expr2_ty.binder_type,
-                    body=W_App(expr2, W_BVar(0))
+                    body=W_App(expr2.incr_free_bvars(1, 0), W_BVar(0))
                 )
         return None
 

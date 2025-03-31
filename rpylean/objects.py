@@ -280,6 +280,9 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         self.val = val
 
+    def instantiate(self, expr, depth):
+        return self
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LitStr) and self.val == other.val
 
@@ -567,8 +570,9 @@ class W_FunBase(W_Expr):
         self.body = body
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
-        if isinstance(self.binder_type, tuple):
-            import pdb; pdb.set_trace()
+        
+        #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
+        #    import pdb; pdb.set_trace()
 
     # Weak head normal form stops at forall/lambda
     def whnf(self, env):
@@ -651,6 +655,10 @@ class W_ForAll(W_FunBase):
 
 
 class W_Lambda(W_FunBase):
+    def __init__(self, binder_name, binder_type, binder_info, body):
+        W_FunBase.__init__(self, binder_name, binder_type, binder_info, body)
+        #if binder_name.components == ["a"] and isinstance(binder_type, W_Const) and binder_type.name.components == ["False"]:
+        #    import pdb; pdb.set_trace()
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(λ %s : %s => \b%s)" % (
@@ -791,6 +799,7 @@ class W_App(W_Expr):
                 major_premise_ctor = W_App(major_premise_ctor, arg)
             print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
+            import pdb; pdb.set_trace()
             #import pdb; pdb.set_trace()
 
         # We try to delay materializing LitNat expressions as late as possible,
@@ -858,8 +867,8 @@ class W_App(W_Expr):
                     new_app = W_App(new_app, ctor_field)
 
                 # Type check the new application, to ensure that all of our args have the right types
-                if decl.w_kind.k == 1:
-                    import pdb; pdb.set_trace()
+                #if decl.w_kind.k == 1:
+                    #import pdb; pdb.set_trace()
                 new_app_ty = new_app.infer(infcx)
                 new_app = new_app.whnf(infcx.env)
                 return True, new_app
