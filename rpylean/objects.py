@@ -536,6 +536,7 @@ class W_Proj(W_Expr):
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
         ctor_type = ctor_decl.w_kind.ctype
+        ctor_type = apply_const_level_params(struct_expr_type, ctor_type, infcx.env)
 
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
         # so start iteration from the end

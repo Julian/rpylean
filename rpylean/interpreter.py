@@ -192,7 +192,7 @@ class InferenceContext:
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):
-            expr2_ty = expr2.infer(self).whnf(self.env)
+            expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_ForAll):
                 print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
@@ -205,7 +205,7 @@ class InferenceContext:
         return None
 
     def infer_sort_of(self, expr):
-        expr_type = expr.infer(self).whnf(self.env)
+        expr_type = expr.infer(self).whnf(self)
         if isinstance(expr_type, W_Sort):
             return expr_type.level
         raise RuntimeError("Expected Sort, got %s" % expr_type)
