@@ -256,7 +256,7 @@ class W_FVar(W_Expr):
     def instantiate(self, expr, depth):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
 
     def syntactic_eq(self, other):
@@ -291,7 +291,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def incr_free_bvars(self, count, depth):
@@ -361,7 +361,10 @@ class W_Const(W_Expr):
     def incr_free_bvars(self, count, depth):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
+        reduced = self.try_delta_reduce(infcx.env)
+        if reduced is not None:
+            return reduced.whnf(infcx)
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
@@ -414,7 +417,7 @@ class W_LitNat(W_Expr):
     def subst_levels(self, substs):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def syntactic_eq(self, other):
@@ -482,8 +485,9 @@ class W_Proj(W_Expr):
 
         return (True, target_arg)
 
-    def whnf(self, env):
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(env))
+    def whnf(self, infcx):
+        # TODO - do we need to try reducing the projection?
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(infcx))
 
     def incr_free_bvars(self, count, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
@@ -513,7 +517,7 @@ class W_Proj(W_Expr):
         return isinstance(other, W_Proj) and self.struct_type == other.struct_type and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
 
     def infer(self, infcx):
-        struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx.env)
+        struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx)
 
         # Unfold applications of a base inductive type (e.g. `MyList TypeA TypeB`)
         apps = []
@@ -541,7 +545,7 @@ class W_Proj(W_Expr):
         # TODO: handle levels
         apps.reverse()
         for app in apps:
-            ctor_type = ctor_type.whnf(infcx.env)
+            ctor_type = ctor_type.whnf(infcx)
             assert isinstance(ctor_type, W_ForAll)
             new_type = ctor_type.body.instantiate(app.arg, 0)
             ctor_type = new_type
@@ -551,11 +555,11 @@ class W_Proj(W_Expr):
 
         # Substitute in 'proj' expressions for all of the previous fields
         for i in range(self.field_idx):
-            ctor_type = ctor_type.whnf(infcx.env)
+            ctor_type = ctor_type.whnf(infcx)
             assert isinstance(ctor_type, W_ForAll)
             ctor_type = ctor_type.body.instantiate(W_Proj(self.struct_type, i, self.struct_expr), 0)
 
-        ctor_type = ctor_type.whnf(infcx.env)
+        ctor_type = ctor_type.whnf(infcx)
         assert isinstance(ctor_type, W_ForAll)
         return ctor_type.binder_type
 
@@ -575,7 +579,7 @@ class W_FunBase(W_Expr):
         #    import pdb; pdb.set_trace()
 
     # Weak head normal form stops at forall/lambda
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def syntactic_eq(self, other):
@@ -729,8 +733,9 @@ class W_App(W_Expr):
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
-        fn_type = fn_type_base.whnf(infcx.env)
+        fn_type = fn_type_base.whnf(infcx)
         if not isinstance(fn_type, W_ForAll):
+            import pdb; pdb.set_trace()
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
@@ -927,22 +932,13 @@ class W_App(W_Expr):
         return False, self
         
 
-    def whnf(self, env):
-        fn = self.fn.whnf(env)
-        arg = self.arg.whnf(env)
-
-        # TODO - should we only delta reduce abbrevs here?
-        if isinstance(fn, W_Const):
-            reduced = fn.try_delta_reduce(env, only_abbrev=True)
-            if reduced is not None:
-                fn = reduced
-
+    def whnf(self, infcx):
+        fn = self.fn.whnf(infcx)
         if isinstance(fn, W_FunBase):
-            res = fn.body.instantiate(arg, 0)
-            return res.whnf(env)
-
-        else:
-            return self
+            body = fn.body.instantiate(self.arg, 0)
+            return body
+        return self
+        
         
     def strong_reduce_step(self, infcx):
         # First, try beta reduction
