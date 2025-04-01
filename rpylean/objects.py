@@ -774,33 +774,59 @@ class W_App(W_Expr):
             return False, self
         major_premise = args[major_idx]
 
+
+
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
         if decl.w_kind.k == 1:
-            major_premise_ty = major_premise.infer(infcx)
-            print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
-            k_like_args = []
-            while isinstance(major_premise_ty, W_App):
-                k_like_args.append(major_premise_ty.arg)
-                major_premise_ty = major_premise_ty.fn
+            # Verify that our major premise type is correct (by checking the whole expression)
+            # before we get rid of it
+            self.infer(infcx)
 
-            k_like_args.reverse()
-            print("Unwrapped: %s" % major_premise_ty.pretty())
-            assert isinstance(major_premise_ty, W_Const)
-            base_decl = infcx.env.declarations[major_premise_ty.name]
-            assert isinstance(base_decl.w_kind, W_Inductive)
-            assert len(base_decl.w_kind.ctor_names) == 1
-            print("Ctor name: %s" % base_decl.w_kind.ctor_names[0])
+            assert len(decl.w_kind.ind_names) == 1
+            inductive_decl = infcx.env.declarations[decl.w_kind.ind_names[0]]
+            assert isinstance(inductive_decl.w_kind, W_Inductive)
 
-            ctor_decl = infcx.env.declarations[base_decl.w_kind.ctor_names[0]]
+            assert len(inductive_decl.w_kind.ctor_names) == 1
+            ctor_decl = infcx.env.declarations[inductive_decl.w_kind.ctor_names[0]]
+            assert isinstance(ctor_decl.w_kind, W_Constructor)
 
-            major_premise_ctor = W_Const(base_decl.w_kind.ctor_names[0], major_premise_ty.levels)
-            for arg in k_like_args[0:ctor_decl.w_kind.num_params]:
+            new_args = list(args)
+            new_args.reverse()
+            num_ctor_params = ctor_decl.w_kind.num_params
+
+            major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], target.levels)
+            for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = W_App(major_premise_ctor, arg)
-            print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
+
+            print("Built new major premise: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
-            import pdb; pdb.set_trace()
-            #import pdb; pdb.set_trace()
+
+
+            # import pdb; pdb.set_trace()
+            # major_premise_ty = major_premise.infer(infcx)
+            # print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
+            # k_like_args = []
+            # while isinstance(major_premise_ty, W_App):
+            #     k_like_args.append(major_premise_ty.arg)
+            #     major_premise_ty = major_premise_ty.fn
+
+            # k_like_args.reverse()
+            # print("Unwrapped: %s" % major_premise_ty.pretty())
+            # assert isinstance(major_premise_ty, W_Const)
+            # base_decl = infcx.env.declarations[major_premise_ty.name]
+            # assert isinstance(base_decl.w_kind, W_Inductive)
+            # assert len(base_decl.w_kind.ctor_names) == 1
+            # print("Ctor name: %s" % base_decl.w_kind.ctor_names[0])
+
+            # ctor_decl = infcx.env.declarations[base_decl.w_kind.ctor_names[0]]
+
+            # major_premise_ctor = W_Const(base_decl.w_kind.ctor_names[0], major_premise_ty.levels)
+            # for arg in k_like_args[0:ctor_decl.w_kind.num_params]:
+            #     major_premise_ctor = W_App(major_premise_ctor, arg)
+            # print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
+            # major_premise = major_premise_ctor
+            # #import pdb; pdb.set_trace()
 
         # We try to delay materializing LitNat expressions as late as possible,
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
@@ -826,7 +852,9 @@ class W_App(W_Expr):
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
-                print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))
+                #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))
+                print("Performing iota reduction on %s" % major_premise_ctor.pretty())
+                
 
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 # import pdb; pdb.set_trace()
@@ -866,11 +894,27 @@ class W_App(W_Expr):
                 for ctor_field in all_ctor_args[decl.w_kind.num_params:(decl.w_kind.num_params+rec_rule.n_fields)]:
                     new_app = W_App(new_app, ctor_field)
 
+                i = major_idx - 1
+                while i >= 0:
+                    print("Adding back extra arg: %s" % new_args[i].pretty())
+                    new_app = W_App(new_app, args[i])
+                    i -= 1
+
                 # Type check the new application, to ensure that all of our args have the right types
                 #if decl.w_kind.k == 1:
                     #import pdb; pdb.set_trace()
-                new_app_ty = new_app.infer(infcx)
-                new_app = new_app.whnf(infcx.env)
+                try:
+                    new_app_ty = new_app.infer(infcx)
+                except NotDefEq as e:
+                    print("Infer failed, bailing from iota")
+                    return False, self
+                old_ty = self.infer(infcx)
+                try:
+                    infcx.def_eq(new_app_ty, old_ty)
+                except NotDefEq as e:
+                    print("DefEq failed, bailing from iota")
+                    return False, self
+                #new_app = new_app.whnf(infcx.env)
                 return True, new_app
 
 
