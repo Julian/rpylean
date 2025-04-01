@@ -117,15 +117,15 @@ class InferenceContext:
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             if expr1.id != expr2.id:
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
             if not expr1.level.antisymm_eq(expr2.level, self):
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
             if not self.def_eq(expr1.binder_type, expr2.binder_type):
-                raise NotDefEq(expr1, expr2)
+                return False
 
             fvar = W_FVar(expr1)
             body = expr1.body.instantiate(fvar, 0)
@@ -135,7 +135,7 @@ class InferenceContext:
         # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
         elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
             if expr1.val != expr2.val:
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
@@ -173,9 +173,7 @@ class InferenceContext:
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-           fn_eq = self.def_eq(expr1.fn, expr2.fn)
-           arg_eq = self.def_eq(expr1.arg, expr2.arg)
-           return fn_eq and arg_eq
+           return self.def_eq(expr1.fn, expr2.fn) and self.def_eq(expr1.arg, expr2.arg)
 
         expr2_eta = self.try_eta_expand(expr1, expr2)
         if expr2_eta is not None:
@@ -199,7 +197,7 @@ class InferenceContext:
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
-        raise NotDefEq(expr1, expr2)
+        return False
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):

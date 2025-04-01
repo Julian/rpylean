@@ -786,6 +786,13 @@ class W_App(W_Expr):
             # before we get rid of it
             self.infer(infcx)
 
+            old_ty = major_premise.infer(infcx)
+            old_ty_base = old_ty
+            while isinstance(old_ty_base, W_App):
+                old_ty_base = old_ty_base.fn
+            assert isinstance(old_ty_base, W_Const)
+
+
             assert len(decl.w_kind.ind_names) == 1
             inductive_decl = infcx.env.declarations[decl.w_kind.ind_names[0]]
             assert isinstance(inductive_decl.w_kind, W_Inductive)
@@ -798,13 +805,17 @@ class W_App(W_Expr):
             new_args.reverse()
             num_ctor_params = ctor_decl.w_kind.num_params
 
-            major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], target.levels)
+            major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], old_ty_base.levels)
             assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = W_App(major_premise_ctor, arg)
 
+            new_ty = major_premise_ctor.infer(infcx)
+            if not infcx.def_eq(old_ty, new_ty):
+                return False, self
             #print("Built new major premise: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
+
 
 
             # import pdb; pdb.set_trace()
@@ -912,15 +923,10 @@ class W_App(W_Expr):
                 # Type check the new application, to ensure that all of our args have the right types
                 #if decl.w_kind.k == 1:
                     #import pdb; pdb.set_trace()
-                try:
-                    new_app_ty = new_app.infer(infcx)
-                except NotDefEq as e:
-                    #print("Infer failed, bailing from iota")
-                    return False, self
+                new_app_ty = new_app.infer(infcx)
                 old_ty = self.infer(infcx)
-                try:
-                    infcx.def_eq(new_app_ty, old_ty)
-                except NotDefEq as e:
+                # TODO - this should actually be in the k-like reduction check above
+                if not infcx.def_eq(new_app_ty, old_ty):
                     #print("DefEq failed, bailing from iota")
                     return False, self
                 #new_app = new_app.whnf(infcx.env)
