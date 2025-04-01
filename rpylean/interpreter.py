@@ -113,6 +113,7 @@ class InferenceContext:
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
+        #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             if expr1.id != expr2.id:
@@ -158,6 +159,16 @@ class InferenceContext:
             return self.def_eq(expr1_reduced, expr2_reduced)
         expr1 = expr1_reduced
         expr2 = expr2_reduced
+
+        # Proof irrelevance check: Get the types of our expressions
+        expr1_ty = expr1.infer(self)
+        expr2_ty = expr2.infer(self)
+        # If these types are themselves Prop (Sort 0), and the types are equal, then our original expressions are proofs of the same `Prop`
+        expr1_ty_kind = expr1_ty.infer(self)
+        expr2_ty_kind = expr2_ty.infer(self)
+        if expr1_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)) and expr2_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)):
+            if self.def_eq(expr1_ty, expr2_ty):
+                return True
         
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
@@ -194,7 +205,7 @@ class InferenceContext:
         if isinstance(expr1, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_ForAll):
-                print("Eta-expanding %s" % expr2.pretty())
+                #print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return W_Lambda(
                     binder_name=expr2_ty.binder_name,

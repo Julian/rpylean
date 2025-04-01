@@ -421,7 +421,8 @@ class W_LitNat(W_Expr):
         return isinstance(other, W_LitNat) and self.val == other.val
     
     def build_nat_expr(self):
-        print("Building nat expr for %s" % self)
+        if rbigint.fromint(100).lt(self.val):
+            print("Building large nat expr for %s" % self.val)
         expr = NAT_ZERO
         i = rbigint.fromint(0)
         while i.lt(self.val):
@@ -733,7 +734,6 @@ class W_App(W_Expr):
         fn_type_base = self.fn.infer(infcx)
         fn_type = fn_type_base.whnf(infcx)
         if not isinstance(fn_type, W_ForAll):
-            import pdb; pdb.set_trace()
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
@@ -803,7 +803,7 @@ class W_App(W_Expr):
             for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = W_App(major_premise_ctor, arg)
 
-            print("Built new major premise: %s" % major_premise_ctor.pretty())
+            #print("Built new major premise: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
 
 
@@ -905,7 +905,7 @@ class W_App(W_Expr):
 
                 i = major_idx - 1
                 while i >= 0:
-                    print("Adding back extra arg: %s" % new_args[i].pretty())
+                    #print("Adding back extra arg: %s" % new_args[i].pretty())
                     new_app = W_App(new_app, args[i])
                     i -= 1
 
@@ -915,13 +915,13 @@ class W_App(W_Expr):
                 try:
                     new_app_ty = new_app.infer(infcx)
                 except NotDefEq as e:
-                    print("Infer failed, bailing from iota")
+                    #print("Infer failed, bailing from iota")
                     return False, self
                 old_ty = self.infer(infcx)
                 try:
                     infcx.def_eq(new_app_ty, old_ty)
                 except NotDefEq as e:
-                    print("DefEq failed, bailing from iota")
+                    #print("DefEq failed, bailing from iota")
                     return False, self
                 #new_app = new_app.whnf(infcx.env)
                 return True, new_app
