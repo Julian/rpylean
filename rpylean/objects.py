@@ -571,6 +571,7 @@ class W_FunBase(W_Expr):
         self.binder_type = binder_type
         self.binder_info = binder_info
         self.body = body
+        self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
         
@@ -605,6 +606,8 @@ class W_FunBase(W_Expr):
         new_body = open_body.bind_fvar(fvar, 0)
         if progress:
             return (True, (self.binder_name, binder_type, self.binder_info, new_body))
+        
+        self.finished_reduce = True
         return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
     
 class W_ForAll(W_FunBase):
@@ -644,7 +647,11 @@ class W_ForAll(W_FunBase):
         )
 
     def strong_reduce_step(self, infcx):
+        if self.finished_reduce:
+            return False, self
         progress, args = self.strong_reduction_helper(infcx)
+        if not progress:
+            return (False, self)
         return (progress, W_ForAll(*args))
 
     def subst_levels(self, levels):
@@ -703,7 +710,11 @@ class W_Lambda(W_FunBase):
         return res
     
     def strong_reduce_step(self, infcx):
+        if self.finished_reduce:
+            return False, self
         progress, args = self.strong_reduction_helper(infcx)
+        if not progress:
+            return (False, self)
         return (progress, W_Lambda(*args))
 
     def subst_levels(self, substs):
