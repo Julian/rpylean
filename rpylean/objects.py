@@ -731,7 +731,7 @@ class W_App(W_Expr):
         fn_type_base = self.fn.infer(infcx)
         fn_type = fn_type_base.whnf(infcx.env)
         if not isinstance(fn_type, W_ForAll):
-            raise RuntimeError("W_App.infer: expected function type, got %s" % fn_type)
+            raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
@@ -853,8 +853,7 @@ class W_App(W_Expr):
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
-                #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))
-                print("Performing iota reduction on %s" % major_premise_ctor.pretty())
+                #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
                 
 
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
@@ -1127,11 +1126,10 @@ class W_Constructor(W_DeclarationKind):
 
     def type_check(self, infcx):
         # TODO - implement type checking
+        # This includes checking that num_params and num_fields match the declared ctype
         pass
 
     def get_type(self):
-        if self.num_params != 0 or self.num_fields != 0:
-            warn("W_Constructor.get_type not yet implemented for num_params=%s num_fields=%s" % (self.num_params, self.num_fields))
         return self.ctype
 
     def pretty(self):
