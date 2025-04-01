@@ -796,6 +796,7 @@ class W_App(W_Expr):
             num_ctor_params = ctor_decl.w_kind.num_params
 
             major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], target.levels)
+            assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = W_App(major_premise_ctor, arg)
 
@@ -887,11 +888,17 @@ class W_App(W_Expr):
                 new_args.reverse()
 
                 total_args = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                assert total_args >= 0
                 for arg in new_args[:total_args]:
                     new_app = W_App(new_app, arg)
                 # We want to include all of the arguments up to the motive (which is the major premise)
 
-                for ctor_field in all_ctor_args[decl.w_kind.num_params:(decl.w_kind.num_params+rec_rule.n_fields)]:
+                ctor_start = decl.w_kind.num_params
+                ctor_end = decl.w_kind.num_params + rec_rule.n_fields
+                assert ctor_start >= 0
+                assert ctor_end >= 0
+
+                for ctor_field in all_ctor_args[ctor_start:ctor_end]:
                     new_app = W_App(new_app, ctor_field)
 
                 i = major_idx - 1
