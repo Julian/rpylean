@@ -362,9 +362,6 @@ class W_Const(W_Expr):
         return self
     
     def whnf(self, infcx):
-        reduced = self.try_delta_reduce(infcx.env)
-        if reduced is not None:
-            return reduced.whnf(infcx)
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
@@ -932,12 +929,29 @@ class W_App(W_Expr):
         return False, self
         
 
+    # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def whnf(self, infcx):
         fn = self.fn.whnf(infcx)
+        # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
             body = fn.body.instantiate(self.arg, 0)
-            return body
+            return body.whnf(infcx)
+        
+        # Handle recursor in head position
+        progress, reduced = self.try_iota_reduce(infcx)
+        if progress:
+            return reduced.whnf(infcx)
+        
+        if isinstance(fn, W_Const):
+            reduced = fn.try_delta_reduce(infcx.env)
+            if reduced is not None:
+                return W_App(reduced, self.arg).whnf(infcx)
+            else:
+                # We must have a constructor (or a recusor that we failed to iota-reduce earlier),
+                # so there's nothing we can do to reduce further in whnf
+                return self
         return self
+
         
         
     def strong_reduce_step(self, infcx):
