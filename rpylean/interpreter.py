@@ -230,7 +230,15 @@ def interpret(lines):
     if show_env.lower() == 'true':
         environment.dump_pretty()
 
+    start_pos = os.environ.get('START_POS')
+    if start_pos is None:
+        start_pos = 0
+    else:
+        start_pos = int(start_pos)
+
     total_decls = len(environment.declarations)
     for (i, (name, decl)) in enumerate(environment.declarations.items()):
+        if i < start_pos:
+            continue
         print("Checking declaration [%s/%s] '%s' of type %s" % (i, total_decls, name.pretty(), decl.w_kind.pretty()))
         decl.w_kind.type_check(ctx)
