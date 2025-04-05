@@ -267,4 +267,4 @@ def interpret(lines):
                 decl.w_kind.pretty(),
             ),
         )
-        decl.w_kind.type_check(ctx)
+        decl.type_check(ctx)

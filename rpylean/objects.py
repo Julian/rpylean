@@ -118,7 +118,7 @@ class W_LevelZero(W_Level):
 
     def subst_levels(self, substs):
         return self
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelZero)
 
@@ -133,7 +133,7 @@ class W_LevelSucc(W_Level):
     def subst_levels(self, substs):
         new_parent = self.parent.subst_levels(substs)
         return W_LevelSucc(new_parent)
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelSucc) and self.parent.syntactic_eq(other.parent)
 
@@ -149,7 +149,7 @@ class W_LevelMax(W_Level):
         new_lhs = self.lhs.subst_levels(substs)
         new_rhs = self.rhs.subst_levels(substs)
         return W_LevelMax(new_lhs, new_rhs)
-    
+
     def syntactic_eq(self, other):
         if not isinstance(other, W_LevelMax):
             return False
@@ -184,7 +184,7 @@ class W_LevelParam(W_Level):
 
     def pretty(self):
         return self.name.pretty()
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelParam) and self.name.__eq__(other.name)
 
@@ -198,7 +198,7 @@ class W_Expr(W_Item):
     # * Delta reduction (definition unfolding)
     # * Beta reduction (function application)
     # * Iota reduction: simplification of ('InductiveType.recursor arg0 .. argN InductiveType.ctorName') using matching RecursorRule
-    # 
+    #
     # Return (progress, new_expr), where `progress` indicates whether any reduction was performed
     def strong_reduce_step(self, infcx):
         return (False, self)
@@ -210,10 +210,10 @@ class W_BVar(W_Expr):
 
     def pretty(self):
         return "(BVar [%s])" % (self.id,)
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_BVar) and self.id == other.id
-    
+
     def bind_fvar(self, fvar, depth):
         return self
 
@@ -252,10 +252,10 @@ class W_FVar(W_Expr):
 
     def incr_free_bvars(self, count, depth):
         return self
-    
+
     def instantiate(self, expr, depth):
         return self
-    
+
     def whnf(self, infcx):
         return self
 
@@ -269,7 +269,7 @@ class W_FVar(W_Expr):
         if self.id == fvar.id:
             return W_BVar(depth)
         return self
-    
+
     def __repr__(self):
         return "(FVar %s %s)" % (self.id, self.binder)
 
@@ -293,13 +293,13 @@ class W_Sort(W_Expr):
 
     def whnf(self, infcx):
         return self
-    
+
     def incr_free_bvars(self, count, depth):
         return self
-    
+
     def bind_fvar(self, fvar, depth):
         return self
-    
+
     def instantiate(self, expr, depth):
         return self
 
@@ -311,7 +311,7 @@ class W_Sort(W_Expr):
 
     def subst_levels(self, substs):
         return W_Sort(self.level.subst_levels(substs))
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
 
@@ -333,13 +333,13 @@ class W_Const(W_Expr):
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
-    
+
     def syntactic_eq(self, other):
         if not isinstance(other, W_Const):
             return False
         if self.name != other.name:
             return False
-        
+
         assert len(self.levels) == len(other.levels), "W_Const syntactic_eq: levels length mismatch: %s vs %s" % (self.levels, other.levels)
         for i in range(len(self.levels)):
             if not self.levels[i].syntactic_eq(other.levels[i]):
@@ -351,16 +351,16 @@ class W_Const(W_Expr):
         if reduced is not None:
             return (True, reduced)
         return (False, self)
-    
+
     def bind_fvar(self, fvar, depth):
         return self
 
     def instantiate(self, expr, depth):
         return self
-    
+
     def incr_free_bvars(self, count, depth):
         return self
-    
+
     def whnf(self, infcx):
         return self
 
@@ -373,10 +373,10 @@ class W_Const(W_Expr):
         val = decl.w_kind.get_delta_reduce_target()
         if not isinstance(decl.w_kind, W_Definition):
             return None
-        
+
         if val is None:
             return None
-        
+
         val = apply_const_level_params(self, val, env)
         return val
 
@@ -407,19 +407,19 @@ class W_LitNat(W_Expr):
 
     def pretty(self):
         return "(LitNat %s)" % (self.val.str())
-    
+
     def instantiate(self, expr, depth):
         return self
-    
+
     def subst_levels(self, substs):
         return self
-    
+
     def whnf(self, infcx):
         return self
-    
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LitNat) and self.val == other.val
-    
+
     def build_nat_expr(self):
         if rbigint.fromint(100).lt(self.val):
             print("Building large nat expr for %s" % self.val)
@@ -434,14 +434,14 @@ class W_LitNat(W_Expr):
         return (False, self)
         if self.val == rbigint.fromint(0):
             return (True, NAT_ZERO)
-        
+
         # Add a single 'Succ'
         sub = self.val.sub(rbigint.fromint(1))
         return (True, W_App(NAT_SUCC, W_LitNat(sub)))
-    
+
     def bind_fvar(self, fvar, depth):
         return self
-    
+
     def incr_free_bvars(self, count, depth):
         return self
 
@@ -458,7 +458,7 @@ class W_Proj(W_Expr):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
         if progress:
             return (True, W_Proj(self.struct_type, self.field_idx, new_struct_expr))
-        
+
 
         # Look for a projection of a constructor, which allows us to just pick
         # out the argument corresponding to 'field_idx'
@@ -472,11 +472,11 @@ class W_Proj(W_Expr):
 
         if not isinstance(struct_expr, W_Const):
             return (False, self)
-        
+
         ctor_decl = infcx.env.declarations[struct_expr.name]
         if not isinstance(ctor_decl.w_kind, W_Constructor):
             return (False, self)
-        
+
         num_params = ctor_decl.w_kind.num_params
         args.reverse()
         target_arg = args[num_params + self.field_idx]
@@ -489,7 +489,7 @@ class W_Proj(W_Expr):
 
     def incr_free_bvars(self, count, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
-    
+
     def bind_fvar(self, fvar, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
 
@@ -501,14 +501,14 @@ class W_Proj(W_Expr):
             self.field_idx,
             self.struct_expr.pretty(),
         )
-    
+
     def subst_levels(self, substs):
         return W_Proj(
             self.struct_type,
-            self.field_idx, 
+            self.field_idx,
             self.struct_expr.subst_levels(substs)
         )
-    
+
     def syntactic_eq(self, other):
         # Our 'struct_type' is a 'W_Item' (which is only constructed once, during parsing),
         # so we can compare by object identity with '=='
@@ -533,7 +533,7 @@ class W_Proj(W_Expr):
         assert len(self.struct_type.w_kind.ctor_names) == 1
 
         ctor_decl = infcx.env.declarations[self.struct_type.w_kind.ctor_names[0]]
-        assert isinstance(ctor_decl, W_Declaration) 
+        assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
         ctor_type = ctor_decl.w_kind.ctype
@@ -565,7 +565,7 @@ class W_Proj(W_Expr):
 
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
-class W_FunBase(W_Expr): 
+class W_FunBase(W_Expr):
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
         self.binder_type = binder_type
@@ -574,14 +574,14 @@ class W_FunBase(W_Expr):
         self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
-        
+
         #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
         #    import pdb; pdb.set_trace()
 
     # Weak head normal form stops at forall/lambda
     def whnf(self, infcx):
         return self
-    
+
     def syntactic_eq(self, other):
         # TODO - does syntactic equality really care about binder_info/name?
         if not isinstance(other, W_FunBase):
@@ -599,17 +599,17 @@ class W_FunBase(W_Expr):
         progress, binder_type = self.binder_type.strong_reduce_step(infcx)
         if progress:
             return (True, (self.binder_name, binder_type, self.binder_info, self.body))
-        
+
         fvar = W_FVar(self)
         open_body = self.body.instantiate(fvar, 0)
         progress, open_body = open_body.strong_reduce_step(infcx)
         new_body = open_body.bind_fvar(fvar, 0)
         if progress:
             return (True, (self.binder_name, binder_type, self.binder_info, new_body))
-        
+
         self.finished_reduce = True
         return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
-    
+
 class W_ForAll(W_FunBase):
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
@@ -708,7 +708,7 @@ class W_Lambda(W_FunBase):
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
         res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
         return res
-    
+
     def strong_reduce_step(self, infcx):
         if self.finished_reduce:
             return False, self
@@ -751,12 +751,12 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
-    
+
     def syntactic_eq(self, other):
         if not isinstance(other, W_App):
             return False
         return self.fn.syntactic_eq(other.fn) and self.arg.syntactic_eq(other.arg)
-    
+
     def try_iota_reduce(self, infcx):
         args = []
         target = self
@@ -764,18 +764,18 @@ class W_App(W_Expr):
             args.append(target.arg)
             target = target.fn
 
-    
+
         if not isinstance(target, W_Const):
             return False, self
-        
+
         decl = infcx.env.declarations[target.name]
         if not isinstance(decl.w_kind, W_Recursor):
             return False, self
-        
+
         if decl.w_kind.num_motives != 1:
             warn("W_App.try_iota_reduce: unimplemented case num_motives != 1 for %s" % target.name)
             return False, self
-        
+
         skip_count = decl.w_kind.num_params + decl.w_kind.num_indices + decl.w_kind.num_minors + decl.w_kind.num_motives
         major_idx = len(args) - 1 - skip_count
 
@@ -860,7 +860,7 @@ class W_App(W_Expr):
         # Hopefully we won't reach this spot with any especially large literals.
         if isinstance(major_premise, W_LitNat):
             major_premise = major_premise.build_nat_expr()
-        
+
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')
         # and add then as arguments to the recursor rule application (before the motive)
@@ -879,7 +879,7 @@ class W_App(W_Expr):
             rec_rule = infcx.env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
                 #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
-                
+
 
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 # import pdb; pdb.set_trace()
@@ -890,7 +890,7 @@ class W_App(W_Expr):
                 #     ctor_fields = []
                 # else:
                 #     ctor_fields = all_ctor_args[num_params:]
-                
+
                 # if not isinstance(major_premise_ctor, W_Const):
                 #     return False, self
 
@@ -945,7 +945,7 @@ class W_App(W_Expr):
 
 
         return False, self
-        
+
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def whnf(self, infcx):
@@ -954,12 +954,12 @@ class W_App(W_Expr):
         if isinstance(fn, W_FunBase):
             body = fn.body.instantiate(self.arg, 0)
             return body.whnf(infcx)
-        
+
         # Handle recursor in head position
         progress, reduced = self.try_iota_reduce(infcx)
         if progress:
             return reduced.whnf(infcx)
-        
+
         if isinstance(fn, W_Const):
             reduced = fn.try_delta_reduce(infcx.env)
             if reduced is not None:
@@ -970,14 +970,14 @@ class W_App(W_Expr):
                 return self
         return self
 
-        
-        
+
+
     def strong_reduce_step(self, infcx):
         # First, try beta reduction
         if isinstance(self.fn, W_FunBase):
             body = self.fn.body.instantiate(self.arg, 0)
             return (True, body)
-        
+
         # Next, try strong reduction with the fn and body
         # After this, it might become possible to do beta
         # reduction (if the fn gets reduced to a W_FunBase)
@@ -987,17 +987,17 @@ class W_App(W_Expr):
         progress, new_fn = self.fn.strong_reduce_step(infcx)
         if progress:
             return (True, W_App(new_fn, self.arg))
-        
+
         progress, new_arg = self.arg.strong_reduce_step(infcx)
         if progress:
             return (True, W_App(new_fn, new_arg))
-        
+
         # Finally, try iota reduction after we've reduced everthing else as much as possible
         # This allows us to find a recursor constant and constructor constant
         # (both can be produced by earlier reduction steps, but neither can be further reduced
         # without iota reduction)
         return self.try_iota_reduce(infcx)
-        
+
     def bind_fvar(self, fvar, depth):
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
 
@@ -1040,6 +1040,9 @@ class W_Declaration(W_Item):
 
     def get_type(self):
         return self.w_kind.get_type()
+
+    def type_check(self, *args):
+        return self.w_kind.type_check(*args)
 
     def pretty(self):
         return "<W_Declaration name='%s' level_params='%s' kind=%s>" % (
