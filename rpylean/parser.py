@@ -235,6 +235,7 @@ class BVar(ExprVal):
     def to_w_expr(self, environment):
         return objects.W_BVar(id=self.id)
 
+
 class LitStr(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -250,6 +251,7 @@ class LitStr(ExprVal):
 
     def to_w_expr(self, environment):
         return objects.W_LitStr(val=self.val)
+
 
 class LitNat(ExprVal):
     @staticmethod

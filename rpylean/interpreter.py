@@ -158,7 +158,7 @@ class InferenceContext:
             return self.def_eq(expr1_reduced, expr2_reduced)
         expr1 = expr1_reduced
         expr2 = expr2_reduced
-        
+
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
@@ -177,7 +177,7 @@ class InferenceContext:
         # Perform this check late, as it can be very slow for large nested App expressiosn
         if expr1.syntactic_eq(expr2):
             return True
-        
+
         # As the *very* last step, try converting NatLit exprs
         # In order to be able to type check things like 'UInt32.size',
         # we need to try everything else before actually calling 'build_nat_expr'
@@ -219,8 +219,16 @@ def interpret(lines):
     show_env = os.environ.get('SHOW_ENV') or 'true'
     if show_env.lower() == 'true':
         environment.dump_pretty()
+        print("\n\n")
 
     total_decls = len(environment.declarations)
-    for (i, (name, decl)) in enumerate(environment.declarations.items()):
-        print("Checking declaration [%s/%s] '%s' of type %s" % (i, total_decls, name.pretty(), decl.w_kind.pretty()))
+    for i, (name, decl) in enumerate(environment.declarations.items(), 1):
+        print(
+            "Checking declaration [%s/%s] '%s' of type %s" % (
+                i,
+                total_decls,
+                name.pretty(),
+                decl.w_kind.pretty(),
+            ),
+        )
         decl.w_kind.type_check(ctx)
