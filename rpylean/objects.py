@@ -256,7 +256,7 @@ class W_FVar(W_Expr):
     def instantiate(self, expr, depth):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
 
     def syntactic_eq(self, other):
@@ -280,6 +280,9 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         self.val = val
 
+    def instantiate(self, expr, depth):
+        return self
+
     def syntactic_eq(self, other):
         return isinstance(other, W_LitStr) and self.val == other.val
 
@@ -288,7 +291,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def incr_free_bvars(self, count, depth):
@@ -358,7 +361,7 @@ class W_Const(W_Expr):
     def incr_free_bvars(self, count, depth):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
@@ -411,14 +414,15 @@ class W_LitNat(W_Expr):
     def subst_levels(self, substs):
         return self
     
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def syntactic_eq(self, other):
         return isinstance(other, W_LitNat) and self.val == other.val
     
     def build_nat_expr(self):
-        print("Building nat expr for %s" % self)
+        if rbigint.fromint(100).lt(self.val):
+            print("Building large nat expr for %s" % self.val)
         expr = NAT_ZERO
         i = rbigint.fromint(0)
         while i.lt(self.val):
@@ -479,8 +483,9 @@ class W_Proj(W_Expr):
 
         return (True, target_arg)
 
-    def whnf(self, env):
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(env))
+    def whnf(self, infcx):
+        # TODO - do we need to try reducing the projection?
+        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(infcx))
 
     def incr_free_bvars(self, count, depth):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
@@ -510,7 +515,7 @@ class W_Proj(W_Expr):
         return isinstance(other, W_Proj) and self.struct_type == other.struct_type and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
 
     def infer(self, infcx):
-        struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx.env)
+        struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx)
 
         # Unfold applications of a base inductive type (e.g. `MyList TypeA TypeB`)
         apps = []
@@ -532,13 +537,14 @@ class W_Proj(W_Expr):
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
         ctor_type = ctor_decl.w_kind.ctype
+        ctor_type = apply_const_level_params(struct_expr_type, ctor_type, infcx.env)
 
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
         # so start iteration from the end
         # TODO: handle levels
         apps.reverse()
         for app in apps:
-            ctor_type = ctor_type.whnf(infcx.env)
+            ctor_type = ctor_type.whnf(infcx)
             assert isinstance(ctor_type, W_ForAll)
             new_type = ctor_type.body.instantiate(app.arg, 0)
             ctor_type = new_type
@@ -548,11 +554,11 @@ class W_Proj(W_Expr):
 
         # Substitute in 'proj' expressions for all of the previous fields
         for i in range(self.field_idx):
-            ctor_type = ctor_type.whnf(infcx.env)
+            ctor_type = ctor_type.whnf(infcx)
             assert isinstance(ctor_type, W_ForAll)
             ctor_type = ctor_type.body.instantiate(W_Proj(self.struct_type, i, self.struct_expr), 0)
 
-        ctor_type = ctor_type.whnf(infcx.env)
+        ctor_type = ctor_type.whnf(infcx)
         assert isinstance(ctor_type, W_ForAll)
         return ctor_type.binder_type
 
@@ -565,13 +571,15 @@ class W_FunBase(W_Expr):
         self.binder_type = binder_type
         self.binder_info = binder_info
         self.body = body
+        self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
-        if isinstance(self.binder_type, tuple):
-            import pdb; pdb.set_trace()
+        
+        #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
+        #    import pdb; pdb.set_trace()
 
     # Weak head normal form stops at forall/lambda
-    def whnf(self, env):
+    def whnf(self, infcx):
         return self
     
     def syntactic_eq(self, other):
@@ -598,14 +606,17 @@ class W_FunBase(W_Expr):
         new_body = open_body.bind_fvar(fvar, 0)
         if progress:
             return (True, (self.binder_name, binder_type, self.binder_info, new_body))
+        
+        self.finished_reduce = True
         return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
     
 class W_ForAll(W_FunBase):
     def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(∀ (%s : %s), %s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            self.body.pretty()
+            body_pretty
         )
 
     def infer(self, infcx):
@@ -636,7 +647,11 @@ class W_ForAll(W_FunBase):
         )
 
     def strong_reduce_step(self, infcx):
+        if self.finished_reduce:
+            return False, self
         progress, args = self.strong_reduction_helper(infcx)
+        if not progress:
+            return (False, self)
         return (progress, W_ForAll(*args))
 
     def subst_levels(self, levels):
@@ -650,11 +665,16 @@ class W_ForAll(W_FunBase):
 
 
 class W_Lambda(W_FunBase):
+    def __init__(self, binder_name, binder_type, binder_info, body):
+        W_FunBase.__init__(self, binder_name, binder_type, binder_info, body)
+        #if binder_name.components == ["a"] and isinstance(binder_type, W_Const) and binder_type.name.components == ["False"]:
+        #    import pdb; pdb.set_trace()
     def pretty(self):
+        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
         return "(λ %s : %s => \b%s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
-            self.body.pretty()
+            body_pretty
         )
 
     def bind_fvar(self, fvar, depth):
@@ -690,7 +710,11 @@ class W_Lambda(W_FunBase):
         return res
     
     def strong_reduce_step(self, infcx):
+        if self.finished_reduce:
+            return False, self
         progress, args = self.strong_reduction_helper(infcx)
+        if not progress:
+            return (False, self)
         return (progress, W_Lambda(*args))
 
     def subst_levels(self, substs):
@@ -719,9 +743,9 @@ class W_App(W_Expr):
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
-        fn_type = fn_type_base.whnf(infcx.env)
+        fn_type = fn_type_base.whnf(infcx)
         if not isinstance(fn_type, W_ForAll):
-            raise RuntimeError("W_App.infer: expected function type, got %s" % fn_type)
+            raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
@@ -764,6 +788,72 @@ class W_App(W_Expr):
             return False, self
         major_premise = args[major_idx]
 
+
+
+        # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
+        # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
+        if decl.w_kind.k == 1:
+            # Verify that our major premise type is correct (by checking the whole expression)
+            # before we get rid of it
+            self.infer(infcx)
+
+            old_ty = major_premise.infer(infcx)
+            old_ty_base = old_ty
+            while isinstance(old_ty_base, W_App):
+                old_ty_base = old_ty_base.fn
+            assert isinstance(old_ty_base, W_Const)
+
+
+            assert len(decl.w_kind.ind_names) == 1
+            inductive_decl = infcx.env.declarations[decl.w_kind.ind_names[0]]
+            assert isinstance(inductive_decl.w_kind, W_Inductive)
+
+            assert len(inductive_decl.w_kind.ctor_names) == 1
+            ctor_decl = infcx.env.declarations[inductive_decl.w_kind.ctor_names[0]]
+            assert isinstance(ctor_decl.w_kind, W_Constructor)
+
+            new_args = list(args)
+            new_args.reverse()
+            num_ctor_params = ctor_decl.w_kind.num_params
+
+            major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], old_ty_base.levels)
+            assert num_ctor_params >= 0
+            for arg in new_args[0:num_ctor_params]:
+                major_premise_ctor = W_App(major_premise_ctor, arg)
+
+            new_ty = major_premise_ctor.infer(infcx)
+            if not infcx.def_eq(old_ty, new_ty):
+                return False, self
+            #print("Built new major premise: %s" % major_premise_ctor.pretty())
+            major_premise = major_premise_ctor
+
+
+
+            # import pdb; pdb.set_trace()
+            # major_premise_ty = major_premise.infer(infcx)
+            # print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
+            # k_like_args = []
+            # while isinstance(major_premise_ty, W_App):
+            #     k_like_args.append(major_premise_ty.arg)
+            #     major_premise_ty = major_premise_ty.fn
+
+            # k_like_args.reverse()
+            # print("Unwrapped: %s" % major_premise_ty.pretty())
+            # assert isinstance(major_premise_ty, W_Const)
+            # base_decl = infcx.env.declarations[major_premise_ty.name]
+            # assert isinstance(base_decl.w_kind, W_Inductive)
+            # assert len(base_decl.w_kind.ctor_names) == 1
+            # print("Ctor name: %s" % base_decl.w_kind.ctor_names[0])
+
+            # ctor_decl = infcx.env.declarations[base_decl.w_kind.ctor_names[0]]
+
+            # major_premise_ctor = W_Const(base_decl.w_kind.ctor_names[0], major_premise_ty.levels)
+            # for arg in k_like_args[0:ctor_decl.w_kind.num_params]:
+            #     major_premise_ctor = W_App(major_premise_ctor, arg)
+            # print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
+            # major_premise = major_premise_ctor
+            # #import pdb; pdb.set_trace()
+
         # We try to delay materializing LitNat expressions as late as possible,
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
         # However, we need an actual constructor and application for iota reduction.
@@ -780,27 +870,37 @@ class W_App(W_Expr):
             all_ctor_args.append(major_premise_ctor.arg)
             major_premise_ctor = major_premise_ctor.fn
 
-        all_ctor_args.reverse()
-        num_params = decl.w_kind.num_params
-        assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
-        # Get the fields, which come after the type-level parametesr
-        # e.g. '(h : ¬p)' in 'Decidable.isFalse'
-        if num_params >= len(all_ctor_args):
-            ctor_fields = []
-        else:
-            ctor_fields = all_ctor_args[num_params:]
-
         if not isinstance(major_premise_ctor, W_Const):
             return False, self
 
-        new_args = list(args)
-        new_args.reverse()
-        new_args.pop()
-
+        all_ctor_args.reverse()
         # TODO - consider storing these by recursor name
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
+                #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
+                
+
+                # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                # import pdb; pdb.set_trace()
+                # assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
+                # # Get the fields, which come after the type-level parametesr
+                # # e.g. '(h : ¬p)' in 'Decidable.isFalse'
+                # if num_params >= len(all_ctor_args):
+                #     ctor_fields = []
+                # else:
+                #     ctor_fields = all_ctor_args[num_params:]
+                
+                # if not isinstance(major_premise_ctor, W_Const):
+                #     return False, self
+
+                # new_args = list(args)
+                # new_args.reverse()
+                # # Remove the major premise
+                # #new_args.pop()
+
+
+
                 # Construct an application of the recursor rule, using all of the parameters except the major premise
                 # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
                 new_app = rec_rule.val
@@ -808,37 +908,69 @@ class W_App(W_Expr):
                 # so apply the parameters from our recursor call
                 new_app = apply_const_level_params(target, new_app, infcx.env)
 
-                for arg in new_args:
-                    new_app = W_App(new_app, arg)
+                new_args = list(args)
+                new_args.reverse()
 
-                for ctor_field in ctor_fields:
+                total_args = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                assert total_args >= 0
+                for arg in new_args[:total_args]:
+                    new_app = W_App(new_app, arg)
+                # We want to include all of the arguments up to the motive (which is the major premise)
+
+                ctor_start = decl.w_kind.num_params
+                ctor_end = decl.w_kind.num_params + rec_rule.n_fields
+                assert ctor_start >= 0
+                assert ctor_end >= 0
+
+                for ctor_field in all_ctor_args[ctor_start:ctor_end]:
                     new_app = W_App(new_app, ctor_field)
 
+                i = major_idx - 1
+                while i >= 0:
+                    #print("Adding back extra arg: %s" % new_args[i].pretty())
+                    new_app = W_App(new_app, args[i])
+                    i -= 1
+
                 # Type check the new application, to ensure that all of our args have the right types
+                #if decl.w_kind.k == 1:
+                    #import pdb; pdb.set_trace()
                 new_app_ty = new_app.infer(infcx)
-                new_app = new_app.whnf(infcx.env)
+                old_ty = self.infer(infcx)
+                # TODO - this should actually be in the k-like reduction check above
+                if not infcx.def_eq(new_app_ty, old_ty):
+                    #print("DefEq failed, bailing from iota")
+                    return False, self
+                #new_app = new_app.whnf(infcx.env)
                 return True, new_app
 
 
         return False, self
         
 
-    def whnf(self, env):
-        fn = self.fn.whnf(env)
-        arg = self.arg.whnf(env)
-
-        # TODO - should we only delta reduce abbrevs here?
-        if isinstance(fn, W_Const):
-            reduced = fn.try_delta_reduce(env, only_abbrev=True)
-            if reduced is not None:
-                fn = reduced
-
+    # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
+    def whnf(self, infcx):
+        fn = self.fn.whnf(infcx)
+        # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
-            res = fn.body.instantiate(arg, 0)
-            return res.whnf(env)
+            body = fn.body.instantiate(self.arg, 0)
+            return body.whnf(infcx)
+        
+        # Handle recursor in head position
+        progress, reduced = self.try_iota_reduce(infcx)
+        if progress:
+            return reduced.whnf(infcx)
+        
+        if isinstance(fn, W_Const):
+            reduced = fn.try_delta_reduce(infcx.env)
+            if reduced is not None:
+                return W_App(reduced, self.arg).whnf(infcx)
+            else:
+                # We must have a constructor (or a recusor that we failed to iota-reduce earlier),
+                # so there's nothing we can do to reduce further in whnf
+                return self
+        return self
 
-        else:
-            return self
+        
         
     def strong_reduce_step(self, infcx):
         # First, try beta reduction
@@ -1022,11 +1154,10 @@ class W_Constructor(W_DeclarationKind):
 
     def type_check(self, infcx):
         # TODO - implement type checking
+        # This includes checking that num_params and num_fields match the declared ctype
         pass
 
     def get_type(self):
-        if self.num_params != 0 or self.num_fields != 0:
-            warn("W_Constructor.get_type not yet implemented for num_params=%s num_fields=%s" % (self.num_params, self.num_fields))
         return self.ctype
 
     def pretty(self):

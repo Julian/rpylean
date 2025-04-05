@@ -113,18 +113,19 @@ class InferenceContext:
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
+        #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             if expr1.id != expr2.id:
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
             if not expr1.level.antisymm_eq(expr2.level, self):
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
             if not self.def_eq(expr1.binder_type, expr2.binder_type):
-                raise NotDefEq(expr1, expr2)
+                return False
 
             fvar = W_FVar(expr1)
             body = expr1.body.instantiate(fvar, 0)
@@ -134,7 +135,7 @@ class InferenceContext:
         # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
         elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
             if expr1.val != expr2.val:
-                raise NotDefEq(expr1, expr2)
+                return False
             return True
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
@@ -149,6 +150,9 @@ class InferenceContext:
             if all_match:
                 return True
 
+        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
+           if self.def_eq(expr1.fn, expr2.fn) and self.def_eq(expr1.arg, expr2.arg):
+               return True
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
@@ -159,12 +163,18 @@ class InferenceContext:
         expr1 = expr1_reduced
         expr2 = expr2_reduced
 
+        # Proof irrelevance check: Get the types of our expressions
+        expr1_ty = expr1.infer(self)
+        expr2_ty = expr2.infer(self)
+        # If these types are themselves Prop (Sort 0), and the types are equal, then our original expressions are proofs of the same `Prop`
+        expr1_ty_kind = expr1_ty.infer(self)
+        expr2_ty_kind = expr2_ty.infer(self)
+        if expr1_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)) and expr2_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)):
+            if self.def_eq(expr1_ty, expr2_ty):
+                return True
+
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
-        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-           fn_eq = self.def_eq(expr1.fn, expr2.fn)
-           arg_eq = self.def_eq(expr1.arg, expr2.arg)
-           return fn_eq and arg_eq
 
         expr2_eta = self.try_eta_expand(expr1, expr2)
         if expr2_eta is not None:
@@ -188,23 +198,24 @@ class InferenceContext:
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
-        raise NotDefEq(expr1, expr2)
+        return False
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):
-            expr2_ty = expr2.infer(self).whnf(self.env)
+            expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_ForAll):
+                #print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return W_Lambda(
                     binder_name=expr2_ty.binder_name,
                     binder_info=expr2_ty.binder_info,
                     binder_type=expr2_ty.binder_type,
-                    body=W_App(expr2, W_BVar(0))
+                    body=W_App(expr2.incr_free_bvars(1, 0), W_BVar(0))
                 )
         return None
 
     def infer_sort_of(self, expr):
-        expr_type = expr.infer(self).whnf(self.env)
+        expr_type = expr.infer(self).whnf(self)
         if isinstance(expr_type, W_Sort):
             return expr_type.level
         raise RuntimeError("Expected Sort, got %s" % expr_type)
@@ -221,8 +232,16 @@ def interpret(lines):
         environment.dump_pretty()
         print("\n\n")
 
+    start_pos = os.environ.get('START_POS')
+    if start_pos is None:
+        start_pos = 0
+    else:
+        start_pos = int(start_pos)
+
     total_decls = len(environment.declarations)
     for i, (name, decl) in enumerate(environment.declarations.items(), 1):
+        if i < start_pos:
+            continue
         print(
             "Checking declaration [%s/%s] '%s' of type %s" % (
                 i,
