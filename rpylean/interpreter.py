@@ -150,6 +150,9 @@ class InferenceContext:
             if all_match:
                 return True
 
+        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
+           if self.def_eq(expr1.fn, expr2.fn) and self.def_eq(expr1.arg, expr2.arg):
+               return True
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
@@ -172,8 +175,6 @@ class InferenceContext:
         
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
-        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-           return self.def_eq(expr1.fn, expr2.fn) and self.def_eq(expr1.arg, expr2.arg)
 
         expr2_eta = self.try_eta_expand(expr1, expr2)
         if expr2_eta is not None:
