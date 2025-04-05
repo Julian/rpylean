@@ -23,6 +23,11 @@ class Environment:
         self.rec_rules = {}
         self.declarations = r_dict(Name.__eq__, Name.__hash__)
 
+    def __getitem__(self, name_or_list):
+        if isinstance(name_or_list, str):
+            name_or_list = [name_or_list]
+        return self.declarations[Name(name_or_list)]
+
     def __repr__(self):
         return "Environment()"
 
@@ -87,6 +92,9 @@ class Environment:
         for id, rule in self.rec_rules.items():
             print(id, "->", rule.pretty())
 
+    def inference_context(self):
+        return _InferenceContext(self)
+
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names, nidx
         parent = self.names[parent_nidx]
@@ -118,7 +126,7 @@ class Environment:
         self.declarations[name] = decl
 
 
-class InferenceContext:
+class _InferenceContext:
     def __init__(self, env):
         self.env = env
 
@@ -246,7 +254,7 @@ def interpret(lines):
     else:
         start_pos = int(start_pos)
 
-    ctx = InferenceContext(environment)
+    ctx = environment.inference_context()
     total_decls = len(environment.declarations)
     for i, (name, decl) in enumerate(environment.declarations.items(), 1):
         if i < start_pos:
