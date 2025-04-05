@@ -1,6 +1,29 @@
 from rpython.rlib.rbigint import rbigint
 from rpython.rlib.objectmodel import compute_hash
 
+
+class NotDefEq(Exception):
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def __repr__(self):
+        return "NotDefEq(%s, %s)" % (self.lhs, self.rhs)
+
+    def __str__(self):
+        return "NotDefEq:\nlhs=%s\nrhs=%s" % (self.lhs.pretty(), self.rhs.pretty())
+
+
+class W_TypeError(Exception):
+    def __init__(self, w_term, w_expected_type):
+        self.w_term = w_term
+        self.w_expected_type = w_expected_type
+
+    def __str__(self):
+        return "%s is not of type %s" % (self.w_term.pretty(),
+                                         self.w_expected_type.pretty())
+
+
 class Name:
     def __init__(self, components):
         self.components = components
@@ -25,18 +48,13 @@ class Name:
     def pretty(self):
         return '.'.join(self.components)
 
-class NotDefEq(Exception):
-    def __init__(self, lhs, rhs):
-        self.lhs = lhs
-        self.rhs = rhs
-
-    def __repr__(self):
-        return "NotDefEq(%s, %s)" % (self.lhs, self.rhs)
-
-    def __str__(self):
-        return "NotDefEq:\nlhs=%s\nrhs=%s" % (self.lhs.pretty(), self.rhs.pretty())
 
 class W_Item(object):
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return vars(self) == vars(other)
+
     def __repr__(self):
         fields = self.__dict__.iteritems()
         contents = ", ".join("%s=%r" % (k, v) for k, v in fields)
@@ -48,6 +66,7 @@ class W_Item(object):
 
     def pretty(self):
         return "<%s repr error>" % (self.__class__.__name__,)
+
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
@@ -66,7 +85,6 @@ class W_Level(W_Item):
                 return W_LevelZero()
             return W_LevelIMax(self.lhs.simplify(), b_simp)
         raise RuntimeError("Unexpected level type: %s" % self)
-
 
     # See https://ammkrn.github.io/type_checking_in_lean4/levels.html?highlight=leq#partial-order-on-levels
     def leq(self, other, infcx, balance=0):
@@ -123,6 +141,9 @@ class W_LevelZero(W_Level):
         return isinstance(other, W_LevelZero)
 
 
+W_LEVEL_ZERO = W_LevelZero()
+
+
 class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
@@ -136,6 +157,7 @@ class W_LevelSucc(W_Level):
 
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelSucc) and self.parent.syntactic_eq(other.parent)
+
 
 class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
@@ -165,6 +187,7 @@ class W_LevelMax(W_Level):
             return lhs
         return W_LevelMax(lhs, rhs)
 
+
 class W_LevelIMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -174,8 +197,6 @@ class W_LevelIMax(W_Level):
         if not isinstance(other, W_LevelIMax):
             return False
         return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
-
-W_LEVEL_ZERO = W_LevelZero()
 
 
 class W_LevelParam(W_Level):
@@ -236,12 +257,15 @@ class W_BVar(W_Expr):
     def subst_levels(self, substs):
         return self
 
+
 # RPython prevents mutating global variable bindings, so we need a class instance
 class FVarCounter(object):
     def __init__(self):
         self.count = 0
 
+
 FVAR_COUNTER = FVarCounter()
+
 
 class W_FVar(W_Expr):
     def __init__(self, binder):
@@ -275,6 +299,7 @@ class W_FVar(W_Expr):
 
     def pretty(self):
         return "{%s@%s}" % (self.binder.binder_name.pretty(), self.id)
+
 
 class W_LitStr(W_Expr):
     def __init__(self, val):
@@ -315,6 +340,7 @@ class W_Sort(W_Expr):
     def syntactic_eq(self, other):
         return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
 
+
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
     decl = env.declarations[const.name]
@@ -325,6 +351,7 @@ def apply_const_level_params(const, target, env):
     for i in range(len(params)):
         substs[params[i]] = const.levels[i]
     return target.subst_levels(substs)
+
 
 class W_Const(W_Expr):
     def __init__(self, name, levels):
@@ -397,9 +424,11 @@ class W_Const(W_Expr):
             new_levels.append(new_level)
         return W_Const(self.name, new_levels)
 
+
 NAT_CONST = W_Const(Name(["Nat"]), [])
 NAT_ZERO = W_Const(Name(["Nat", "zero"]), [])
 NAT_SUCC = W_Const(Name(["Nat", "succ"]), [])
+
 
 class W_LitNat(W_Expr):
     def __init__(self, val):
@@ -447,6 +476,7 @@ class W_LitNat(W_Expr):
 
     def infer(self, infcx):
         return NAT_CONST
+
 
 class W_Proj(W_Expr):
     def __init__(self, struct_type, field_idx, struct_expr):
@@ -563,7 +593,6 @@ class W_Proj(W_Expr):
         return ctor_type.binder_type
 
 
-
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
     def __init__(self, binder_name, binder_type, binder_info, body):
@@ -609,6 +638,7 @@ class W_FunBase(W_Expr):
 
         self.finished_reduce = True
         return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
+
 
 class W_ForAll(W_FunBase):
     def pretty(self):
@@ -661,7 +691,6 @@ class W_ForAll(W_FunBase):
             self.binder_info,
             self.body.subst_levels(levels)
         )
-
 
 
 class W_Lambda(W_FunBase):
@@ -735,6 +764,7 @@ class W_Let(W_Expr):
         self.def_type = def_type
         self.def_val = def_val
         self.body = body
+
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):
@@ -1067,7 +1097,7 @@ class DefOrTheorem(W_DeclarationKind):
     def type_check(self, infcx):
         val_type = self.def_val.infer(infcx)
         if not infcx.def_eq(self.def_type, val_type):
-            raise RuntimeError("W_Definition.type_check: type mismatch: %s != %s" % (self.def_type, val_type))
+            raise W_TypeError(self.def_type, val_type)
 
 
 class W_Definition(DefOrTheorem):
@@ -1088,6 +1118,7 @@ class W_Definition(DefOrTheorem):
             self.hint,
         )
 
+
 class W_Opaque(W_Definition):
     def __init__(self, def_type, def_val):
         # An Opaque is like a definition with hint 'opaque', but even
@@ -1100,6 +1131,7 @@ class W_Opaque(W_Definition):
             self.def_val.pretty(),
         )
 
+
 class W_Theorem(DefOrTheorem):
     def pretty(self):
         return "<W_Theorem def_type=%s def_val=%s>" % (
@@ -1110,6 +1142,7 @@ class W_Theorem(DefOrTheorem):
     def get_type(self):
         return self.def_type
 
+
 class W_Axiom(W_DeclarationKind):
     def __init__(self, def_type):
         self.def_type = def_type
@@ -1117,6 +1150,7 @@ class W_Axiom(W_DeclarationKind):
     def type_check(self, infcx):
         # TODO - implement type checking
         pass
+
 
 class W_Inductive(W_DeclarationKind):
     def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):

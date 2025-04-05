@@ -54,8 +54,10 @@ def test_type_check_invalid_def():
         def_val=test.w_kind.def_val,
         hint=test.w_kind.hint,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(objects.W_TypeError) as e:
         invalid.type_check(ctx)
+
+    assert e.value.w_expected_type == test.w_kind.def_type
 
 
 XFAIL = dict(
