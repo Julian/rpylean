@@ -26,6 +26,17 @@ class Environment:
     def __repr__(self):
         return "Environment()"
 
+    @staticmethod
+    def from_lines(lines):
+        return Environment.from_items(parse(lines))
+
+    @staticmethod
+    def from_items(items):
+        env = Environment()
+        for item in items:
+            item.compile(env)
+        return env
+
     def dump(self):
         print_heading("declarations")
         for name, decl in self.declarations.items():
@@ -222,11 +233,8 @@ class InferenceContext:
 
 
 def interpret(lines):
-    environment = Environment()
-    for item in parse(lines):
-        item.compile(environment)
+    environment = Environment.from_lines(lines)
 
-    ctx = InferenceContext(environment)
     show_env = os.environ.get('SHOW_ENV') or 'true'
     if show_env.lower() == 'true':
         environment.dump_pretty()
@@ -238,6 +246,7 @@ def interpret(lines):
     else:
         start_pos = int(start_pos)
 
+    ctx = InferenceContext(environment)
     total_decls = len(environment.declarations)
     for i, (name, decl) in enumerate(environment.declarations.items(), 1):
         if i < start_pos:

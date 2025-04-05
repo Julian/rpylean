@@ -56,9 +56,9 @@ def test_empty():
         parser.parse("")
 
 
-@pytest.mark.parametrize("example_path", examples.all_valid_examples())
-def test_valid_examples_parse_successfully(example_path):
+@pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
+def test_valid_examples_parse_successfully(path):
     """
     We don't get parse errors from our examples.
     """
-    parser.parse(example_path.readlines())
+    parser.parse(path.readlines())
