@@ -17,12 +17,12 @@ XFAIL = dict(
 )
 
 
-@pytest.mark.parametrize("path", examples.all_valid_examples())
+@pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
 def test_interpret_valid_export(path):
     interpret(path.readlines())
 
 
-@pytest.mark.parametrize("path", examples.all_invalid_examples())
+@pytest.mark.parametrize("path", examples.INVALID, ids=examples.name_of)
 def test_interpret_invalid_export(path):
     message = XFAIL.get(path.dirpath().basename)
     if message is not None:

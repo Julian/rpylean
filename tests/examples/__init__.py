@@ -1,31 +1,25 @@
 from __future__ import print_function
 
 import py
+import pytest
 
-PATH = py.path.local(__file__).dirpath()
+
+EXAMPLES = py.path.local(__file__).dirpath()
 
 
-def export(name):
+def all_examples_from(example_dir):
+    for each in example_dir.listdir():
+        export = each.join("export")
+        if export.isfile():
+            yield export
+
+
+VALID = sorted(all_examples_from(EXAMPLES.join("valid")))
+INVALID = sorted(all_examples_from(EXAMPLES.join("invalid")))
+
+
+def name_of(example_path):
     """
-    The lean4export for the example with the given name.
+    tests/valid/Foo/export -> Foo
     """
-
-    return PATH.join(name, "export").readlines()
-
-
-def all_examples_from_dir(example_dir):
-
-    examples = (
-        each.join("export")
-        for each in PATH.join(example_dir).listdir()
-        if each.join("export").isfile()
-    )
-
-    return sorted(examples)
-
-
-def all_valid_examples():
-    return all_examples_from_dir("valid")
-
-def all_invalid_examples():
-    return all_examples_from_dir("invalid")
+    return example_path.dirpath().basename
