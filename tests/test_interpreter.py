@@ -43,8 +43,6 @@ def test_type_check_invalid_def():
             """,
         ),
     )
-    ctx = env.inference_context()
-
     test = env["test"]
     test.type_check(env.inference_context())
 
@@ -53,6 +51,8 @@ def test_type_check_invalid_def():
         def_val=test.w_kind.def_val,
         hint=test.w_kind.hint,
     )
+
+    ctx = env.inference_context()
     with pytest.raises(objects.W_TypeError) as e:
         invalid.type_check(ctx)
     assert e.value.w_expected_type == test.w_kind.def_type
