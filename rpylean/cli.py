@@ -22,6 +22,7 @@ COMMANDS
 
   check: type check a given file
   dump: parse an export file and simply dump its contents
+  repl: load an export file into an interactive REPL
 """.rstrip("\n")
 
 
@@ -36,7 +37,7 @@ class UsageError(Exception):
     def with_tagline(executable):
         if executable.endswith("__main__.py"):
             executable = "pypy -m rpylean"
-        return UsageError(TAGLINE + "\n" + USAGE % (executable,))
+        return UsageError(TAGLINE + "\n\n" + USAGE % (executable,))
 
 
 def main(argv):
@@ -54,78 +55,114 @@ def main(argv):
 
 
 class Command(object):
+
+    ALL = {}
+
+    def __init__(self, name, help, metavars, run):
+        assert name not in Command.ALL, name
+        self.ALL[name] = self
+
+        self.name = name
+        self._help = help
+        self._metavars = metavars
+        self._run = run
+
+    def run(self, args, stdout, stderr):
+        expected = len(self._metavars)
+        if len(args) > expected:
+            self.usage_error("Unknown arguments: %s" % (args[expected:]))
+        elif len(args) < expected:
+            self.usage_error("Expected an %s" % (self._metavars[len(args)],))
+
+        return self._run(self, args, stdout, stderr)
+
     def help(self, executable):
-        raise UsageError(self.__doc__.strip("\n"))
+        if executable.endswith("__main__.py"):
+            executable = "pypy -m rpylean"
+        message = """\
+        %s
+
+        USAGE
+
+          %s %s %s
+        """ % (self._help, executable, self.name, " ".join(self._metavars))
+        raise UsageError(message)
 
     def usage_error(self, message):
-        raise UsageError("%s\n\n%s" % (message, self.__doc__.strip("\n")))
+        message = """\
+        %s
+
+        %s
+
+        USAGE
+
+          rpylean %s %s
+        """ % (message, self._help, self.name, " ".join(self._metavars))
+        raise UsageError(message)
 
 
-class Check(Command):
+def subcommand(metavars):
+    def _subcommand(fn):
+        name = fn.__name__
+        help = fn.__doc__.strip("\n")
+        return Command(name, help, metavars, fn)
+    return _subcommand
+
+
+@subcommand(["EXPORT_FILE"])
+def check(self, args, stdout, stderr):
     """
     Type check an exported Lean environment.
-
-    USAGE:
-
-        rpylean check EXPORT_FILE
     """
+    path, = args
+    environment = Environment.from_lines(lines_from_path(path))
+    stdout.write("Checking %s declarations...\n" % (len(environment.declarations)))
 
-    name = "check"
+    result = environment.type_check()
 
-    def run(self, args, stdout, stderr):
-        if len(args) > 1:
-            self.usage_error("unknown arguments: %s" % (args[1:]))
+    for name, decl, w_error in result.invalid:
+        stderr.write("%s is not type-correct: %s\n" % (
+            name.pretty(),
+            w_error.__str__()),
+        )
 
-        lines = lines_from_path(args[0])
-        environment = Environment.from_lines(lines)
-        stdout.write("Checking %s declarations...\n" % (len(environment.declarations)))
+    if not result.succeeded():
+        return 1
 
-        result = environment.type_check()
-
-        for name, decl, w_error in result.invalid:
-            stderr.write("%s is not type-correct: %s\n" % (
-                name.pretty(),
-                w_error.__str__()),
-            )
-
-        if not result.succeeded():
-            return 1
-
-        stdout.write("All declarations are type-correct.\n")
-        return 0
+    stdout.write("All declarations are type-correct.\n")
+    return 0
 
 
-class Dump(Command):
+@subcommand(["EXPORT_FILE"])
+def dump(self, args, stdout, stderr):
     """
     Dump an exported Lean environment.
-
-    USAGE:
-
-        rpylean dump EXPORT_FILE
     """
-
-    name = "dump"
-
-    def run(self, args, stdout, stderr):
-        if len(args) > 1:
-            self.usage_error("unknown arguments: %s" % (args[1:]))
-
-        lines = lines_from_path(args[0])
-        environment = Environment.from_lines(lines)
-        environment.dump_pretty(stdout)
-        return 0
+    path, = args
+    environment = Environment.from_lines(lines_from_path(path))
+    environment.dump_pretty(stdout)
+    return 0
 
 
-COMMANDS = {Command.name: Command() for Command in [Check, Dump]}
+@subcommand(["EXPORT_FILE"])
+def repl(self, args, stdout, stderr):
+    """
+    Open a REPL with the environment loaded from the given export.
+    """
+    path, = args
+    environment = Environment.from_lines(lines_from_path(path))
+    from rpylean import repl
+    repl.interact(environment)
+    return 0
 
 
 def subcommand_from(argv):
     if len(argv) == 1 or argv[1] == "--help":
         raise UsageError.with_tagline(argv[0])
 
-    command = COMMANDS.get(argv[1])
+    command = Command.ALL.get(argv[1])
     if command is None:
-        command, args = COMMANDS["check"], argv[1:]
+        command, args = Command.ALL["check"], argv[1:]
     else:
         args = argv[2:]
 
