@@ -37,30 +37,18 @@ class Environment:
             item.compile(env)
         return env
 
-    def dump(self):
-        print_heading("declarations")
-        for name, decl in self.declarations.items():
-            print(name, "->", decl)
-
-        print("")
-        print_heading("exprs")
-        for id, expr in self.exprs.items():
-            print(id, "->", expr)
-
-        print("")
-        print_heading("constants")
-        for id, constant in self.constants.items():
-            print(id, "->", constant)
-
-        print("")
-        print_heading("levels")
-        for id, level in self.levels.items():
-            print(id, "->", level)
-
-        print("")
-        print_heading("rec_rules")
-        for id, rule in self.rec_rules.items():
-            print(id, "->", rule)
+    def iter_check(self):
+        """
+        Type check each declaration in the environment.
+        """
+        ctx = self.inference_context()
+        for name, each in self.declarations.items():
+            try:
+                each.type_check(ctx)
+            except W_TypeError as error:
+                yield name, each, error
+            else:
+                yield name, each, None
 
     def dump_pretty(self):
         print_heading("declarations")
@@ -235,6 +223,12 @@ class _InferenceContext:
         raise RuntimeError("Expected Sort, got %s" % expr_type)
 
 
+class CheckResult(object):
+    def __init__(self, environment, invalid=None):
+        self.environment = environment
+        self.invalid = invalid
+
+
 def interpret(lines):
     environment = Environment.from_lines(lines)
 
@@ -243,30 +237,23 @@ def interpret(lines):
         environment.dump_pretty()
         print("\n\n")
 
-    start_pos = os.environ.get('START_POS')
-    if start_pos is None:
-        start_pos = 0
-    else:
-        start_pos = int(start_pos)
-
-    ctx = environment.inference_context()
-    total_decls = len(environment.declarations)
-    for i, (name, decl) in enumerate(environment.declarations.items(), 1):
-        if i < start_pos:
-            continue
+    exit_code = 0
+    for i, (name, decl, w_error) in enumerate(environment.iter_check(), 1):
         print(
-            "Checking declaration [%s/%s] '%s' of type %s" % (
+            "[%s/%s] '%s' of type %s" % (
                 i,
-                total_decls,
+                len(environment.declarations),
                 name.pretty(),
                 decl.w_kind.pretty(),
             ),
         )
-
-        try:
-            decl.type_check(ctx)
-        except W_TypeError as error:
-            print("%s is not type-correct: %s" % (name.pretty(), error.__str__()))
+        if w_error is not None:
+            print("%s is not type-correct: %s" % (
+                name.pretty(),
+                w_error.__str__()),
+            )
+            exit_code |= 1
+    return exit_code
 
 
 def print_heading(s):

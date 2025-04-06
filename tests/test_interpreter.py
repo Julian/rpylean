@@ -73,7 +73,7 @@ XFAIL = dict(
 
 @pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
 def test_interpret_valid_export(path):
-    interpret(path.readlines())
+    assert interpret(path.readlines()) == 0
 
 
 @pytest.mark.parametrize("path", examples.INVALID, ids=examples.name_of)
@@ -82,7 +82,4 @@ def test_interpret_invalid_export(path):
     if message is not None:
         pytest.xfail(message)
 
-    example_contents = path.readlines()
-
-    with pytest.raises(Exception):
-        interpret(example_contents)
+    assert interpret(path.readlines()) != 0
