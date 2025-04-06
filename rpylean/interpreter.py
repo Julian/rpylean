@@ -37,41 +37,42 @@ class Environment:
             item.compile(env)
         return env
 
-    def iter_check(self):
+    def type_check(self):
         """
         Type check each declaration in the environment.
         """
         ctx = self.inference_context()
+        invalid = []
         for name, each in self.declarations.items():
             try:
                 each.type_check(ctx)
             except W_TypeError as error:
-                yield name, each, error
-            else:
-                yield name, each, None
+                invalid.append((name, each, error))
 
-    def dump_pretty(self):
-        print_heading("declarations")
+        return CheckResult(self, invalid)
+
+    def dump_pretty(self, stdout):
+        stdout.write(heading("declarations"))
         for name, decl in self.declarations.items():
             print(name.pretty(), "->", decl.pretty())
 
-        print("")
-        print_heading("exprs")
+        stdout.write("\n")
+        stdout.write(heading("exprs"))
         for id, expr in self.exprs.items():
             print(id, "->", expr.pretty())
 
-        print("")
-        print_heading("constants")
+        stdout.write("\n")
+        stdout.write(heading("constants"))
         for id, constant in self.constants.items():
             print(id, "->", constant.pretty())
 
-        print("")
-        print_heading("levels")
+        stdout.write("\n")
+        stdout.write(heading("levels"))
         for id, level in self.levels.items():
             print(id, "->", level.pretty())
 
-        print("")
-        print_heading("rec_rules")
+        stdout.write("\n")
+        stdout.write(heading("rec_rules"))
         for id, rule in self.rec_rules.items():
             print(id, "->", rule.pretty())
 
@@ -224,38 +225,17 @@ class _InferenceContext:
 
 
 class CheckResult(object):
+    """
+    The result of type checking an environment.
+    """
+
     def __init__(self, environment, invalid=None):
         self.environment = environment
         self.invalid = invalid
 
-
-def interpret(lines):
-    environment = Environment.from_lines(lines)
-
-    show_env = os.environ.get('SHOW_ENV') or 'true'
-    if show_env.lower() == 'true':
-        environment.dump_pretty()
-        print("\n\n")
-
-    exit_code = 0
-    for i, (name, decl, w_error) in enumerate(environment.iter_check(), 1):
-        print(
-            "[%s/%s] '%s' of type %s" % (
-                i,
-                len(environment.declarations),
-                name.pretty(),
-                decl.w_kind.pretty(),
-            ),
-        )
-        if w_error is not None:
-            print("%s is not type-correct: %s" % (
-                name.pretty(),
-                w_error.__str__()),
-            )
-            exit_code |= 1
-    return exit_code
+    def succeeded(self):
+        return not self.invalid
 
 
-def print_heading(s):
-    print(s)
-    print("-" * len(s), end="\n\n")
+def heading(s):
+    return "%s\n%s\n\n" % (s, "-" * len(s))
