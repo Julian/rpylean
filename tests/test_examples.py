@@ -33,4 +33,4 @@ def test_interpret_invalid_export(path):
     if message is not None:
         pytest.xfail(message)
 
-    assert environment.type_check().succeeded()
+    assert not environment.type_check().succeeded()
