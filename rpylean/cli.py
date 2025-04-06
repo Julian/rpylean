@@ -88,11 +88,11 @@ class Check(Command):
                 w_error.__str__()),
             )
 
-        if result.succeeded():
-            stdout.write("All declarations are type-correct.\n")
-            return 0
-        else:
+        if not result.succeeded():
             return 1
+
+        stdout.write("All declarations are type-correct.\n")
+        return 0
 
 
 class Dump(Command):
