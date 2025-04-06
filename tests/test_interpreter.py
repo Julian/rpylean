@@ -56,7 +56,6 @@ def test_type_check_invalid_def():
     )
     with pytest.raises(objects.W_TypeError) as e:
         invalid.type_check(ctx)
-
     assert e.value.w_expected_type == test.w_kind.def_type
 
 
