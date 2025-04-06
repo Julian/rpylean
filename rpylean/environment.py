@@ -3,7 +3,6 @@ from __future__ import print_function
 from rpylean.objects import W_TypeError, W_LEVEL_ZERO, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
 from rpylean.parser import parse
 from rpython.rlib.objectmodel import r_dict
-import os
 
 import sys
 sys.setrecursionlimit(5000)
@@ -54,27 +53,27 @@ class Environment:
     def dump_pretty(self, stdout):
         stdout.write(heading("declarations"))
         for name, decl in self.declarations.items():
-            print(name.pretty(), "->", decl.pretty())
+            stdout.write("%s := %s\n" % (name.pretty(), decl.pretty()))
 
         stdout.write("\n")
         stdout.write(heading("exprs"))
         for id, expr in self.exprs.items():
-            print(id, "->", expr.pretty())
+            stdout.write("%s -> %s\n" % (id, expr.pretty()))
 
         stdout.write("\n")
         stdout.write(heading("constants"))
         for id, constant in self.constants.items():
-            print(id, "->", constant.pretty())
+            stdout.write("%s -> %s\n" % (id, constant.pretty()))
 
         stdout.write("\n")
         stdout.write(heading("levels"))
         for id, level in self.levels.items():
-            print(id, "->", level.pretty())
+            stdout.write("%s -> %s\n" % (id, level.pretty()))
 
         stdout.write("\n")
         stdout.write(heading("rec_rules"))
         for id, rule in self.rec_rules.items():
-            print(id, "->", rule.pretty())
+            stdout.write("%s -> %s\n" % (id, rule.pretty()))
 
     def inference_context(self):
         return _InferenceContext(self)
