@@ -6,42 +6,40 @@ from rpylean import objects
 from rpylean.environment import Environment
 
 
-def export(lines):
-    return ("0.1.2\n" + dedent(lines).strip()).splitlines()
+def from_lines(item_lines):
+    lines = ["0.1.2"]
+    lines.extend(dedent(item_lines).strip().splitlines())
+    return Environment.from_lines(lines)
 
 
-def test_type_check_valid_def():
-    env = Environment.from_lines(
-        export(
-            """
-            1 #NS 0 test
-            1 #US 0
-            2 #US 1
-            0 #ES 2
-            1 #ES 1
-            #DEF 1 0 1 R 1
-            """,
-        ),
+def test_valid_def_type_checks():
+    env = from_lines(
+        """
+        1 #NS 0 test
+        1 #US 0
+        2 #US 1
+        0 #ES 2
+        1 #ES 1
+        #DEF 1 0 1 R 1
+        """,
     )
     env["test"].type_check(env.inference_context())
 
 
-def test_type_check_invalid_def():
+def test_invalid_def_does_not_type_check():
     """
     def test : Type := Type is not type correct.
     """
 
-    env = Environment.from_lines(
-        export(
-            """
-            1 #NS 0 test
-            1 #US 0
-            2 #US 1
-            0 #ES 2
-            1 #ES 1
-            #DEF 1 0 1 R 1
-            """,
-        ),
+    env = from_lines(
+        """
+        1 #NS 0 test
+        1 #US 0
+        2 #US 1
+        0 #ES 2
+        1 #ES 1
+        #DEF 1 0 1 R 1
+        """,
     )
     test = env["test"]
     test.type_check(env.inference_context())
