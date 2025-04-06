@@ -27,10 +27,16 @@ class Environment:
 
     @staticmethod
     def from_lines(lines):
+        """
+        Load an environment out of some lean4export-formatted lines.
+        """
         return Environment.from_items(parse(lines))
 
     @staticmethod
     def from_items(items):
+        """
+        Load an environment out of some parsed lean4export items.
+        """
         env = Environment()
         for item in items:
             item.compile(env)
@@ -41,6 +47,7 @@ class Environment:
         Type check each declaration in the environment.
         """
         ctx = self.inference_context()
+
         invalid = []
         for name, each in self.declarations.items():
             try:
@@ -51,6 +58,9 @@ class Environment:
         return CheckResult(self, invalid)
 
     def dump_pretty(self, stdout):
+        """
+        Dump the contents of this environment to the given stream.
+        """
         stdout.write(heading("declarations"))
         for name, decl in self.declarations.items():
             stdout.write("%s := %s\n" % (name.pretty(), decl.pretty()))
