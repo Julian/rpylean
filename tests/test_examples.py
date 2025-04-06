@@ -3,7 +3,7 @@ Run our export file examples as tests.
 """
 import pytest
 
-from rpylean.interpreter import Environment
+from rpylean.environment import Environment
 from tests import examples
 
 

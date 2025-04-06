@@ -3,7 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean import objects
-from rpylean.interpreter import Environment
+from rpylean.environment import Environment
 
 
 def export(lines):
