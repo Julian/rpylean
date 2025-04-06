@@ -24,7 +24,7 @@ class Environment:
         return self.declarations[Name(name_or_list)]
 
     def __repr__(self):
-        return "Environment()"
+        return "<Environment with %s declarations>" % (len(self.declarations),)
 
     @staticmethod
     def from_lines(lines):
