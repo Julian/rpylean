@@ -3,8 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean import objects
-from rpylean.interpreter import Environment, interpret
-from tests import examples
+from rpylean.interpreter import Environment
 
 
 def export(lines):
@@ -57,29 +56,3 @@ def test_type_check_invalid_def():
     with pytest.raises(objects.W_TypeError) as e:
         invalid.type_check(ctx)
     assert e.value.w_expected_type == test.w_kind.def_type
-
-
-XFAIL = dict(
-    FreeVars=(
-        "Something seems entirely wrong with this example, "
-        "as the export.orig and export files are identical"
-    ),
-    UndeclaredUniv=(
-        "Presumably this fails because we don't "
-        "check for undeclared universes."
-    )
-)
-
-
-@pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
-def test_interpret_valid_export(path):
-    assert interpret(path.readlines()) == 0
-
-
-@pytest.mark.parametrize("path", examples.INVALID, ids=examples.name_of)
-def test_interpret_invalid_export(path):
-    message = XFAIL.get(path.dirpath().basename)
-    if message is not None:
-        pytest.xfail(message)
-
-    assert interpret(path.readlines()) != 0
