@@ -116,7 +116,9 @@ def check(self, args, stdout, stderr):
     """
     path, = args
     environment = Environment.from_lines(lines_from_path(path))
-    stdout.write("Checking %s declarations...\n" % (len(environment.declarations)))
+    stdout.write(
+        "Checking %s declarations...\n" % (len(environment.declarations)),
+    )
 
     result = environment.type_check()
 
@@ -186,5 +188,4 @@ def lines_from_path(path):
 
 
 if __name__ == '__main__':
-    import sys
     sys.exit(main(sys.argv))

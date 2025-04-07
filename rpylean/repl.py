@@ -3,6 +3,7 @@ Interactive REPL for rpylean.
 """
 from rpython.rlib.rfile import create_stdio
 
+
 def interact(environment):
     stdin, stdout, stderr = create_stdio()
 

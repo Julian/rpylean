@@ -2,18 +2,6 @@ from rpython.rlib.rbigint import rbigint
 from rpython.rlib.objectmodel import compute_hash
 
 
-class NotDefEq(Exception):
-    def __init__(self, lhs, rhs):
-        self.lhs = lhs
-        self.rhs = rhs
-
-    def __repr__(self):
-        return "NotDefEq(%s, %s)" % (self.lhs, self.rhs)
-
-    def __str__(self):
-        return "NotDefEq:\nlhs=%s\nrhs=%s" % (self.lhs.pretty(), self.rhs.pretty())
-
-
 class W_TypeError(Exception):
     def __init__(self, w_term, w_expected_type):
         self.w_term = w_term
@@ -1208,7 +1196,8 @@ class W_Constructor(W_DeclarationKind):
 
 
 class W_Recursor(W_DeclarationKind):
-    def __init__(self,
+    def __init__(
+        self,
         expr,
         k,
         num_params,

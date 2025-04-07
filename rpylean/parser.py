@@ -420,8 +420,9 @@ class Proj(ExprVal):
         self.struct_expr = struct_expr
 
     def to_w_expr(self, environment):
+        name = environment.names[self.type_name]
         return objects.W_Proj(
-            struct_type=environment.declarations[environment.names[self.type_name]],
+            struct_type=environment.declarations[name],
             field_idx=self.field_idx,
             struct_expr=environment.exprs[self.struct_expr],
         )
@@ -436,7 +437,11 @@ class Declaration(Node):
         for level in w_kind.level_params:
             if level in seen:
                 raise Invalid(
-                    "%s has duplicate level %s in all kind: %s" % (w_kind.name, level, w_kind.level_params),
+                    "%s has duplicate level %s in all kind: %s" % (
+                        w_kind.name,
+                        level,
+                        w_kind.level_params,
+                    ),
                 )
             seen[level] = True
         environment.register_declaration(
@@ -796,7 +801,6 @@ class RecRule(Node):
         val = tokens[4].text
         return RecRule(ridx, ctor_name, n_fields, val)
 
-
     def __init__(self, ridx, ctor_name, n_fields, val):
         self.ridx = ridx
         self.ctor_name = ctor_name
@@ -841,6 +845,7 @@ TOKEN_KINDS = {
 
 for token, cls in TOKEN_KINDS.items():
     cls.parse.func_name += "_" + cls.__name__
+
 
 def tokenize(line, lineno):
     tokens = []

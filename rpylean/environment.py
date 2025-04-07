@@ -163,8 +163,11 @@ class _InferenceContext:
                 return True
 
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-           if self.def_eq(expr1.fn, expr2.fn) and self.def_eq(expr1.arg, expr2.arg):
-               return True
+            if (
+                    self.def_eq(expr1.fn, expr2.fn)
+                and self.def_eq(expr1.arg, expr2.arg)
+            ):
+                return True
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)

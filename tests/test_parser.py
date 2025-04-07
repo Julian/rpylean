@@ -42,7 +42,10 @@ def test_large_litnat():
         0 #ELN 18446744073709551616
         """
     ) == [
-        parser.Expr(eidx="0", val=parser.LitNat(val=rbigint.fromlong(18446744073709551616))),
+        parser.Expr(
+            eidx="0",
+            val=parser.LitNat(val=rbigint.fromlong(18446744073709551616)),
+        ),
     ]
 
 
