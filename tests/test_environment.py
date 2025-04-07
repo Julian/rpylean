@@ -2,7 +2,13 @@ from textwrap import dedent
 
 import pytest
 
-from rpylean import objects
+from rpylean.objects import (
+    W_LEVEL_ZERO,
+    W_TypeError,
+    W_Definition,
+    W_Sort,
+    W_LevelSucc,
+)
 from rpylean.environment import Environment
 
 
@@ -13,17 +19,11 @@ def from_lines(item_lines):
 
 
 def test_valid_def_type_checks():
-    env = from_lines(
-        """
-        1 #NS 0 test
-        1 #US 0
-        2 #US 1
-        0 #ES 2
-        1 #ES 1
-        #DEF 1 0 1 R 1
-        """,
-    )
-    env["test"].type_check(env.inference_context())
+    W_Type = W_Sort(W_LevelSucc(W_LEVEL_ZERO))
+    W_Type1 = W_Sort(W_LevelSucc(W_LevelSucc(W_LEVEL_ZERO)))
+
+    valid = W_Definition(def_type=W_Type1, def_val=W_Type, hint="R")
+    valid.type_check(Environment().inference_context())
 
 
 def test_invalid_def_does_not_type_check():
@@ -31,26 +31,13 @@ def test_invalid_def_does_not_type_check():
     def test : Type := Type is not type correct.
     """
 
-    env = from_lines(
-        """
-        1 #NS 0 test
-        1 #US 0
-        2 #US 1
-        0 #ES 2
-        1 #ES 1
-        #DEF 1 0 1 R 1
-        """,
-    )
-    test = env["test"]
-    test.type_check(env.inference_context())
+    W_Prop = W_Sort(W_LEVEL_ZERO)
+    W_Type = W_Sort(W_LevelSucc(W_LEVEL_ZERO))
+    W_Type1 = W_Sort(W_LevelSucc(W_LevelSucc(W_LEVEL_ZERO)))
 
-    invalid = objects.W_Definition(  # Sort 1 == Type 0 == Type
-        def_type=objects.W_Sort(level=env.levels["1"]),
-        def_val=test.w_kind.def_val,
-        hint=test.w_kind.hint,
-    )
+    invalid = W_Definition(def_type=W_Prop, def_val=W_Type, hint="R")
 
-    ctx = env.inference_context()
-    with pytest.raises(objects.W_TypeError) as e:
+    ctx = Environment().inference_context()
+    with pytest.raises(W_TypeError) as e:
         invalid.type_check(ctx)
-    assert e.value.w_expected_type == test.w_kind.def_type
+    assert e.value.w_expected_type == W_Type1
