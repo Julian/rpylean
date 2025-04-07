@@ -3,8 +3,10 @@ Interactive REPL for rpylean.
 """
 from rpython.rlib.rfile import create_stdio
 
+from rpylean.objects import W_TypeError
 
-def interact(environment):
+
+def interact(env):
     stdin, stdout, stderr = create_stdio()
 
     while True:
@@ -21,13 +23,28 @@ def interact(environment):
         command = split[0]
 
         if command in ["d", "dump"]:
-            environment.dump_pretty(stdout)
+            env.dump_pretty(stdout)
+        elif command in ["c", "check"]:
+            if len(split) == 1:  # ok, all of them!
+                env.type_check()
+                stdout.write(
+                    "Checked %d declarations.\n" % len(env.declarations),
+                )
+                continue
+
+            name = split[1]
+            try:
+                env[name.split(".")].type_check(env.inference_context())
+            except W_TypeError as error:
+                stdout.write("Type error: %s\n" % error)
+            else:
+                stdout.write("%s correctly type checks.\n" % name)
         elif command in ["p", "print"]:
             name = split[1]
-            stdout.write(environment[name].pretty())
+            stdout.write(env[name].pretty())
             stdout.write("\n")
         elif command in ["n", "names"]:
-            for name in environment.names.values():
+            for name in env.names.values():
                 stdout.write(name.pretty())
                 stdout.write("\n")
         else:
