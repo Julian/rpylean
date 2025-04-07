@@ -3,7 +3,7 @@ Interactive REPL for rpylean.
 """
 from rpython.rlib.rfile import create_stdio
 
-from rpylean.objects import W_TypeError
+from rpylean.objects import W_TypeError, Name
 
 
 def interact(env):
@@ -32,13 +32,13 @@ def interact(env):
                 )
                 continue
 
-            name = split[1]
+            name = Name(split[1].split("."))
             try:
-                env[name.split(".")].type_check(env.inference_context())
+                env.declarations[name].type_check(env.inference_context())
             except W_TypeError as error:
                 stdout.write("Type error: %s\n" % error)
             else:
-                stdout.write("%s correctly type checks.\n" % name)
+                stdout.write("%s correctly type checks.\n" % name.pretty())
         elif command in ["p", "print"]:
             name = split[1]
             stdout.write(env[name].pretty())
