@@ -49,8 +49,12 @@ class Environment:
         ctx = self.inference_context()
 
         invalid = []
-        for name, each in self.declarations.items():
+        num_decls = len(self.declarations)
+        for (i, (name, each)) in enumerate(self.declarations.items()):
+            if i <= 257:
+                continue
             try:
+                print("[%s/%s] Checking %s : %s" % (i, num_decls, name.pretty(), each.pretty()))
                 each.type_check(ctx)
             except W_TypeError as error:
                 invalid.append((name, each, error))
@@ -172,6 +176,10 @@ class _InferenceContext:
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
         progress2, expr2_reduced = expr2.strong_reduce_step(self)
+        if progress1:
+            print("Reduced expr1:\n  %s\n  to\n  %s" % (expr1.pretty(), expr1_reduced.pretty()))
+        if progress2:
+            print("Reduced expr2:\n  %s\n  to\n  %s" % (expr2.pretty(), expr2_reduced.pretty()))
         if progress1 or progress2:
             # If expr2 made progress, retry with the new expr2
             return self.def_eq(expr1_reduced, expr2_reduced)

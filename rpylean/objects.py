@@ -472,28 +472,30 @@ class W_Proj(W_Expr):
         self.field_idx = field_idx
         self.struct_expr = struct_expr
 
-    def strong_reduce_step(self, infcx):
+    def reduce_struct_expr(self, infcx):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
         if progress:
             return (True, W_Proj(self.struct_type, self.field_idx, new_struct_expr))
 
-
+        return (False, self)
+        
+    def strong_reduce_step(self, infcx):
         # Look for a projection of a constructor, which allows us to just pick
         # out the argument corresponding to 'field_idx'
 
         args = []
-        struct_expr = new_struct_expr
+        struct_expr = self.struct_expr
         while isinstance(struct_expr, W_App):
             # Collect arguments until we reach the base type
             args.append(struct_expr.arg)
             struct_expr = struct_expr.fn
 
-        if not isinstance(struct_expr, W_Const):
-            return (False, self)
+        if not isinstance(self.struct_expr, W_Const):
+            return self.reduce_struct_expr(infcx)
 
         ctor_decl = infcx.env.declarations[struct_expr.name]
         if not isinstance(ctor_decl.w_kind, W_Constructor):
-            return (False, self)
+            return self.reduce_struct_expr(infcx)
 
         num_params = ctor_decl.w_kind.num_params
         args.reverse()
@@ -766,7 +768,7 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
-            raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
+            raise RuntimeError("W_App.infer: type mismatch:\n  %s\n !=\n  %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
 
