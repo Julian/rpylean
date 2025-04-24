@@ -203,7 +203,7 @@ class W_LevelParam(W_Level):
 
 class W_Expr(W_Item):
     def __init__(self):
-        self.has_bvars = True
+        self.max_bvar_id = None
         self.has_fvars = True
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
@@ -220,6 +220,7 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         W_Expr.__init__(self)
         self.id = int(id)
+        self.max_bvar_id = self.id
         self.has_fvars = False
 
     def pretty(self):
@@ -267,7 +268,7 @@ class W_FVar(W_Expr):
         self.id = FVAR_COUNTER.count
         self.binder = binder
         FVAR_COUNTER.count += 1
-        self.has_bvars = False
+        self.max_bvar_id = -1
 
     def incr_free_bvars(self, count, depth):
         return self
@@ -300,7 +301,7 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         W_Expr.__init__(self)
         self.val = val
-        self.has_bvars = False
+        self.max_bvar_id = -1
         self.has_fvars = False
 
     def instantiate(self, expr, depth):
@@ -314,7 +315,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         W_Expr.__init__(self)
         self.level = level
-        self.has_bvars = False
+        self.max_bvar_id = -1
         self.has_fvars = False
 
     def whnf(self, infcx):
@@ -359,7 +360,7 @@ class W_Const(W_Expr):
         W_Expr.__init__(self)
         self.name = name
         self.levels = levels
-        self.has_bvars = False
+        self.max_bvar_id = -1
         self.has_fvars = False
 
     def pretty(self):
@@ -442,7 +443,7 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         W_Expr.__init__(self)
         self.val = val
-        self.has_bvars = False
+        self.max_bvar_id = -1
         self.has_fvars = False
 
     def pretty(self):
@@ -495,7 +496,7 @@ class W_Proj(W_Expr):
         self.struct_type = struct_type
         self.field_idx = field_idx
         self.struct_expr = struct_expr
-        self.has_bvars = struct_expr.has_bvars
+        self.max_bvar_id = struct_expr.max_bvar_id
         self.has_fvars = struct_expr.has_fvars
 
     def reduce_struct_expr(self, infcx):
@@ -545,7 +546,7 @@ class W_Proj(W_Expr):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
-        if not self.has_bvars:
+        if depth > self.max_bvar_id:
             return self
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.instantiate(expr, depth))
     def pretty(self):
@@ -627,7 +628,7 @@ class W_FunBase(W_Expr):
         self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
-        self.has_bvars = self.binder_type.has_bvars or self.body.has_bvars
+        self.max_bvar_id = max(self.binder_type.max_bvar_id, self.body.max_bvar_id)
         self.has_fvars = self.binder_type.has_fvars or self.body.has_fvars
 
         #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
@@ -682,7 +683,7 @@ class W_ForAll(W_FunBase):
 
     # TODO - double check this
     def instantiate(self, expr, depth):
-        if not self.has_bvars:
+        if depth > self.max_bvar_id:
             return self
         # Don't increment - not yet inside a binder
         new_binder = self.binder_type.instantiate(expr, depth)
@@ -744,7 +745,7 @@ class W_Lambda(W_FunBase):
         return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
 
     def instantiate(self, expr, depth):
-        if not self.has_bvars:
+        if depth > self.max_bvar_id:
             return self
         # Don't increment - not yet inside a binder
         new_binder = self.binder_type.instantiate(expr, depth)
@@ -799,7 +800,7 @@ class W_Let(W_Expr):
         self.def_type = def_type
         self.def_val = def_val
         self.body = body
-        self.has_bvars = True # TODO - adjust
+        self.max_bvar_id = -1
         self.has_fvars = True # TODO - adjust
 
 
@@ -808,7 +809,7 @@ class W_App(W_Expr):
         W_Expr.__init__(self)
         self.fn = fn
         self.arg = arg
-        self.has_bvars = fn.has_bvars or arg.has_bvars
+        self.max_bvar_id = max(fn.max_bvar_id, arg.max_bvar_id)
         self.has_fvars = fn.has_fvars or arg.has_fvars
 
     def infer(self, infcx):
@@ -1078,7 +1079,7 @@ class W_App(W_Expr):
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
-        if not self.has_bvars:
+        if depth > self.max_bvar_id:
             return self
         return W_App(self.fn.instantiate(expr, depth), self.arg.instantiate(expr, depth))
 
