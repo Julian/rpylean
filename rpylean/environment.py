@@ -229,7 +229,7 @@ class _InferenceContext:
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
-        print("Failed to prove definitionally equal:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
+        #print("Failed to prove definitionally equal:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         return False
 
     def try_eta_expand(self, expr1, expr2):

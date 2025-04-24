@@ -202,6 +202,8 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(W_Item):
+    def __init__(self):
+        self.has_bvars = True
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
     # * Delta reduction (definition unfolding)
@@ -215,6 +217,7 @@ class W_Expr(W_Item):
 
 class W_BVar(W_Expr):
     def __init__(self, id):
+        W_Expr.__init__(self)
         self.id = int(id)
 
     def pretty(self):
@@ -257,10 +260,12 @@ FVAR_COUNTER = FVarCounter()
 
 class W_FVar(W_Expr):
     def __init__(self, binder):
+        W_Expr.__init__(self)
         global FVAR_COUNTER
         self.id = FVAR_COUNTER.count
         self.binder = binder
         FVAR_COUNTER.count += 1
+        self.has_bvars = False
 
     def incr_free_bvars(self, count, depth):
         return self
@@ -291,7 +296,9 @@ class W_FVar(W_Expr):
 
 class W_LitStr(W_Expr):
     def __init__(self, val):
+        W_Expr.__init__(self)
         self.val = val
+        self.has_bvars = False
 
     def instantiate(self, expr, depth):
         return self
@@ -302,7 +309,9 @@ class W_LitStr(W_Expr):
 
 class W_Sort(W_Expr):
     def __init__(self, level):
+        W_Expr.__init__(self)
         self.level = level
+        self.has_bvars = False
 
     def whnf(self, infcx):
         return self
@@ -343,8 +352,10 @@ def apply_const_level_params(const, target, env):
 
 class W_Const(W_Expr):
     def __init__(self, name, levels):
+        W_Expr.__init__(self)
         self.name = name
         self.levels = levels
+        self.has_bvars = False
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
@@ -391,8 +402,12 @@ class W_Const(W_Expr):
 
         if val is None:
             return None
+        
+        if decl.w_kind.hint == 'O':
+            return None
 
         val = apply_const_level_params(self, val, env)
+        #print("Delta reduced %s to %s" % (self.pretty(), val.pretty()))
         return val
 
     def infer(self, infcx):
@@ -420,7 +435,9 @@ NAT_SUCC = W_Const(Name(["Nat", "succ"]), [])
 
 class W_LitNat(W_Expr):
     def __init__(self, val):
+        W_Expr.__init__(self)
         self.val = val
+        self.has_bvars = False
 
     def pretty(self):
         return "(LitNat %s)" % (self.val.str())
@@ -468,9 +485,11 @@ class W_LitNat(W_Expr):
 
 class W_Proj(W_Expr):
     def __init__(self, struct_type, field_idx, struct_expr):
+        W_Expr.__init__(self)
         self.struct_type = struct_type
         self.field_idx = field_idx
         self.struct_expr = struct_expr
+        self.has_bvars = struct_expr.has_bvars
 
     def reduce_struct_expr(self, infcx):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
@@ -517,6 +536,8 @@ class W_Proj(W_Expr):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
+        if not self.has_bvars:
+            return self
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.instantiate(expr, depth))
     def pretty(self):
         return "<W_Proj struct_type='%s' field_idx='%s' struct_expr='%s'>" % (
@@ -589,6 +610,7 @@ class W_Proj(W_Expr):
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
     def __init__(self, binder_name, binder_type, binder_info, body):
+        W_Expr.__init__(self)
         self.binder_name = binder_name
         self.binder_type = binder_type
         self.binder_info = binder_info
@@ -596,6 +618,7 @@ class W_FunBase(W_Expr):
         self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
+        self.has_bvars = self.binder_type.has_bvars or self.body.has_bvars
 
         #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
         #    import pdb; pdb.set_trace()
@@ -649,6 +672,8 @@ class W_ForAll(W_FunBase):
 
     # TODO - double check this
     def instantiate(self, expr, depth):
+        if not self.has_bvars:
+            return self
         # Don't increment - not yet inside a binder
         new_binder = self.binder_type.instantiate(expr, depth)
         new_body = self.body.instantiate(expr, depth + 1)
@@ -705,6 +730,8 @@ class W_Lambda(W_FunBase):
         return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
 
     def instantiate(self, expr, depth):
+        if not self.has_bvars:
+            return self
         # Don't increment - not yet inside a binder
         new_binder = self.binder_type.instantiate(expr, depth)
         new_body = self.body.instantiate(expr, depth + 1)
@@ -753,16 +780,20 @@ class W_Lambda(W_FunBase):
 
 class W_Let(W_Expr):
     def __init__(self, name, def_type, def_val, body):
+        W_Expr.__init__(self)
         self.name = name
         self.def_type = def_type
         self.def_val = def_val
         self.body = body
+        self.has_bvars = True # TODO - adjust
 
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):
+        W_Expr.__init__(self)
         self.fn = fn
         self.arg = arg
+        self.has_bvars = fn.has_bvars or arg.has_bvars
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
@@ -770,6 +801,7 @@ class W_App(W_Expr):
         if not isinstance(fn_type, W_ForAll):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
+        #print("Checking binder: %s, arg: %s" % (fn_type.binder_type.pretty(), arg_type.pretty()))
         if not infcx.def_eq(fn_type.binder_type, arg_type):
             print("Type mismatch: re-running with trace enabled")
             infcx.trace_def_eq = True
@@ -1028,6 +1060,8 @@ class W_App(W_Expr):
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
+        if not self.has_bvars:
+            return self
         return W_App(self.fn.instantiate(expr, depth), self.arg.instantiate(expr, depth))
 
     def incr_free_bvars(self, count, depth):
