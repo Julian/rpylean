@@ -345,7 +345,7 @@ class W_Sort(W_Expr):
 
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
-    decl = env.declarations[const.name]
+    decl = const.get_decl(env)
     if len(decl.level_params) != len(const.levels):
         raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.level_params), len(const.levels)))
     params = decl.level_params
@@ -362,6 +362,13 @@ class W_Const(W_Expr):
         self.levels = levels
         self.max_bvar_id = -1
         self.has_fvars = False
+        self._decl = None
+
+    def get_decl(self, env):
+        if self._decl is not None:
+            return self._decl
+        self._decl = env.declarations[self.name]
+        return self._decl
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
@@ -397,7 +404,7 @@ class W_Const(W_Expr):
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
-        decl = env.declarations[self.name]
+        decl = self.get_decl(env)
         if decl is None:
             print("Missing decl: %s" % self.name.components)
             raise RuntimeError("Missing decl: %s" % self.pretty())
@@ -417,7 +424,7 @@ class W_Const(W_Expr):
         return val
 
     def infer(self, infcx):
-        decl = infcx.env.declarations[self.name]
+        decl = self.get_decl(infcx.env)
         params = decl.level_params
 
         if len(params) == 0:
@@ -520,7 +527,7 @@ class W_Proj(W_Expr):
         if not isinstance(struct_expr, W_Const):
             return self.reduce_struct_expr(infcx)
 
-        ctor_decl = infcx.env.declarations[struct_expr.name]
+        ctor_decl = struct_expr.get_decl(infcx.env)
         if not isinstance(ctor_decl.w_kind, W_Constructor):
             #print("Non-ctor in projection: %s" % self.pretty())
             return self.reduce_struct_expr(infcx)
@@ -579,7 +586,7 @@ class W_Proj(W_Expr):
 
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
         assert isinstance(struct_expr_type, W_Const), "Expected W_Const, got %s" % struct_expr_type
-        target_const = infcx.env.declarations[struct_expr_type.name]
+        target_const = struct_expr_type.get_decl(infcx.env)
         assert target_const == self.struct_type, "Expected %s, got %s" % (target_const, struct_expr_type)
 
         assert isinstance(self.struct_type, W_Declaration)
@@ -843,7 +850,7 @@ class W_App(W_Expr):
         if not isinstance(target, W_Const):
             return False, self
 
-        decl = infcx.env.declarations[target.name]
+        decl = target.get_decl(infcx.env)
         if not isinstance(decl.w_kind, W_Recursor):
             return False, self
 
