@@ -204,6 +204,7 @@ class W_LevelParam(W_Level):
 class W_Expr(W_Item):
     def __init__(self):
         self.has_bvars = True
+        self.has_fvars = True
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
     # * Delta reduction (definition unfolding)
@@ -219,6 +220,7 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         W_Expr.__init__(self)
         self.id = int(id)
+        self.has_fvars = False
 
     def pretty(self):
         return "(BVar [%s])" % (self.id,)
@@ -299,6 +301,7 @@ class W_LitStr(W_Expr):
         W_Expr.__init__(self)
         self.val = val
         self.has_bvars = False
+        self.has_fvars = False
 
     def instantiate(self, expr, depth):
         return self
@@ -312,6 +315,7 @@ class W_Sort(W_Expr):
         W_Expr.__init__(self)
         self.level = level
         self.has_bvars = False
+        self.has_fvars = False
 
     def whnf(self, infcx):
         return self
@@ -356,6 +360,7 @@ class W_Const(W_Expr):
         self.name = name
         self.levels = levels
         self.has_bvars = False
+        self.has_fvars = False
 
     def pretty(self):
         return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
@@ -438,6 +443,7 @@ class W_LitNat(W_Expr):
         W_Expr.__init__(self)
         self.val = val
         self.has_bvars = False
+        self.has_fvars = False
 
     def pretty(self):
         return "(LitNat %s)" % (self.val.str())
@@ -490,6 +496,7 @@ class W_Proj(W_Expr):
         self.field_idx = field_idx
         self.struct_expr = struct_expr
         self.has_bvars = struct_expr.has_bvars
+        self.has_fvars = struct_expr.has_fvars
 
     def reduce_struct_expr(self, infcx):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
@@ -533,6 +540,8 @@ class W_Proj(W_Expr):
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvars:
+            return self
         return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
@@ -619,6 +628,7 @@ class W_FunBase(W_Expr):
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
         self.has_bvars = self.binder_type.has_bvars or self.body.has_bvars
+        self.has_fvars = self.binder_type.has_fvars or self.body.has_fvars
 
         #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
         #    import pdb; pdb.set_trace()
@@ -680,6 +690,8 @@ class W_ForAll(W_FunBase):
         return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvars:
+            return self
         new_binder = self.binder_type.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
         return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
@@ -725,6 +737,8 @@ class W_Lambda(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvars:
+            return self
         new_binder = self.binder_type.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
         return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
@@ -786,6 +800,7 @@ class W_Let(W_Expr):
         self.def_val = def_val
         self.body = body
         self.has_bvars = True # TODO - adjust
+        self.has_fvars = True # TODO - adjust
 
 
 class W_App(W_Expr):
@@ -794,6 +809,7 @@ class W_App(W_Expr):
         self.fn = fn
         self.arg = arg
         self.has_bvars = fn.has_bvars or arg.has_bvars
+        self.has_fvars = fn.has_fvars or arg.has_fvars
 
     def infer(self, infcx):
         fn_type_base = self.fn.infer(infcx)
@@ -1057,6 +1073,8 @@ class W_App(W_Expr):
         return self.try_iota_reduce(infcx)
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvars:
+            return self
         return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
