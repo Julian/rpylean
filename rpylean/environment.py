@@ -126,17 +126,22 @@ class Environment:
 class _InferenceContext:
     def __init__(self, env):
         self.env = env
+        self.trace_def_eq = False
 
     # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
-        #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
+        if self.trace_def_eq:
+            pass
+            #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             if expr1.id != expr2.id:
+                print("FVar mismatch: %s != %s" % (expr1.id, expr2.id))
                 return False
             return True
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
             if not expr1.level.antisymm_eq(expr2.level, self):
+                print("Sort mismatch: %s != %s" % (expr1.pretty(), expr2.pretty()))
                 return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
@@ -151,6 +156,7 @@ class _InferenceContext:
         # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
         elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
             if expr1.val != expr2.val:
+                print("NatLit mismatch: %s != %s" % (expr1.val, expr2.val))
                 return False
             return True
 
@@ -177,9 +183,11 @@ class _InferenceContext:
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
         progress2, expr2_reduced = expr2.strong_reduce_step(self)
         if progress1:
-            print("Reduced expr1:\n  %s\n  to\n  %s" % (expr1.pretty(), expr1_reduced.pretty()))
+            pass
+            #print("Reduced expr1:\n  %s\n  to\n  %s" % (expr1.pretty(), expr1_reduced.pretty()))
         if progress2:
-            print("Reduced expr2:\n  %s\n  to\n  %s" % (expr2.pretty(), expr2_reduced.pretty()))
+            pass
+            #print("Reduced expr2:\n  %s\n  to\n  %s" % (expr2.pretty(), expr2_reduced.pretty()))
         if progress1 or progress2:
             # If expr2 made progress, retry with the new expr2
             return self.def_eq(expr1_reduced, expr2_reduced)
@@ -221,6 +229,7 @@ class _InferenceContext:
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
+        print("Failed to prove definitionally equal:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         return False
 
     def try_eta_expand(self, expr1, expr2):

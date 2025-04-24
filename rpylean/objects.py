@@ -490,16 +490,19 @@ class W_Proj(W_Expr):
             args.append(struct_expr.arg)
             struct_expr = struct_expr.fn
 
-        if not isinstance(self.struct_expr, W_Const):
+        if not isinstance(struct_expr, W_Const):
             return self.reduce_struct_expr(infcx)
 
         ctor_decl = infcx.env.declarations[struct_expr.name]
         if not isinstance(ctor_decl.w_kind, W_Constructor):
+            #print("Non-ctor in projection: %s" % self.pretty())
             return self.reduce_struct_expr(infcx)
 
         num_params = ctor_decl.w_kind.num_params
         args.reverse()
         target_arg = args[num_params + self.field_idx]
+
+        #print("Reduced proj: %s to %s" % (self.pretty(), target_arg.pretty()))
 
         return (True, target_arg)
 
@@ -768,6 +771,9 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
+            print("Type mismatch: re-running with trace enabled")
+            infcx.trace_def_eq = True
+            infcx.def_eq(fn_type.binder_type, arg_type)
             raise RuntimeError("W_App.infer: type mismatch:\n  %s\n !=\n  %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
