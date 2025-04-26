@@ -24,6 +24,22 @@ COMMANDS
   dump: parse an export file and simply dump its contents
   repl: load an export file into an interactive REPL
 """.rstrip("\n")
+COMMAND_USAGE = """\
+%s
+
+USAGE
+
+    %s %s %s
+"""
+USAGE_ERROR = """\
+%s
+
+%s
+
+USAGE
+
+    rpylean %s %s
+"""
 
 
 class UsageError(Exception):
@@ -79,41 +95,36 @@ class Command(object):
     def help(self, executable):
         if executable.endswith("__main__.py"):
             executable = "pypy -m rpylean"
-        message = """\
-        %s
-
-        USAGE
-
-          %s %s %s
-        """ % (self._help, executable, self.name, " ".join(self._metavars))
+        message = COMMAND_USAGE % (
+            self._help,
+            executable,
+            self.name,
+            " ".join(self._metavars),
+        )
         raise UsageError(message)
 
     def usage_error(self, message):
-        message = """\
-        %s
-
-        %s
-
-        USAGE
-
-          rpylean %s %s
-        """ % (message, self._help, self.name, " ".join(self._metavars))
+        message = USAGE_ERROR % (
+            message,
+            self._help,
+            self.name,
+            " ".join(self._metavars),
+        )
         raise UsageError(message)
 
 
-def subcommand(metavars):
+def subcommand(metavars, help):
     def _subcommand(fn):
         name = fn.__name__
-        help = fn.__doc__.strip("\n")
-        return Command(name, help, metavars, fn)
+        return Command(name, help.strip("\n"), metavars, fn)
     return _subcommand
 
 
-@subcommand(["EXPORT_FILE"])
+@subcommand(
+    ["EXPORT_FILE"],
+    help="Type check an exported Lean environment.",
+)
 def check(self, args, stdout, stderr):
-    """
-    Type check an exported Lean environment.
-    """
     path, = args
     environment = Environment.from_lines(lines_from_path(path))
     stdout.write(
@@ -135,22 +146,22 @@ def check(self, args, stdout, stderr):
     return 0
 
 
-@subcommand(["EXPORT_FILE"])
+@subcommand(
+    ["EXPORT_FILE"],
+    help="Dump an exported Lean environment.",
+)
 def dump(self, args, stdout, stderr):
-    """
-    Dump an exported Lean environment.
-    """
     path, = args
     environment = Environment.from_lines(lines_from_path(path))
     environment.dump_pretty(stdout)
     return 0
 
 
-@subcommand(["EXPORT_FILE"])
+@subcommand(
+    ["EXPORT_FILE"],
+    help="Open a REPL with the environment loaded from the given export.",
+)
 def repl(self, args, stdout, stderr):
-    """
-    Open a REPL with the environment loaded from the given export.
-    """
     path, = args
     environment = Environment.from_lines(lines_from_path(path))
     from rpylean import repl
