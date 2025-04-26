@@ -5,7 +5,7 @@ from rpylean.parser import parse
 from rpython.rlib.objectmodel import r_dict
 
 import sys
-sys.setrecursionlimit(5000)
+sys.setrecursionlimit(50000)
 
 
 class Environment:

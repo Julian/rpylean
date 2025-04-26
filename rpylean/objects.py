@@ -203,7 +203,7 @@ class W_LevelParam(W_Level):
 
 class W_Expr(W_Item):
     def __init__(self):
-        self.max_bvar_id = None
+        self.max_bvar_id = -1
         self.has_fvars = True
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
