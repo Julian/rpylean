@@ -31,10 +31,10 @@ class Name:
         return True
 
     def __repr__(self):
-        return "<Name %r>" % (self.components,)
+        return self.pretty()
 
     def pretty(self):
-        return '.'.join(self.components)
+        return ".".join(self.components)
 
 
 class W_Item(object):
@@ -44,13 +44,7 @@ class W_Item(object):
         return vars(self) == vars(other)
 
     def __repr__(self):
-        fields = self.__dict__.iteritems()
-        contents = ", ".join("%s=%r" % (k, v) for k, v in fields)
-        return "<%s%s%s>" % (
-            self.__class__.__name__,
-            " " if contents else "",
-            contents,
-        )
+        return self.pretty()
 
     def pretty(self):
         return "<%s repr error>" % (self.__class__.__name__,)
