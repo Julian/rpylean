@@ -17,4 +17,4 @@ def test_no_such_file():
     stdout, stderr = process.communicate()
 
     assert stdout == "", stdout
-    assert stderr.strip() == "nonexistent/path does not exist."
+    assert stderr.strip().startswith("`nonexistent/path` does not exist.\n")
