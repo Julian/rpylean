@@ -9,6 +9,7 @@ examples := tests / "examples"
 target := justfile_directory() / "targetrpylean.py"
 
 translated := justfile_directory() / "rpylean-c"
+translated_tests := justfile_directory() / "translated-tests"
 
 # Run rpylean (untranslated) with any extra arguments.
 rpylean *ARGS:
@@ -28,4 +29,8 @@ translate *ARGS:
 
 # Run rpylean's (untranslated) tests.
 test *ARGS=tests:
+    "{{ pypy }}" "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
+
+# Run rpylean's translated tests.
+test-translated *ARGS=translated_tests:
     "{{ pypy }}" "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
