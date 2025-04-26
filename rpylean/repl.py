@@ -2,6 +2,7 @@
 Interactive REPL for rpylean.
 """
 from rpython.rlib.rfile import create_stdio
+import re
 
 from rpylean.objects import W_TypeError, Name
 
@@ -44,7 +45,20 @@ def interact(env):
             stdout.write(env[name].pretty())
             stdout.write("\n")
         elif command in ["n", "names"]:
-            for name in env.names.values():
+            names = env.names.values()
+            if len(split) == 2:  # ok, all of them!
+                arg = split[1].strip()
+                if arg.isdigit():  # all names with at most `n` components
+                    n = int(arg)
+                    names = [
+                        name for name in names if len(name.components) <= n
+                    ]
+                else:              # all names starting with the given prefix
+                    names = [
+                        name for name in names if name.pretty().startswith(arg)
+                    ]
+
+            for name in names:
                 stdout.write(name.pretty())
                 stdout.write("\n")
         else:
