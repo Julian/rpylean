@@ -12,12 +12,6 @@ from rpylean.objects import (
 from rpylean.environment import Environment
 
 
-def from_lines(item_lines):
-    lines = ["0.1.2"]
-    lines.extend(dedent(item_lines).strip().splitlines())
-    return Environment.from_lines(lines)
-
-
 def test_valid_def_type_checks():
     W_Type = W_Sort(W_LevelSucc(W_LEVEL_ZERO))
     W_Type1 = W_Sort(W_LevelSucc(W_LevelSucc(W_LEVEL_ZERO)))
