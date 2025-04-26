@@ -22,16 +22,16 @@ class Name:
             hash_val = hash_val ^ compute_hash(c)
         return hash_val
 
-    def __eq__(self, other):
+    def __repr__(self):
+        return self.pretty()
+
+    def eq(self, other):
         if len(self.components) != len(other.components):
             return False
         for i in range(len(self.components)):
             if self.components[i] != other.components[i]:
                 return False
         return True
-
-    def __repr__(self):
-        return self.pretty()
 
     def pretty(self):
         return ".".join(self.components)
@@ -75,7 +75,7 @@ class W_Level(W_Item):
         if isinstance(other, W_LevelZero) and balance < 0:
             return False
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelParam):
-            return self.name.__eq__(other.name) and balance == 0
+            return self.name.eq(other.name) and balance == 0
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelZero):
             return False
         if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
@@ -92,7 +92,7 @@ class W_Level(W_Item):
             return self.leq(other.lhs, infcx, balance) or self.leq(other.rhs, infcx, balance)
 
         # TODO - what equality is this?
-        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.antisymm_eq(other.lhs, infcx) and self.rhs.antisymm_eq(other.rhs, infcx):
+        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.eq(other.lhs, infcx) and self.rhs.eq(other.rhs, infcx):
             return True
 
         if isinstance(self, W_LevelIMax) and isinstance(self.rhs, W_LevelParam):
@@ -106,7 +106,12 @@ class W_Level(W_Item):
         warn("Unimplemented level comparison: %s <= %s" % (self, other))
         return True
 
-    def antisymm_eq(self, other, infcx):
+    def eq(self, other, infcx):
+        """
+        Two levels are equal via antisymmetry.
+
+        I.e. `a == b` if `a.leq(b)` and `b.leq(a)`.
+        """
         lhs = self.simplify()
         rhs = other.simplify()
         return lhs.leq(rhs, infcx) and rhs.leq(lhs, infcx)
@@ -189,7 +194,7 @@ class W_LevelParam(W_Level):
         return self.name.pretty()
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LevelParam) and self.name.__eq__(other.name)
+        return isinstance(other, W_LevelParam) and self.name.eq(other.name)
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
@@ -889,7 +894,7 @@ class W_App(W_Expr):
         # TODO - consider storing these by recursor name
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = infcx.env.rec_rules[rec_rule_id]
-            if rec_rule.ctor_name.__eq__(major_premise_ctor.name):
+            if rec_rule.ctor_name.eq(major_premise_ctor.name):
                 #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
 
 

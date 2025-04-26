@@ -13,9 +13,9 @@ class Environment:
         self.levels = {"0": W_LEVEL_ZERO}
         self.exprs = {}
         self.names = {"0": Name([])}
-        self.constants = r_dict(Name.__eq__, Name.__hash__)
+        self.constants = r_dict(Name.eq, Name.__hash__)
         self.rec_rules = {}
-        self.declarations = r_dict(Name.__eq__, Name.__hash__)
+        self.declarations = r_dict(Name.eq, Name.__hash__)
 
     def __getitem__(self, name_or_list):
         if isinstance(name_or_list, str):
@@ -132,7 +132,7 @@ class _InferenceContext:
                 return False
             return True
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
-            if not expr1.level.antisymm_eq(expr2.level, self):
+            if not expr1.level.eq(expr2.level, self):
                 return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
@@ -151,12 +151,12 @@ class _InferenceContext:
             return True
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
-        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name.__eq__(expr2.name):
+        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name.eq(expr2.name):
             # A given constant always has the same number of universe parameters
             assert len(expr1.levels) == len(expr2.levels)
             all_match = True
             for i in range(len(expr1.levels)):
-                if not expr1.levels[i].antisymm_eq(expr2.levels[i], self):
+                if not expr1.levels[i].eq(expr2.levels[i], self):
                     all_match = False
                     break
             if all_match:
