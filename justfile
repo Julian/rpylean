@@ -18,7 +18,7 @@ example name:
 
 # Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:
-    "{{ pypy }}" "{{ rpython }}" "{{ target }}" {{ ARGS }}
+    "{{ pypy }}" "{{ rpython }}" {{ ARGS }} "{{ target }}"
 
 # Run rpylean's (untranslated) tests.
 test *ARGS=tests:
