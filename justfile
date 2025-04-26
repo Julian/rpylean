@@ -8,6 +8,8 @@ tests := justfile_directory() / "tests"
 examples := tests / "examples"
 target := justfile_directory() / "targetrpylean.py"
 
+translated := justfile_directory() / "rpylean-c"
+
 # Run rpylean (untranslated) with any extra arguments.
 rpylean *ARGS:
     PYTHONPATH="{{ pypy_checkout }}/" "{{ pypy }}" -m rpylean {{ ARGS }}
@@ -15,6 +17,10 @@ rpylean *ARGS:
 # Run the rpylean REPL untranslated on an example.
 example name:
     @just rpylean repl $(find "{{ examples }}" -iname "{{ name }}")/export
+
+# Run the translated rpylean REPL under rlwrap.
+repl *ARGS:
+    rlwrap "{{ translated }}" repl {{ ARGS }}
 
 # Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:
