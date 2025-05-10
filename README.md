@@ -1,14 +1,12 @@
 # rpylean
 
+A Lean (4) type checker written in (R)Python.
+
 ## Prerequisites
 
 You'll need to install PyPy (2) and *also* to have a [checkout of PyPy](https://github.com/pypy/pypy) which contains the [RPython toolchain](https://rpython.readthedocs.io) in order to work on `rpylean`.
 
-### `justfile`
-
-There's a `justfile` alongside this README which can be used to perform all of the commands mentioned below.
-To use it, after [installing `just`](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) and cloning PyPy, create a [`.env` file](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) containing `PYPY_CHECKOUT=/path/to/pypy/checkout`.
-You can then run `just rpylean`, `just translate` and/or `just test`.
+## Development
 
 ### Running Untranslated
 
@@ -36,6 +34,12 @@ There are some tests for `rpylean` which can be run via:
 pypy <pypy-checkout>/pytest.py <rpylean-checkout>/tests
 
 ```
+
+### `justfile`
+
+There's a `justfile` alongside this README which can be used to perform all of the commands mentioned above.
+To use it, after [installing `just`](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) and cloning PyPy, create a [`.env` file](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) containing `PYPY_CHECKOUT=/path/to/pypy/checkout`.
+You can then run `just rpylean`, `just translate` and/or `just test`.
 
 ## Resources
 
