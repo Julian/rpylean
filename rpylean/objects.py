@@ -68,6 +68,12 @@ class Name(W_Item):
         """
         return Name(self.components + [part])
 
+    def const(self, levels=[]):
+        """
+        Construct a constant expression for this name.
+        """
+        return W_Const(self, levels)
+
 
 Name.ANONYMOUS = Name([])
 
@@ -443,13 +449,13 @@ class W_Const(W_Expr):
         for level in self.levels:
             new_level = level.subst_levels(substs)
             new_levels.append(new_level)
-        return W_Const(self.name, new_levels)
+        return self.name.const(new_levels)
 
 
 NAT = Name.simple("Nat")
-NAT_CONST = W_Const(NAT, [])
-NAT_ZERO = W_Const(NAT.child("zero"), [])
-NAT_SUCC = W_Const(NAT.child("succ"), [])
+NAT_CONST = NAT.const()
+NAT_ZERO = NAT.child("zero").const()
+NAT_SUCC = NAT.child("succ").const()
 
 
 class W_LitNat(W_Expr):
@@ -868,7 +874,7 @@ class W_App(W_Expr):
             new_args.reverse()
             num_ctor_params = ctor_decl.w_kind.num_params
 
-            major_premise_ctor = W_Const(inductive_decl.w_kind.ctor_names[0], old_ty_base.levels)
+            major_premise_ctor = inductive_decl.w_kind.ctor_names[0].const(old_ty_base.levels)
             assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = W_App(major_premise_ctor, arg)

@@ -300,10 +300,8 @@ class Const(ExprVal):
         self.levels = levels
 
     def to_w_expr(self, environment):
-        return objects.W_Const(
-            name=environment.names[self.name],
-            levels=[environment.levels[level] for level in self.levels],
-        )
+        levels = [environment.levels[level] for level in self.levels]
+        return environment.names[self.name].const(levels)
 
 
 class Let(ExprVal):

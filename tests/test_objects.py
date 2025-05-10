@@ -1,4 +1,4 @@
-from rpylean.objects import Name
+from rpylean.objects import Name, W_Const, W_LevelParam
 
 
 class TestName:
@@ -19,3 +19,13 @@ class TestName:
 
     def test_child_anonymous(self):
         assert Name.ANONYMOUS.child("foo") == Name.simple("foo")
+
+    def test_const_no_levels(self):
+        bar = Name(["foo", "bar"])
+        assert bar.const() == W_Const(bar, [])
+
+    def test_const_with_levels(self):
+        bar = Name(["foo", "bar"])
+        u = W_LevelParam("u")
+        v = W_LevelParam("v")
+        assert bar.const([u, v]) == W_Const(bar, [u, v])
