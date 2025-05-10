@@ -12,7 +12,7 @@ class W_TypeError(Exception):
                                          self.w_expected_type.pretty())
 
 
-class Name:
+class Name(object):
     def __init__(self, components):
         self.components = components
 
@@ -34,7 +34,24 @@ class Name:
         return True
 
     def pretty(self):
-        return ".".join(self.components)
+        if not self.components:
+            return "[anonymous]"
+        return ".".join([pretty_part(each) for each in self.components])
+
+
+def pretty_part(part):
+    """
+    Pretty print a single component of a Name.
+    """
+
+    if isinstance(part, int):
+        return str(part)
+    if "." in part:
+        return "«%s»" % (part,)
+    return part
+
+
+Name.ANONYMOUS = Name([])
 
 
 class W_Item(object):

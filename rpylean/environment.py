@@ -12,7 +12,7 @@ class Environment:
     def __init__(self):
         self.levels = {"0": W_LEVEL_ZERO}
         self.exprs = {}
-        self.names = {"0": Name([])}
+        self.names = {"0": Name.ANONYMOUS}
         self.constants = r_dict(Name.eq, Name.__hash__)
         self.rec_rules = {}
         self.declarations = r_dict(Name.eq, Name.__hash__)
