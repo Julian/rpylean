@@ -91,7 +91,7 @@ class Environment:
     def register_name(self, nidx, parent_nidx, name):
         assert nidx not in self.names, nidx
         parent = self.names[parent_nidx]
-        self.names[nidx] = Name(parent.components + [name])
+        self.names[nidx] = parent.child(name)
 
     def register_expr(self, eidx, w_expr):
         assert eidx not in self.exprs, eidx

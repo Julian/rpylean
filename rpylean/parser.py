@@ -102,6 +102,7 @@ class NameStr(Node):
     def compile(self, environment):
         environment.register_name(self.nidx, self.parent_nidx, self.name)
 
+
 class NameId(Node):
     @staticmethod
     def parse(tokens):

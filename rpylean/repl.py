@@ -33,7 +33,7 @@ def interact(env):
                 )
                 continue
 
-            name = Name(split[1].split("."))
+            name = Name.from_str(split[1])
             try:
                 env.declarations[name].type_check(env.inference_context())
             except W_TypeError as error:

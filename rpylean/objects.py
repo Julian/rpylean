@@ -12,7 +12,20 @@ class W_TypeError(Exception):
                                          self.w_expected_type.pretty())
 
 
-class Name(object):
+class W_Item(object):
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return vars(self) == vars(other)
+
+    def __repr__(self):
+        return self.pretty()
+
+    def pretty(self):
+        return "<%s repr error>" % (self.__class__.__name__,)
+
+
+class Name(W_Item):
     def __init__(self, components):
         self.components = components
 
@@ -22,8 +35,19 @@ class Name(object):
             hash_val = hash_val ^ compute_hash(c)
         return hash_val
 
-    def __repr__(self):
-        return self.pretty()
+    @staticmethod
+    def simple(part):
+        """
+        A name with one part.
+        """
+        return Name([part])
+
+    @staticmethod
+    def from_str(s):
+        """
+        Construct a name by splitting a string on ``.``.
+        """
+        return Name(s.split("."))
 
     def eq(self, other):
         if len(self.components) != len(other.components):
@@ -38,6 +62,15 @@ class Name(object):
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
 
+    def child(self, part):
+        """
+        Construct a name nested inside this one.
+        """
+        return Name(self.components + [part])
+
+
+Name.ANONYMOUS = Name([])
+
 
 def pretty_part(part):
     """
@@ -49,22 +82,6 @@ def pretty_part(part):
     if "." in part:
         return "«%s»" % (part,)
     return part
-
-
-Name.ANONYMOUS = Name([])
-
-
-class W_Item(object):
-    def __eq__(self, other):
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return vars(self) == vars(other)
-
-    def __repr__(self):
-        return self.pretty()
-
-    def pretty(self):
-        return "<%s repr error>" % (self.__class__.__name__,)
 
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
@@ -429,9 +446,10 @@ class W_Const(W_Expr):
         return W_Const(self.name, new_levels)
 
 
-NAT_CONST = W_Const(Name(["Nat"]), [])
-NAT_ZERO = W_Const(Name(["Nat", "zero"]), [])
-NAT_SUCC = W_Const(Name(["Nat", "succ"]), [])
+NAT = Name.simple("Nat")
+NAT_CONST = W_Const(NAT, [])
+NAT_ZERO = W_Const(NAT.child("zero"), [])
+NAT_SUCC = W_Const(NAT.child("succ"), [])
 
 
 class W_LitNat(W_Expr):
