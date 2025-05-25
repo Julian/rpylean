@@ -74,6 +74,12 @@ class Name(W_Item):
         """
         return W_Const(self, levels)
 
+    def level(self):
+        """
+        Construct a level parameter from this name.
+        """
+        return W_LevelParam(self)
+
 
 Name.ANONYMOUS = Name([])
 
@@ -96,7 +102,7 @@ class W_Level(W_Item):
         if isinstance(self, W_LevelZero) or isinstance(self, W_LevelParam):
             return self
         if isinstance(self, W_LevelSucc):
-            return W_LevelSucc(self.parent.simplify())
+            return self.parent.simplify().succ()
         if isinstance(self, W_LevelMax):
             return W_LevelMax.combining(self.lhs.simplify(), self.rhs.simplify())
         if isinstance(self, W_LevelIMax):
@@ -156,6 +162,30 @@ class W_Level(W_Item):
         rhs = other.simplify()
         return lhs.leq(rhs, infcx) and rhs.leq(lhs, infcx)
 
+    def sort(self):
+        """
+        Return a Sort for this level.
+        """
+        return W_Sort(self)
+
+    def succ(self):
+        """
+        Return the level which is successor to this one.
+        """
+        return W_LevelSucc(self)
+
+    def max(self, other):
+        """
+        Return the (simplified) max of this level with another.
+        """
+        return W_LevelMax.combining(self, other)
+
+    def imax(self, other):
+        """
+        Return the (simplified) imax of this level with another.
+        """
+        return W_LevelIMax(self, other)
+
 
 class W_LevelZero(W_Level):
     def pretty(self):
@@ -180,7 +210,7 @@ class W_LevelSucc(W_Level):
 
     def subst_levels(self, substs):
         new_parent = self.parent.subst_levels(substs)
-        return W_LevelSucc(new_parent)
+        return new_parent.succ()
 
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelSucc) and self.parent.syntactic_eq(other.parent)
@@ -207,7 +237,7 @@ class W_LevelMax(W_Level):
     @staticmethod
     def combining(lhs, rhs):
         if isinstance(lhs, W_LevelSucc) and isinstance(rhs, W_LevelSucc):
-            return W_LevelSucc(W_LevelMax.combining(lhs.parent, rhs.parent))
+            return W_LevelMax.combining(lhs.parent, rhs.parent).succ()
         if isinstance(lhs, W_LevelZero):
             return rhs
         if isinstance(rhs, W_LevelZero):
@@ -359,10 +389,10 @@ class W_Sort(W_Expr):
         return "Sort %s" % self.level.pretty()
 
     def infer(self, infcx):
-        return W_Sort(W_LevelSucc(self.level))
+        return self.level.succ().sort()
 
     def subst_levels(self, substs):
-        return W_Sort(self.level.subst_levels(substs))
+        return self.level.subst_levels(substs).sort()
 
     def syntactic_eq(self, other):
         return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
@@ -680,7 +710,7 @@ class W_ForAll(W_FunBase):
     def infer(self, infcx):
         binder_sort = infcx.infer_sort_of(self.binder_type)
         body_sort = infcx.infer_sort_of(self.body.instantiate(W_FVar(self), 0))
-        return W_Sort(W_LevelIMax(binder_sort, body_sort))
+        return W_LevelIMax(binder_sort, body_sort).sort()
 
     # TODO - double check this
     def instantiate(self, expr, depth):

@@ -184,7 +184,7 @@ class _InferenceContext:
         # If these types are themselves Prop (Sort 0), and the types are equal, then our original expressions are proofs of the same `Prop`
         expr1_ty_kind = expr1_ty.infer(self)
         expr2_ty_kind = expr2_ty.infer(self)
-        if expr1_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)) and expr2_ty_kind.syntactic_eq(W_Sort(W_LEVEL_ZERO)):
+        if expr1_ty_kind.syntactic_eq(W_LEVEL_ZERO.sort()) and expr2_ty_kind.syntactic_eq(W_LEVEL_ZERO.sort()):
             if self.def_eq(expr1_ty, expr2_ty):
                 return True
 

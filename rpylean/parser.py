@@ -142,7 +142,7 @@ class UniverseSucc(Universe):
 
     def compile(self, environment):
         parent = environment.levels[self.parent]
-        environment.register_level(self.uidx, objects.W_LevelSucc(parent))
+        environment.register_level(self.uidx, parent.succ())
 
 class UniverseMax(Universe):
     @staticmethod
@@ -206,7 +206,7 @@ class UniverseParam(Universe):
 
     def compile(self, environment):
         name = environment.names[self.nidx]
-        environment.register_level(self.uidx, objects.W_LevelParam(name=name))
+        environment.register_level(self.uidx, name.level())
 
 
 class Expr(Node):
@@ -280,7 +280,7 @@ class Sort(ExprVal):
         self.level = level
 
     def to_w_expr(self, environment):
-        return objects.W_Sort(level=environment.levels[self.level])
+        return environment.levels[self.level].sort()
 
 
 class Const(ExprVal):
