@@ -1,3 +1,5 @@
+import pytest
+
 from rpylean.objects import (
     W_LEVEL_ZERO,
     Name,
@@ -44,15 +46,38 @@ class TestName:
 
 
 class TestLevel:
-    def test_max(self):
-        u = Name.simple("u").level()
-        v = Name.simple("v").level()
-        assert u.max(v) == W_LevelMax(u, v)
+
+    u = Name.simple("u").level()
+    v = Name.simple("v").level()
+
+    @pytest.mark.parametrize(
+        "lhs, rhs, expected",
+        [
+            (W_LEVEL_ZERO, W_LEVEL_ZERO, W_LEVEL_ZERO),
+            (W_LEVEL_ZERO, W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ()),
+            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO.succ()),
+            (W_LEVEL_ZERO.succ().succ(), W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ().succ()),
+            (u, v, W_LevelMax(u, v)),
+            (u.succ(), v, W_LevelMax(u.succ(), v)),
+            (u, v.succ(), W_LevelMax(u, v.succ())),
+            (u.succ(), v.succ(), u.max(v).succ()),
+        ],
+        ids=[
+            "0_0",
+            "0_1",
+            "1_0",
+            "2_1",
+            "u_v",
+            "u+1_v",
+            "u_v+1",
+            "u+1_v+1",
+        ]
+    )
+    def test_max(self, lhs, rhs, expected):
+        assert lhs.max(rhs) == expected
 
     def test_imax(self):
-        u = Name.simple("u").level()
-        v = Name.simple("v").level()
-        assert u.imax(v) == W_LevelIMax(u, v)
+        assert self.u.imax(self.v) == W_LevelIMax(self.u, self.v)
 
 
 class TestSort:
