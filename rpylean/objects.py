@@ -104,7 +104,7 @@ class W_Level(W_Item):
         if isinstance(self, W_LevelSucc):
             return self.parent.simplify().succ()
         if isinstance(self, W_LevelMax):
-            return W_LevelMax.combining(self.lhs.simplify(), self.rhs.simplify())
+            return self.lhs.simplify().max(self.rhs.simplify())
         if isinstance(self, W_LevelIMax):
             b_simp = self.rhs.simplify()
             if isinstance(b_simp, W_LevelSucc):
@@ -256,7 +256,7 @@ class W_LevelMax(W_Level):
 
         if isinstance(lhs, W_LevelSucc):
             if isinstance(rhs, W_LevelSucc):
-                return W_LevelMax.combining(lhs.parent, rhs.parent).succ()
+                return lhs.parent.max(rhs.parent).succ()
             if lhs.parent == rhs:
                 return lhs
         if isinstance(rhs, W_LevelSucc) and rhs.parent == lhs:

@@ -162,10 +162,7 @@ class UniverseMax(Universe):
     def compile(self, environment):
         environment.register_level(
             self.uidx,
-            objects.W_LevelMax(
-                lhs=environment.levels[self.lhs],
-                rhs=environment.levels[self.rhs],
-            ),
+            environment.levels[self.lhs].max(environment.levels[self.rhs])
         )
 
 class UniverseIMax(Universe):
