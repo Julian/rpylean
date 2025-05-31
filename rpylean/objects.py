@@ -188,6 +188,8 @@ class W_Level(W_Item):
             return self
         if isinstance(other, W_LevelZero):
             return W_LEVEL_ZERO
+        if isinstance(self, W_LevelZero) or self == W_LEVEL_ZERO.succ():
+            return other
         return W_LevelIMax(self, other)
 
 

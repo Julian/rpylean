@@ -56,6 +56,11 @@ class TestLevel:
         [
             (W_LEVEL_ZERO, W_LEVEL_ZERO, W_LEVEL_ZERO),
             (W_LEVEL_ZERO, W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ()),
+            (
+                W_LEVEL_ZERO.succ(),
+                W_LEVEL_ZERO.succ().succ().succ(),
+                W_LEVEL_ZERO.succ().succ().succ(),
+            ),
             (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO.succ()),
             (W_LEVEL_ZERO.succ().succ(), W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ().succ()),
             (u, u, u),
@@ -69,6 +74,7 @@ class TestLevel:
         ids=[
             "0_0",
             "0_1",
+            "1_3",
             "1_0",
             "2_1",
             "u_u",
@@ -86,17 +92,34 @@ class TestLevel:
     @pytest.mark.parametrize(
         "lhs, rhs, expected",
         [
-            (u, u, u),
-            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO),
             (W_LEVEL_ZERO, W_LEVEL_ZERO, W_LEVEL_ZERO),
+
+            # imax 1 0 = 0
+            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO),
+
+            # in fact imax u 0 = 0 for any u
             (u, W_LEVEL_ZERO, W_LEVEL_ZERO),
+
+            # but imax 0 1 = 1
+            (W_LEVEL_ZERO, W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ()),
+
+            # in fact imax 0 u = u for any u
+            (W_LEVEL_ZERO, u, u),
+
+            # and in fact imax 1 u = u for any u as well
+            (W_LEVEL_ZERO.succ(), u, u),
+
+            (u, u, u),
             (u, v, W_LevelIMax(u, v)),
         ],
         ids=[
-            "u_u",
-            "1_0",
             "0_0",
+            "1_0",
             "u_0",
+            "0_1",
+            "0_u",
+            "1_u",
+            "u_u",
             "u_v",
         ]
     )
