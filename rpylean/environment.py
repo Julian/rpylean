@@ -13,7 +13,6 @@ class Environment:
         self.levels = {"0": W_LEVEL_ZERO}
         self.exprs = {}
         self.names = {"0": Name.ANONYMOUS}
-        self.constants = r_dict(Name.eq, Name.__hash__)
         self.rec_rules = {}
         self.declarations = r_dict(Name.eq, Name.__hash__)
 
@@ -71,11 +70,6 @@ class Environment:
             stdout.write("%s -> %s\n" % (id, expr.pretty()))
 
         stdout.write("\n")
-        stdout.write(heading("constants"))
-        for id, constant in self.constants.items():
-            stdout.write("%s -> %s\n" % (id, constant.pretty()))
-
-        stdout.write("\n")
         stdout.write(heading("levels"))
         for id, level in self.levels.items():
             stdout.write("%s -> %s\n" % (id, level.pretty()))
@@ -96,10 +90,6 @@ class Environment:
     def register_expr(self, eidx, w_expr):
         assert eidx not in self.exprs, eidx
         self.exprs[eidx] = w_expr
-
-    def register_constant(self, name, type):
-        assert name not in self.constants, name
-        self.constants[name] = type
 
     def register_level(self, uidx, level):
         assert uidx not in self.levels, uidx
