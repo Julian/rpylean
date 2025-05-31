@@ -194,8 +194,8 @@ class W_Level(W_Item):
 
 
 class W_LevelZero(W_Level):
-    def pretty(self):
-        return "<W_LevelZero>"
+    def pretty_parts(self):
+        return "", 0
 
     def subst_levels(self, substs):
         return self
@@ -211,8 +211,9 @@ class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
 
-    def pretty(self):
-        return "(Succ %s)" % self.parent.pretty()
+    def pretty_parts(self):
+        text, balance = self.parent.pretty_parts()
+        return text, balance + 1
 
     def subst_levels(self, substs):
         new_parent = self.parent.subst_levels(substs)
@@ -227,8 +228,10 @@ class W_LevelMax(W_Level):
         self.lhs = lhs
         self.rhs = rhs
 
-    def pretty(self):
-        return "(Max %s %s)" % (self.lhs.pretty(), self.rhs.pretty())
+    def pretty_parts(self):
+        lhs, _ = self.lhs.pretty_parts()
+        rhs, _ = self.rhs.pretty_parts()
+        return "(max %s %s)" % (lhs, rhs), 0
 
     def subst_levels(self, substs):
         new_lhs = self.lhs.subst_levels(substs)
@@ -264,6 +267,11 @@ class W_LevelIMax(W_Level):
         self.lhs = lhs
         self.rhs = rhs
 
+    def pretty_parts(self):
+        lhs, _ = self.lhs.pretty_parts()
+        rhs, _ = self.rhs.pretty_parts()
+        return "(imax %s %s)" % (lhs, rhs), 0
+
     def syntactic_eq(self, other):
         if not isinstance(other, W_LevelIMax):
             return False
@@ -274,8 +282,8 @@ class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
 
-    def pretty(self):
-        return self.name.pretty()
+    def pretty_parts(self):
+        return self.name.pretty(), 0
 
     def syntactic_eq(self, other):
         return isinstance(other, W_LevelParam) and self.name.eq(other.name)
@@ -400,7 +408,26 @@ class W_Sort(W_Expr):
         return self
 
     def pretty(self):
-        return "Sort %s" % self.level.pretty()
+        """
+        Pretty format this Sort.
+        """
+        text, balance = self.level.pretty_parts()
+
+        if balance == 0:
+            if not text:
+                return "Prop"
+            prefix = "Sort"
+        else:
+            prefix, balance = "Type", balance - 1
+
+        if not text:
+            if balance == 0:
+                return "Type"
+            return "%s %s" % (prefix, balance)
+
+        if balance == 0:
+            return "%s %s" % (prefix, text)
+        return "%s (%s + %s)" % (prefix, text, balance)
 
     def infer(self, infcx):
         return self.level.succ().sort()
