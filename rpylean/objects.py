@@ -115,7 +115,7 @@ class W_Level(W_Item):
         raise RuntimeError("Unexpected level type: %s" % self)
 
     # See https://ammkrn.github.io/type_checking_in_lean4/levels.html?highlight=leq#partial-order-on-levels
-    def leq(self, other, infcx, balance=0):
+    def leq(self, other, balance=0):
         if isinstance(self, W_LevelZero) and balance >= 0:
             return True
         if isinstance(other, W_LevelZero) and balance < 0:
@@ -127,15 +127,15 @@ class W_Level(W_Item):
         if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
             return balance >= 0
         if isinstance(self, W_LevelSucc):
-            return self.parent.leq(other, infcx, balance - 1)
+            return self.parent.leq(other, balance - 1)
         if isinstance(other, W_LevelSucc):
-            return self.leq(other.parent, infcx, balance + 1)
+            return self.leq(other.parent, balance + 1)
 
         if isinstance(self, W_LevelMax):
-            return self.lhs.leq(other, infcx, balance) or self.rhs.leq(other, infcx, balance)
+            return self.lhs.leq(other, balance) or self.rhs.leq(other, balance)
 
         if (isinstance(self, W_LevelParam) or isinstance(self, W_LevelZero)) and isinstance(other, W_LevelMax):
-            return self.leq(other.lhs, infcx, balance) or self.leq(other.rhs, infcx, balance)
+            return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
 
         # TODO - what equality is this?
         if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.eq(other.lhs, infcx) and self.rhs.eq(other.rhs, infcx):
@@ -160,7 +160,7 @@ class W_Level(W_Item):
         """
         lhs = self.simplify()
         rhs = other.simplify()
-        return lhs.leq(rhs, infcx) and rhs.leq(lhs, infcx)
+        return lhs.leq(rhs) and rhs.leq(lhs)
 
     def sort(self):
         """
