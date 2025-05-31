@@ -186,6 +186,8 @@ class W_Level(W_Item):
         """
         if self == other:
             return self
+        if isinstance(other, W_LevelZero):
+            return W_LEVEL_ZERO
         return W_LevelIMax(self, other)
 
 

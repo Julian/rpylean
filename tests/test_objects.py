@@ -87,10 +87,16 @@ class TestLevel:
         "lhs, rhs, expected",
         [
             (u, u, u),
+            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO),
+            (W_LEVEL_ZERO, W_LEVEL_ZERO, W_LEVEL_ZERO),
+            (u, W_LEVEL_ZERO, W_LEVEL_ZERO),
             (u, v, W_LevelIMax(u, v)),
         ],
         ids=[
             "u_u",
+            "1_0",
+            "0_0",
+            "u_0",
             "u_v",
         ]
     )
