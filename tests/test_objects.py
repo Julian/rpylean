@@ -49,7 +49,7 @@ u = Name.simple("u").level()
 v = Name.simple("v").level()
 
 
-class TestLevel:
+class TestLevel(object):
 
     @pytest.mark.parametrize(
         "lhs, rhs, expected",
