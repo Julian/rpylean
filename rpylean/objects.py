@@ -236,6 +236,9 @@ class W_LevelMax(W_Level):
 
     @staticmethod
     def combining(lhs, rhs):
+        if lhs == rhs:
+            return lhs
+
         if isinstance(lhs, W_LevelSucc):
             if isinstance(rhs, W_LevelSucc):
                 return W_LevelMax.combining(lhs.parent, rhs.parent).succ()
