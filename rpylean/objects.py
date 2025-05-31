@@ -229,8 +229,14 @@ class W_LevelMax(W_Level):
         self.rhs = rhs
 
     def pretty_parts(self):
-        lhs, _ = self.lhs.pretty_parts()
-        rhs, _ = self.rhs.pretty_parts()
+        lhs, balance = self.lhs.pretty_parts()
+        if balance != 0:
+            lhs = "(%s + %s)" % (lhs, balance)
+
+        rhs, balance = self.rhs.pretty_parts()
+        if balance != 0:
+            rhs = "(%s + %s)" % (rhs, balance)
+
         return "(max %s %s)" % (lhs, rhs), 0
 
     def subst_levels(self, substs):
