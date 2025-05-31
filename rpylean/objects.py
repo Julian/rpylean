@@ -751,7 +751,7 @@ class W_ForAll(W_FunBase):
     def infer(self, infcx):
         binder_sort = infcx.infer_sort_of(self.binder_type)
         body_sort = infcx.infer_sort_of(self.body.instantiate(W_FVar(self), 0))
-        return W_LevelIMax(binder_sort, body_sort).sort()
+        return binder_sort.imax(body_sort).sort()
 
     # TODO - double check this
     def instantiate(self, expr, depth):

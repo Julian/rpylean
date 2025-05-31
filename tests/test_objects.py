@@ -126,8 +126,6 @@ class TestLevel:
     def test_imax(self, lhs, rhs, expected):
         assert lhs.imax(rhs) == expected
 
-
-class TestSort:
     def test_succ(self):
         assert u.succ() == W_LevelSucc(W_LevelParam(Name(["u"])))
 
