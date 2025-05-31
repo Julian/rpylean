@@ -45,10 +45,11 @@ class TestName:
         assert Name.simple("foo").level() == W_LevelParam(Name(["foo"]))
 
 
-class TestLevel:
+u = Name.simple("u").level()
+v = Name.simple("v").level()
 
-    u = Name.simple("u").level()
-    v = Name.simple("v").level()
+
+class TestLevel:
 
     @pytest.mark.parametrize(
         "lhs, rhs, expected",
@@ -61,6 +62,8 @@ class TestLevel:
             (u.succ(), v, W_LevelMax(u.succ(), v)),
             (u, v.succ(), W_LevelMax(u, v.succ())),
             (u.succ(), v.succ(), u.max(v).succ()),
+            (u.succ(), u, u.succ()),
+            (u, u.succ(), u.succ()),
         ],
         ids=[
             "0_0",
@@ -71,18 +74,19 @@ class TestLevel:
             "u+1_v",
             "u_v+1",
             "u+1_v+1",
+            "u+1_u",
+            "u_u+1",
         ]
     )
     def test_max(self, lhs, rhs, expected):
         assert lhs.max(rhs) == expected
 
     def test_imax(self):
-        assert self.u.imax(self.v) == W_LevelIMax(self.u, self.v)
+        assert u.imax(v) == W_LevelIMax(u, v)
 
 
 class TestSort:
     def test_succ(self):
-        u = Name(["u"]).level()
         assert u.succ() == W_LevelSucc(W_LevelParam(Name(["u"])))
 
     def test_succ_level_zero(self):
