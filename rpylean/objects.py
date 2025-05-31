@@ -138,7 +138,7 @@ class W_Level(W_Item):
             return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
 
         # TODO - what equality is this?
-        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.eq(other.lhs, infcx) and self.rhs.eq(other.rhs, infcx):
+        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.eq(other.lhs) and self.rhs.eq(other.rhs):
             return True
 
         if isinstance(self, W_LevelIMax) and isinstance(self.rhs, W_LevelParam):
@@ -152,7 +152,7 @@ class W_Level(W_Item):
         warn("Unimplemented level comparison: %s <= %s" % (self, other))
         return True
 
-    def eq(self, other, infcx):
+    def eq(self, other):
         """
         Two levels are equal via antisymmetry.
 

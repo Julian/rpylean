@@ -132,7 +132,7 @@ class _InferenceContext:
                 return False
             return True
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
-            if not expr1.level.eq(expr2.level, self):
+            if not expr1.level.eq(expr2.level):
                 return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
@@ -156,7 +156,7 @@ class _InferenceContext:
             assert len(expr1.levels) == len(expr2.levels)
             all_match = True
             for i in range(len(expr1.levels)):
-                if not expr1.levels[i].eq(expr2.levels[i], self):
+                if not expr1.levels[i].eq(expr2.levels[i]):
                     all_match = False
                     break
             if all_match:
