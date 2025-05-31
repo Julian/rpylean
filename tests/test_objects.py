@@ -126,6 +126,50 @@ class TestLevel(object):
     def test_imax(self, lhs, rhs, expected):
         assert lhs.imax(rhs) == expected
 
+    @pytest.mark.parametrize(
+        "lhs, rhs",
+        [
+            (W_LEVEL_ZERO, W_LEVEL_ZERO.succ()),
+            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ().succ()),
+            (u, u.succ()),
+            (u, u.succ().succ()),
+        ],
+        ids=[
+            "0_1",
+            "1_2",
+            "u_u+1",
+            "u_u+2",
+        ]
+    )
+    def test_leq_lt(self, lhs, rhs):
+        assert lhs.leq(rhs)
+        assert not rhs.leq(lhs)
+
+    @pytest.mark.parametrize(
+        "lhs, rhs",
+        [
+            (W_LEVEL_ZERO, W_LEVEL_ZERO),
+            (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ()),
+            (W_LEVEL_ZERO.succ().succ(), W_LEVEL_ZERO.succ().succ()),
+            (u, u),
+            (u.succ(), u.succ()),
+            (u.succ().succ(), u.succ().succ()),
+        ],
+        ids=[
+            "0_0",
+            "1_1",
+            "2_2",
+            "u_u",
+            "u+1_u+1",
+            "u+2_u+2",
+        ]
+    )
+    def test_leq_eq(self, lhs, rhs):
+        assert lhs.leq(rhs)
+        assert rhs.leq(lhs)
+        assert lhs.eq(rhs)
+        assert rhs.eq(lhs)
+
     def test_succ(self):
         assert u.succ() == W_LevelSucc(W_LevelParam(Name(["u"])))
 

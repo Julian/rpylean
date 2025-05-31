@@ -121,7 +121,7 @@ class W_Level(W_Item):
         if isinstance(other, W_LevelZero) and balance < 0:
             return False
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelParam):
-            return self.name.eq(other.name) and balance == 0
+            return self.name.eq(other.name) and balance >= 0
         if isinstance(self, W_LevelParam) and isinstance(other, W_LevelZero):
             return False
         if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
@@ -225,6 +225,10 @@ class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
 
+    def __repr__(self):
+        text, balance = self.pretty_parts()
+        return "<Level {} + {}>".format(text, balance)
+
     def pretty_parts(self):
         text, balance = self.parent.pretty_parts()
         return text, balance + 1
@@ -283,6 +287,9 @@ class W_LevelIMax(W_Level):
 class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
+
+    def __repr__(self):
+        return "<Level {}>".format(self.name)
 
     def pretty_parts(self):
         return self.name.pretty(), 0
