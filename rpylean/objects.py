@@ -184,6 +184,8 @@ class W_Level(W_Item):
         """
         Return the (simplified) imax of this level with another.
         """
+        if self == other:
+            return self
         return W_LevelIMax(self, other)
 
 

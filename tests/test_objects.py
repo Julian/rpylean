@@ -83,8 +83,19 @@ class TestLevel:
     def test_max(self, lhs, rhs, expected):
         assert lhs.max(rhs) == expected
 
-    def test_imax(self):
-        assert u.imax(v) == W_LevelIMax(u, v)
+    @pytest.mark.parametrize(
+        "lhs, rhs, expected",
+        [
+            (u, u, u),
+            (u, v, W_LevelIMax(u, v)),
+        ],
+        ids=[
+            "u_u",
+            "u_v",
+        ]
+    )
+    def test_imax(self, lhs, rhs, expected):
+        assert lhs.imax(rhs) == expected
 
 
 class TestSort:
