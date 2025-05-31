@@ -4,6 +4,7 @@ pypy := env('PYPY', 'pypy')
 pypy_checkout := env('PYPY_CHECKOUT')
 rpython := pypy_checkout / "rpython/bin/rpython"
 
+package := justfile_directory() / "rpylean"
 tests := justfile_directory() / "tests"
 examples := tests / "examples"
 target := justfile_directory() / "targetrpylean.py"
@@ -20,11 +21,8 @@ example name:
     @just rpylean repl $(find "{{ examples }}" -iname "{{ name }}")/export
 
 # Run a PyPy REPL with rpylean imported.
-pypy *ARGS:
-    PYTHONPATH="{{ pypy_checkout }}/" "{{ pypy }}" $@ -ic '\
-    from rpylean import objects as o ;\
-    import rpylean ;\
-    '
+pypy $RPYLEAN_EXAMPLE='' *ARGS:
+    PYTHONPATH="{{ pypy_checkout }}:{{ justfile_directory() }}" "{{ pypy }}" $@ -i "{{ package }}/_pypy_repl.py"
 
 # Run the translated rpylean REPL under rlwrap.
 repl *ARGS:
