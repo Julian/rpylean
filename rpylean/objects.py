@@ -108,9 +108,9 @@ class W_Level(W_Item):
         if isinstance(self, W_LevelIMax):
             b_simp = self.rhs.simplify()
             if isinstance(b_simp, W_LevelSucc):
-                return W_LevelMax.combining(self.lhs, b_simp)
+                return self.lhs.max(b_simp)
             if isinstance(b_simp, W_LevelZero):
-                return W_LevelZero()
+                return W_LEVEL_ZERO
             return W_LevelIMax(self.lhs.simplify(), b_simp)
         raise RuntimeError("Unexpected level type: %s" % self)
 
@@ -178,7 +178,21 @@ class W_Level(W_Item):
         """
         Return the (simplified) max of this level with another.
         """
-        return W_LevelMax.combining(self, other)
+        if self == other:
+            return self
+
+        if isinstance(self, W_LevelSucc):
+            if isinstance(other, W_LevelSucc):
+                return self.parent.max(other.parent).succ()
+            if self.parent == other:
+                return self
+        if isinstance(other, W_LevelSucc) and other.parent == self:
+            return other
+        if isinstance(self, W_LevelZero):
+            return other
+        if isinstance(other, W_LevelZero):
+            return self
+        return W_LevelMax(self, other)
 
     def imax(self, other):
         """
@@ -248,24 +262,6 @@ class W_LevelMax(W_Level):
         if not isinstance(other, W_LevelMax):
             return False
         return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
-
-    @staticmethod
-    def combining(lhs, rhs):
-        if lhs == rhs:
-            return lhs
-
-        if isinstance(lhs, W_LevelSucc):
-            if isinstance(rhs, W_LevelSucc):
-                return lhs.parent.max(rhs.parent).succ()
-            if lhs.parent == rhs:
-                return lhs
-        if isinstance(rhs, W_LevelSucc) and rhs.parent == lhs:
-            return rhs
-        if isinstance(lhs, W_LevelZero):
-            return rhs
-        if isinstance(rhs, W_LevelZero):
-            return lhs
-        return W_LevelMax(lhs, rhs)
 
 
 class W_LevelIMax(W_Level):
