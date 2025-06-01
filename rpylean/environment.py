@@ -1,7 +1,7 @@
 from __future__ import print_function
 
 from rpylean.objects import W_TypeError, W_LEVEL_ZERO, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
-from rpylean.parser import parse
+from rpylean.parser import from_export
 from rpython.rlib.objectmodel import r_dict
 
 import sys
@@ -29,7 +29,7 @@ class Environment:
         """
         Load an environment out of some lean4export-formatted lines.
         """
-        return Environment.from_items(parse(lines))
+        return Environment.from_items(from_export(lines))
 
     @staticmethod
     def from_items(items):

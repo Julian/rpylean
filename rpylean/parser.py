@@ -324,6 +324,7 @@ class Let(ExprVal):
             body=environment.exprs[self.body],
         )
 
+
 class App(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -396,6 +397,7 @@ class ForAll(ExprVal):
             body=environment.exprs[self.body],
         )
 
+
 class Proj(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -419,6 +421,7 @@ class Proj(ExprVal):
             field_idx=self.field_idx,
             struct_expr=environment.exprs[self.struct_expr],
         )
+
 
 class Declaration(Node):
     def __init__(self, decl):
@@ -480,6 +483,7 @@ class Definition(Node):
             ),
         )
 
+
 class Opaque(Node):
     @staticmethod
     def parse(tokens):
@@ -538,6 +542,7 @@ class Theorem(Node):
                 def_val=environment.exprs[self.def_val],
             ),
         )
+
 
 class Axiom(Node):
     @staticmethod
@@ -855,7 +860,10 @@ def tokenize(line, lineno):
     return tokens
 
 
-def parse(lines):
+def from_export(lines):
+    """
+    Parse a lean4export-formatted file into a its individial items.
+    """
     rest = iter(lines)
 
     try:

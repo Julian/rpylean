@@ -8,7 +8,7 @@ from rpython.rlib.rbigint import rbigint
 
 
 def items(source):
-    return list(parser.parse(dedent(source).lstrip("\n").splitlines()))
+    return list(parser.from_export(dedent(source).lstrip("\n").splitlines()))
 
 
 def test_ns():
@@ -51,12 +51,12 @@ def test_large_litnat():
 
 def test_wrong_version():
     with pytest.raises(parser.ExportVersionError):
-        parser.parse("1.2.3\n")
+        parser.from_export("1.2.3\n")
 
 
 def test_empty():
     with pytest.raises(parser.ExportVersionError):
-        parser.parse("")
+        parser.from_export("")
 
 
 @pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
@@ -64,4 +64,4 @@ def test_valid_examples_parse_successfully(path):
     """
     We don't get parse errors from our examples.
     """
-    parser.parse(path.readlines())
+    parser.from_export(path.readlines())
