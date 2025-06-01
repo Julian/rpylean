@@ -98,22 +98,6 @@ def pretty_part(part):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
-    def simplify(self):
-        if isinstance(self, W_LevelZero) or isinstance(self, W_LevelParam):
-            return self
-        if isinstance(self, W_LevelSucc):
-            return self.parent.simplify().succ()
-        if isinstance(self, W_LevelMax):
-            return self.lhs.simplify().max(self.rhs.simplify())
-        if isinstance(self, W_LevelIMax):
-            b_simp = self.rhs.simplify()
-            if isinstance(b_simp, W_LevelSucc):
-                return self.lhs.max(b_simp)
-            if isinstance(b_simp, W_LevelZero):
-                return W_LEVEL_ZERO
-            return W_LevelIMax(self.lhs.simplify(), b_simp)
-        raise RuntimeError("Unexpected level type: %s" % self)
-
     # See https://ammkrn.github.io/type_checking_in_lean4/levels.html?highlight=leq#partial-order-on-levels
     def leq(self, other, balance=0):
         if isinstance(self, W_LevelZero) and balance >= 0:
@@ -158,9 +142,7 @@ class W_Level(W_Item):
 
         I.e. `a == b` if `a.leq(b)` and `b.leq(a)`.
         """
-        lhs = self.simplify()
-        rhs = other.simplify()
-        return lhs.leq(rhs) and rhs.leq(lhs)
+        return self.leq(other) and other.leq(self)
 
     def sort(self):
         """
