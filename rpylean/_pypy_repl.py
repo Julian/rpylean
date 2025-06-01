@@ -14,7 +14,7 @@ import rpylean
 __example__ = os.environ.get("RPYLEAN_EXAMPLE", "")
 if __example__:
     with open(__example__) as f:
-        e = env = environment = Environment.from_lines(f)
+        e = env = environment = Environment.from_export(f)
 
     msg = "Loaded `e = env = {!r}` from {!r}."
     print(msg.format(e, __example__))

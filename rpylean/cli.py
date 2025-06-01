@@ -126,7 +126,7 @@ def subcommand(metavars, help):
 )
 def check(self, args, stdout, stderr):
     path, = args
-    environment = Environment.from_lines(lines_from_path(path))
+    environment = Environment.from_export(lines_from_path(path))
     stdout.write(
         "Checking %s declarations...\n" % (len(environment.declarations)),
     )
@@ -152,7 +152,7 @@ def check(self, args, stdout, stderr):
 )
 def dump(self, args, stdout, stderr):
     path, = args
-    environment = Environment.from_lines(lines_from_path(path))
+    environment = Environment.from_export(lines_from_path(path))
     environment.dump_pretty(stdout)
     return 0
 
@@ -163,7 +163,7 @@ def dump(self, args, stdout, stderr):
 )
 def repl(self, args, stdout, stderr):
     path, = args
-    environment = Environment.from_lines(lines_from_path(path))
+    environment = Environment.from_export(lines_from_path(path))
     from rpylean import repl
     repl.interact(environment)
     return 0
