@@ -8,13 +8,12 @@ from rpython.rlib.rbigint import rbigint
 
 
 def items(source):
-    return list(parser.from_export(dedent(source).lstrip("\n").splitlines()))
+    return list(parser.to_items(dedent(source).lstrip("\n").splitlines()))
 
 
 def test_ns():
     assert items(
         """
-        0.1.2
         1 #NS 0 MyTrue
         2 #NS 1 intro
         """
@@ -27,7 +26,6 @@ def test_ns():
 def test_es():
     assert items(
         """
-        0.1.2
         0 #ES 0
         """
     ) == [
@@ -38,7 +36,6 @@ def test_es():
 def test_large_litnat():
     assert items(
         """
-        0.1.2
         0 #ELN 18446744073709551616
         """
     ) == [

@@ -1,14 +1,6 @@
-from textwrap import dedent
-
 import pytest
 
-from rpylean.objects import (
-    W_LEVEL_ZERO,
-    W_TypeError,
-    W_Definition,
-    W_Sort,
-    W_LevelSucc,
-)
+from rpylean.objects import W_LEVEL_ZERO, Name, W_TypeError, W_Definition
 from rpylean.environment import Environment
 
 

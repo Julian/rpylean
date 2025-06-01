@@ -862,7 +862,7 @@ def tokenize(line, lineno):
 
 def from_export(lines):
     """
-    Parse a lean4export-formatted file into a its individial items.
+    Parse a lean4export-formatted iterable of lines into its individial items.
     """
     rest = iter(lines)
 
@@ -874,24 +874,28 @@ def from_export(lines):
         if version.strip() != EXPORT_VERSION:
             raise ExportVersionError(version)
 
-    lineno, items = 0, []
-    while True:
+    return to_items(rest)
+
+
+def to_items(lines):
+    """
+    Parse a lean4export-formatted iterable of lines *without* version number.
+    """
+
+    lineno = 0  # enumerate() in rpython seems ill-equipped for iterators
+    for line in lines:
         lineno += 1
-        try:
-            line = next(rest).strip()
-        except StopIteration:
-            break
+        line = line.strip()
         if not line:
             continue
 
         tokens = tokenize(line, lineno=lineno)
-        item = to_item(tokens)
+        item = _to_item(tokens)
         if item:
-            items.append(item)
-    return items
+            yield item
 
 
-def to_item(tokens):
+def _to_item(tokens):
     try:
         if tokens[0].text.isdigit():
             token_type = TOKEN_KINDS[tokens[1].text]
