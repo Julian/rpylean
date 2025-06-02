@@ -133,12 +133,22 @@ class TestLevel(object):
             (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ().succ()),
             (u, u.succ()),
             (u, u.succ().succ()),
+            (W_LEVEL_ZERO, u),
+            (W_LEVEL_ZERO, u.max(v)),
+            (W_LEVEL_ZERO, u.imax(v)),
+            (u.max(v), u.succ().max(v.succ())),
+            (u.imax(v), u.succ().imax(v.succ())),
         ],
         ids=[
             "0_1",
             "1_2",
             "u_u+1",
             "u_u+2",
+            "0_u",
+            "0_max_uv",
+            "0_imax_uv",
+            "max_uv_u+1v+1",
+            "imax_uv_u+1v+1",
         ]
     )
     def test_leq_lt(self, lhs, rhs):
@@ -156,6 +166,8 @@ class TestLevel(object):
             (u.succ().succ(), u.succ().succ()),
             (u.max(v), u.max(v)),
             (u.max(v).succ(), u.max(v).succ()),
+            (u.imax(v), u.imax(v)),
+            (u.imax(v).succ(), u.imax(v).succ()),
         ],
         ids=[
             "0_0",
@@ -166,6 +178,8 @@ class TestLevel(object):
             "u+2_u+2",
             "max_uv",
             "max_uv+1",
+            "imax_uv",
+            "imax_uv+1",
         ]
     )
     def test_leq_eq(self, lhs, rhs):

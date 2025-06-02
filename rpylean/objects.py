@@ -221,7 +221,11 @@ class W_LevelMax(W_Level):
 
     @leq
     def leq(self, other, balance):
-        return other.leq(self.lhs, balance) or other.leq(self.rhs, balance)
+        return self.lhs.leq(other, balance) and self.rhs.leq(other, balance)
+
+    def gt(self, other, balance):
+        # XXX
+        return False
 
     def pretty_parts(self):
         lhs, balance = self.lhs.pretty_parts()
@@ -250,6 +254,17 @@ class W_LevelIMax(W_Level):
         self.lhs = lhs
         self.rhs = rhs
 
+    def __repr__(self):
+        return "<Level imax({!r} {!r})>".format(self.lhs, self.rhs)
+
+    @leq
+    def leq(self, other, balance):
+        return self.lhs.leq(other, balance) or self.rhs.leq(other, balance)
+
+    def gt(self, other, balance):
+        # XXX
+        return self.lhs.gt(other, balance) or self.rhs.gt(other, balance)
+
     def pretty_parts(self):
         lhs, _ = self.lhs.pretty_parts()
         rhs, _ = self.rhs.pretty_parts()
@@ -266,7 +281,7 @@ class W_LevelParam(W_Level):
         self.name = name
 
     def __repr__(self):
-        return "<Level {}>".format(self.name)
+        return "<Level {}>".format(self.name.pretty())
 
     @leq
     def leq(self, other, balance):
@@ -279,6 +294,10 @@ class W_LevelParam(W_Level):
             return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
 
         return other.gt(self, -balance)
+
+    def gt(self, other, balance):
+        # XXX
+        return False
 
     def pretty_parts(self):
         return self.name.pretty(), 0
