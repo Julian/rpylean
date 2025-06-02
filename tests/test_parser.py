@@ -29,7 +29,7 @@ def test_es():
         0 #ES 0
         """
     ) == [
-        parser.Expr(eidx="0", val=parser.Sort(level="0")),
+        parser.Expr(eidx="0", val=parser.Sort(level=0)),
     ]
 
 

@@ -131,27 +131,24 @@ class UniverseSucc(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _us_token, parent = tokens
-        return UniverseSucc(
-            uidx=uidx.text,
-            parent=parent.text,
-        )
+        return UniverseSucc(uidx=int(uidx.text), parent=int(parent.text))
 
     def __init__(self, uidx, parent):
         self.uidx = uidx
         self.parent = parent
 
     def compile(self, environment):
-        parent = environment.levels[self.parent]
-        environment.register_level(self.uidx, parent.succ())
+        level = environment.levels[self.parent].succ()
+        environment.register_level(self.uidx, level)
 
 class UniverseMax(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseMax(
-            uidx=uidx.text,
-            lhs=lhs.text,
-            rhs=rhs.text,
+            uidx=int(uidx.text),
+            lhs=int(lhs.text),
+            rhs=int(rhs.text),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -160,19 +157,17 @@ class UniverseMax(Universe):
         self.rhs = rhs
 
     def compile(self, environment):
-        environment.register_level(
-            self.uidx,
-            environment.levels[self.lhs].max(environment.levels[self.rhs])
-        )
+        level = environment.levels[self.lhs].max(environment.levels[self.rhs])
+        environment.register_level(self.uidx, level)
 
 class UniverseIMax(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseIMax(
-            uidx=uidx.text,
-            lhs=lhs.text,
-            rhs=rhs.text,
+            uidx=int(uidx.text),
+            lhs=int(lhs.text),
+            rhs=int(rhs.text),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -181,17 +176,15 @@ class UniverseIMax(Universe):
         self.rhs = rhs
 
     def compile(self, environment):
-        environment.register_level(
-            self.uidx,
-            environment.levels[self.lhs].imax(environment.levels[self.rhs]),
-        )
+        level = environment.levels[self.lhs].imax(environment.levels[self.rhs])
+        environment.register_level(self.uidx, level)
 
 class UniverseParam(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _up_token, nidx = tokens
         return UniverseParam(
-            uidx=uidx.text,
+            uidx=int(uidx.text),
             nidx=nidx.text,
         )
     def __init__(self, uidx, nidx):
@@ -199,8 +192,8 @@ class UniverseParam(Universe):
         self.nidx = nidx
 
     def compile(self, environment):
-        name = environment.names[self.nidx]
-        environment.register_level(self.uidx, name.level())
+        level = environment.names[self.nidx].level()
+        environment.register_level(self.uidx, level)
 
 
 class Expr(Node):
@@ -267,7 +260,7 @@ class Sort(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _sort_tok, level = tokens
-        val = Sort(level=level.text)
+        val = Sort(level=int(level.text))
         return Expr(eidx=eidx.text, val=val)
 
     def __init__(self, level):
@@ -283,12 +276,10 @@ class Const(ExprVal):
         eidx, _ec_token, name = tokens[:3]
         val = Const(
             name=name.text,
-            levels=[
-                level.text
-                for level in tokens[3:]
-            ],
+            levels=[int(level.text) for level in tokens[3:]],
         )
         return Expr(eidx=eidx.text, val=val)
+
     def __init__(self, name, levels):
         self.name = name
         self.levels = levels

@@ -10,7 +10,7 @@ sys.setrecursionlimit(5000)
 
 class Environment:
     def __init__(self):
-        self.levels = {"0": W_LEVEL_ZERO}
+        self.levels = [W_LEVEL_ZERO]
         self.exprs = {}
         self.names = {"0": Name.ANONYMOUS}
         self.rec_rules = {}
@@ -78,7 +78,7 @@ class Environment:
 
         stdout.write("\n")
         stdout.write(heading("levels"))
-        for id, level in self.levels.items():
+        for id, level in enumerate(self.levels):
             stdout.write("%s -> %s\n" % (id, level.pretty()))
 
         stdout.write("\n")
@@ -99,8 +99,9 @@ class Environment:
         self.exprs[eidx] = w_expr
 
     def register_level(self, uidx, level):
-        assert uidx not in self.levels, uidx
-        self.levels[uidx] = level
+        # Are levels always dense? If not, we can presumably renumber them?
+        assert uidx == len(self.levels), uidx
+        self.levels.append(level)
 
     def register_rec_rule(self, ridx, w_recrule):
         assert ridx not in self.rec_rules, ridx
