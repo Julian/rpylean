@@ -18,8 +18,8 @@ def test_ns():
         2 #NS 1 intro
         """
     ) == [
-        parser.NameStr(nidx="1", parent_nidx="0", name="MyTrue"),
-        parser.NameStr(nidx="2", parent_nidx="1", name="intro"),
+        parser.NameStr(nidx=1, parent_nidx=0, name="MyTrue"),
+        parser.NameStr(nidx=2, parent_nidx=1, name="intro"),
     ]
 
 

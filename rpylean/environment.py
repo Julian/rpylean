@@ -12,7 +12,7 @@ class Environment:
     def __init__(self):
         self.levels = [W_LEVEL_ZERO]
         self.exprs = {}
-        self.names = {"0": Name.ANONYMOUS}
+        self.names = [Name.ANONYMOUS]
         self.rec_rules = {}
         self.declarations = r_dict(Name.eq, Name.__hash__)
 
@@ -90,9 +90,9 @@ class Environment:
         return _InferenceContext(self)
 
     def register_name(self, nidx, parent_nidx, name):
-        assert nidx not in self.names, nidx
+        assert nidx == len(self.names), nidx
         parent = self.names[parent_nidx]
-        self.names[nidx] = parent.child(name)
+        self.names.append(parent.child(name))
 
     def register_expr(self, eidx, w_expr):
         assert eidx not in self.exprs, eidx

@@ -89,8 +89,8 @@ class NameStr(Node):
     def parse(tokens):
         nidx, _ns_token, parent_nidx, name = tokens
         return NameStr(
-            nidx=nidx.text,
-            parent_nidx=parent_nidx.text,
+            nidx=int(nidx.text),
+            parent_nidx=int(parent_nidx.text),
             name=name.text,
         )
 
@@ -108,8 +108,8 @@ class NameId(Node):
     def parse(tokens):
         nidx, _ni_token, parent_nidx, id = tokens
         return NameId(
-            nidx=nidx.text,
-            parent_nidx=parent_nidx.text,
+            nidx=int(nidx.text),
+            parent_nidx=int(parent_nidx.text),
             id=id.text,
         )
 
@@ -119,7 +119,6 @@ class NameId(Node):
         self.id = id
 
     def compile(self, environment):
-        # TODO - should we register id names separately (as ints)?
         environment.register_name(self.nidx, self.parent_nidx, self.id)
 
 
@@ -183,10 +182,8 @@ class UniverseParam(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _up_token, nidx = tokens
-        return UniverseParam(
-            uidx=int(uidx.text),
-            nidx=nidx.text,
-        )
+        return UniverseParam(uidx=int(uidx.text), nidx=int(nidx.text))
+
     def __init__(self, uidx, nidx):
         self.uidx = uidx
         self.nidx = nidx
@@ -275,7 +272,7 @@ class Const(ExprVal):
     def parse(tokens):
         eidx, _ec_token, name = tokens[:3]
         val = Const(
-            name=name.text,
+            name=int(name.text),
             levels=[int(level.text) for level in tokens[3:]],
         )
         return Expr(eidx=eidx.text, val=val)
@@ -294,7 +291,7 @@ class Let(ExprVal):
     def parse(tokens):
         eidx, _let_token, name_idx, def_type, def_val, body = tokens
         val = Let(
-            name_idx=name_idx.text,
+            name_idx=int(name_idx.text),
             def_type=def_type.text,
             def_val=def_val.text,
             body=body.text,
@@ -340,7 +337,7 @@ class Lambda(ExprVal):
     def parse(tokens):
         eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
         val = Lambda(
-            binder_name=binder_name.text,
+            binder_name=int(binder_name.text),
             binder_type=binder_type.text,
             binder_info=binder_info.text,
             body=body.text,
@@ -367,7 +364,7 @@ class ForAll(ExprVal):
     def parse(tokens):
         eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
         val = ForAll(
-            binder_name=binder_name.text,
+            binder_name=int(binder_name.text),
             binder_type=binder_type.text,
             binder_info=binder_info.text,
             body=body.text,
@@ -394,7 +391,7 @@ class Proj(ExprVal):
     def parse(tokens):
         eidx, _ej_token, type_name, field_idx, struct_expr = tokens
         val = Proj(
-            type_name=type_name.text,
+            type_name=int(type_name.text),
             field_idx=int(field_idx.text),
             struct_expr=struct_expr.text,
         )
@@ -445,15 +442,14 @@ class Definition(Node):
         # TODO actually use the argument to 'R"
         if hint.text== "R":
             start += 1
-        return Declaration(Definition(
-            name_idx=name_idx.text,
+        definition = Definition(
+            name_idx=int(name_idx.text),
             def_type=def_type.text,
             def_val=def_val.text,
             hint=hint.text,
-            level_params=[
-                each.text for each in tokens[start:]
-            ],
-        ))
+            level_params=[int(each.text) for each in tokens[start:]],
+        )
+        return Declaration(definition)
 
     def __init__(self, name_idx, def_type, def_val, hint, level_params):
         self.name_idx = name_idx
@@ -479,14 +475,13 @@ class Opaque(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
-        return Declaration(Opaque(
-            name_idx=name_idx.text,
+        opaque = Opaque(
+            name_idx=int(name_idx.text),
             def_type=def_type.text,
             def_val=def_val.text,
-            level_params=[
-                each.text for each in tokens[4:]
-            ],
-        ))
+            level_params=[int(each.text) for each in tokens[4:]],
+        )
+        return Declaration(opaque)
 
     def __init__(self, name_idx, def_type, def_val, level_params):
         self.name_idx = name_idx
@@ -509,14 +504,13 @@ class Theorem(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
-        return Declaration(Theorem(
-            name_idx=name_idx.text,
+        theorem = Theorem(
+            name_idx=int(name_idx.text),
             def_type=def_type.text,
             def_val=def_val.text,
-            level_params=[
-                each.text for each in tokens[4:]
-            ],
-        ))
+            level_params=[int(each.text) for each in tokens[4:]],
+        )
+        return Declaration(theorem)
 
     def __init__(self, name_idx, def_type, def_val, level_params):
         self.name_idx = name_idx
@@ -539,13 +533,12 @@ class Axiom(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type = tokens[:3]
-        return Declaration(Axiom(
-            name_idx=name_idx.text,
+        axiom = Axiom(
+            name_idx=int(name_idx.text),
             def_type=def_type.text,
-            level_params=[
-                each.text for each in tokens[3:]
-            ],
-        ))
+            level_params=[int(each.text) for each in tokens[3:]],
+        )
+        return Declaration(axiom)
 
     def __init__(self, name_idx, def_type, level_params):
         self.name_idx = name_idx
@@ -570,7 +563,7 @@ class Inductive(Node):
         assert num_ind_name_idxs >= 0
         pos = 8
         ind_name_idxs = [
-            nidx.text
+            int(nidx.text)
             for nidx in tokens[pos:(pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
@@ -580,7 +573,7 @@ class Inductive(Node):
         pos += 1
 
         ctor_name_idxs = [
-            nidx.text
+            int(nidx.text)
             for nidx in tokens[pos:(pos + num_ctors)]
         ]
         pos += num_ctors
@@ -594,12 +587,10 @@ class Inductive(Node):
         if pos > len(tokens):
             level_params = []
         else:
-            level_params = [
-                each.text for each in tokens[pos:]
-            ]
+            level_params = [int(each.text) for each in tokens[pos:]]
 
-        return Declaration(Inductive(
-            name_idx=target_nidx.text,
+        inductive = Inductive(
+            name_idx=int(target_nidx.text),
             expr_idx=eidx.text,
             is_rec=is_rec.text,
             is_nested=is_nested.text,
@@ -608,7 +599,8 @@ class Inductive(Node):
             ind_name_idxs=ind_name_idxs,
             ctor_name_idxs=ctor_name_idxs,
             level_params=level_params,
-        ))
+        )
+        return Declaration(inductive)
 
     def __init__(
         self,
@@ -654,17 +646,16 @@ class Constructor(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, ctype, induct, cidx, num_params, num_fields = tokens[:7]
-        return Declaration(Constructor(
-            name_idx=name_idx.text,
+        constructor = Constructor(
+            name_idx=int(name_idx.text),
             ctype=ctype.text,
             induct=induct.text,
             cidx=cidx.text,
             num_params=int(num_params.text),
             num_fields=int(num_fields.text),
-            level_params=[
-                each.text for each in tokens[7:]
-            ],
-        ))
+            level_params=[int(each.text) for each in tokens[7:]],
+        )
+        return Declaration(constructor)
 
     def __init__(self, name_idx, ctype, induct, cidx, num_params, num_fields, level_params):
         self.name_idx = name_idx
@@ -699,7 +690,7 @@ class Recursor(Node):
 
         pos = 4
         ind_name_idxs = [
-            nidx.text
+            int(nidx.text)
             for nidx in tokens[pos:(pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
@@ -724,10 +715,10 @@ class Recursor(Node):
             pos += 1
 
         k = tokens[pos].text
-        level_params = [param.text for param in tokens[(pos + 1):]]
+        level_params = [int(param.text) for param in tokens[(pos + 1):]]
 
-        return Declaration(Recursor(
-            name_idx=name_idx.text,
+        recursor = Recursor(
+            name_idx=int(name_idx.text),
             expr_idx=expr_idx.text,
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
@@ -737,7 +728,8 @@ class Recursor(Node):
             num_motives=int(num_motives.text),
             num_minors=int(num_minors.text),
             level_params=level_params
-        ))
+        )
+        return Declaration(recursor)
 
     def __init__(
         self,
@@ -785,7 +777,7 @@ class RecRule(Node):
     def parse(tokens):
         ridx = int(tokens[0].text)
         _rr_token = tokens[1].text
-        ctor_name = tokens[2].text
+        ctor_name = int(tokens[2].text)
         n_fields = int(tokens[3].text)
         val = tokens[4].text
         return RecRule(ridx, ctor_name, n_fields, val)
