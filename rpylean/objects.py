@@ -333,16 +333,18 @@ class FVarCounter(object):
     def __init__(self):
         self.count = 0
 
+    def next(self):
+        count, self.count = self.count, self.count + 1
+        return count
+
 
 FVAR_COUNTER = FVarCounter()
 
 
 class W_FVar(W_Expr):
     def __init__(self, binder):
-        global FVAR_COUNTER
-        self.id = FVAR_COUNTER.count
+        self.id = next(FVAR_COUNTER)
         self.binder = binder
-        FVAR_COUNTER.count += 1
 
     def incr_free_bvars(self, count, depth):
         return self
