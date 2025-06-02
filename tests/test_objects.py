@@ -154,6 +154,8 @@ class TestLevel(object):
             (u, u),
             (u.succ(), u.succ()),
             (u.succ().succ(), u.succ().succ()),
+            (u.max(v), u.max(v)),
+            (u.max(v).succ(), u.max(v).succ()),
         ],
         ids=[
             "0_0",
@@ -162,6 +164,8 @@ class TestLevel(object):
             "u_u",
             "u+1_u+1",
             "u+2_u+2",
+            "max_uv",
+            "max_uv+1",
         ]
     )
     def test_leq_eq(self, lhs, rhs):

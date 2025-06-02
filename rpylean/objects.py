@@ -96,46 +96,16 @@ def pretty_part(part):
     return part
 
 
+def leq(fn):
+    def leq(self, other, balance=0):
+        if self == other:
+            return balance >= 0
+        return fn(self, other, balance)
+    return leq
+
+
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
-    # See https://ammkrn.github.io/type_checking_in_lean4/levels.html?highlight=leq#partial-order-on-levels
-    def leq(self, other, balance=0):
-        if isinstance(self, W_LevelZero) and balance >= 0:
-            return True
-        if isinstance(other, W_LevelZero) and balance < 0:
-            return False
-        if isinstance(self, W_LevelParam) and isinstance(other, W_LevelParam):
-            return self.name.eq(other.name) and balance >= 0
-        if isinstance(self, W_LevelParam) and isinstance(other, W_LevelZero):
-            return False
-        if isinstance(self, W_LevelZero) and isinstance(other, W_LevelParam):
-            return balance >= 0
-        if isinstance(self, W_LevelSucc):
-            return self.parent.leq(other, balance - 1)
-        if isinstance(other, W_LevelSucc):
-            return self.leq(other.parent, balance + 1)
-
-        if isinstance(self, W_LevelMax):
-            return self.lhs.leq(other, balance) or self.rhs.leq(other, balance)
-
-        if (isinstance(self, W_LevelParam) or isinstance(self, W_LevelZero)) and isinstance(other, W_LevelMax):
-            return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
-
-        # TODO - what equality is this?
-        if isinstance(self, W_LevelIMax) and isinstance(other, W_LevelIMax) and self.lhs.eq(other.lhs) and self.rhs.eq(other.rhs):
-            return True
-
-        if isinstance(self, W_LevelIMax) and isinstance(self.rhs, W_LevelParam):
-            warn("W_LevelIMax with W_LevelParam not yet implemented")
-            return True
-
-        if isinstance(other, W_LevelIMax) and isinstance(other.rhs, W_LevelParam):
-            warn("W_LevelIMax with W_LevelParam not yet implemented")
-            return True
-
-        warn("Unimplemented level comparison: %s <= %s" % (self, other))
-        return True
-
     def eq(self, other):
         """
         Two levels are equal via antisymmetry.
@@ -193,6 +163,14 @@ class W_LevelZero(W_Level):
     def __repr__(self):
         return "<Level 0>"
 
+    @leq
+    def leq(self, other, balance):
+        if balance >= 0:
+            return True
+        if isinstance(other, W_LevelParam):
+            return balance >= 0
+        return other.gt(self, -balance)
+
     def pretty_parts(self):
         return "", 0
 
@@ -213,6 +191,13 @@ class W_LevelSucc(W_Level):
     def __repr__(self):
         joined = " + ".join(str(part) for part in self.pretty_parts() if part)
         return "<Level {}>".format(joined)
+
+    @leq
+    def leq(self, other, balance):
+        return self.parent.leq(other, balance - 1)
+
+    def gt(self, lhs, balance):
+        return lhs.leq(self.parent, -balance + 1)
 
     def pretty_parts(self):
         text, balance = self.parent.pretty_parts()
@@ -282,6 +267,18 @@ class W_LevelParam(W_Level):
 
     def __repr__(self):
         return "<Level {}>".format(self.name)
+
+    @leq
+    def leq(self, other, balance):
+        if isinstance(other, W_LevelZero):
+            return False
+
+        if isinstance(other, W_LevelParam):
+            return balance >= 0 and self.name.eq(other.name)
+        if isinstance(other, W_LevelMax):
+            return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
+
+        return other.gt(self, -balance)
 
     def pretty_parts(self):
         return self.name.pretty(), 0
@@ -880,6 +877,7 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
+            infcx.def_eq(fn_type.binder_type, arg_type)
             raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
