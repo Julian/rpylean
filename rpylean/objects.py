@@ -241,7 +241,7 @@ class W_LevelMax(W_Level):
     def subst_levels(self, substs):
         new_lhs = self.lhs.subst_levels(substs)
         new_rhs = self.rhs.subst_levels(substs)
-        return W_LevelMax(new_lhs, new_rhs)
+        return new_lhs.max(new_rhs)
 
     def syntactic_eq(self, other):
         if not isinstance(other, W_LevelMax):
@@ -896,8 +896,7 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
-            infcx.def_eq(fn_type.binder_type, arg_type)
-            raise RuntimeError("W_App.infer: type mismatch: %s != %s" % (fn_type.binder_type, arg_type))
+            raise RuntimeError("W_App.infer: type mismatch:\n%s !=\n%s" % (fn_type.binder_type, arg_type))
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
 
