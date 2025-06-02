@@ -19,7 +19,7 @@ class W_Item(object):
         return vars(self) == vars(other)
 
     def __repr__(self):
-        return self.pretty()
+        return "<%s %s>" % (self.__class__.__name__, self.pretty())
 
     def pretty(self):
         return "<%s repr error>" % (self.__class__.__name__,)
@@ -190,6 +190,9 @@ class W_Level(W_Item):
 
 
 class W_LevelZero(W_Level):
+    def __repr__(self):
+        return "<Level 0>"
+
     def pretty_parts(self):
         return "", 0
 
@@ -208,8 +211,8 @@ class W_LevelSucc(W_Level):
         self.parent = parent
 
     def __repr__(self):
-        text, balance = self.pretty_parts()
-        return "<Level {} + {}>".format(text, balance)
+        joined = " + ".join(str(part) for part in self.pretty_parts() if part)
+        return "<Level {}>".format(joined)
 
     def pretty_parts(self):
         text, balance = self.parent.pretty_parts()
@@ -227,6 +230,13 @@ class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+
+    def __repr__(self):
+        return "<Level max({!r} {!r})>".format(self.lhs, self.rhs)
+
+    @leq
+    def leq(self, other, balance):
+        return other.leq(self.lhs, balance) or other.leq(self.rhs, balance)
 
     def pretty_parts(self):
         lhs, balance = self.lhs.pretty_parts()
