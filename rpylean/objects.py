@@ -144,6 +144,9 @@ class W_Level(W_Item):
             return other
         if isinstance(other, W_LevelZero):
             return self
+        if isinstance(other, W_LevelIMax) or isinstance(other, W_LevelMax):
+            if self.leq(other.lhs) or self.leq(other.rhs):
+                return other
         return W_LevelMax(self, other)
 
     def imax(self, other):

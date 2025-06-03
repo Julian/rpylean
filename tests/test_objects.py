@@ -74,6 +74,10 @@ class TestLevel(object):
             (u.succ(), v.succ(), u.max(v).succ()),
             (u.succ(), u, u.succ()),
             (u, u.succ(), u.succ()),
+            (u, u.max(v), u.max(v)),
+            (v, u.max(v), u.max(v)),
+            (u, u.imax(v), u.imax(v)),
+            (v, u.imax(v), u.imax(v)),
         ],
         ids=[
             "0_0",
@@ -88,6 +92,10 @@ class TestLevel(object):
             "u+1_v+1",
             "u+1_u",
             "u_u+1",
+            "u_maxuv",
+            "v_maxuv",
+            "u_imaxuv",
+            "v_imaxuv",
         ]
     )
     def test_max(self, lhs, rhs, expected):
