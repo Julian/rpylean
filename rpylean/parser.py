@@ -43,7 +43,9 @@ class ExportVersionError(ParseError):
 
 
 class Invalid(Exception):
-    pass
+    """
+    An export file is semantically invalid.
+    """
 
 
 class Node(object):
@@ -459,7 +461,6 @@ class Definition(Node):
         self.level_params = level_params
 
     def to_w_decl(self, environment):
-
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
@@ -862,7 +863,6 @@ def to_items(lines):
     """
     Parse a lean4export-formatted iterable of lines *without* version number.
     """
-
     lineno = 0  # enumerate() in rpython seems ill-equipped for iterators
     for line in lines:
         lineno += 1
