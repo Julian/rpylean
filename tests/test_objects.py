@@ -1,18 +1,22 @@
 import pytest
 
 from rpylean.objects import (
+    NAT,
+    NAT_ZERO,
     W_LEVEL_ZERO,
     Name,
     W_Const,
+    W_Declaration,
     W_LevelIMax,
     W_LevelMax,
     W_LevelParam,
     W_LevelSucc,
     W_Sort,
+    W_Theorem,
 )
 
 
-class TestName:
+class TestName(object):
     def test_simple(self):
         assert Name.simple("foo") == Name(["foo"])
 
@@ -196,3 +200,15 @@ class TestLevel(object):
 
     def test_sort(self):
         assert W_LEVEL_ZERO.sort() == W_Sort(W_LEVEL_ZERO)
+
+
+class TestTheorem(object):
+    def test_delaborate(self):
+        theorem = W_Declaration(
+            name=Name.simple("foo"),
+            # FIXME: this theorem is not a Prop, but that's too annoying now
+            w_kind=W_Theorem(type=NAT, value=NAT_ZERO),
+            level_params=[],
+
+        )
+        assert theorem.pretty() == "theorem foo : Nat := Nat.zero"

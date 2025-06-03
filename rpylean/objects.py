@@ -476,7 +476,13 @@ class W_Const(W_Expr):
         self.levels = levels
 
     def pretty(self):
-        return "`" + self.name.pretty() + "[%s]" % (", ".join([level.pretty() for level in self.levels]))
+        name = self.name.pretty()
+        if not self.levels:
+            return name
+        return "%s[%s]" % (
+            name,
+            ", ".join([level.pretty() for level in self.levels]),
+        )
 
     def syntactic_eq(self, other):
         if not isinstance(other, W_Const):
@@ -818,7 +824,7 @@ class W_Lambda(W_FunBase):
         #    import pdb; pdb.set_trace()
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
-        return "(λ %s : %s => \b%s)" % (
+        return "(fun %s : %s ↦ %s)" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
             body_pretty
@@ -896,7 +902,12 @@ class W_App(W_Expr):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
         if not infcx.def_eq(fn_type.binder_type, arg_type):
-            raise RuntimeError("W_App.infer: type mismatch:\n%s !=\n%s" % (fn_type.binder_type, arg_type))
+            raise RuntimeError(
+                "W_App.infer: type mismatch:\n%s\n  !=\n%s" % (
+                    fn_type.binder_type.pretty(),
+                    arg_type.pretty(),
+                ),
+            )
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
 
@@ -1193,11 +1204,7 @@ class W_Declaration(W_Item):
         return self.w_kind.type_check(*args)
 
     def pretty(self):
-        return "<W_Declaration name='%s' level_params='%s' kind=%s>" % (
-            self.name.pretty(),
-            self.level_params,
-            self.w_kind.pretty(),
-        )
+        return self.w_kind.delaborate(self.name)  # Is this the right vocabulary?!
 
 
 class W_DeclarationKind(W_Item):
@@ -1258,8 +1265,9 @@ class W_Theorem(DefOrTheorem):
         self.type = type
         self.value = value
 
-    def pretty(self):
-        return "<W_Theorem type=%s value=%s>" % (
+    def delaborate(self, name):
+        return "theorem %s : %s := %s" % (
+            name.pretty(),
             self.type.pretty(),
             self.value.pretty(),
         )
