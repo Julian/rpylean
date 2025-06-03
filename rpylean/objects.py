@@ -228,13 +228,21 @@ class W_LevelMax(W_Level):
         return False
 
     def pretty_parts(self):
-        lhs, balance = self.lhs.pretty_parts()
-        if balance != 0:
-            lhs = "(%s + %s)" % (lhs, balance)
+        left, balance = self.lhs.pretty_parts()
+        if not left:
+            lhs = str(balance)
+        elif balance == 0:
+            lhs = left
+        else:
+            lhs = "(%s + %s)" % (left, balance)
 
-        rhs, balance = self.rhs.pretty_parts()
-        if balance != 0:
-            rhs = "(%s + %s)" % (rhs, balance)
+        right, balance = self.rhs.pretty_parts()
+        if not right:
+            rhs = str(balance)
+        elif balance == 0:
+            rhs = right
+        else:
+            rhs = "(%s + %s)" % (right, balance)
 
         return "(max %s %s)" % (lhs, rhs), 0
 
