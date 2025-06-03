@@ -1238,6 +1238,13 @@ class W_Definition(DefOrTheorem):
         self.value = value
         self.hint = hint
 
+    def delaborate(self, name):
+        return "def %s : %s := %s" % (
+            name.pretty(),
+            self.type.pretty(),
+            self.value.pretty(),
+        )
+
     def get_type(self):
         return self.type
 
@@ -1291,6 +1298,9 @@ class W_Axiom(W_DeclarationKind):
     def __init__(self, type):
         self.type = type
 
+    def delaborate(self, name):
+        return "axiom %s : %s" % (name.pretty(), self.type.pretty())
+
     def type_check(self, infcx):
         # TODO - implement type checking
         pass
@@ -1313,15 +1323,12 @@ class W_Inductive(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def pretty(self):
-        return "<W_Inductive expr=%s is_rec=%s is_nested=%s num_params=%s num_indices=%s ind_names=%s ctor_names=%s>" % (
+    def delaborate(self, name):
+        ctors = [("| %s" % each.pretty()) for each in self.ctor_names]
+        return "inductive %s : %s%s" % (
+            name.pretty(),
             self.expr.pretty(),
-            self.is_rec,
-            self.is_nested,
-            self.num_params,
-            self.num_indices,
-            [each.pretty() for each in self.ind_names],
-            [each.pretty() for each in self.ctor_names],
+            "\n" + "\n".join(ctors) if ctors else "",
         )
 
 

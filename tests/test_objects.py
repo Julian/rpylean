@@ -5,8 +5,10 @@ from rpylean.objects import (
     NAT_ZERO,
     W_LEVEL_ZERO,
     Name,
+    W_Axiom,
     W_Const,
     W_Declaration,
+    W_Definition,
     W_LevelIMax,
     W_LevelMax,
     W_LevelParam,
@@ -220,3 +222,13 @@ class TestTheorem(object):
 
         )
         assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
+
+
+class TestAxiom(object):
+    def test_delaborate(self):
+        axiom = W_Declaration(
+            name=Name.simple("sorryAx"),
+            w_kind=W_Axiom(type=NAT),
+            level_params=[],
+        )
+        assert axiom.pretty() == "axiom sorryAx : Nat"
