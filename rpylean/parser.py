@@ -307,8 +307,8 @@ class Let(ExprVal):
     def to_w_expr(self, environment):
         return objects.W_Let(
             name=environment.names[self.name_idx],
-            def_type=environment.exprs[self.def_type],
-            def_val=environment.exprs[self.def_val],
+            type=environment.exprs[self.def_type],
+            value=environment.exprs[self.def_val],
             body=environment.exprs[self.body],
         )
 
@@ -464,8 +464,8 @@ class Definition(Node):
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Definition(
-                def_type=environment.exprs[self.def_type],
-                def_val=environment.exprs[self.def_val],
+                type=environment.exprs[self.def_type],
+                value=environment.exprs[self.def_val],
                 hint=self.hint,
             ),
         )
@@ -494,8 +494,8 @@ class Opaque(Node):
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Opaque(
-                def_type=environment.exprs[self.def_type],
-                def_val=environment.exprs[self.def_val],
+                type=environment.exprs[self.def_type],
+                value=environment.exprs[self.def_val],
             ),
         )
 
@@ -523,8 +523,8 @@ class Theorem(Node):
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Theorem(
-                def_type=environment.exprs[self.def_type],
-                def_val=environment.exprs[self.def_val],
+                type=environment.exprs[self.def_type],
+                value=environment.exprs[self.def_val],
             ),
         )
 
@@ -549,9 +549,7 @@ class Axiom(Node):
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
-            w_kind=objects.W_Axiom(
-                def_type=environment.exprs[self.def_type],
-            ),
+            w_kind=objects.W_Axiom(type=environment.exprs[self.def_type]),
         )
 
 

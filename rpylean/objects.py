@@ -877,10 +877,10 @@ class W_Lambda(W_FunBase):
 #'(n: Nat) -> Vector n'
 
 class W_Let(W_Expr):
-    def __init__(self, name, def_type, def_val, body):
+    def __init__(self, name, type, value, body):
         self.name = name
-        self.def_type = def_type
-        self.def_val = def_val
+        self.type = type
+        self.value = value
         self.body = body
 
 
@@ -1208,62 +1208,69 @@ class W_DeclarationKind(W_Item):
 
 
 class DefOrTheorem(W_DeclarationKind):
-    def __init__(self, def_type, def_val):
-        self.def_type = def_type
-        self.def_val = def_val
-
     def type_check(self, infcx):
-        val_type = self.def_val.infer(infcx)
-        if not infcx.def_eq(self.def_type, val_type):
-            raise W_TypeError(self.def_type, val_type)
+        val_type = self.value.infer(infcx)
+        if not infcx.def_eq(self.type, val_type):
+            raise W_TypeError(self.type, val_type)
 
 
 class W_Definition(DefOrTheorem):
-    def __init__(self, def_type, def_val, hint):
-        DefOrTheorem.__init__(self, def_type, def_val)
+    def __init__(self, type, value, hint):
+        self.type = type
+        self.value = value
         self.hint = hint
 
     def get_type(self):
-        return self.def_type
+        return self.type
 
     def get_delta_reduce_target(self):
-        return self.def_val
+        return self.value
 
     def pretty(self):
-        return "<W_Definition def_type='%s' def_val='%s' hint='%s'>" % (
-            self.def_type.pretty(),
-            self.def_val.pretty(),
+        return "<W_Definition type='%s' value='%s' hint='%s'>" % (
+            self.type.pretty(),
+            self.value.pretty(),
             self.hint,
         )
 
 
 class W_Opaque(W_Definition):
-    def __init__(self, def_type, def_val):
-        # An Opaque is like a definition with hint 'opaque', but even
-        # stronger (we will never unfold it)
-        W_Definition.__init__(self, def_type, def_val, hint="O")
+    """
+    An Opaque definition.
+
+    This is like a definition with hint 'opaque', but even
+    stronger (we will never unfold it).
+    """
+    def __init__(self, type, value):
+        self.type = type
+        self.value = value
+        self.hint = "O"
 
     def pretty(self):
-        return "<W_Opaque def_type='%s' def_val='%s'>" % (
-            self.def_type.pretty(),
-            self.def_val.pretty(),
+        return "<W_Opaque type='%s' value='%s'>" % (
+            self.type.pretty(),
+            self.value.pretty(),
         )
 
 
 class W_Theorem(DefOrTheorem):
+    def __init__(self, type, value):
+        self.type = type
+        self.value = value
+
     def pretty(self):
-        return "<W_Theorem def_type=%s def_val=%s>" % (
-            self.def_type.pretty(),
-            self.def_val.pretty(),
+        return "<W_Theorem type=%s value=%s>" % (
+            self.type.pretty(),
+            self.value.pretty(),
         )
 
     def get_type(self):
-        return self.def_type
+        return self.type
 
 
 class W_Axiom(W_DeclarationKind):
-    def __init__(self, def_type):
-        self.def_type = def_type
+    def __init__(self, type):
+        self.type = type
 
     def type_check(self, infcx):
         # TODO - implement type checking

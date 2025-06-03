@@ -10,7 +10,7 @@ def test_valid_def_type_checks():
     W_Type = W_LEVEL_ZERO.succ().sort()
     W_Type1 = W_LEVEL_ZERO.succ().succ().sort()
 
-    valid = W_Definition(def_type=W_Type1, def_val=W_Type, hint="R")
+    valid = W_Definition(type=W_Type1, value=W_Type, hint="R")
     valid.type_check(Environment().inference_context())
 
 
@@ -23,7 +23,7 @@ def test_invalid_def_does_not_type_check():
     W_Type = W_LEVEL_ZERO.succ().sort()
     W_Type1 = W_LEVEL_ZERO.succ().succ().sort()
 
-    invalid = W_Definition(def_type=W_Prop, def_val=W_Type, hint="R")
+    invalid = W_Definition(type=W_Prop, value=W_Type, hint="R")
 
     ctx = Environment().inference_context()
     with pytest.raises(W_TypeError) as e:
