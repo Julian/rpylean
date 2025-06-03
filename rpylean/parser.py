@@ -669,7 +669,7 @@ class Constructor(Node):
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Constructor(
-                ctype=environment.exprs[self.ctype],
+                type=environment.exprs[self.ctype],
                 induct=self.induct,
                 cidx=self.cidx,
                 num_params=int(self.num_params),

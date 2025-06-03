@@ -701,7 +701,7 @@ class W_Proj(W_Expr):
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
-        ctor_type = ctor_decl.w_kind.ctype
+        ctor_type = ctor_decl.w_kind.type
         ctor_type = apply_const_level_params(struct_expr_type, ctor_type, infcx.env)
 
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
@@ -1333,8 +1333,8 @@ class W_Inductive(W_DeclarationKind):
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, ctype, induct, cidx, num_params, num_fields):
-        self.ctype = ctype
+    def __init__(self, type, induct, cidx, num_params, num_fields):
+        self.type = type
         self.induct = induct
         self.cidx = cidx
         self.num_params = num_params
@@ -1346,11 +1346,11 @@ class W_Constructor(W_DeclarationKind):
         pass
 
     def get_type(self):
-        return self.ctype
+        return self.type
 
     def pretty(self):
-        return "<W_Constructor ctype='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
-            self.ctype.pretty(),
+        return "<W_Constructor type='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
+            self.type.pretty(),
             self.induct,
             self.cidx,
             self.num_params,
