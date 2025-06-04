@@ -46,12 +46,19 @@ def test_large_litnat():
     ]
 
 
+def test_empty():
+    """
+    Nothing to check, but that's fine.
+    """
+    items("") == []
+
+
 def test_wrong_version():
     with pytest.raises(parser.ExportVersionError):
         parser.from_export("1.2.3\n")
 
 
-def test_empty():
+def test_totally_empty():
     with pytest.raises(parser.ExportVersionError):
         parser.from_export("")
 

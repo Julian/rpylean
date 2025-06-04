@@ -7,7 +7,7 @@ import errno
 import sys
 
 from rpython.rlib.streamio import open_file_as_stream
-from rpython.rlib.rfile import RFile, c_stderr, c_stdout
+from rpython.rlib.rfile import create_stdio
 
 from rpylean.environment import Environment
 
@@ -57,12 +57,11 @@ class UsageError(Exception):
 
 
 def main(argv):
-    stdout = RFile(c_stdout(), close2=(None, None))
-    stderr = RFile(c_stderr(), close2=(None, None))
+    stdin, stdout, stderr = create_stdio()
 
     try:
         command, args = subcommand_from(argv)
-        return command.run(args, stdout, stderr)
+        return command.run(args, stdin, stdout, stderr)
     except UsageError as error:
         stderr.write(error.__str__())
         stderr.write("\n")
@@ -83,14 +82,14 @@ class Command(object):
         self._metavars = metavars
         self._run = run
 
-    def run(self, args, stdout, stderr):
+    def run(self, args, stdin, stdout, stderr):
         expected = len(self._metavars)
         if len(args) > expected:
             self.usage_error("Unknown arguments: %s" % (args[expected:]))
         elif len(args) < expected:
             self.usage_error("Expected an %s" % (self._metavars[len(args)],))
 
-        return self._run(self, args, stdout, stderr)
+        return self._run(self, args, stdin, stdout, stderr)
 
     def help(self, executable):
         if executable.endswith("__main__.py"):
@@ -124,9 +123,9 @@ def subcommand(metavars, help):
     ["EXPORT_FILE"],
     help="Type check an exported Lean environment.",
 )
-def check(self, args, stdout, stderr):
+def check(self, args, stdin, stdout, stderr):
     path, = args
-    environment = Environment.from_export(lines_from_path(path))
+    environment = environment_from(path=path, stdin=stdin)
     stdout.write(
         "Checking %s declarations...\n" % (len(environment.declarations)),
     )
@@ -150,9 +149,9 @@ def check(self, args, stdout, stderr):
     ["EXPORT_FILE"],
     help="Dump an exported Lean environment.",
 )
-def dump(self, args, stdout, stderr):
+def dump(self, args, stdin, stdout, stderr):
     path, = args
-    environment = Environment.from_export(lines_from_path(path))
+    environment = environment_from(path=path, stdin=stdin)
     environment.dump_pretty(stdout)
     return 0
 
@@ -161,9 +160,9 @@ def dump(self, args, stdout, stderr):
     ["EXPORT_FILE"],
     help="Open a REPL with the environment loaded from the given export.",
 )
-def repl(self, args, stdout, stderr):
+def repl(self, args, stdin, stdout, stderr):
     path, = args
-    environment = Environment.from_export(lines_from_path(path))
+    environment = environment_from(path=path, stdin=stdin)
     from rpylean import repl
     repl.interact(environment)
     return 0
@@ -185,17 +184,23 @@ def subcommand_from(argv):
     return command, args
 
 
-def lines_from_path(path):
-    try:
-        file = open_file_as_stream(path)
-    except OSError as err:
-        if err.errno != errno.ENOENT:
-            raise
-        raise UsageError("`%s` does not exist." % (path,))
+def environment_from(path, stdin):
+    # FIXME: lazify me!
 
-    lines = file.readall().splitlines()
-    file.close()
-    return lines
+    if path == "-":
+        source = stdin.read()
+        stdin.close()
+    else:
+        try:
+            file = open_file_as_stream(path)
+        except OSError as err:
+            if err.errno != errno.ENOENT:
+                raise
+            raise UsageError("`%s` does not exist." % (path,))
+        source = file.readall()
+        file.close()
+
+    return Environment.from_export(source.splitlines())
 
 
 if __name__ == '__main__':
