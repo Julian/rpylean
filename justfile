@@ -28,6 +28,11 @@ pypy $RPYLEAN_EXAMPLE='' *ARGS:
 repl *ARGS:
     rlwrap "{{ translated }}" repl {{ ARGS }}
 
+# Run lean4export with the provided arguments.
+lean4export *ARGS:
+    lake --dir "${LEAN4EXPORT_CHECKOUT}" exe lean4export {{ ARGS }}
+
+
 # Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:
     "{{ pypy }}" "{{ rpython }}" {{ ARGS }} "{{ target }}"

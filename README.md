@@ -37,10 +37,11 @@ pypy <pypy-checkout>/pytest.py <rpylean-checkout>/tests
 ### `justfile`
 
 There's a `justfile` alongside this README which can be used to perform all of the commands mentioned above.
-To use it, after [installing `just`](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) and cloning PyPy, create a [`.env` file](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) containing:
+To use it, after [installing `just`](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) and cloning PyPy and `lean4export`, create a [`.env` file](https://github.com/casey/just?tab=readme-ov-file#dotenv-settings) containing:
 
 ```sh
 PYPY_CHECKOUT=/path/to/pypy/checkout
+LEAN4EXPORT_CHECKOUT=/path/to/lean4export/checkout
 ```
 
 You can then run `just rpylean`, `just translate` and/or `just test`.
@@ -48,4 +49,4 @@ You can then run `just rpylean`, `just translate` and/or `just test`.
 ## Resources
 
 * [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/) by [@ammkrn](https://github.com/ammkrn)
-* [lean4export (v2025 version)](https://github.com/ammkrn/lean4export/tree/v2025)
+* [lean4export](https://github.com/leanprover/lean4export)
