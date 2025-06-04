@@ -1307,10 +1307,10 @@ class W_Axiom(W_DeclarationKind):
 
 
 class W_Inductive(W_DeclarationKind):
-    def __init__(self, expr, is_rec, is_nested, num_params, num_indices, ind_names, ctor_names):
+    def __init__(self, expr, is_rec, num_nested, num_params, num_indices, ind_names, ctor_names):
         self.expr = expr
         self.is_rec = is_rec
-        self.is_nested = is_nested
+        self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
         self.ind_names = ind_names

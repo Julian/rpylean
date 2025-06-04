@@ -48,4 +48,4 @@ You can then run `just rpylean`, `just translate` and/or `just test`.
 ## Resources
 
 * [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/) by [@ammkrn](https://github.com/ammkrn)
-* [lean4export (format2024 version)](https://github.com/ammkrn/lean4export/tree/format2024)
+* [lean4export (v2025 version)](https://github.com/ammkrn/lean4export/tree/v2025)

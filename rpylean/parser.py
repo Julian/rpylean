@@ -5,8 +5,8 @@ from rpython.rlib.rbigint import rbigint
 from rpylean import objects
 
 #: The lean4export format we claim to be able to parse.
-#: Should match https://github.com/ammkrn/lean4export/blob/format2024/Main.lean#L4
-EXPORT_VERSION = "0.1.2"
+#: Should match https://github.com/ammkrn/lean4export/blob/v2025/Main.lean#L4
+EXPORT_VERSION = "2.0.0"
 
 
 class ParseError(Exception):
@@ -557,10 +557,10 @@ class Axiom(Node):
 class Inductive(Node):
     @staticmethod
     def parse(tokens):
-        _, target_nidx, eidx, is_rec, is_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:8]
+        _, target_nidx, eidx, is_reflexive, is_rec, num_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:9]
         num_ind_name_idxs = int(num_ind_name_idxs_str.text)
         assert num_ind_name_idxs >= 0
-        pos = 8
+        pos = 9
         ind_name_idxs = [
             int(nidx.text)
             for nidx in tokens[pos:(pos + num_ind_name_idxs)]
@@ -591,8 +591,9 @@ class Inductive(Node):
         inductive = Inductive(
             name_idx=int(target_nidx.text),
             expr_idx=eidx.text,
+            is_reflexive=is_reflexive.text,
             is_rec=is_rec.text,
-            is_nested=is_nested.text,
+            num_nested=int(num_nested.text),
             num_params=int(num_params.text),
             num_indices=int(num_indices.text),
             ind_name_idxs=ind_name_idxs,
@@ -605,8 +606,9 @@ class Inductive(Node):
         self,
         name_idx,
         expr_idx,
+        is_reflexive,
         is_rec,
-        is_nested,
+        num_nested,
         num_params,
         num_indices,
         ind_name_idxs,
@@ -615,8 +617,9 @@ class Inductive(Node):
     ):
         self.name_idx = name_idx
         self.expr_idx = expr_idx
+        self.is_reflexive = is_reflexive
         self.is_rec = is_rec
-        self.is_nested = is_nested
+        self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
         self.ind_name_idxs = ind_name_idxs
@@ -630,7 +633,7 @@ class Inductive(Node):
             w_kind=objects.W_Inductive(
                 expr=environment.exprs[self.expr_idx],
                 is_rec=self.is_rec,
-                is_nested=self.is_nested,
+                num_nested=int(self.num_nested),
                 num_params=int(self.num_params),
                 num_indices=int(self.num_indices),
                 ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],

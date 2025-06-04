@@ -1,0 +1,2 @@
+prelude
+inductive MyFalse

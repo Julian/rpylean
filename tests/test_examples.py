@@ -8,10 +8,6 @@ from tests import examples
 
 
 XFAIL = dict(
-    FreeVars=(
-        "Something seems entirely wrong with this example, "
-        "as the export.orig and export files are identical"
-    ),
     UndeclaredUniv=(
         "Presumably this fails because we don't "
         "check for undeclared universes."
