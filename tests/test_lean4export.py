@@ -3,7 +3,7 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
 
 from rpylean.environment import Environment
-from rpylean.objects import W_LEVEL_ZERO, Name, W_BVar, W_Lambda, W_Let
+from rpylean.objects import W_LEVEL_ZERO, Name, W_BVar, W_Lambda, W_Let, W_Proj
 
 
 def from_source(source):
@@ -114,4 +114,27 @@ def test_dump_expr_let():
             W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar),
         ],
         names=[Name.ANONYMOUS, x, Nat, zero],
+    )
+
+
+def test_dump_expr_proj():
+    bvar = W_BVar(0)
+    Prod = Name.simple("Prod")
+    assert from_source(
+        #eval run <| dumpExpr (.proj `Prod 1 (.bvar 0))
+        """
+        1 #NS 0 Prod
+        0 #EV 0
+        1 #EJ 1 1 0
+        """,
+    ) == Environment(
+        exprs=[
+            bvar,
+            W_Proj(
+                struct_name=Name.simple("Prod"),
+                field_idx=1,
+                struct_expr=bvar,
+            ),
+        ],
+        names=[Name.ANONYMOUS, Prod],
     )

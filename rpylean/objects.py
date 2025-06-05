@@ -617,15 +617,15 @@ class W_LitNat(W_Expr):
 
 
 class W_Proj(W_Expr):
-    def __init__(self, struct_type, field_idx, struct_expr):
-        self.struct_type = struct_type
+    def __init__(self, struct_name, field_idx, struct_expr):
+        self.struct_name = struct_name
         self.field_idx = field_idx
         self.struct_expr = struct_expr
 
     def strong_reduce_step(self, infcx):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(infcx)
         if progress:
-            return (True, W_Proj(self.struct_type, self.field_idx, new_struct_expr))
+            return (True, W_Proj(self.struct_name, self.field_idx, new_struct_expr))
 
 
         # Look for a projection of a constructor, which allows us to just pick
@@ -653,26 +653,27 @@ class W_Proj(W_Expr):
 
     def whnf(self, infcx):
         # TODO - do we need to try reducing the projection?
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.whnf(infcx))
+        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.whnf(infcx))
 
     def incr_free_bvars(self, count, depth):
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
+        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
+        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
-        return W_Proj(self.struct_type, self.field_idx, self.struct_expr.instantiate(expr, depth))
+        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.instantiate(expr, depth))
+
     def pretty(self):
-        return "<W_Proj struct_type='%s' field_idx='%s' struct_expr='%s'>" % (
-            self.struct_type.pretty(),
+        return "<W_Proj struct_name='%s' field_idx='%s' struct_expr='%s'>" % (
+            self.struct_name.pretty(),
             self.field_idx,
             self.struct_expr.pretty(),
         )
 
     def subst_levels(self, substs):
         return W_Proj(
-            self.struct_type,
+            self.struct_name,
             self.field_idx,
             self.struct_expr.subst_levels(substs)
         )
@@ -680,7 +681,7 @@ class W_Proj(W_Expr):
     def syntactic_eq(self, other):
         # Our 'struct_type' is a 'W_Item' (which is only constructed once, during parsing),
         # so we can compare by object identity with '=='
-        return isinstance(other, W_Proj) and self.struct_type == other.struct_type and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
+        return isinstance(other, W_Proj) and self.struct_name == other.struct_name and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
 
     def infer(self, infcx):
         struct_expr_type = self.struct_expr.infer(infcx).whnf(infcx)
@@ -691,16 +692,18 @@ class W_Proj(W_Expr):
             apps.append(struct_expr_type)
             struct_expr_type = struct_expr_type.fn
 
+        struct_type = infcx.env.declarations[self.struct_name]
+
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
         assert isinstance(struct_expr_type, W_Const), "Expected W_Const, got %s" % struct_expr_type
         target_const = infcx.env.declarations[struct_expr_type.name]
-        assert target_const == self.struct_type, "Expected %s, got %s" % (target_const, struct_expr_type)
+        assert target_const == struct_type, "Expected %s, got %s" % (target_const, struct_type)
 
-        assert isinstance(self.struct_type, W_Declaration)
-        assert isinstance(self.struct_type.w_kind, W_Inductive)
-        assert len(self.struct_type.w_kind.ctor_names) == 1
+        assert isinstance(struct_type, W_Declaration)
+        assert isinstance(struct_type.w_kind, W_Inductive)
+        assert len(struct_type.w_kind.ctor_names) == 1
 
-        ctor_decl = infcx.env.declarations[self.struct_type.w_kind.ctor_names[0]]
+        ctor_decl = infcx.env.declarations[struct_type.w_kind.ctor_names[0]]
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
@@ -724,7 +727,7 @@ class W_Proj(W_Expr):
         for i in range(self.field_idx):
             ctor_type = ctor_type.whnf(infcx)
             assert isinstance(ctor_type, W_ForAll)
-            ctor_type = ctor_type.body.instantiate(W_Proj(self.struct_type, i, self.struct_expr), 0)
+            ctor_type = ctor_type.body.instantiate(W_Proj(struct_type, i, self.struct_expr), 0)
 
         ctor_type = ctor_type.whnf(infcx)
         assert isinstance(ctor_type, W_ForAll)

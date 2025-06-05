@@ -406,7 +406,7 @@ class Proj(ExprVal):
     def to_w_expr(self, environment):
         name = environment.names[self.type_name]
         return objects.W_Proj(
-            struct_type=environment.declarations[name],
+            struct_name=name,
             field_idx=self.field_idx,
             struct_expr=environment.exprs[self.struct_expr],
         )
