@@ -417,6 +417,12 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         self.val = val
 
+    def __repr__(self):
+        return repr(self.val)
+
+    def pretty(self):
+        return '"%s"' % (self.val,)
+
     def instantiate(self, expr, depth):
         return self
 
@@ -572,8 +578,11 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
 
+    def __repr__(self):
+        return "<LitNat %s>" % (self.val.str(),)
+
     def pretty(self):
-        return "(LitNat %s)" % (self.val.str())
+        return self.val.str()
 
     def instantiate(self, expr, depth):
         return self
@@ -784,7 +793,7 @@ class W_FunBase(W_Expr):
 class W_ForAll(W_FunBase):
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
-        return "(∀ (%s : %s), %s)" % (
+        return "∀ %s : %s, %s" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
             body_pretty
@@ -835,13 +844,9 @@ class W_ForAll(W_FunBase):
 
 
 class W_Lambda(W_FunBase):
-    def __init__(self, binder_name, binder_type, binder_info, body):
-        W_FunBase.__init__(self, binder_name, binder_type, binder_info, body)
-        #if binder_name.components == ["a"] and isinstance(binder_type, W_Const) and binder_type.name.components == ["False"]:
-        #    import pdb; pdb.set_trace()
     def pretty(self):
         body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
-        return "(fun %s : %s ↦ %s)" % (
+        return "fun %s : %s ↦ %s" % (
             self.binder_name.pretty(),
             self.binder_type.pretty(),
             body_pretty
@@ -1192,7 +1197,7 @@ class W_App(W_Expr):
         return W_App(self.fn.incr_free_bvars(count, depth), self.arg.incr_free_bvars(count, depth))
 
     def pretty(self):
-        return "(%s %s)" % (self.fn.pretty(), self.arg.pretty())
+        return "%s %s" % (self.fn.pretty(), self.arg.pretty())
 
 
     def subst_levels(self, substs):

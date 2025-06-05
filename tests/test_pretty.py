@@ -2,9 +2,19 @@
 Pretty printing of Lean objects.
 """
 
+from rpython.rlib.rbigint import rbigint
+
 import pytest
 
-from rpylean.objects import Name, W_LEVEL_ZERO, W_BVar, W_Let
+from rpylean.objects import (
+    W_LEVEL_ZERO,
+    Name,
+    W_BVar,
+    W_Lambda,
+    W_Let,
+    W_LitNat,
+    W_LitStr,
+)
 
 
 @pytest.mark.parametrize(
@@ -86,3 +96,13 @@ def test_let():
     zero = Nat.child("zero")
     let = W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar)
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
+
+
+def test_litnat():
+    nat = W_LitNat(rbigint.fromlong(1000000000000000))
+    assert nat.pretty() == "1000000000000000"
+
+
+def test_litstr():
+    hi = W_LitStr("hi")
+    assert hi.pretty() == '"hi"'

@@ -2,8 +2,20 @@
 Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
 
+from rpython.rlib.rbigint import rbigint
+
 from rpylean.environment import Environment
-from rpylean.objects import W_LEVEL_ZERO, Name, W_BVar, W_Lambda, W_Let, W_Proj
+from rpylean.objects import (
+    W_LEVEL_ZERO,
+    Name,
+    W_BVar,
+    W_ForAll,
+    W_Lambda,
+    W_Let,
+    W_LitNat,
+    W_LitStr,
+    W_Proj,
+)
 
 
 def from_source(source):
@@ -138,3 +150,21 @@ def test_dump_expr_proj():
         ],
         names=[Name.ANONYMOUS, Prod],
     )
+
+
+def test_dump_large_natlit():
+    assert from_source(
+        #eval run <| dumpExpr (.lit (.natVal 1000000000000000))
+        """
+        0 #ELN 1000000000000000
+        """,
+    ) == Environment(exprs=[W_LitNat(rbigint.fromlong(1000000000000000))])
+
+
+def test_dump_litstr():
+    assert from_source(
+        #eval run <| dumpExpr (.lit (.strVal "hi"))
+        """
+        0 #ELS 68 69
+        """,
+    ) == Environment(exprs=[W_LitStr("hi")])
