@@ -8,18 +8,31 @@ import sys
 sys.setrecursionlimit(5000)
 
 
-class Environment:
-    def __init__(self):
-        self.levels = [W_LEVEL_ZERO]
-        self.exprs = []
-        self.names = [Name.ANONYMOUS]
+class Environment(object):
+    def __init__(self, levels=None, exprs=None, names=None):
+        self.levels = [W_LEVEL_ZERO] if levels is None else levels
+        self.exprs = [] if exprs is None else exprs
+        self.names = [Name.ANONYMOUS] if names is None else names
         self.rec_rules = {}
-        self.declarations = r_dict(Name.eq, Name.__hash__)
+        self.declarations = r_dict(Name.eq, Name.hash)
 
     def __getitem__(self, name_or_list):
         if isinstance(name_or_list, str):
             name_or_list = [name_or_list]
         return self.declarations[Name(name_or_list)]
+
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        # r_dict doesn't have sane __eq__
+        left = vars(self)
+        left["declarations"] = dict(left.pop("declarations"))
+        right = vars(other)
+        right["declarations"] = dict(right.pop("declarations"))
+        return left == right
+
+    def __ne__(self, other):
+        return not self == other
 
     def __repr__(self):
         return "<Environment with %s declarations>" % (len(self.declarations),)

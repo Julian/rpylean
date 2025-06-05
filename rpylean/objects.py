@@ -18,6 +18,9 @@ class W_Item(object):
             return NotImplemented
         return vars(self) == vars(other)
 
+    def __ne__(self, other):
+        return not self == other
+
     def __repr__(self):
         return "<%s %s>" % (self.__class__.__name__, self.pretty())
 
@@ -28,12 +31,6 @@ class W_Item(object):
 class Name(W_Item):
     def __init__(self, components):
         self.components = components
-
-    def __hash__(self):
-        hash_val = 0
-        for c in self.components:
-            hash_val = hash_val ^ compute_hash(c)
-        return hash_val
 
     @staticmethod
     def simple(part):
@@ -56,6 +53,12 @@ class Name(W_Item):
             if self.components[i] != other.components[i]:
                 return False
         return True
+
+    def hash(self):
+        hash_val = 0
+        for c in self.components:
+            hash_val = hash_val ^ compute_hash(c)
+        return hash_val
 
     def pretty(self):
         if not self.components:

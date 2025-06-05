@@ -54,10 +54,9 @@ class Node(object):
     """
 
     def __eq__(self, other):
-        return (
-            self.__class__ == other.__class__ and
-            self.__dict__ == other.__dict__
-        )
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return vars(self) == vars(other)
 
     def __ne__(self, other):
         return not self == other
@@ -272,7 +271,7 @@ class Sort(ExprVal):
 class Const(ExprVal):
     @staticmethod
     def parse(tokens):
-        eidx, _ec_token, name = tokens[:3]
+        eidx, _, name = tokens[:3]
         val = Const(
             name=int(name.text),
             levels=[int(level.text) for level in tokens[3:]],
@@ -391,7 +390,7 @@ class ForAll(ExprVal):
 class Proj(ExprVal):
     @staticmethod
     def parse(tokens):
-        eidx, _ej_token, type_name, field_idx, struct_expr = tokens
+        eidx, _, type_name, field_idx, struct_expr = tokens
         val = Proj(
             type_name=int(type_name.text),
             field_idx=int(field_idx.text),
