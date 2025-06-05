@@ -214,7 +214,7 @@ class BVar(ExprVal):
     def parse(tokens):
         eidx, _bval_tok, id = tokens
         val = BVar(id=int(id.text))
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, id):
         self.id = id
@@ -231,7 +231,7 @@ class LitStr(ExprVal):
         hex_tokens = tokens[2:]
         lit_val = "".join([chr(int(token.text, 16)) for token in hex_tokens]).decode('utf-8')
         val = LitStr(val=lit_val)
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -246,7 +246,7 @@ class LitNat(ExprVal):
         eidx, _eli_token, val = tokens
         val = LitNat(val=rbigint.fromstr(val.text))
         assert val.val.int_ge(0)
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -260,7 +260,7 @@ class Sort(ExprVal):
     def parse(tokens):
         eidx, _sort_tok, level = tokens
         val = Sort(level=int(level.text))
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, level):
         self.level = level
@@ -277,7 +277,7 @@ class Const(ExprVal):
             name=int(name.text),
             levels=[int(level.text) for level in tokens[3:]],
         )
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, name, levels):
         self.name = name
@@ -294,11 +294,11 @@ class Let(ExprVal):
         eidx, _let_token, name_idx, def_type, def_val, body = tokens
         val = Let(
             name_idx=int(name_idx.text),
-            def_type=def_type.text,
-            def_val=def_val.text,
-            body=body.text,
+            def_type=int(def_type.text),
+            def_val=int(def_val.text),
+            body=int(body.text),
         )
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, name_idx, def_type, def_val, body):
         self.name_idx = name_idx
@@ -319,9 +319,9 @@ class App(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _ea_token, fn_eidx, arg_eidx = tokens
-        return Expr(eidx=eidx.text, val=App(
-            fn_eidx=fn_eidx.text,
-            arg_eidx=arg_eidx.text,
+        return Expr(eidx=int(eidx.text), val=App(
+            fn_eidx=int(fn_eidx.text),
+            arg_eidx=int(arg_eidx.text),
         ))
 
     def __init__(self, fn_eidx, arg_eidx):
@@ -340,11 +340,11 @@ class Lambda(ExprVal):
         eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
         val = Lambda(
             binder_name=int(binder_name.text),
-            binder_type=binder_type.text,
+            binder_type=int(binder_type.text),
             binder_info=binder_info.text,
-            body=body.text,
+            body=int(body.text),
         )
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -367,11 +367,11 @@ class ForAll(ExprVal):
         eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
         val = ForAll(
             binder_name=int(binder_name.text),
-            binder_type=binder_type.text,
+            binder_type=int(binder_type.text),
             binder_info=binder_info.text,
-            body=body.text,
+            body=int(body.text),
         )
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -395,9 +395,9 @@ class Proj(ExprVal):
         val = Proj(
             type_name=int(type_name.text),
             field_idx=int(field_idx.text),
-            struct_expr=struct_expr.text,
+            struct_expr=int(struct_expr.text),
         )
-        return Expr(eidx=eidx.text, val=val)
+        return Expr(eidx=int(eidx.text), val=val)
 
     def __init__(self, type_name, field_idx, struct_expr):
         self.type_name = type_name
@@ -446,8 +446,8 @@ class Definition(Node):
             start += 1
         definition = Definition(
             name_idx=int(name_idx.text),
-            def_type=def_type.text,
-            def_val=def_val.text,
+            def_type=int(def_type.text),
+            def_val=int(def_val.text),
             hint=hint.text,
             level_params=[int(each.text) for each in tokens[start:]],
         )
@@ -478,8 +478,8 @@ class Opaque(Node):
         _, name_idx, def_type, def_val = tokens[:4]
         opaque = Opaque(
             name_idx=int(name_idx.text),
-            def_type=def_type.text,
-            def_val=def_val.text,
+            def_type=int(def_type.text),
+            def_val=int(def_val.text),
             level_params=[int(each.text) for each in tokens[4:]],
         )
         return Declaration(opaque)
@@ -507,8 +507,8 @@ class Theorem(Node):
         _, name_idx, def_type, def_val = tokens[:4]
         theorem = Theorem(
             name_idx=int(name_idx.text),
-            def_type=def_type.text,
-            def_val=def_val.text,
+            def_type=int(def_type.text),
+            def_val=int(def_val.text),
             level_params=[int(each.text) for each in tokens[4:]],
         )
         return Declaration(theorem)
@@ -536,7 +536,7 @@ class Axiom(Node):
         _, name_idx, def_type = tokens[:3]
         axiom = Axiom(
             name_idx=int(name_idx.text),
-            def_type=def_type.text,
+            def_type=int(def_type.text),
             level_params=[int(each.text) for each in tokens[3:]],
         )
         return Declaration(axiom)
@@ -590,7 +590,7 @@ class Inductive(Node):
 
         inductive = Inductive(
             name_idx=int(target_nidx.text),
-            expr_idx=eidx.text,
+            expr_idx=int(eidx.text),
             is_reflexive=is_reflexive.text,
             is_rec=is_rec.text,
             num_nested=int(num_nested.text),
@@ -650,7 +650,7 @@ class Constructor(Node):
         _, name_idx, ctype, induct, cidx, num_params, num_fields = tokens[:7]
         constructor = Constructor(
             name_idx=int(name_idx.text),
-            ctype=ctype.text,
+            ctype=int(ctype.text),
             induct=induct.text,
             cidx=cidx.text,
             num_params=int(num_params.text),
@@ -721,7 +721,7 @@ class Recursor(Node):
 
         recursor = Recursor(
             name_idx=int(name_idx.text),
-            expr_idx=expr_idx.text,
+            expr_idx=int(expr_idx.text),
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
             k=int(k),
@@ -781,7 +781,7 @@ class RecRule(Node):
         _rr_token = tokens[1].text
         ctor_name = int(tokens[2].text)
         n_fields = int(tokens[3].text)
-        val = tokens[4].text
+        val = int(tokens[4].text)
         return RecRule(ridx, ctor_name, n_fields, val)
 
     def __init__(self, ridx, ctor_name, n_fields, val):
