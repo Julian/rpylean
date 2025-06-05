@@ -106,3 +106,17 @@ def test_litnat():
 def test_litstr():
     hi = W_LitStr("hi")
     assert hi.pretty() == '"hi"'
+
+
+def test_lambda_binder_default():
+    Nat = Name.simple("Nat")
+    zero = Nat.child("zero")
+
+    fun = W_Lambda(
+        binder_name=Name.simple("a"),
+        binder_type=Nat.const(),
+        binder_info="#BD",
+        body=zero.const(),
+    )
+
+    assert fun.pretty() == "fun (a : Nat) ↦ Nat.zero"
