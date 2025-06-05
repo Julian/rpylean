@@ -333,6 +333,19 @@ class App(ExprVal):
         return objects.W_App(fn=fn, arg=arg)
 
 
+def binder(name, info, type):
+    if info == "#BD":
+        return name.binder(type=type)
+    elif info == "#BI":
+        return name.implicit_binder(type=type)
+    elif info == "#BS":
+        return name.strict_implicit_binder(type=type)
+    elif info == "#BC":
+        return name.instance_binder(type=type)
+    else:
+        assert False, "Unknown binder info %s" % info
+
+
 class Lambda(ExprVal):
     @staticmethod
     def parse(tokens):
@@ -353,9 +366,11 @@ class Lambda(ExprVal):
 
     def to_w_expr(self, environment):
         return objects.W_Lambda(
-            binder_name=environment.names[self.binder_name],
-            binder_type=environment.exprs[self.binder_type],
-            binder_info=self.binder_info,
+            binder=binder(
+                name=environment.names[self.binder_name],
+                type=environment.exprs[self.binder_type],
+                info=self.binder_info,
+            ),
             body=environment.exprs[self.body],
         )
 
@@ -380,9 +395,11 @@ class ForAll(ExprVal):
 
     def to_w_expr(self, environment):
         return objects.W_ForAll(
-            binder_name=environment.names[self.binder_name],
-            binder_type=environment.exprs[self.binder_type],
-            binder_info=self.binder_info,
+            binder=binder(
+                name=environment.names[self.binder_name],
+                type=environment.exprs[self.binder_type],
+                info=self.binder_info,
+            ),
             body=environment.exprs[self.body],
         )
 

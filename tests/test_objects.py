@@ -4,6 +4,7 @@ from rpylean.objects import (
     NAT,
     NAT_ZERO,
     W_LEVEL_ZERO,
+    Binder,
     Name,
     W_Axiom,
     W_Const,
@@ -49,6 +50,46 @@ class TestName(object):
 
     def test_level(self):
         assert Name.simple("foo").level() == W_LevelParam(Name(["foo"]))
+
+    def test_binder(self):
+        x = Name.simple("x")
+        Nat = Name.simple("Nat")
+        assert x.binder(type=Nat) == Binder(
+            name=x,
+            type=Nat,
+            left="(",
+            right=")",
+        )
+
+    def test_implicit_binder(self):
+        x = Name.simple("x")
+        Nat = Name.simple("Nat")
+        assert x.implicit_binder(type=Nat) == Binder(
+            name=x,
+            type=Nat,
+            left="{",
+            right="}",
+        )
+
+    def test_instance_implicit_binder(self):
+        x = Name.simple("x")
+        NeZero = Name.simple("NeZero")
+        assert x.instance_binder(type=NeZero) == Binder(
+            name=x,
+            type=NeZero,
+            left="[",
+            right="]",
+        )
+
+    def test_strict_implicit_binder(self):
+        x = Name.simple("x")
+        Nat = Name.simple("Nat")
+        assert x.strict_implicit_binder(type=Nat) == Binder(
+            name=x,
+            type=Nat,
+            left="⦃",
+            right="⦄",
+        )
 
 
 u = Name.simple("u").level()

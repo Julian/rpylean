@@ -147,7 +147,7 @@ class _InferenceContext:
                 return False
             return True
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
-            if not self.def_eq(expr1.binder_type, expr2.binder_type):
+            if not self.def_eq(expr1.binder.type, expr2.binder.type):
                 return False
 
             fvar = W_FVar(expr1)
@@ -233,10 +233,8 @@ class _InferenceContext:
                 #print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return W_Lambda(
-                    binder_name=expr2_ty.binder_name,
-                    binder_info=expr2_ty.binder_info,
-                    binder_type=expr2_ty.binder_type,
-                    body=W_App(expr2.incr_free_bvars(1, 0), W_BVar(0))
+                    binder=expr2_ty.binder,
+                    body=W_App(expr2.incr_free_bvars(1, 0), W_BVar(0)),
                 )
         return None
 

@@ -113,9 +113,7 @@ def test_lambda_binder_default():
     zero = Nat.child("zero")
 
     fun = W_Lambda(
-        binder_name=Name.simple("a"),
-        binder_type=Nat.const(),
-        binder_info="#BD",
+        binder=Name.simple("a").binder(type=Nat.const()),
         body=zero.const(),
     )
 

@@ -77,6 +77,30 @@ class Name(W_Item):
         """
         return W_Const(self, levels)
 
+    def binder(self, type):
+        """
+        Bind this name in a (default) binder.
+        """
+        return Binder.default(self, type)
+
+    def implicit_binder(self, type):
+        """
+        Bind this name in an implicit binder.
+        """
+        return Binder.implicit(self, type)
+
+    def instance_binder(self, type):
+        """
+        Bind this name in an instance-implicit binder.
+        """
+        return Binder.instance(self, type)
+
+    def strict_implicit_binder(self, type):
+        """
+        Bind this name in a strict implicit binder.
+        """
+        return Binder.strict_implicit(self, type)
+
     def level(self):
         """
         Construct a level parameter from this name.
@@ -85,6 +109,99 @@ class Name(W_Item):
 
 
 Name.ANONYMOUS = Name([])
+
+
+class Binder(W_Item):
+    """
+    A binder within a Lambda or ForAll.
+
+    Only `type` is really functionally important, the other attributes are
+    strictly for pretty printing.
+    """
+
+    @staticmethod
+    def default(name, type):
+        """
+        A default style binder.
+        """
+        return Binder(name=name, type=type, left="(", right=")")
+
+    @staticmethod
+    def implicit(name, type):
+        """
+        An implicit style binder.
+        """
+        return Binder(name=name, type=type, left="{", right="}")
+
+    @staticmethod
+    def instance(name, type):
+        """
+        An intance-implicit style binder.
+        """
+        return Binder(name=name, type=type, left="[", right="]")
+
+    @staticmethod
+    def strict_implicit(name, type):
+        """
+        A strict implicit style binder.
+        """
+        return Binder(name=name, type=type, left="⦃", right="⦄")
+
+    def __init__(self, name, type, left, right):
+        self.name = name
+        self.type = type
+        self.left = left
+        self.right = right
+
+    def __repr__(self):
+        return "<Binder %s>" % (self.pretty())
+
+    def pretty(self):
+        return "%s%s : %s%s" % (
+            self.left,
+            self.name.pretty(),
+            self.type.pretty(),
+            self.right,
+        )
+
+    def fvar(self):
+        """
+        An FVar for this binder.
+        """
+        return W_FVar(self)
+
+    def bind_fvar(self, fvar, depth):
+        return self.with_type(type=self.type.bind_fvar(fvar, depth))
+
+    def incr_free_bvars(self, expr, depth):
+        return self.with_type(type=self.type.incr_free_bvars(expr, depth))
+
+    def instantiate(self, expr, depth):
+        return self.with_type(type=self.type.instantiate(expr, depth))
+
+    def subst_levels(self, subts):
+        return self.with_type(type=self.type.subst_levels(subts))
+
+    def syntactic_eq(self, other):
+        """
+        Check if this binder is syntactically equal to another.
+        """
+        # TODO - does syntactic equality really care about binder info/name?
+        return (
+            isinstance(other, Binder) and
+            self.name.eq(other.name) and
+            self.type.syntactic_eq(other.type) and
+            self.left == other.left and
+            self.right == other.right
+        )
+
+    def with_type(self, type):
+        return Binder(
+            name=self.name,
+            type=type,
+            left=self.left,
+            right=self.right,
+        )
 
 
 def pretty_part(part):
@@ -399,7 +516,7 @@ class W_FVar(W_Expr):
         return isinstance(other, W_FVar) and self.id == other.id and self.binder.syntactic_eq(other.binder)
 
     def infer(self, infcx):
-        return self.binder.binder_type
+        return self.binder.type
 
     def bind_fvar(self, fvar, depth):
         if self.id == fvar.id:
@@ -410,7 +527,7 @@ class W_FVar(W_Expr):
         return "(FVar %s %s)" % (self.id, self.binder)
 
     def pretty(self):
-        return "{%s@%s}" % (self.binder.binder_name.pretty(), self.id)
+        return "{%s@%s}" % (self.binder.name.pretty(), self.id)
 
 
 class W_LitStr(W_Expr):
@@ -421,6 +538,7 @@ class W_LitStr(W_Expr):
         return repr(self.val)
 
     def pretty(self):
+        assert isinstance(self.val, str)
         return '"%s"' % (self.val,)
 
     def instantiate(self, expr, depth):
@@ -740,90 +858,74 @@ class W_Proj(W_Expr):
 
         ctor_type = ctor_type.whnf(infcx)
         assert isinstance(ctor_type, W_ForAll)
-        return ctor_type.binder_type
+        return ctor_type.binder.type
 
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
-    def __init__(self, binder_name, binder_type, binder_info, body):
-        self.binder_name = binder_name
-        self.binder_type = binder_type
-        self.binder_info = binder_info
+    def __init__(self, binder, body):
+        self.binder = binder
         self.body = body
         self.finished_reduce = False
         if self.body is None:
             raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
-
-        #if self.binder_type.pretty() == "`False[]" and isinstance(self.body, W_BVar) and self.body.id == 0:
-        #    import pdb; pdb.set_trace()
 
     # Weak head normal form stops at forall/lambda
     def whnf(self, infcx):
         return self
 
     def syntactic_eq(self, other):
-        # TODO - does syntactic equality really care about binder_info/name?
         if not isinstance(other, W_FunBase):
             return False
-        if self.binder_name != other.binder_name:
-            return False
-        if not self.binder_type.syntactic_eq(other.binder_type):
-            return False
-        if self.binder_info != other.binder_info:
+        if not self.binder.syntactic_eq(other.binder):
             return False
         # Compare the body expressions
         return self.body.syntactic_eq(other.body)
 
     def strong_reduction_helper(self, infcx):
-        progress, binder_type = self.binder_type.strong_reduce_step(infcx)
+        progress, binder_type = self.binder.type.strong_reduce_step(infcx)
         if progress:
-            return (True, (self.binder_name, binder_type, self.binder_info, self.body))
+            return (True, (self.binder.with_type(binder_type), self.body))
 
-        fvar = W_FVar(self)
+        fvar = self.binder.fvar()
         open_body = self.body.instantiate(fvar, 0)
         progress, open_body = open_body.strong_reduce_step(infcx)
         new_body = open_body.bind_fvar(fvar, 0)
         if progress:
-            return (True, (self.binder_name, binder_type, self.binder_info, new_body))
+            return (True, (self.binder.with_type(binder_type), new_body))
 
         self.finished_reduce = True
-        return (False, (self.binder_name, self.binder_type, self.binder_info, self.body))
+        return (False, (self.binder, self.body))
 
 
 class W_ForAll(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
-        return "∀ %s : %s, %s" % (
-            self.binder_name.pretty(),
-            self.binder_type.pretty(),
-            body_pretty
-        )
+        body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
+        return "∀ %s, %s" % (self.binder.pretty(), body_pretty)
 
     def infer(self, infcx):
-        binder_sort = infcx.infer_sort_of(self.binder_type)
-        body_sort = infcx.infer_sort_of(self.body.instantiate(W_FVar(self), 0))
+        binder_sort = infcx.infer_sort_of(self.binder.type)
+        body_sort = infcx.infer_sort_of(self.body.instantiate(self.binder.fvar(), 0))
         return binder_sort.imax(body_sort).sort()
 
     # TODO - double check this
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        new_binder = self.binder_type.instantiate(expr, depth)
-        new_body = self.body.instantiate(expr, depth + 1)
-        return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
+        return W_ForAll(
+            binder=self.binder.instantiate(expr, depth),
+            body=self.body.instantiate(expr, depth + 1),
+        )
 
     def bind_fvar(self, fvar, depth):
-        new_binder = self.binder_type.bind_fvar(fvar, depth)
-        new_body = self.body.bind_fvar(fvar, depth + 1)
-        return W_ForAll(self.binder_name, new_binder, self.binder_info, new_body)
+        return W_ForAll(
+            binder=self.binder.bind_fvar(fvar, depth),
+            body=self.body.bind_fvar(fvar, depth + 1),
+        )
 
     def incr_free_bvars(self, count, depth):
-        binder_type = self.binder_type.incr_free_bvars(count, depth)
-        body = self.body.incr_free_bvars(count, depth + 1)
         return W_ForAll(
-            self.binder_name,
-            binder_type,
-            self.binder_info,
-            body
+            binder=self.binder.incr_free_bvars(count, depth),
+            body=self.body.incr_free_bvars(count, depth + 1),
         )
 
     def strong_reduce_step(self, infcx):
@@ -836,52 +938,44 @@ class W_ForAll(W_FunBase):
 
     def subst_levels(self, levels):
         return W_ForAll(
-            self.binder_name,
-            self.binder_type.subst_levels(levels),
-            self.binder_info,
-            self.body.subst_levels(levels)
+            binder=self.binder.subst_levels(levels),
+            body=self.body.subst_levels(levels),
         )
 
 
 class W_Lambda(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(W_FVar(self), 0).pretty()
-        return "fun (%s : %s) ↦ %s" % (
-            self.binder_name.pretty(),
-            self.binder_type.pretty(),
-            body_pretty
-        )
+        body_pretty = self.body.instantiate(W_FVar(self.binder), 0).pretty()
+        return "fun %s ↦ %s" % (self.binder.pretty(), body_pretty)
 
     def bind_fvar(self, fvar, depth):
-        new_binder = self.binder_type.bind_fvar(fvar, depth)
-        new_body = self.body.bind_fvar(fvar, depth + 1)
-        return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
+        return W_Lambda(
+            binder=self.binder.bind_fvar(fvar, depth),
+            body=self.body.bind_fvar(fvar, depth + 1),
+        )
 
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        new_binder = self.binder_type.instantiate(expr, depth)
-        new_body = self.body.instantiate(expr, depth + 1)
-        return W_Lambda(self.binder_name, new_binder, self.binder_info, new_body)
+        return W_Lambda(
+            binder=self.binder.instantiate(expr, depth),
+            body=self.body.instantiate(expr, depth + 1),
+        )
 
     def incr_free_bvars(self, count, depth):
-        binder_type = self.binder_type.incr_free_bvars(count, depth)
-        body = self.body.incr_free_bvars(count, depth + 1)
         return W_Lambda(
-            self.binder_name,
-            binder_type,
-            self.binder_info,
-            body,
+            binder=self.binder.incr_free_bvars(count, depth),
+            body=self.body.incr_free_bvars(count, depth + 1),
         )
 
     def infer(self, infcx):
         # Run this for the side effect - throwing an exception if not a Sort
-        infcx.infer_sort_of(self.binder_type)
-        fvar = W_FVar(self)
+        infcx.infer_sort_of(self.binder.type)
+        fvar = W_FVar(self.binder)
         body_type_fvar = self.body.instantiate(fvar, 0).infer(infcx)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
-        res = W_ForAll(self.binder_name, self.binder_type, self.binder_info, body_type)
+        res = W_ForAll(binder=self.binder, body=body_type)
         return res
 
     def strong_reduce_step(self, infcx):
@@ -894,10 +988,8 @@ class W_Lambda(W_FunBase):
 
     def subst_levels(self, substs):
         return W_Lambda(
-            self.binder_name,
-            self.binder_type.subst_levels(substs),
-            self.binder_info,
-            self.body.subst_levels(substs)
+            binder=self.binder.subst_levels(substs),
+            body=self.body.subst_levels(substs),
         )
 
 
@@ -931,10 +1023,10 @@ class W_App(W_Expr):
         if not isinstance(fn_type, W_ForAll):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
         arg_type = self.arg.infer(infcx)
-        if not infcx.def_eq(fn_type.binder_type, arg_type):
+        if not infcx.def_eq(fn_type.binder.type, arg_type):
             raise RuntimeError(
                 "W_App.infer: type mismatch:\n%s\n  !=\n%s" % (
-                    fn_type.binder_type.pretty(),
+                    fn_type.binder.type.pretty(),
                     arg_type.pretty(),
                 ),
             )

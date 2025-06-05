@@ -74,7 +74,8 @@ def test_dump_level():
 
 def test_dump_expr_lambda():
     bvar = W_BVar(0)
-    fun = W_Lambda(Name.simple("a"), bvar, "#BD", bvar)
+    fun = W_Lambda(binder=Name.simple("a").binder(type=bvar), body=bvar)
+    Type = W_LEVEL_ZERO.succ().sort()
     assert from_source(
         #eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
         """
@@ -91,7 +92,10 @@ def test_dump_expr_lambda():
             W_LEVEL_ZERO.succ().sort(),
             bvar,
             fun,
-            W_Lambda(Name.simple("A"), W_LEVEL_ZERO.succ().sort(), "#BI", fun),
+            W_Lambda(
+                binder=Name.simple("A").implicit_binder(type=Type),
+                body=fun,
+            ),
         ],
         levels=[
             W_LEVEL_ZERO,
