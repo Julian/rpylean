@@ -903,6 +903,14 @@ class W_Let(W_Expr):
         self.value = value
         self.body = body
 
+    def pretty(self):
+        return "let %s : %s := %s\n%s" % (
+            self.name.pretty(),
+            self.type.pretty(),
+            self.value.pretty(),
+            self.body.pretty(),
+        )
+
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):

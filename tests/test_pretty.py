@@ -4,7 +4,7 @@ Pretty printing of Lean objects.
 
 import pytest
 
-from rpylean.objects import Name, W_LEVEL_ZERO
+from rpylean.objects import Name, W_LEVEL_ZERO, W_BVar, W_Let
 
 
 @pytest.mark.parametrize(
@@ -77,3 +77,12 @@ v = Name.simple("v").level()
 )
 def test_sort(level, expected):
     assert level.sort().pretty() == expected
+
+
+def test_let():
+    bvar = W_BVar(0)
+    x = Name.simple("x")
+    Nat = Name.simple("Nat")
+    zero = Nat.child("zero")
+    let = W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar)
+    assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
