@@ -43,6 +43,12 @@ class Name(W_Item):
         """
         return Name(s.split("."))
 
+    def child(self, part):
+        """
+        Construct a name nested inside this one.
+        """
+        return Name(self.components + [part])
+
     def eq(self, other):
         return self.components == other.components
 
@@ -56,18 +62,6 @@ class Name(W_Item):
         if not self.components:
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
-
-    def child(self, part):
-        """
-        Construct a name nested inside this one.
-        """
-        return Name(self.components + [part])
-
-    def const(self, levels=[]):
-        """
-        Construct a constant expression for this name.
-        """
-        return W_Const(self, levels)
 
     def binder(self, type):
         """
@@ -92,6 +86,27 @@ class Name(W_Item):
         Bind this name in a strict implicit binder.
         """
         return Binder.strict_implicit(self, type)
+
+    def const(self, levels=[]):
+        """
+        Construct a constant expression for this name.
+        """
+        return W_Const(self, levels)
+
+    def definition(self, type, value, level_params=None):
+        """
+        Make a definition of the given type and value with this name.
+        """
+
+        return W_Declaration(
+            name=self,
+            level_params=[] if level_params is None else level_params,
+            w_kind=W_Definition(
+                type=type,
+                value=value,
+                hint="R",  # FIXME: proper hints
+            ),
+        )
 
     def level(self):
         """

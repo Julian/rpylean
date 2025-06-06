@@ -53,6 +53,19 @@ class TestName(object):
     def test_level(self):
         assert Name.simple("foo").level() == W_LevelParam(Name(["foo"]))
 
+    def test_definition(self):
+        foo = Name.simple("foo")
+        Nat = Name.simple("Nat")
+        zero = Nat.child("zero")
+        assert foo.definition(
+            type=Nat.const(),
+            value=zero.const(),
+        ) == W_Declaration(
+            name=foo,
+            level_params=[],
+            w_kind=W_Definition(type=Nat.const(), value=zero.const(), hint="R"),
+        )
+
     def test_binder(self):
         x = Name.simple("x")
         Nat = Name.simple("Nat")

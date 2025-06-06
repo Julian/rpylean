@@ -169,3 +169,62 @@ def test_dump_litstr():
         0 #ELS 68 69
         """,
     ) == Environment(exprs=[W_LitStr("hi")])
+
+
+def test_dump_constant_id():
+    a, alpha = Name.simple("a"), Name.simple("α")
+    u = Name.simple("u").level()
+    b0 = W_BVar(0)
+    b1 = W_BVar(1)
+
+    id = Name.simple("id")
+    id_type = alpha.implicit_binder(type=u.sort()).forall(
+        body=a.binder(type=b0).forall(body=b1),
+    )
+    id_value = alpha.implicit_binder(type=u.sort()).fun(
+        body=a.binder(type=b0).fun(body=b0),
+    )
+
+    assert from_source(
+        #eval run <| dumpConstant `id
+        """
+        1 #NS 0 id
+        2 #NS 0 α
+        3 #NS 0 u
+        1 #UP 3
+        0 #ES 1
+        4 #NS 0 a
+        1 #EV 0
+        2 #EV 1
+        3 #EP #BD 4 1 2
+        4 #EP #BI 2 0 3
+        5 #EL #BD 4 1 1
+        6 #EL #BI 2 0 5
+        #DEF 1 4 6 R 1 3
+        """,
+    ) == Environment(
+        exprs=[
+            u.sort(),
+            b0,
+            b1,
+            a.binder(type=b0).forall(body=b1),
+            id_type,
+            a.binder(type=b0).fun(body=b0),
+            id_value,
+        ],
+        names=[
+            Name.ANONYMOUS,
+            id,
+            Name.simple("α"),
+            Name.simple("u"),
+            Name.simple("a"),
+        ],
+        levels=[W_LEVEL_ZERO, u],
+        declarations=[
+            id.definition(
+                type=id_type,
+                value=id_value,
+                level_params=[Name.simple("u")],
+            )
+        ],
+    )

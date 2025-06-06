@@ -9,12 +9,15 @@ sys.setrecursionlimit(5000)
 
 
 class Environment(object):
-    def __init__(self, levels=None, exprs=None, names=None):
+    def __init__(self, levels=None, exprs=None, names=None, declarations=[]):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] if names is None else names
         self.rec_rules = {}
+
         self.declarations = r_dict(Name.eq, Name.hash)
+        for each in declarations:
+            self.declarations[each.name] = each
 
     def __getitem__(self, name_or_list):
         if isinstance(name_or_list, str):
@@ -25,11 +28,19 @@ class Environment(object):
         if self.__class__ is not other.__class__:
             return NotImplemented
         # r_dict doesn't have sane __eq__
-        left = vars(self)
-        left["declarations"] = dict(left.pop("declarations"))
-        right = vars(other)
-        right["declarations"] = dict(right.pop("declarations"))
-        return left == right
+        if not all(
+            v == getattr(other, k)
+            for k, v in vars(self).items()
+            if k != "declarations"
+        ):
+            return False
+        return (
+            len(self.declarations) == len(other.declarations)
+            and all(
+                k in other.declarations and other.declarations[k] == v
+                for k, v in self.declarations.items()
+            )
+        )
 
     def __ne__(self, other):
         return not self == other
