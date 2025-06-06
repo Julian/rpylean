@@ -112,9 +112,6 @@ def test_lambda_binder_default():
     Nat = Name.simple("Nat")
     zero = Nat.child("zero")
 
-    fun = W_Lambda(
-        binder=Name.simple("a").binder(type=Nat.const()),
-        body=zero.const(),
-    )
+    fun = Name.simple("a").binder(type=Nat.const()).fun(body=zero.const())
 
     assert fun.pretty() == "fun (a : Nat) ↦ Nat.zero"

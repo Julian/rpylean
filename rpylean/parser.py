@@ -365,12 +365,11 @@ class Lambda(ExprVal):
         self.body = body
 
     def to_w_expr(self, environment):
-        return objects.W_Lambda(
-            binder=binder(
+        return binder(
                 name=environment.names[self.binder_name],
                 type=environment.exprs[self.binder_type],
                 info=self.binder_info,
-            ),
+        ).fun(
             body=environment.exprs[self.body],
         )
 
@@ -394,12 +393,11 @@ class ForAll(ExprVal):
         self.body = body
 
     def to_w_expr(self, environment):
-        return objects.W_ForAll(
-            binder=binder(
+        return binder(
                 name=environment.names[self.binder_name],
                 type=environment.exprs[self.binder_type],
                 info=self.binder_info,
-            ),
+        ).forall(
             body=environment.exprs[self.body],
         )
 

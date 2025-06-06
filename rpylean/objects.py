@@ -156,6 +156,12 @@ class Binder(W_Item):
     def __repr__(self):
         return "<Binder %s>" % (self.pretty())
 
+    def forall(self, body):
+        return W_ForAll(binder=self, body=body)
+
+    def fun(self, body):
+        return W_Lambda(binder=self, body=body)
+
     def pretty(self):
         return "%s%s : %s%s" % (
             self.left,
@@ -911,20 +917,17 @@ class W_ForAll(W_FunBase):
     # TODO - double check this
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        return W_ForAll(
-            binder=self.binder.instantiate(expr, depth),
+        return self.binder.instantiate(expr, depth).forall(
             body=self.body.instantiate(expr, depth + 1),
         )
 
     def bind_fvar(self, fvar, depth):
-        return W_ForAll(
-            binder=self.binder.bind_fvar(fvar, depth),
+        return self.binder.bind_fvar(fvar, depth).forall(
             body=self.body.bind_fvar(fvar, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
-        return W_ForAll(
-            binder=self.binder.incr_free_bvars(count, depth),
+        return self.binder.incr_free_bvars(count, depth).forall(
             body=self.body.incr_free_bvars(count, depth + 1),
         )
 
@@ -937,46 +940,41 @@ class W_ForAll(W_FunBase):
         return (progress, W_ForAll(*args))
 
     def subst_levels(self, levels):
-        return W_ForAll(
-            binder=self.binder.subst_levels(levels),
+        return self.binder.subst_levels(levels).forall(
             body=self.body.subst_levels(levels),
         )
 
 
 class W_Lambda(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(W_FVar(self.binder), 0).pretty()
+        body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
         return "fun %s ↦ %s" % (self.binder.pretty(), body_pretty)
 
     def bind_fvar(self, fvar, depth):
-        return W_Lambda(
-            binder=self.binder.bind_fvar(fvar, depth),
+        return self.binder.bind_fvar(fvar, depth).fun(
             body=self.body.bind_fvar(fvar, depth + 1),
         )
 
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        return W_Lambda(
-            binder=self.binder.instantiate(expr, depth),
+        return self.binder.instantiate(expr, depth).fun(
             body=self.body.instantiate(expr, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
-        return W_Lambda(
-            binder=self.binder.incr_free_bvars(count, depth),
+        return self.binder.incr_free_bvars(count, depth).fun(
             body=self.body.incr_free_bvars(count, depth + 1),
         )
 
     def infer(self, infcx):
         # Run this for the side effect - throwing an exception if not a Sort
         infcx.infer_sort_of(self.binder.type)
-        fvar = W_FVar(self.binder)
+        fvar = self.binder.fvar()
         body_type_fvar = self.body.instantiate(fvar, 0).infer(infcx)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
-        res = W_ForAll(binder=self.binder, body=body_type)
-        return res
+        return self.binder.forall(body=body_type)
 
     def strong_reduce_step(self, infcx):
         if self.finished_reduce:
@@ -987,8 +985,7 @@ class W_Lambda(W_FunBase):
         return (progress, W_Lambda(*args))
 
     def subst_levels(self, substs):
-        return W_Lambda(
-            binder=self.binder.subst_levels(substs),
+        return self.binder.subst_levels(substs).fun(
             body=self.body.subst_levels(substs),
         )
 

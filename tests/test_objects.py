@@ -10,6 +10,8 @@ from rpylean.objects import (
     W_Const,
     W_Declaration,
     W_Definition,
+    W_ForAll,
+    W_Lambda,
     W_LevelIMax,
     W_LevelMax,
     W_LevelParam,
@@ -90,6 +92,20 @@ class TestName(object):
             left="⦃",
             right="⦄",
         )
+
+
+class TestBinder(object):
+    def test_forall(self):
+        P = Name.simple("P").const()
+        x = Name.simple("x").binder(type=NAT.const())
+        forall = x.forall(body=P)
+        assert forall == W_ForAll(binder=x, body=P)
+
+    def test_lambda(self):
+        x = Name.simple("x").binder(type=NAT.const())
+        y = Name.simple("y").const()
+        forall = x.fun(body=y)
+        assert forall == W_Lambda(binder=x, body=y)
 
 
 u = Name.simple("u").level()
