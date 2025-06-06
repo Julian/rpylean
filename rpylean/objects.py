@@ -47,17 +47,12 @@ class Name(W_Item):
         return Name(s.split("."))
 
     def eq(self, other):
-        if len(self.components) != len(other.components):
-            return False
-        for i in range(len(self.components)):
-            if self.components[i] != other.components[i]:
-                return False
-        return True
+        return self.components == other.components
 
     def hash(self):
         hash_val = 0
         for c in self.components:
-            hash_val = hash_val ^ compute_hash(c)
+            hash_val ^= compute_hash(c)
         return hash_val
 
     def pretty(self):
