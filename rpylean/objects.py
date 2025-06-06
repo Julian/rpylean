@@ -24,9 +24,6 @@ class W_Item(object):
     def __repr__(self):
         return "<%s %s>" % (self.__class__.__name__, self.pretty())
 
-    def pretty(self):
-        return "<%s repr error>" % (self.__class__.__name__,)
-
 
 class Name(W_Item):
     def __init__(self, components):
@@ -227,6 +224,10 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
+    def pretty(self):
+        # FIXME: Actually get rid of this and implement it on each level type
+        return "<%s repr error>" % (self.__class__.__name__,)
+
     def eq(self, other):
         """
         Two levels are equal via antisymmetry.
@@ -514,7 +515,11 @@ class W_FVar(W_Expr):
         return self
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_FVar) and self.id == other.id and self.binder.syntactic_eq(other.binder)
+        return (
+            isinstance(other, W_FVar)
+            and self.id == other.id
+            and self.binder.syntactic_eq(other.binder)
+        )
 
     def infer(self, infcx):
         return self.binder.type
