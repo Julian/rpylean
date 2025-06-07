@@ -9,8 +9,6 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     Name,
     W_BVar,
-    W_ForAll,
-    W_Lambda,
     W_Let,
     W_LitNat,
     W_LitStr,
@@ -226,5 +224,117 @@ def test_dump_constant_id():
                 value=id_value,
                 level_params=[Name.simple("u")],
             )
+        ],
+    )
+
+
+def test_dump_constant_list():
+    u = Name.simple("u").level()
+    alpha = Name.simple("α").binder(type=u.succ().sort())
+    b0, b1, b2 = [W_BVar(i) for i in range(3)]
+
+    head = Name.simple("head")
+    tail = Name.simple("tail")
+
+    nil = Name(["List", "nil"])
+    cons = Name(["List", "cons"])
+    List = Name.simple("List").inductive(
+        type=alpha.forall(body=u.succ().sort()),
+        ctor_names=[nil, cons],
+        level_params=[Name.simple("u")],
+        num_params=1,
+        is_recursive=True,
+    )
+    ListFn = Name.simple("List").const(levels=[u])
+
+    assert from_source(
+        #eval run <| dumpConstant `List
+        """
+        1 #NS 0 List
+        2 #NS 1 nil
+        3 #NS 1 cons
+        4 #NS 0 α
+        5 #NS 0 u
+        1 #UP 5
+        2 #US 1
+        0 #ES 2
+        1 #EP #BD 4 0 0
+        #IND 1 1 0 1 0 1 0 1 1 2 2 3 5
+        2 #EC 1 1
+        3 #EV 0
+        4 #EA 2 3
+        5 #EP #BI 4 0 4
+        #CTOR 2 5 1 0 1 0 5
+        6 #NS 0 head
+        7 #NS 0 tail
+        6 #EV 1
+        7 #EA 2 6
+        8 #EV 2
+        9 #EA 2 8
+        10 #EP #BD 7 7 9
+        11 #EP #BD 6 3 10
+        12 #EP #BI 4 0 11
+        #CTOR 3 12 1 1 1 2 5
+        """,
+    ) == Environment(
+        exprs=[
+            u.succ().sort(),
+            alpha.forall(body=u.succ().sort()),
+            ListFn,
+            b0,
+            ListFn.app(b0),
+            alpha.to_implicit().forall(body=ListFn.app(b0)),
+            b1,
+            ListFn.app(b1),
+            b2,
+            ListFn.app(b2),
+            tail.binder(type=ListFn.app(b1)).forall(body=ListFn.app(b2)),
+            head.binder(type=b0).forall(
+                body=tail.binder(type=ListFn.app(b1)).forall(
+                    body=ListFn.app(b2),
+                ),
+            ),
+            alpha.to_implicit().forall(
+                body=head.binder(type=b0).forall(
+                    body=tail.binder(type=ListFn.app(b1)).forall(
+                        body=ListFn.app(b2),
+                    ),
+                ),
+            ),
+        ],
+        names=[
+            Name.ANONYMOUS,
+            Name.simple("List"),
+            nil,
+            cons,
+            Name.simple("α"),
+            Name.simple("u"),
+            head,
+            tail,
+        ],
+        levels=[W_LEVEL_ZERO, u, u.succ()],
+        declarations=[
+            List,
+            nil.constructor(
+                for_inductive=List,
+                type=alpha.to_implicit().forall(body=ListFn.app(b0)),
+                level_params=[Name.simple("u")],
+                index=0,
+                num_params=1,
+            ),
+            cons.constructor(
+                for_inductive=List,
+                type=alpha.to_implicit().forall(
+                    body=head.binder(type=b0).forall(
+                        body=tail.binder(
+                            type=ListFn.app(b1),
+                        ).forall(body=ListFn.app(b2)),
+                    ),
+                ),
+                level_params=[Name.simple("u")],
+                index=1,
+                num_params=1,
+                num_fields=2,
+            ),
         ],
     )
