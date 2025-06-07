@@ -7,11 +7,13 @@ from rpylean.objects import (
     Binder,
     Name,
     W_Axiom,
+    W_BVar,
     W_Const,
     W_Declaration,
     W_Definition,
     W_ForAll,
     W_Lambda,
+    W_Let,
     W_LevelIMax,
     W_LevelMax,
     W_LevelParam,
@@ -49,6 +51,22 @@ class TestName(object):
         u = Name.simple("u").level()
         v = Name.simple("v").level()
         assert bar.const([u, v]) == W_Const(bar, [u, v])
+
+    def test_let(self):
+        foo = Name.simple("foo")
+        Nat = Name.simple("Nat")
+        zero = Nat.child("zero")
+        bvar = W_BVar(0)
+        assert foo.let(
+            type=Nat.const(),
+            value=zero.const(),
+            body=bvar,
+        ) == W_Let(
+            name=foo,
+            type=Nat.const(),
+            value=zero.const(),
+            body=bvar,
+        )
 
     def test_level(self):
         assert Name.simple("foo").level() == W_LevelParam(Name(["foo"]))

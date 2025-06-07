@@ -11,7 +11,6 @@ from rpylean.objects import (
     Name,
     W_BVar,
     W_Lambda,
-    W_Let,
     W_LitNat,
     W_LitStr,
 )
@@ -90,11 +89,10 @@ def test_sort(level, expected):
 
 
 def test_let():
-    bvar = W_BVar(0)
-    x = Name.simple("x")
     Nat = Name.simple("Nat")
     zero = Nat.child("zero")
-    let = W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar)
+    x = Name.simple("x")
+    let = x.let(type=Nat.const(), value=zero.const(), body=W_BVar(0))
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 

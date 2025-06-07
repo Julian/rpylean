@@ -108,6 +108,12 @@ class Name(W_Item):
             ),
         )
 
+    def let(self, type, value, body):
+        """
+        Construct a let expression with this name.
+        """
+        return W_Let(name=self, type=type, value=value, body=body)
+
     def level(self):
         """
         Construct a level parameter from this name.
