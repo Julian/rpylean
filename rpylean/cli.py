@@ -134,7 +134,7 @@ def check(self, args, stdin, stdout, stderr):
 
     for name, decl, w_error in result.invalid:
         stderr.write(
-            "%s is not type-correct: %s\n" % (decl.pretty(), str(w_error))
+            "%s is not type-correct: %s\n" % (decl.pretty(), w_error.str())
         )
 
     if not result.succeeded():

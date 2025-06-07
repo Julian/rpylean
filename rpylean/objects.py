@@ -7,7 +7,7 @@ class W_TypeError(Exception):
         self.w_term = w_term
         self.w_expected_type = w_expected_type
 
-    def __str__(self):
+    def str(self):
         return "%s is not of type %s" % (self.w_term.pretty(),
                                          self.w_expected_type.pretty())
 
