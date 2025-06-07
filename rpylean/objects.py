@@ -584,6 +584,9 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
 
+    def __repr__(self):
+        return "<%s>" % (self.pretty(),)
+
     def whnf(self, infcx):
         return self
 
