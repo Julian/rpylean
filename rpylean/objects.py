@@ -648,7 +648,7 @@ class W_Const(W_Expr):
         name = self.name.pretty()
         if not self.levels:
             return name
-        return "%s[%s]" % (
+        return "%s.{%s}" % (
             name,
             ", ".join([level.pretty() for level in self.levels]),
         )

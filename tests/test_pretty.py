@@ -96,6 +96,20 @@ def test_let():
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
+class TestConst:
+    def test_multiple_levels(self):
+        foo = Name.simple("foo").const(levels=[u, v])
+        assert foo.pretty() == "foo.{u, v}"
+
+    def test_one_level(self):
+        List = Name.simple("List").const(levels=[u])
+        assert List.pretty() == "List.{u}"
+
+    def test_no_levels(self):
+        foo = Name.simple("foo").const()
+        assert foo.pretty() == "foo"
+
+
 def test_litnat():
     nat = W_LitNat(rbigint.fromlong(1000000000000000))
     assert nat.pretty() == "1000000000000000"
