@@ -287,8 +287,14 @@ def leq(fn):
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(W_Item):
     def pretty(self):
+        parts = []
+        text, balance = self.pretty_parts()
+        if text:
+            parts.append(text)
+        if balance:
+            parts.append(str(balance))
         # FIXME: Actually get rid of this and implement it on each level type
-        return " + ".join(str(part) for part in self.pretty_parts() if part)
+        return " + ".join(parts)
 
     def eq(self, other):
         """
