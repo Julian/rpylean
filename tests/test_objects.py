@@ -157,6 +157,12 @@ class TestName(object):
 
 
 class TestBinder(object):
+    def test_to_implicit(self):
+        x = Name.simple("x")
+        Nat = Name.simple("Nat")
+        binder = Binder.default(name=x, type=Nat).to_implicit()
+        assert binder == Binder.implicit(name=x, type=Nat)
+
     def test_forall(self):
         P = Name.simple("P").const()
         x = Name.simple("x").binder(type=NAT.const())

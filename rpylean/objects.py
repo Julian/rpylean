@@ -207,6 +207,9 @@ class Binder(W_Item):
     def __repr__(self):
         return "<Binder %s>" % (self.pretty())
 
+    def to_implicit(self):
+        return Binder.implicit(name=self.name, type=self.type)
+
     def forall(self, body):
         return W_ForAll(binder=self, body=body)
 
