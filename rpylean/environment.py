@@ -1,7 +1,7 @@
 from __future__ import print_function
 
 from rpylean import parser
-from rpylean.objects import W_TypeError, W_LEVEL_ZERO, W_App, W_BVar, W_Const, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
+from rpylean.objects import W_TypeError, W_LEVEL_ZERO, W_App, W_BVar, W_Const, W_Declaration, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
 from rpython.rlib.objectmodel import r_dict
 
 import sys
@@ -17,6 +17,7 @@ class Environment(object):
 
         self.declarations = r_dict(Name.eq, Name.hash)
         for each in declarations:
+            assert isinstance(each, W_Declaration)
             self.declarations[each.name] = each
 
     def __getitem__(self, name_or_list):
