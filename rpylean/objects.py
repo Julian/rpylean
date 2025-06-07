@@ -528,6 +528,7 @@ FVAR_COUNTER = FVarCounter()
 class W_FVar(W_Expr):
     def __init__(self, binder):
         self.id = next(FVAR_COUNTER)
+        assert isinstance(binder, Binder)
         self.binder = binder
 
     def incr_free_bvars(self, count, depth):

@@ -161,7 +161,7 @@ class _InferenceContext:
             if not self.def_eq(expr1.binder.type, expr2.binder.type):
                 return False
 
-            fvar = W_FVar(expr1)
+            fvar = expr1.binder.fvar()
             body = expr1.body.instantiate(fvar, 0)
             other_body = expr2.body.instantiate(fvar, 0)
 
