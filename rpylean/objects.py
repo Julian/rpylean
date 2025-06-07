@@ -97,6 +97,40 @@ class Name(W_Item):
         """
         return W_Const(self, levels)
 
+    def constructor(
+        self,
+        type,
+        for_inductive,
+        index,
+        level_params=None,
+        **kwargs
+    ):
+        """
+        Make a constructor declaration with this name.
+        """
+        # XXX: Shouldn't this be bundled w/inductives by the time we get here?
+        return W_Declaration(
+                name=self,
+                level_params=[] if level_params is None else level_params,
+                w_kind=W_Constructor(
+                    for_inductive=for_inductive,
+                    index=index,
+                    type=type,
+                    **kwargs
+                ),
+        )
+
+    def inductive(self, type, level_params=None, **kwargs):
+        """
+        Make an inductive type declaration with this name.
+        """
+
+        return W_Declaration(
+            name=self,
+            level_params=[] if level_params is None else level_params,
+            w_kind=W_Inductive(type=type, names=[self], **kwargs),
+        )
+
     def definition(self, type, value, level_params=None):
         """
         Make a definition of the given type and value with this name.
@@ -1117,8 +1151,8 @@ class W_App(W_Expr):
             assert isinstance(old_ty_base, W_Const)
 
 
-            assert len(decl.w_kind.ind_names) == 1
-            inductive_decl = infcx.env.declarations[decl.w_kind.ind_names[0]]
+            assert len(decl.w_kind.names) == 1
+            inductive_decl = infcx.env.declarations[decl.w_kind.names[0]]
             assert isinstance(inductive_decl.w_kind, W_Inductive)
 
             assert len(inductive_decl.w_kind.ctor_names) == 1
@@ -1453,17 +1487,29 @@ class W_Axiom(W_DeclarationKind):
 
 
 class W_Inductive(W_DeclarationKind):
-    def __init__(self, expr, is_rec, num_nested, num_params, num_indices, ind_names, ctor_names):
-        self.expr = expr
-        self.is_rec = is_rec
+    def __init__(
+        self,
+        type,
+        names,       # ??: What is this? Inductives know their names?
+                     #     Is this for mutual inductives which have multiple?
+        ctor_names=None,  # FIXME: make these be the constructors themselves
+        num_nested=0,
+        num_params=0,
+        num_indices=0,
+        is_reflexive=False,
+        is_recursive=False,
+    ):
+        self.type = type
+        self.names = names
+        self.ctor_names = [] if ctor_names is None else ctor_names
         self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
-        self.ind_names = ind_names
-        self.ctor_names = ctor_names
+        self.is_reflexive = is_reflexive
+        self.is_recursive = is_recursive
 
     def get_type(self):
-        return self.expr
+        return self.type
 
     def type_check(self, infcx):
         # TODO - implement type checking
@@ -1473,16 +1519,16 @@ class W_Inductive(W_DeclarationKind):
         ctors = [("| %s" % each.pretty()) for each in self.ctor_names]
         return "inductive %s : %s%s" % (
             name.pretty(),
-            self.expr.pretty(),
+            self.type.pretty(),
             "\n" + "\n".join(ctors) if ctors else "",
         )
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, type, induct, cidx, num_params, num_fields):
+    def __init__(self, for_inductive, type, index, num_params=0, num_fields=0):
+        self.for_inductive = for_inductive
         self.type = type
-        self.induct = induct
-        self.cidx = cidx
+        self.index = index
         self.num_params = num_params
         self.num_fields = num_fields
 
@@ -1494,26 +1540,20 @@ class W_Constructor(W_DeclarationKind):
     def get_type(self):
         return self.type
 
-    def pretty(self):
-        return "<W_Constructor type='%s' induct='%s' cidx='%s' num_params='%s' num_fields='%s'>" % (
-            self.type.pretty(),
-            self.induct,
-            self.cidx,
-            self.num_params,
-            self.num_fields,
-        )
+    def delaborate(self, name):
+        return "| %s : %s" % (name.pretty(), self.type.pretty())
 
 
 class W_Recursor(W_DeclarationKind):
     def __init__(
         self,
         expr,
+        names,
         k,
         num_params,
         num_indices,
         num_motives,
         num_minors,
-        ind_names,
         rule_idxs,
     ):
         self.expr = expr
@@ -1522,7 +1562,7 @@ class W_Recursor(W_DeclarationKind):
         self.num_indices = num_indices
         self.num_motives = num_motives
         self.num_minors = num_minors
-        self.ind_names = ind_names
+        self.names = names
         self.rule_idxs = rule_idxs
 
     def type_check(self, infcx):
@@ -1533,14 +1573,14 @@ class W_Recursor(W_DeclarationKind):
         return self.expr
 
     def pretty(self):
-        return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' ind_names='%s' rule_idxs='%s'>" % (
+        return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' names='%s' rule_idxs='%s'>" % (
             self.expr.pretty(),
             self.k,
             self.num_params,
             self.num_indices,
             self.num_motives,
             self.num_minors,
-            [each.pretty() for each in self.ind_names],
+            [each.pretty() for each in self.names],
             self.rule_idxs,
         )
 

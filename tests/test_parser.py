@@ -8,7 +8,8 @@ from rpython.rlib.rbigint import rbigint
 
 
 def items(source):
-    return list(parser.to_items(dedent(source).lstrip("\n").splitlines()))
+    export = dedent(source.replace("⏎", "")).lstrip("\n").splitlines()
+    return list(parser.to_items(export))
 
 
 def test_ns():
@@ -31,6 +32,90 @@ def test_es():
     ) == [
         parser.Expr(eidx=0, val=parser.Sort(level=0)),
     ]
+
+
+def test_inductive():
+    assert items(
+        """
+        1 #NS 0 Empty
+        1 #US 0
+        0 #ES 1
+        #IND 1 0 0 0 0 0 0 1 1 0 ⏎
+        """
+    ) == [
+        parser.NameStr(nidx=1, parent_nidx=0, name="Empty"),
+        parser.UniverseSucc(uidx=1, parent=0),
+        parser.Expr(eidx=0, val=parser.Sort(level=1)),
+        parser.Declaration(
+            decl=parser.Inductive(
+                name_idx=1,
+                type_idx=0,
+                name_idxs=[1],
+                ctor_name_idxs=[],
+                level_params=[],
+                is_reflexive=False,
+                is_recursive=False,
+                num_nested=0,
+                num_params=0,
+                num_indices=0,
+            ),
+        ),
+    ]
+
+
+def test_constructor():
+    assert items(
+        """
+        1 #NS 0 True
+        2 #NS 1 intro
+        1 #US 0
+        0 #ES 1
+        #IND 1 0 0 0 0 0 0 1 1 1 2 ⏎
+        1 #EC 1 ⏎
+        #CTOR 2 1 1 0 0 0 ⏎
+        """
+    ) == [
+        parser.NameStr(nidx=1, parent_nidx=0, name="True"),
+        parser.NameStr(nidx=2, parent_nidx=1, name="intro"),
+        parser.UniverseSucc(uidx=1, parent=0),
+        parser.Expr(eidx=0, val=parser.Sort(level=1)),
+        parser.Declaration(
+            decl=parser.Inductive(
+                name_idx=1,
+                type_idx=0,
+                name_idxs=[1],
+                ctor_name_idxs=[2],
+                level_params=[],
+                is_reflexive=False,
+                is_recursive=False,
+                num_nested=0,
+                num_params=0,
+                num_indices=0,
+            ),
+        ),
+        parser.Expr(eidx=1, val=parser.Const(name=1, levels=[])),
+        parser.Declaration(
+            decl=parser.Constructor(
+                name_idx=2,
+                type_idx=1,
+                inductive_nidx=1,
+                cidx=0,
+                num_fields=0,
+                num_params=0,
+                level_params=[],
+            ),
+        ),
+    ]
+    from rpylean.environment import Environment
+    print(Environment().from_items(items("""
+        1 #NS 0 True
+        2 #NS 1 intro
+        1 #US 0
+        0 #ES 1
+        #IND 1 0 0 0 0 0 0 1 1 1 2 ⏎
+        1 #EC 1 ⏎
+        #CTOR 2 1 1 0 0 0 ⏎
+    """)))
 
 
 def test_large_litnat():

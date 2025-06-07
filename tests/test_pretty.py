@@ -1,9 +1,9 @@
 """
 Pretty printing of Lean objects.
 """
+from textwrap import dedent
 
 from rpython.rlib.rbigint import rbigint
-
 import pytest
 
 from rpylean.objects import (
@@ -104,7 +104,7 @@ def test_forall():
     assert forall.pretty() == "∀ (x : Nat), P"
 
 
-class TestConst:
+class TestConst(object):
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
         assert foo.pretty() == "foo.{u, v}"
@@ -116,6 +116,42 @@ class TestConst:
     def test_no_levels(self):
         foo = Name.simple("foo").const()
         assert foo.pretty() == "foo"
+
+
+class TestInductive(object):
+    def test_with_constructor(self):
+        name = Name.simple("Foo")
+        Foo = name.inductive(
+            type=W_LEVEL_ZERO.sort(),
+            ctor_names=[name.child("bar")],
+        )
+        assert Foo.pretty() == dedent(
+            """
+            inductive Foo : Prop
+            | Foo.bar
+            """,
+        ).strip("\n")
+
+    def test_no_constructors(self):
+        Empty = Name.simple("Empty").inductive(type=W_LEVEL_ZERO.succ().sort())
+        assert Empty.pretty() == "inductive Empty : Type"
+
+
+class TestConstructor(object):
+    def test_constructor(self):
+        Type = W_LEVEL_ZERO.succ().sort()
+        True_ = Name.simple("True")
+        inductive = True_.inductive(type=Type)
+        intro = True_.child("intro").constructor(
+            for_inductive=inductive,
+            type=True_.const(),
+            index=0,
+        )
+        assert intro.pretty() == dedent(
+            """
+            | True.intro : True
+            """
+        ).strip("\n")
 
 
 def test_litnat():

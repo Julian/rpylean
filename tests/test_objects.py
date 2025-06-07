@@ -10,9 +10,11 @@ from rpylean.objects import (
     W_Axiom,
     W_BVar,
     W_Const,
+    W_Constructor,
     W_Declaration,
     W_Definition,
     W_ForAll,
+    W_Inductive,
     W_Lambda,
     W_Let,
     W_LevelIMax,
@@ -83,6 +85,34 @@ class TestName(object):
             name=foo,
             level_params=[],
             w_kind=W_Definition(type=Nat.const(), value=zero.const(), hint="R"),
+        )
+
+    def test_inductive(self):
+        Empty = Name.simple("Empty")
+        Type = W_LEVEL_ZERO.succ().sort()
+        assert Empty.inductive(type=Type) == W_Declaration(
+            name=Empty,
+            level_params=[],
+            w_kind=W_Inductive(type=Type, names=[Empty]),
+        )
+
+    def test_constructor(self):
+        Type = W_LEVEL_ZERO.succ().sort()
+        True_ = Name.simple("True")
+        inductive = True_.inductive(type=Type)
+        intro = True_.child("intro")
+        assert intro.constructor(
+            for_inductive=inductive,
+            type=True_.const(),
+            index=0,
+        ) == W_Declaration(
+            name=intro,
+            level_params=[],
+            w_kind=W_Constructor(
+                for_inductive=inductive,
+                type=True_.const(),
+                index=0,
+            ),
         )
 
     def test_binder(self):

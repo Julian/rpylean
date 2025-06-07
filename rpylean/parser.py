@@ -1,3 +1,7 @@
+"""
+See https://ammkrn.github.io/type_checking_in_lean4/export_format.html
+"""
+
 from __future__ import print_function
 
 from rpython.rlib.rbigint import rbigint
@@ -571,15 +575,15 @@ class Axiom(Node):
 class Inductive(Node):
     @staticmethod
     def parse(tokens):
-        _, target_nidx, eidx, is_reflexive, is_rec, num_nested, num_params, num_indices, num_ind_name_idxs_str = tokens[:9]
-        num_ind_name_idxs = int(num_ind_name_idxs_str.text)
-        assert num_ind_name_idxs >= 0
         pos = 9
-        ind_name_idxs = [
+        _, name_idx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
+        num_name_idxs = int(num_name_idxs_str.text)
+        assert num_name_idxs >= 0
+        name_idxs = [
             int(nidx.text)
-            for nidx in tokens[pos:(pos + num_ind_name_idxs)]
+            for nidx in tokens[pos:(pos + num_name_idxs)]
         ]
-        pos += num_ind_name_idxs
+        pos += num_name_idxs
 
         num_ctors = int(tokens[pos].text)
         assert num_ctors >= 0
@@ -603,14 +607,14 @@ class Inductive(Node):
             level_params = [int(each.text) for each in tokens[pos:]]
 
         inductive = Inductive(
-            name_idx=int(target_nidx.text),
-            expr_idx=int(eidx.text),
-            is_reflexive=is_reflexive.text,
-            is_rec=is_rec.text,
+            name_idx=int(name_idx.text),
+            type_idx=int(type_idx.text),
+            is_reflexive=is_reflexive.text == "1",
+            is_recursive=is_recursive.text == "1",
             num_nested=int(num_nested.text),
             num_params=int(num_params.text),
             num_indices=int(num_indices.text),
-            ind_name_idxs=ind_name_idxs,
+            name_idxs=name_idxs,
             ctor_name_idxs=ctor_name_idxs,
             level_params=level_params,
         )
@@ -619,24 +623,24 @@ class Inductive(Node):
     def __init__(
         self,
         name_idx,
-        expr_idx,
+        type_idx,
         is_reflexive,
-        is_rec,
+        is_recursive,
         num_nested,
         num_params,
         num_indices,
-        ind_name_idxs,
+        name_idxs,
         ctor_name_idxs,
         level_params,
     ):
         self.name_idx = name_idx
-        self.expr_idx = expr_idx
+        self.type_idx = type_idx
         self.is_reflexive = is_reflexive
-        self.is_rec = is_rec
+        self.is_recursive = is_recursive
         self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
-        self.ind_name_idxs = ind_name_idxs
+        self.name_idxs = name_idxs
         self.ctor_name_idxs = ctor_name_idxs
         self.level_params = level_params
 
@@ -645,15 +649,16 @@ class Inductive(Node):
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Inductive(
-                expr=environment.exprs[self.expr_idx],
-                is_rec=self.is_rec,
-                num_nested=int(self.num_nested),
-                num_params=int(self.num_params),
-                num_indices=int(self.num_indices),
-                ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+                type=environment.exprs[self.type_idx],
+                names=[environment.names[nidx] for nidx in self.name_idxs],
                 ctor_names=[
                     environment.names[nidx] for nidx in self.ctor_name_idxs
                 ],
+                num_nested=int(self.num_nested),
+                num_params=int(self.num_params),
+                num_indices=int(self.num_indices),
+                is_reflexive=self.is_reflexive,
+                is_recursive=self.is_recursive,
             ),
         )
 
@@ -661,35 +666,36 @@ class Inductive(Node):
 class Constructor(Node):
     @staticmethod
     def parse(tokens):
-        _, name_idx, ctype, induct, cidx, num_params, num_fields = tokens[:7]
+        _, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
         constructor = Constructor(
             name_idx=int(name_idx.text),
-            ctype=int(ctype.text),
-            induct=induct.text,
-            cidx=cidx.text,
+            type_idx=int(type_idx.text),
+            inductive_nidx=int(inductive_nidx.text),
+            cidx=int(cidx.text),
             num_params=int(num_params.text),
             num_fields=int(num_fields.text),
             level_params=[int(each.text) for each in tokens[7:]],
         )
         return Declaration(constructor)
 
-    def __init__(self, name_idx, ctype, induct, cidx, num_params, num_fields, level_params):
+    def __init__(self, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields, level_params):
         self.name_idx = name_idx
-        self.ctype = ctype
-        self.induct = induct
+        self.type_idx = type_idx
+        self.inductive_nidx = inductive_nidx
         self.cidx = cidx
         self.num_params = num_params
         self.num_fields = num_fields
         self.level_params = level_params
 
     def to_w_decl(self, environment):
+        inductive_name = environment.names[self.inductive_nidx]
         return objects.W_Declaration(
             name=environment.names[self.name_idx],
             level_params=[environment.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Constructor(
-                type=environment.exprs[self.ctype],
-                induct=self.induct,
-                cidx=self.cidx,
+                type=environment.exprs[self.type_idx],
+                for_inductive=environment.declarations[inductive_name],
+                index=int(self.cidx),
                 num_params=int(self.num_params),
                 num_fields=int(self.num_fields),
             ),
@@ -782,7 +788,7 @@ class Recursor(Node):
                 num_indices=int(self.num_indices),
                 num_motives=int(self.num_motives),
                 num_minors=int(self.num_minors),
-                ind_names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+                names=[environment.names[nidx] for nidx in self.ind_name_idxs],
                 rule_idxs=[int(ridx) for ridx in self.rule_idxs],
             ),
         )
