@@ -22,12 +22,16 @@ class W_Item(object):
         return not self == other
 
     def __repr__(self):
-        return "<%s %s>" % (self.__class__.__name__, self.pretty())
+        attrs = " ".join("=".join((k, repr(v))) for k, v in vars(self).items())
+        return "<%s %s>" % (self.__class__.__name__, attrs)
 
 
 class Name(W_Item):
     def __init__(self, components):
         self.components = components
+
+    def __repr__(self):
+        return "<Name %s>" % (self.pretty(),)
 
     @staticmethod
     def simple(part):
@@ -247,7 +251,7 @@ def leq(fn):
 class W_Level(W_Item):
     def pretty(self):
         # FIXME: Actually get rid of this and implement it on each level type
-        return "<%s repr error>" % (self.__class__.__name__,)
+        return " + ".join(str(part) for part in self.pretty_parts() if part)
 
     def eq(self, other):
         """
