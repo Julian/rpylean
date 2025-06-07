@@ -704,7 +704,7 @@ class W_Const(W_Expr):
         decl = infcx.env.declarations[self.name]
         params = decl.level_params
 
-        if len(params) == 0:
+        if not params:
             return decl.get_type()
 
         res = apply_const_level_params(self, decl.get_type(), infcx.env)

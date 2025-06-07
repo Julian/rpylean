@@ -96,6 +96,14 @@ def test_let():
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
+def test_forall():
+    x = Name.simple("x")
+    forall = x.binder(type=Name.simple("Nat").const()).forall(
+        Name.simple("P").const(),
+    )
+    assert forall.pretty() == "∀ (x : Nat), P"
+
+
 class TestConst:
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
