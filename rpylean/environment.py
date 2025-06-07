@@ -244,7 +244,7 @@ class _InferenceContext:
                 #print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return expr2_ty.binder.fun(
-                    body=W_App(expr2.incr_free_bvars(1, 0), W_BVar(0)),
+                    body=expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
                 )
         return None
 

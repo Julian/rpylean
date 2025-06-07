@@ -468,6 +468,12 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(W_Item):
+    def app(self, arg):
+        """
+        Apply this (which better be a function) to an argument.
+        """
+        return W_App(fn=self, arg=arg)
+
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
     # * Delta reduction (definition unfolding)
@@ -755,7 +761,7 @@ class W_LitNat(W_Expr):
         expr = NAT_ZERO
         i = rbigint.fromint(0)
         while i.lt(self.val):
-            expr = W_App(NAT_SUCC, expr)
+            expr = NAT_SUCC.app(expr)
             i = i.add(rbigint.fromint(1))
         return expr
 
@@ -766,7 +772,7 @@ class W_LitNat(W_Expr):
 
         # Add a single 'Succ'
         sub = self.val.sub(rbigint.fromint(1))
-        return (True, W_App(NAT_SUCC, W_LitNat(sub)))
+        return (True, NAT_SUCC.app(W_LitNat(sub)))
 
     def bind_fvar(self, fvar, depth):
         return self
@@ -1126,7 +1132,7 @@ class W_App(W_Expr):
             major_premise_ctor = inductive_decl.w_kind.ctor_names[0].const(old_ty_base.levels)
             assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
-                major_premise_ctor = W_App(major_premise_ctor, arg)
+                major_premise_ctor = major_premise_ctor.app(arg)
 
             new_ty = major_premise_ctor.infer(infcx)
             if not infcx.def_eq(old_ty, new_ty):
@@ -1221,7 +1227,7 @@ class W_App(W_Expr):
                 total_args = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 assert total_args >= 0
                 for arg in new_args[:total_args]:
-                    new_app = W_App(new_app, arg)
+                    new_app = new_app.app(arg)
                 # We want to include all of the arguments up to the motive (which is the major premise)
 
                 ctor_start = decl.w_kind.num_params
@@ -1230,12 +1236,12 @@ class W_App(W_Expr):
                 assert ctor_end >= 0
 
                 for ctor_field in all_ctor_args[ctor_start:ctor_end]:
-                    new_app = W_App(new_app, ctor_field)
+                    new_app = new_app.app(ctor_field)
 
                 i = major_idx - 1
                 while i >= 0:
                     #print("Adding back extra arg: %s" % new_args[i].pretty())
-                    new_app = W_App(new_app, args[i])
+                    new_app = new_app.app(args[i])
                     i -= 1
 
                 # Type check the new application, to ensure that all of our args have the right types
@@ -1270,7 +1276,7 @@ class W_App(W_Expr):
         if isinstance(fn, W_Const):
             reduced = fn.try_delta_reduce(infcx.env)
             if reduced is not None:
-                return W_App(reduced, self.arg).whnf(infcx)
+                return reduced.app(self.arg).whnf(infcx)
             else:
                 # We must have a constructor (or a recusor that we failed to iota-reduce earlier),
                 # so there's nothing we can do to reduce further in whnf
@@ -1293,11 +1299,11 @@ class W_App(W_Expr):
         # code decides to perform another strong reduction step.
         progress, new_fn = self.fn.strong_reduce_step(infcx)
         if progress:
-            return (True, W_App(new_fn, self.arg))
+            return (True, new_fn.app(self.arg))
 
         progress, new_arg = self.arg.strong_reduce_step(infcx)
         if progress:
-            return (True, W_App(new_fn, new_arg))
+            return (True, new_fn.app(new_arg))
 
         # Finally, try iota reduction after we've reduced everthing else as much as possible
         # This allows us to find a recursor constant and constructor constant
@@ -1306,23 +1312,26 @@ class W_App(W_Expr):
         return self.try_iota_reduce(infcx)
 
     def bind_fvar(self, fvar, depth):
-        return W_App(self.fn.bind_fvar(fvar, depth), self.arg.bind_fvar(fvar, depth))
+        return self.fn.bind_fvar(fvar, depth).app(
+            self.arg.bind_fvar(fvar, depth),
+        )
 
     def instantiate(self, expr, depth):
-        return W_App(self.fn.instantiate(expr, depth), self.arg.instantiate(expr, depth))
+        return self.fn.instantiate(expr, depth).app(
+            self.arg.instantiate(expr, depth),
+        )
 
     def incr_free_bvars(self, count, depth):
-        return W_App(self.fn.incr_free_bvars(count, depth), self.arg.incr_free_bvars(count, depth))
+        return self.fn.incr_free_bvars(count, depth).app(
+            self.arg.incr_free_bvars(count, depth),
+        )
 
     def pretty(self):
         return "%s %s" % (self.fn.pretty(), self.arg.pretty())
 
 
     def subst_levels(self, substs):
-        return W_App(
-            self.fn.subst_levels(substs),
-            self.arg.subst_levels(substs)
-        )
+        return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))
 
 
 class W_RecRule(W_Item):

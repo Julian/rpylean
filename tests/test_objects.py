@@ -6,6 +6,7 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     Binder,
     Name,
+    W_App,
     W_Axiom,
     W_BVar,
     W_Const,
@@ -320,3 +321,10 @@ class TestAxiom(object):
             level_params=[],
         )
         assert axiom.pretty() == "axiom sorryAx : Nat"
+
+
+class TestConst(object):
+    def test_app(self):
+        bvar = W_BVar(0)
+        id = Name.simple("id").const()
+        assert id.app(bvar) == W_App(fn=id, arg=bvar)

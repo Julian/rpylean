@@ -330,7 +330,7 @@ class App(ExprVal):
     def to_w_expr(self, environment):
         fn = environment.exprs[self.fn_eidx]
         arg = environment.exprs[self.arg_eidx]
-        return objects.W_App(fn=fn, arg=arg)
+        return fn.app(arg=arg)
 
 
 def binder(name, info, type):
