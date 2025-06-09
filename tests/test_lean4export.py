@@ -220,17 +220,31 @@ def test_dump_constant_list():
     head = Name.simple("head")
     tail = Name.simple("tail")
 
-    nil = Name(["List", "nil"])
-    cons = Name(["List", "cons"])
+    ListFn = Name.simple("List").const(levels=[u])
+    nil = Name(["List", "nil"]).constructor(
+        type=alpha.to_implicit().forall(body=ListFn.app(b0)),
+        level_params=[Name.simple("u")],
+        num_params=1,
+    )
+    cons = Name(["List", "cons"]).constructor(
+        type=alpha.to_implicit().forall(
+            body=head.binder(type=b0).forall(
+                body=tail.binder(type=ListFn.app(b1)).forall(
+                    body=ListFn.app(b2),
+                ),
+            ),
+        ),
+        level_params=[Name.simple("u")],
+        num_params=1,
+        num_fields=2,
+    )
     List = Name.simple("List").inductive(
         type=alpha.forall(body=u.succ().sort()),
-        ctor_names=[nil, cons],
+        constructors=[nil, cons],
         level_params=[Name.simple("u")],
         num_params=1,
         is_recursive=True,
     )
-    ListFn = Name.simple("List").const(levels=[u])
-
     assert from_source(
         #eval run <| dumpConstant `List
         """
@@ -260,29 +274,4 @@ def test_dump_constant_list():
         12 #EP #BI 4 0 11
         #CTOR 3 12 1 1 1 2 5
         """,
-    ).finish() == Environment.having(
-        [
-            List,
-            nil.constructor(
-                for_inductive=List,
-                type=alpha.to_implicit().forall(body=ListFn.app(b0)),
-                level_params=[Name.simple("u")],
-                index=0,
-                num_params=1,
-            ),
-            cons.constructor(
-                for_inductive=List,
-                type=alpha.to_implicit().forall(
-                    body=head.binder(type=b0).forall(
-                        body=tail.binder(
-                            type=ListFn.app(b1),
-                        ).forall(body=ListFn.app(b2)),
-                    ),
-                ),
-                level_params=[Name.simple("u")],
-                index=1,
-                num_params=1,
-                num_fields=2,
-            ),
-        ],
-    )
+    ).finish() == Environment.having([List, nil, cons])

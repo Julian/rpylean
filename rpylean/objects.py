@@ -41,7 +41,7 @@ class _Item(object):
         for k, v in vars(self).items():
             if isinstance(v, bool):
                 if v:
-                    parts.append(i)
+                    parts.append(k)
             elif isinstance(v, (int, list)):
                 if v:
                     parts.append("=".join((k, repr(v))))
@@ -121,27 +121,15 @@ class Name(_Item):
         """
         return W_Const(self, levels)
 
-    def constructor(
-        self,
-        type,
-        for_inductive,
-        index,
-        level_params=None,
-        **kwargs
-    ):
+    def constructor(self, type, level_params=None, **kwargs):
         """
         Make a constructor declaration with this name.
         """
         # XXX: Shouldn't this be bundled w/inductives by the time we get here?
         return W_Declaration(
-                name=self,
-                level_params=[] if level_params is None else level_params,
-                w_kind=W_Constructor(
-                    for_inductive=for_inductive,
-                    index=index,
-                    type=type,
-                    **kwargs
-                ),
+            name=self,
+            level_params=[] if level_params is None else level_params,
+            w_kind=W_Constructor(type=type, **kwargs),
         )
 
     def inductive(self, type, level_params=None, **kwargs):
@@ -936,9 +924,9 @@ class W_Proj(W_Expr):
 
         assert isinstance(struct_type, W_Declaration)
         assert isinstance(struct_type.w_kind, W_Inductive)
-        assert len(struct_type.w_kind.ctor_names) == 1
+        assert len(struct_type.w_kind.constructors) == 1
 
-        ctor_decl = infcx.env.declarations[struct_type.w_kind.ctor_names[0]]
+        ctor_decl = struct_type.w_kind.constructors[0]
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
@@ -1184,15 +1172,15 @@ class W_App(W_Expr):
             inductive_decl = infcx.env.declarations[decl.w_kind.names[0]]
             assert isinstance(inductive_decl.w_kind, W_Inductive)
 
-            assert len(inductive_decl.w_kind.ctor_names) == 1
-            ctor_decl = infcx.env.declarations[inductive_decl.w_kind.ctor_names[0]]
+            assert len(inductive_decl.w_kind.constructors) == 1
+            ctor_decl = inductive_decl.w_kind.constructors[0]
             assert isinstance(ctor_decl.w_kind, W_Constructor)
 
             new_args = list(args)
             new_args.reverse()
             num_ctor_params = ctor_decl.w_kind.num_params
 
-            major_premise_ctor = inductive_decl.w_kind.ctor_names[0].const(old_ty_base.levels)
+            major_premise_ctor = ctor_decl.name.const(old_ty_base.levels)
             assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
                 major_premise_ctor = major_premise_ctor.app(arg)
@@ -1203,9 +1191,6 @@ class W_App(W_Expr):
             #print("Built new major premise: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
 
-
-
-            # import pdb; pdb.set_trace()
             # major_premise_ty = major_premise.infer(infcx)
             # print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
             # k_like_args = []
@@ -1508,7 +1493,7 @@ class W_Inductive(W_DeclarationKind):
         type,
         names,       # ??: What is this? Inductives know their names?
                      #     Is this for mutual inductives which have multiple?
-        ctor_names=None,  # FIXME: make these be the constructors themselves
+        constructors=None,
         num_nested=0,
         num_params=0,
         num_indices=0,
@@ -1517,7 +1502,7 @@ class W_Inductive(W_DeclarationKind):
     ):
         self.type = type
         self.names = names
-        self.ctor_names = [] if ctor_names is None else ctor_names
+        self.constructors = [] if constructors is None else constructors
         self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
@@ -1532,19 +1517,23 @@ class W_Inductive(W_DeclarationKind):
         pass
 
     def delaborate(self, name):
-        ctors = [("| %s" % each.pretty()) for each in self.ctor_names]
+        ctors = [
+            each.w_kind.delaborate_in(
+                constructor_name=each.name,
+                inductive=self,
+            )
+            for each in self.constructors
+        ]
         return "inductive %s : %s%s" % (
             name.pretty(),
             self.type.pretty(),
-            "\n" + "\n".join(ctors) if ctors else "",
+            ("\n" + "\n".join(ctors)) if ctors else "",
         )
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, for_inductive, type, index, num_params=0, num_fields=0):
-        self.for_inductive = for_inductive
+    def __init__(self, type, num_params=0, num_fields=0):
         self.type = type
-        self.index = index
         self.num_params = num_params
         self.num_fields = num_fields
 
@@ -1558,6 +1547,12 @@ class W_Constructor(W_DeclarationKind):
 
     def delaborate(self, name):
         return "| %s : %s" % (name.pretty(), self.type.pretty())
+
+    def delaborate_in(self, constructor_name, inductive):
+        if self.type in [name.const() for name in inductive.names]:
+            # TODO: is this exactly right?
+            return "| %s" % (constructor_name.pretty(),)
+        return "| %s : %s" % (constructor_name.pretty(), self.type.pretty())
 
 
 class W_Recursor(W_DeclarationKind):

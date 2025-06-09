@@ -99,20 +99,11 @@ class TestName(object):
     def test_constructor(self):
         Type = W_LEVEL_ZERO.succ().sort()
         True_ = Name.simple("True")
-        inductive = True_.inductive(type=Type)
         intro = True_.child("intro")
-        assert intro.constructor(
-            for_inductive=inductive,
-            type=True_.const(),
-            index=0,
-        ) == W_Declaration(
+        assert intro.constructor(type=True_.const()) == W_Declaration(
             name=intro,
             level_params=[],
-            w_kind=W_Constructor(
-                for_inductive=inductive,
-                type=True_.const(),
-                index=0,
-            ),
+            w_kind=W_Constructor(type=True_.const()),
         )
 
     def test_binder(self):

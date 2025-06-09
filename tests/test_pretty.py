@@ -119,11 +119,29 @@ class TestConst(object):
 
 
 class TestInductive(object):
-    def test_with_constructor(self):
+    def test_multiple_constructors(self):
         name = Name.simple("Foo")
         Foo = name.inductive(
             type=W_LEVEL_ZERO.sort(),
-            ctor_names=[name.child("bar")],
+            constructors=[
+                name.child("bar").constructor(type=name.const()),
+                name.child("baz").constructor(type=name.const()),
+                # TODO: test constructors with params
+            ],
+        )
+        assert Foo.pretty() == dedent(
+            """
+            inductive Foo : Prop
+            | Foo.bar
+            | Foo.baz
+            """,
+        ).strip("\n")
+
+    def test_one_constructor(self):
+        name = Name.simple("Foo")
+        Foo = name.inductive(
+            type=W_LEVEL_ZERO.sort(),
+            constructors=[name.child("bar").constructor(type=name.const())],
         )
         assert Foo.pretty() == dedent(
             """
@@ -139,14 +157,8 @@ class TestInductive(object):
 
 class TestConstructor(object):
     def test_constructor(self):
-        Type = W_LEVEL_ZERO.succ().sort()
         True_ = Name.simple("True")
-        inductive = True_.inductive(type=Type)
-        intro = True_.child("intro").constructor(
-            for_inductive=inductive,
-            type=True_.const(),
-            index=0,
-        )
+        intro = True_.child("intro").constructor(type=True_.const())
         assert intro.pretty() == dedent(
             """
             | True.intro : True

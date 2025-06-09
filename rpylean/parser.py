@@ -102,8 +102,8 @@ class NameStr(Node):
         self.parent_nidx = parent_nidx
         self.name = name
 
-    def compile(self, environment):
-        environment.register_name(self.nidx, self.parent_nidx, self.name)
+    def compile(self, builder):
+        builder.register_name(self.nidx, self.parent_nidx, self.name)
 
 
 class NameId(Node):
@@ -124,8 +124,8 @@ class NameId(Node):
         self.parent_nidx = parent_nidx
         self.id = id
 
-    def compile(self, environment):
-        environment.register_name(self.nidx, self.parent_nidx, self.id)
+    def compile(self, builder):
+        builder.register_name(self.nidx, self.parent_nidx, self.id)
 
 
 class Universe(Node):
@@ -145,9 +145,9 @@ class UniverseSucc(Universe):
         self.uidx = uidx
         self.parent = parent
 
-    def compile(self, environment):
-        level = environment.levels[self.parent].succ()
-        environment.register_level(self.uidx, level)
+    def compile(self, builder):
+        level = builder.levels[self.parent].succ()
+        builder.register_level(self.uidx, level)
 
 
 class UniverseMax(Universe):
@@ -168,9 +168,9 @@ class UniverseMax(Universe):
         self.lhs = lhs
         self.rhs = rhs
 
-    def compile(self, environment):
-        level = environment.levels[self.lhs].max(environment.levels[self.rhs])
-        environment.register_level(self.uidx, level)
+    def compile(self, builder):
+        level = builder.levels[self.lhs].max(builder.levels[self.rhs])
+        builder.register_level(self.uidx, level)
 
 
 class UniverseIMax(Universe):
@@ -191,9 +191,9 @@ class UniverseIMax(Universe):
         self.lhs = lhs
         self.rhs = rhs
 
-    def compile(self, environment):
-        level = environment.levels[self.lhs].imax(environment.levels[self.rhs])
-        environment.register_level(self.uidx, level)
+    def compile(self, builder):
+        level = builder.levels[self.lhs].imax(builder.levels[self.rhs])
+        builder.register_level(self.uidx, level)
 
 
 class UniverseParam(Universe):
@@ -209,9 +209,9 @@ class UniverseParam(Universe):
         self.uidx = uidx
         self.nidx = nidx
 
-    def compile(self, environment):
-        level = environment.names[self.nidx].level()
-        environment.register_level(self.uidx, level)
+    def compile(self, builder):
+        level = builder.names[self.nidx].level()
+        builder.register_level(self.uidx, level)
 
 
 class Expr(Node):
@@ -219,9 +219,9 @@ class Expr(Node):
         self.eidx = eidx
         self.val = val
 
-    def compile(self, environment):
-        w_expr = self.val.to_w_expr(environment)
-        environment.register_expr(self.eidx, w_expr)
+    def compile(self, builder):
+        w_expr = self.val.to_w_expr(builder)
+        builder.register_expr(self.eidx, w_expr)
 
 
 class ExprVal(Node):
@@ -241,7 +241,7 @@ class BVar(ExprVal):
     def __init__(self, id):
         self.id = id
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return objects.W_BVar(id=self.id)
 
 
@@ -261,7 +261,7 @@ class LitStr(ExprVal):
     def __init__(self, val):
         self.val = val
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return objects.W_LitStr(val=self.val)
 
 
@@ -279,7 +279,7 @@ class LitNat(ExprVal):
     def __init__(self, val):
         self.val = val
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return objects.W_LitNat(val=self.val)
 
 
@@ -296,8 +296,8 @@ class Sort(ExprVal):
     def __init__(self, level):
         self.level = level
 
-    def to_w_expr(self, environment):
-        return environment.levels[self.level].sort()
+    def to_w_expr(self, builder):
+        return builder.levels[self.level].sort()
 
 
 class Const(ExprVal):
@@ -317,9 +317,9 @@ class Const(ExprVal):
         self.name = name
         self.levels = levels
 
-    def to_w_expr(self, environment):
-        levels = [environment.levels[level] for level in self.levels]
-        return environment.names[self.name].const(levels)
+    def to_w_expr(self, builder):
+        levels = [builder.levels[level] for level in self.levels]
+        return builder.names[self.name].const(levels)
 
 
 class Let(ExprVal):
@@ -343,12 +343,12 @@ class Let(ExprVal):
         self.def_val = def_val
         self.body = body
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return objects.W_Let(
-            name=environment.names[self.name_idx],
-            type=environment.exprs[self.def_type],
-            value=environment.exprs[self.def_val],
-            body=environment.exprs[self.body],
+            name=builder.names[self.name_idx],
+            type=builder.exprs[self.def_type],
+            value=builder.exprs[self.def_val],
+            body=builder.exprs[self.body],
         )
 
 
@@ -368,9 +368,9 @@ class App(ExprVal):
         self.fn_eidx = fn_eidx
         self.arg_eidx = arg_eidx
 
-    def to_w_expr(self, environment):
-        fn = environment.exprs[self.fn_eidx]
-        arg = environment.exprs[self.arg_eidx]
+    def to_w_expr(self, builder):
+        fn = builder.exprs[self.fn_eidx]
+        arg = builder.exprs[self.arg_eidx]
         return fn.app(arg=arg)
 
 
@@ -408,13 +408,13 @@ class Lambda(ExprVal):
         self.binder_info = binder_info
         self.body = body
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return binder(
-                name=environment.names[self.binder_name],
-                type=environment.exprs[self.binder_type],
+                name=builder.names[self.binder_name],
+                type=builder.exprs[self.binder_type],
                 info=self.binder_info,
         ).fun(
-            body=environment.exprs[self.body],
+            body=builder.exprs[self.body],
         )
 
 
@@ -439,13 +439,13 @@ class ForAll(ExprVal):
         self.binder_info = binder_info
         self.body = body
 
-    def to_w_expr(self, environment):
+    def to_w_expr(self, builder):
         return binder(
-                name=environment.names[self.binder_name],
-                type=environment.exprs[self.binder_type],
+                name=builder.names[self.binder_name],
+                type=builder.exprs[self.binder_type],
                 info=self.binder_info,
         ).forall(
-            body=environment.exprs[self.body],
+            body=builder.exprs[self.body],
         )
 
 
@@ -468,12 +468,12 @@ class Proj(ExprVal):
         self.field_idx = field_idx
         self.struct_expr = struct_expr
 
-    def to_w_expr(self, environment):
-        name = environment.names[self.type_name]
+    def to_w_expr(self, builder):
+        name = builder.names[self.type_name]
         return objects.W_Proj(
             struct_name=name,
             field_idx=self.field_idx,
-            struct_expr=environment.exprs[self.struct_expr],
+            struct_expr=builder.exprs[self.struct_expr],
         )
 
 
@@ -481,23 +481,8 @@ class Declaration(Node):
     def __init__(self, decl):
         self.decl = decl
 
-    def compile(self, environment):
-        w_kind = self.decl.to_w_decl(environment)
-        seen = {}
-        for level in w_kind.level_params:
-            if level in seen:
-                raise Invalid(
-                    "%s has duplicate level %s in all kind: %s" % (
-                        w_kind.name,
-                        level,
-                        w_kind.level_params,
-                    ),
-                )
-            seen[level] = True
-        environment.register_declaration(
-            self.decl.name_idx,
-            w_kind,
-        )
+    def compile(self, builder):
+        builder.register_declaration(self.decl.to_w_decl(builder))
 
 
 class Definition(Node):
@@ -527,13 +512,13 @@ class Definition(Node):
         self.hint = hint
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
+    def to_w_decl(self, builder):
         return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Definition(
-                type=environment.exprs[self.def_type],
-                value=environment.exprs[self.def_val],
+                type=builder.exprs[self.def_type],
+                value=builder.exprs[self.def_val],
                 hint=self.hint,
             ),
         )
@@ -560,13 +545,13 @@ class Opaque(Node):
         self.def_val = def_val
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
+    def to_w_decl(self, builder):
         return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Opaque(
-                type=environment.exprs[self.def_type],
-                value=environment.exprs[self.def_val],
+                type=builder.exprs[self.def_type],
+                value=builder.exprs[self.def_val],
             ),
         )
 
@@ -592,13 +577,13 @@ class Theorem(Node):
         self.def_val = def_val
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
+    def to_w_decl(self, builder):
         return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Theorem(
-                type=environment.exprs[self.def_type],
-                value=environment.exprs[self.def_val],
+                type=builder.exprs[self.def_type],
+                value=builder.exprs[self.def_val],
             ),
         )
 
@@ -622,15 +607,23 @@ class Axiom(Node):
         self.def_type = def_type
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
+    def to_w_decl(self, builder):
         return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
-            w_kind=objects.W_Axiom(type=environment.exprs[self.def_type]),
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
+            w_kind=objects.W_Axiom(type=builder.exprs[self.def_type]),
         )
 
 
-class Inductive(Node):
+class InductiveSkeleton(Node):
+    """
+    The skeleton of an inductive type.
+
+    Here we mean the inductive type without its constructors.
+    We don't add this to the environment until we see the constructors
+    themselves, meaning we collect lines which will appear later in the export
+    file until we see all constructors.
+    """
 
     kind = "IND"
 
@@ -667,7 +660,7 @@ class Inductive(Node):
         else:
             level_params = [int(each.text) for each in tokens[pos:]]
 
-        inductive = Inductive(
+        return InductiveSkeleton(
             name_idx=int(name_idx.text),
             type_idx=int(type_idx.text),
             is_reflexive=is_reflexive.bool(),
@@ -679,7 +672,6 @@ class Inductive(Node):
             ctor_name_idxs=ctor_name_idxs,
             level_params=level_params,
         )
-        return Declaration(inductive)
 
     def __init__(
         self,
@@ -705,23 +697,38 @@ class Inductive(Node):
         self.ctor_name_idxs = ctor_name_idxs
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
-        return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+        self.constructors = [None] * len(ctor_name_idxs)
+        self.num_remaining_constructors = len(ctor_name_idxs)
+
+    def compile(self, builder):
+        if self.ctor_name_idxs:
+            builder.register_inductive_skeleton(self)
+        else:  # no constructors, just go!
+            self.finish(builder)
+
+    def finish(self, builder):
+        """
+        Finish defining this inductive type, adding it to the environment.
+
+        Called once all constructors have been seen.
+        """
+        assert len(self.constructors) == len(self.ctor_name_idxs)
+        assert None not in self.constructors
+        declaration = objects.W_Declaration(
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Inductive(
-                type=environment.exprs[self.type_idx],
-                names=[environment.names[nidx] for nidx in self.name_idxs],
-                ctor_names=[
-                    environment.names[nidx] for nidx in self.ctor_name_idxs
-                ],
-                num_nested=int(self.num_nested),
-                num_params=int(self.num_params),
-                num_indices=int(self.num_indices),
+                type=builder.exprs[self.type_idx],
+                names=[builder.names[nidx] for nidx in self.name_idxs],
+                constructors=self.constructors,
+                num_nested=self.num_nested,
+                num_params=self.num_params,
+                num_indices=self.num_indices,
                 is_reflexive=self.is_reflexive,
                 is_recursive=self.is_recursive,
             ),
         )
+        builder.register_declaration(declaration)
 
 
 class Constructor(Node):
@@ -731,7 +738,7 @@ class Constructor(Node):
     @staticmethod
     def parse(tokens):
         _, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
-        constructor = Constructor(
+        return Constructor(
             name_idx=int(name_idx.text),
             type_idx=int(type_idx.text),
             inductive_nidx=int(inductive_nidx.text),
@@ -740,7 +747,6 @@ class Constructor(Node):
             num_fields=int(num_fields.text),
             level_params=[int(each.text) for each in tokens[7:]],
         )
-        return Declaration(constructor)
 
     def __init__(self, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields, level_params):
         self.name_idx = name_idx
@@ -751,19 +757,38 @@ class Constructor(Node):
         self.num_fields = num_fields
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
-        inductive_name = environment.names[self.inductive_nidx]
-        return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+    def compile(self, builder):
+        """
+        Add this constructor to the environment.
+
+        Then check whether our parent inductive type has all its constructors
+        now set, in which case compile it too.
+        """
+        constructor = objects.W_Declaration(
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Constructor(
-                type=environment.exprs[self.type_idx],
-                for_inductive=environment.declarations[inductive_name],
-                index=int(self.cidx),
-                num_params=int(self.num_params),
-                num_fields=int(self.num_fields),
+                type=builder.exprs[self.type_idx],
+                num_params=self.num_params,
+                num_fields=self.num_fields,
             ),
         )
+
+        skeleton = builder.inductive_skeletons[self.inductive_nidx]
+        assert skeleton.constructors[self.cidx] is None, (
+            "Constructor %s.%s already defined at index %d" % (
+                builder.names[self.inductive_nidx].pretty(),
+                builder.names[self.name_idx].pretty(),
+                self.cidx,
+            )
+        )
+        skeleton.constructors[self.cidx] = constructor
+        skeleton.num_remaining_constructors -= 1
+        builder.register_declaration(constructor)
+
+        if not skeleton.num_remaining_constructors:  # saw all of em!
+            del builder.inductive_skeletons[self.inductive_nidx]
+            skeleton.finish(builder)
 
 
 class Recursor(Node):
@@ -844,18 +869,18 @@ class Recursor(Node):
         self.rule_idxs = rule_idxs
         self.level_params = level_params
 
-    def to_w_decl(self, environment):
+    def to_w_decl(self, builder):
         return objects.W_Declaration(
-            name=environment.names[self.name_idx],
-            level_params=[environment.names[nidx] for nidx in self.level_params],
+            name=builder.names[self.name_idx],
+            level_params=[builder.names[nidx] for nidx in self.level_params],
             w_kind=objects.W_Recursor(
-                expr=environment.exprs[self.expr_idx],
+                expr=builder.exprs[self.expr_idx],
                 k=int(self.k),
                 num_params=int(self.num_params),
                 num_indices=int(self.num_indices),
                 num_motives=int(self.num_motives),
                 num_minors=int(self.num_minors),
-                names=[environment.names[nidx] for nidx in self.ind_name_idxs],
+                names=[builder.names[nidx] for nidx in self.ind_name_idxs],
                 rule_idxs=[int(ridx) for ridx in self.rule_idxs],
             ),
         )
@@ -867,12 +892,13 @@ class RecRule(Node):
 
     @staticmethod
     def parse(tokens):
-        ridx = int(tokens[0].text)
-        _rr_token = tokens[1].text
-        ctor_name = int(tokens[2].text)
-        n_fields = int(tokens[3].text)
-        val = int(tokens[4].text)
-        return RecRule(ridx, ctor_name, n_fields, val)
+        ridx, _, ctor_name, n_fields, val = tokens
+        return RecRule(
+            ridx=int(ridx.text),
+            ctor_name=int(ctor_name.text),
+            n_fields=int(n_fields.text),
+            val=int(val.text),
+        )
 
     def __init__(self, ridx, ctor_name, n_fields, val):
         self.ridx = ridx
@@ -880,13 +906,13 @@ class RecRule(Node):
         self.n_fields = n_fields
         self.val = val
 
-    def compile(self, environment):
+    def compile(self, builder):
         w_recrule = objects.W_RecRule(
-            ctor_name=environment.names[self.ctor_name],
+            ctor_name=builder.names[self.ctor_name],
             n_fields=self.n_fields,
-            val=environment.exprs[self.val]
+            val=builder.exprs[self.val]
         )
-        environment.register_rec_rule(self.ridx, w_recrule)
+        builder.register_rec_rule(self.ridx, w_recrule)
 
 
 NODES = {}
@@ -912,7 +938,7 @@ for cls in [
     Definition,
     Theorem,
     Constructor,
-    Inductive,
+    InductiveSkeleton,
     Opaque,
     Axiom,
 ]:

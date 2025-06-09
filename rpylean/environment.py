@@ -1,8 +1,21 @@
 from __future__ import print_function
 
-from rpylean import parser
-from rpylean.objects import W_TypeError, W_LEVEL_ZERO, W_App, W_BVar, W_Const, W_Declaration, W_FVar, W_ForAll, W_Lambda, W_LitNat, W_Proj, W_Sort, Name
 from rpython.rlib.objectmodel import r_dict
+
+from rpylean import parser
+from rpylean.objects import (
+    W_TypeError,
+    W_LEVEL_ZERO,
+    Name,
+    W_App,
+    W_BVar,
+    W_Const,
+    W_FVar,
+    W_ForAll,
+    W_Lambda,
+    W_LitNat,
+    W_Sort,
+)
 
 import sys
 sys.setrecursionlimit(5000)
@@ -20,6 +33,7 @@ class EnvironmentBuilder(object):
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] + names
         self.rec_rules = {}
+        self.inductive_skeletons = {}
         self.declarations = r_dict(Name.eq, Name.hash)
 
     def __eq__(self, other):
@@ -72,19 +86,39 @@ class EnvironmentBuilder(object):
         assert ridx not in self.rec_rules, ridx
         self.rec_rules[ridx] = w_recrule
 
-    def register_declaration(self, name_idx, decl):
-        name = self.names[name_idx]
+    def register_inductive_skeleton(self, skeleton):
+        """
+        Add the skeleton to our processing mapping.
+
+        It will be finished when we see all of its constructors.
+        """
+        assert skeleton.name_idx not in self.inductive_skeletons
+        self.inductive_skeletons[skeleton.name_idx] = skeleton
+
+    def register_declaration(self, decl):
+        seen = {}
+        for level in decl.level_params:
+            assert level not in seen, "%s has duplicate level %s in all kind: %s" % (
+                decl.name.pretty(),
+                level,
+                decl.level_params,
+            )
+            seen[level] = True
+
         # > the kernel requires that the declaration is not already
         # > declared in the environment
         #
         #  -- from https://ammkrn.github.io/type_checking_in_lean4/kernel_concepts/the_big_picture.html
-        assert name not in self.declarations, "Duplicate declaration: %s" % name
-        self.declarations[name] = decl
+        assert decl.name not in self.declarations, "Duplicate declaration: %s" % (decl.name.pretty(),)
+        self.declarations[decl.name] = decl
 
     def finish(self):
         """
         Finish building, generating the known-valid and immutable environment.
         """
+        assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
+            ", ".join([self.names[nidx].pretty() for nidx in self.inductive_skeletons]),
+        )
         return Environment(
             declarations=self.declarations,
             rec_rules=self.rec_rules,
