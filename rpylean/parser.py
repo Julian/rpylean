@@ -14,10 +14,9 @@ EXPORT_VERSION = "2.0.0"
 
 
 class ParseError(Exception):
-    def __init__(self, line, lineno, column=0):
-        Exception.__init__(self, (line, column))
-        self.line = line
-        self.column = column
+    def __init__(self, message, source_pos):
+        self.message = message
+        self.source_pos = source_pos
 
 
 class ExportVersionError(ParseError):
@@ -32,12 +31,6 @@ class ExportVersionError(ParseError):
             EXPORT_VERSION,
             self.got,
         )
-
-
-class Invalid(Exception):
-    """
-    An export file is semantically invalid.
-    """
 
 
 class Token(object):
@@ -63,7 +56,10 @@ class Token(object):
             return False
         elif self.text == "1":
             return True
-        raise Invalid("Expected 0|1 but got '%s'" % (self.text,))
+        raise ParseError(
+            message="Expected 0|1 but got '%s'" % (self.text,),
+            source_pos=self.source_pos,
+        )
 
 
 class Node(object):
