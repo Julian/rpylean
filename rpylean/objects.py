@@ -14,7 +14,18 @@ class W_TypeError(Exception):
         )
 
 
-class W_Item(object):
+class _Item(object):
+    """
+    A common type for all Lean items.
+
+    The "item" nomenclature comes from the export format documentation (and
+    possibly is used elsewhere).
+
+    Don't put any Lean behavior here, it's strictly used to satisfy RPython
+    (by making sure all Lean objects have the same base class) and to give Lean
+    objects some sane default Python behavior for tests.
+    """
+
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
@@ -30,7 +41,7 @@ class W_Item(object):
         return "<%s %s>" % (self.__class__.__name__, attrs)
 
 
-class Name(W_Item):
+class Name(_Item):
     def __init__(self, components):
         self.components = components
 
@@ -139,7 +150,6 @@ class Name(W_Item):
         """
         Make a definition of the given type and value with this name.
         """
-
         return W_Declaration(
             name=self,
             level_params=[] if level_params is None else level_params,
@@ -163,10 +173,11 @@ class Name(W_Item):
         return W_LevelParam(self)
 
 
+#: The anonymous name.
 Name.ANONYMOUS = Name([])
 
 
-class Binder(W_Item):
+class Binder(_Item):
     """
     A binder within a Lambda or ForAll.
 
@@ -289,7 +300,7 @@ def leq(fn):
 
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
-class W_Level(W_Item):
+class W_Level(_Item):
     def pretty(self):
         parts = []
         text, balance = self.pretty_parts()
@@ -514,7 +525,7 @@ class W_LevelParam(W_Level):
         return substs.get(self.name, self)
 
 
-class W_Expr(W_Item):
+class W_Expr(_Item):
     def app(self, arg):
         """
         Apply this (which better be a function) to an argument.
@@ -894,7 +905,7 @@ class W_Proj(W_Expr):
         )
 
     def syntactic_eq(self, other):
-        # Our 'struct_type' is a 'W_Item' (which is only constructed once, during parsing),
+        # Our 'struct_type' is a '_Item' (which is only constructed once, during parsing),
         # so we can compare by object identity with '=='
         return isinstance(other, W_Proj) and self.struct_name == other.struct_name and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
 
@@ -1381,7 +1392,7 @@ class W_App(W_Expr):
         return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))
 
 
-class W_RecRule(W_Item):
+class W_RecRule(_Item):
     def __init__(self, ctor_name, n_fields, val):
         self.ctor_name = ctor_name
         self.n_fields = n_fields
@@ -1395,7 +1406,7 @@ class W_RecRule(W_Item):
         )
 
 
-class W_Declaration(W_Item):
+class W_Declaration(_Item):
     def __init__(self, name, level_params, w_kind):
         self.name = name
         self.level_params = level_params
@@ -1411,7 +1422,7 @@ class W_Declaration(W_Item):
         return self.w_kind.delaborate(self.name)  # Is this the right vocabulary?!
 
 
-class W_DeclarationKind(W_Item):
+class W_DeclarationKind(_Item):
     # Returns the value associated with this declaration kind.
     # This is the def value for a Definition, and `None` for things like Inductive
     def get_delta_reduce_target(self):

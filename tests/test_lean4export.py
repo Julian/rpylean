@@ -32,7 +32,6 @@ def test_dump_name():
         """,
     ) == EnvironmentBuilder(
         names=[
-            Name.ANONYMOUS,
             Name(["foo"]),
             Name(["foo", "bla"]),
             Name(["foo", "bla", "1"]),
@@ -66,7 +65,7 @@ def test_dump_level():
             Name.simple("l2").level(),
             W_LEVEL_ZERO.succ().succ().max(l1.level()).imax(l2.level()),
         ],
-        names=[Name.ANONYMOUS, l1, l2],
+        names=[l1, l2],
     )
 
 
@@ -96,7 +95,7 @@ def test_dump_expr_lambda():
             W_LEVEL_ZERO,
             W_LEVEL_ZERO.succ(),
         ],
-        names=[Name.ANONYMOUS, Name.simple("A"), Name.simple("a")],
+        names=[Name.simple("A"), Name.simple("a")],
     )
 
 
@@ -124,7 +123,7 @@ def test_dump_expr_let():
             bvar,
             W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar),
         ],
-        names=[Name.ANONYMOUS, x, Nat, zero],
+        names=[x, Nat, zero],
     )
 
 
@@ -147,7 +146,7 @@ def test_dump_expr_proj():
                 struct_expr=bvar,
             ),
         ],
-        names=[Name.ANONYMOUS, Prod],
+        names=[Prod],
     )
 
 

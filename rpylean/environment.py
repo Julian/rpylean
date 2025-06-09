@@ -15,10 +15,10 @@ class EnvironmentBuilder(object):
     Incrementally builds up an environment as we parse an export file.
     """
 
-    def __init__(self, levels=None, exprs=None, names=None):
+    def __init__(self, levels=None, exprs=None, names=[]):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
         self.exprs = [] if exprs is None else exprs
-        self.names = [Name.ANONYMOUS] if names is None else names
+        self.names = [Name.ANONYMOUS] + names
         self.rec_rules = {}
         self.declarations = r_dict(Name.eq, Name.hash)
 
