@@ -55,6 +55,16 @@ class Token(object):
             self.source_pos,
         )
 
+    def bool(self):
+        """
+        Convert 0 -> False and 1 -> True.
+        """
+        if self.text == "0":
+            return False
+        elif self.text == "1":
+            return True
+        raise Invalid("Expected 0|1 but got '%s'" % (self.text,))
+
 
 class Node(object):
     """
@@ -660,8 +670,8 @@ class Inductive(Node):
         inductive = Inductive(
             name_idx=int(name_idx.text),
             type_idx=int(type_idx.text),
-            is_reflexive=is_reflexive.text == "1",
-            is_recursive=is_recursive.text == "1",
+            is_reflexive=is_reflexive.bool(),
+            is_recursive=is_recursive.bool(),
             num_nested=int(num_nested.text),
             num_params=int(num_params.text),
             num_indices=int(num_indices.text),
