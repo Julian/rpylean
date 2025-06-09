@@ -20,18 +20,6 @@ class ParseError(Exception):
         self.column = column
 
 
-class Token:
-    def __init__(self, text, source_pos):
-        self.text = text
-        self.source_pos = source_pos
-
-    def __repr__(self):
-        return "<Token text={!r} source_pos={!r}>".format(
-            self.text,
-            self.source_pos,
-        )
-
-
 class ExportVersionError(ParseError):
     """
     The export file version doesn't match one we know how to parse.
@@ -50,6 +38,22 @@ class Invalid(Exception):
     """
     An export file is semantically invalid.
     """
+
+
+class Token(object):
+    """
+    A token in the export file.
+    """
+
+    def __init__(self, text, source_pos):
+        self.text = text
+        self.source_pos = source_pos
+
+    def __repr__(self):
+        return "<Token text={!r} source_pos={!r}>".format(
+            self.text,
+            self.source_pos,
+        )
 
 
 class Node(object):
