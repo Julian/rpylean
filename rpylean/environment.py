@@ -177,7 +177,7 @@ class Environment(object):
         return _InferenceContext(self)
 
 
-class _InferenceContext:
+class _InferenceContext(object):
     def __init__(self, env):
         self.env = env
 
