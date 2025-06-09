@@ -74,26 +74,10 @@ class Node(object):
         return "<%s %s>" % (self.__class__.__name__, ", ".join(contents))
 
 
-class File(Node):
-    def __init__(self, version, items=None):
-        if items is None:
-            items = []
-        self.version = version
-        self.items = items
-
-    def compile(self, context):
-        for item in self.items:
-            item.compile(context)
-
-
-class Version(Node):
-    def __init__(self, major, minor, patch):
-        self.major = int(major)
-        self.minor = int(minor)
-        self.patch = int(patch)
-
-
 class NameStr(Node):
+
+    kind = "NS"
+
     @staticmethod
     def parse(tokens):
         nidx, _ns_token, parent_nidx, name = tokens
@@ -113,13 +97,16 @@ class NameStr(Node):
 
 
 class NameId(Node):
+
+    kind = "NI"
+
     @staticmethod
     def parse(tokens):
         nidx, _ni_token, parent_nidx, id = tokens
         return NameId(
             nidx=int(nidx.text),
             parent_nidx=int(parent_nidx.text),
-            id=id.text,
+            id=id.text,  # TODO: do we care that this isn't an int?
         )
 
     def __init__(self, nidx, parent_nidx, id):
@@ -136,6 +123,9 @@ class Universe(Node):
 
 
 class UniverseSucc(Universe):
+
+    kind = "US"
+
     @staticmethod
     def parse(tokens):
         uidx, _us_token, parent = tokens
@@ -149,7 +139,11 @@ class UniverseSucc(Universe):
         level = environment.levels[self.parent].succ()
         environment.register_level(self.uidx, level)
 
+
 class UniverseMax(Universe):
+
+    kind = "UM"
+
     @staticmethod
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
@@ -168,7 +162,11 @@ class UniverseMax(Universe):
         level = environment.levels[self.lhs].max(environment.levels[self.rhs])
         environment.register_level(self.uidx, level)
 
+
 class UniverseIMax(Universe):
+
+    kind = "UIM"
+
     @staticmethod
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
@@ -187,7 +185,11 @@ class UniverseIMax(Universe):
         level = environment.levels[self.lhs].imax(environment.levels[self.rhs])
         environment.register_level(self.uidx, level)
 
+
 class UniverseParam(Universe):
+
+    kind = "UP"
+
     @staticmethod
     def parse(tokens):
         uidx, _up_token, nidx = tokens
@@ -217,6 +219,9 @@ class ExprVal(Node):
 
 
 class BVar(ExprVal):
+
+    kind = "EV"
+
     @staticmethod
     def parse(tokens):
         eidx, _bval_tok, id = tokens
@@ -231,6 +236,9 @@ class BVar(ExprVal):
 
 
 class LitStr(ExprVal):
+
+    kind = "ELS"
+
     @staticmethod
     def parse(tokens):
         eidx = tokens[0]
@@ -248,6 +256,9 @@ class LitStr(ExprVal):
 
 
 class LitNat(ExprVal):
+
+    kind = "ELN"
+
     @staticmethod
     def parse(tokens):
         eidx, _eli_token, val = tokens
@@ -263,6 +274,9 @@ class LitNat(ExprVal):
 
 
 class Sort(ExprVal):
+
+    kind = "ES"
+
     @staticmethod
     def parse(tokens):
         eidx, _sort_tok, level = tokens
@@ -277,6 +291,9 @@ class Sort(ExprVal):
 
 
 class Const(ExprVal):
+
+    kind = "EC"
+
     @staticmethod
     def parse(tokens):
         eidx, _, name = tokens[:3]
@@ -296,6 +313,9 @@ class Const(ExprVal):
 
 
 class Let(ExprVal):
+
+    kind = "EZ"
+
     @staticmethod
     def parse(tokens):
         eidx, _let_token, name_idx, def_type, def_val, body = tokens
@@ -323,6 +343,9 @@ class Let(ExprVal):
 
 
 class App(ExprVal):
+
+    kind = "EA"
+
     @staticmethod
     def parse(tokens):
         eidx, _ea_token, fn_eidx, arg_eidx = tokens
@@ -355,6 +378,9 @@ def binder(name, info, type):
 
 
 class Lambda(ExprVal):
+
+    kind = "EL"
+
     @staticmethod
     def parse(tokens):
         eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
@@ -383,6 +409,9 @@ class Lambda(ExprVal):
 
 
 class ForAll(ExprVal):
+
+    kind = "EP"
+
     @staticmethod
     def parse(tokens):
         eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
@@ -411,6 +440,9 @@ class ForAll(ExprVal):
 
 
 class Proj(ExprVal):
+
+    kind = "EJ"
+
     @staticmethod
     def parse(tokens):
         eidx, _, type_name, field_idx, struct_expr = tokens
@@ -459,6 +491,9 @@ class Declaration(Node):
 
 
 class Definition(Node):
+
+    kind = "DEF"
+
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val, hint = tokens[:5]
@@ -495,6 +530,9 @@ class Definition(Node):
 
 
 class Opaque(Node):
+
+    kind = "OPAQ"
+
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
@@ -524,6 +562,9 @@ class Opaque(Node):
 
 
 class Theorem(Node):
+
+    kind = "THM"
+
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
@@ -553,6 +594,9 @@ class Theorem(Node):
 
 
 class Axiom(Node):
+
+    kind = "AX"
+
     @staticmethod
     def parse(tokens):
         _, name_idx, def_type = tokens[:3]
@@ -577,6 +621,9 @@ class Axiom(Node):
 
 
 class Inductive(Node):
+
+    kind = "IND"
+
     @staticmethod
     def parse(tokens):
         pos = 9
@@ -668,6 +715,9 @@ class Inductive(Node):
 
 
 class Constructor(Node):
+
+    kind = "CTOR"
+
     @staticmethod
     def parse(tokens):
         _, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
@@ -707,6 +757,9 @@ class Constructor(Node):
 
 
 class Recursor(Node):
+
+    kind = "REC"
+
     @staticmethod
     def parse(tokens):
         _rec_token, name_idx, expr_idx, num_ind_name_idxs_str = tokens[:4]
@@ -799,6 +852,9 @@ class Recursor(Node):
 
 
 class RecRule(Node):
+
+    kind = "RR"
+
     @staticmethod
     def parse(tokens):
         ridx = int(tokens[0].text)
@@ -823,35 +879,35 @@ class RecRule(Node):
         environment.register_rec_rule(self.ridx, w_recrule)
 
 
-TOKEN_KINDS = {
-    "#NS": NameStr,
-    "#NI": NameId,
-    "#EA": App,
-    "#EL": Lambda,
-    "#EP": ForAll,
-    "#EC": Const,
-    "#ELS": LitStr,
-    "#ELN": LitNat,
-    "#ES": Sort,
-    "#EV": BVar,
-    "#EJ": Proj,
-    "#EZ": Let,
-    "#RR": RecRule,
-    "#REC": Recursor,
-    "#UP": UniverseParam,
-    "#US": UniverseSucc,
-    "#UM": UniverseMax,
-    "#UIM": UniverseIMax,
-    "#DEF": Definition,
-    "#THM": Theorem,
-    "#CTOR": Constructor,
-    "#IND": Inductive,
-    "#OPAQ": Opaque,
-    "#AX": Axiom,
-}
-
-for token, cls in TOKEN_KINDS.items():
+NODES = {}
+for cls in [
+    NameStr,
+    NameId,
+    App,
+    Lambda,
+    ForAll,
+    Const,
+    LitStr,
+    LitNat,
+    Sort,
+    BVar,
+    Proj,
+    Let,
+    RecRule,
+    Recursor,
+    UniverseParam,
+    UniverseSucc,
+    UniverseMax,
+    UniverseIMax,
+    Definition,
+    Theorem,
+    Constructor,
+    Inductive,
+    Opaque,
+    Axiom,
+]:
     cls.parse.func_name += "_" + cls.__name__
+    NODES["#" + cls.kind] = cls
 
 
 def tokenize(line, lineno):
@@ -904,13 +960,11 @@ def to_items(lines):
 
 
 def _to_item(tokens):
+    token = tokens[0] if tokens[0].text.startswith("#") else tokens[1]
     try:
-        if tokens[0].text.startswith("#"):
-            token_type = TOKEN_KINDS[tokens[0].text]
-        else:
-            token_type = TOKEN_KINDS[tokens[1].text]
+        cls = NODES[token.text]
     except KeyError as e:
         print("Unimplemented token kind: %s" % e)
         return None
 
-    return token_type.parse(tokens)
+    return cls.parse(tokens)
