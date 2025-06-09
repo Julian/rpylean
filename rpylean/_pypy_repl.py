@@ -8,8 +8,10 @@ from __future__ import print_function
 import os
 
 from rpylean.environment import from_export
-from rpylean import objects as o
-import rpylean
+from rpylean import objects as o  # noqa: F401
+
+Name = o.Name
+n = Name.simple
 
 __example__ = os.environ.get("RPYLEAN_EXAMPLE", "")
 if __example__:
@@ -18,3 +20,8 @@ if __example__:
 
     msg = "Loaded `e = env = {!r}` from {!r}."
     print(msg.format(e, __example__))
+
+for k, v in sorted(locals().items()):
+    if k.startswith("_") or k in {"os", "print", "print_function"}:
+        continue
+    print("{} = {!r}".format(k, v))
