@@ -20,6 +20,9 @@ if __example__:
 
     msg = "Loaded `e = env = {!r}` from {!r}."
     print(msg.format(e, __example__))
+else:
+    Prop = o.W_LEVEL_ZERO.sort()
+    Type = o.W_LEVEL_ZERO.succ().sort()
 
 for k, v in sorted(locals().items()):
     if k.startswith("_") or k in {"os", "print", "print_function"}:
