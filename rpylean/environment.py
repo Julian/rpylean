@@ -193,10 +193,13 @@ class Environment(object):
 
         invalid = []
         for name, each in self.declarations.items():
+            print(name.pretty())
             try:
                 each.type_check(ctx)
             except W_TypeError as error:
                 invalid.append((name, each, error))
+            except Exception as error:
+                print("Error checking %s: %s" % (name.pretty(), error))
 
         return CheckResult(self, invalid)
 
