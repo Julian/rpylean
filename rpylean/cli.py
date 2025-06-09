@@ -9,7 +9,7 @@ import sys
 from rpython.rlib.streamio import open_file_as_stream
 from rpython.rlib.rfile import create_stdio
 
-from rpylean.environment import Environment
+from rpylean import environment
 
 
 TAGLINE = "A type checker for the Lean theorem prover."
@@ -199,7 +199,7 @@ def environment_from(path, stdin):
         source = file.readall()
         file.close()
 
-    return Environment.from_export(source.splitlines())
+    return environment.from_export(source.splitlines())
 
 
 if __name__ == '__main__':

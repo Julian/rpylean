@@ -8,22 +8,19 @@ import sys
 sys.setrecursionlimit(5000)
 
 
-class Environment(object):
-    def __init__(self, levels=None, exprs=None, names=None, declarations=[]):
+class EnvironmentBuilder(object):
+    """
+    A mutable environment builder.
+
+    Incrementally builds up an environment as we parse an export file.
+    """
+
+    def __init__(self, levels=None, exprs=None, names=None):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] if names is None else names
         self.rec_rules = {}
-
         self.declarations = r_dict(Name.eq, Name.hash)
-        for each in declarations:
-            assert isinstance(each, W_Declaration)
-            self.declarations[each.name] = each
-
-    def __getitem__(self, name_or_list):
-        if isinstance(name_or_list, str):
-            name_or_list = [name_or_list]
-        return self.declarations[Name(name_or_list)]
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
@@ -31,88 +28,31 @@ class Environment(object):
         # r_dict doesn't have sane __eq__
         if not all(
             v == getattr(other, k)
-            for k, v in vars(self).items()
+            for k, v in vars(self).iteritems()
             if k != "declarations"
         ):
             return False
-        return (
-            len(self.declarations) == len(other.declarations)
-            and all(
-                k in other.declarations and other.declarations[k] == v
-                for k, v in self.declarations.items()
-            )
-        )
+        return r_dict_eq(self.declarations, other.declarations)
 
     def __ne__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
         return not self == other
 
     def __repr__(self):
-        return "<Environment with %s declarations>" % (len(self.declarations),)
+        return "<EnvironmentBuilder with %s declarations>" % (
+            len(self.declarations),
+        )
 
-    @staticmethod
-    def from_export(export):
+    def consume(self, items):
         """
-        Load an environment out of some lean4export-formatted export.
-        """
-        return Environment.from_items(parser.from_export(export))
+        Incrementally consume some items into this builder.
 
-    @staticmethod
-    def from_lines(lines):
+        Returns self, even though this mutates, so that chaining is possible.
         """
-        Load an environment out of some lean4export lines with no version.
-        """
-        return Environment.from_items(parser.to_items(lines))
-
-    @staticmethod
-    def from_items(items):
-        """
-        Load an environment out of some parsed lean4export items.
-        """
-        env = Environment()
         for item in items:
-            item.compile(env)
-        return env
-
-    def type_check(self):
-        """
-        Type check each declaration in the environment.
-        """
-        ctx = self.inference_context()
-
-        invalid = []
-        for name, each in self.declarations.items():
-            try:
-                each.type_check(ctx)
-            except W_TypeError as error:
-                invalid.append((name, each, error))
-
-        return CheckResult(self, invalid)
-
-    def dump_pretty(self, stdout):
-        """
-        Dump the contents of this environment to the given stream.
-        """
-        stdout.write(heading("declarations"))
-        for name, decl in self.declarations.items():
-            stdout.write("%s := %s\n" % (name.pretty(), decl.pretty()))
-
-        stdout.write("\n")
-        stdout.write(heading("exprs"))
-        for id, expr in enumerate(self.exprs):
-            stdout.write("%s -> %s\n" % (id, expr.pretty()))
-
-        stdout.write("\n")
-        stdout.write(heading("levels"))
-        for id, level in enumerate(self.levels):
-            stdout.write("%s -> %s\n" % (id, level.pretty()))
-
-        stdout.write("\n")
-        stdout.write(heading("rec_rules"))
-        for id, rule in self.rec_rules.items():
-            stdout.write("%s -> %s\n" % (id, rule.pretty()))
-
-    def inference_context(self):
-        return _InferenceContext(self)
+            item.compile(self)
+        return self
 
     def register_name(self, nidx, parent_nidx, name):
         assert nidx == len(self.names), nidx
@@ -140,6 +80,101 @@ class Environment(object):
         #  -- from https://ammkrn.github.io/type_checking_in_lean4/kernel_concepts/the_big_picture.html
         assert name not in self.declarations, "Duplicate declaration: %s" % name
         self.declarations[name] = decl
+
+    def finish(self):
+        """
+        Finish building, generating the known-valid and immutable environment.
+        """
+        return Environment(
+            declarations=self.declarations,
+            rec_rules=self.rec_rules,
+        )
+
+
+def from_export(export):
+    """
+    Load an environment out of some lean4export-formatted export.
+    """
+    return from_items(parser.from_export(export)).finish()
+
+
+def from_lines(lines):
+    """
+    Load an environment builder out of some partial lean4export lines.
+    """
+    return from_items(parser.to_items(lines))
+
+
+def from_items(items):
+    """
+    Load an environment builder out of some parsed lean4export items.
+    """
+    return EnvironmentBuilder().consume(items)
+
+
+class Environment(object):
+    """
+    A Lean environment with its declarations.
+    """
+
+    def __init__(self, declarations, rec_rules=None):
+        self.declarations = declarations
+        self.rec_rules = {} if rec_rules is None else rec_rules
+
+    def __getitem__(self, name_or_list):
+        if isinstance(name_or_list, str):
+            name_or_list = [name_or_list]
+        return self.declarations[Name(name_or_list)]
+
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return (
+            # r_dict doesn't have sane __eq__
+            r_dict_eq(self.declarations, other.declarations)
+            and self.rec_rules == other.rec_rules
+        )
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __repr__(self):
+        return "<Environment with %s declarations>" % (len(self.declarations),)
+
+    @staticmethod
+    def having(declarations):
+        """
+        Construct an environment with the given declarations.
+        """
+        by_name = r_dict(Name.eq, Name.hash)
+        for declaration in declarations:
+            by_name[declaration.name] = declaration
+        return Environment(declarations=by_name)
+
+    def type_check(self):
+        """
+        Type check each declaration in the environment.
+        """
+        ctx = self.inference_context()
+
+        invalid = []
+        for name, each in self.declarations.items():
+            try:
+                each.type_check(ctx)
+            except W_TypeError as error:
+                invalid.append((name, each, error))
+
+        return CheckResult(self, invalid)
+
+    def dump_pretty(self, stdout):
+        """
+        Dump the contents of this environment to the given stream.
+        """
+        for decl in self.declarations.values():
+            stdout.write("%s\n" % (decl.pretty(),))
+
+    def inference_context(self):
+        return _InferenceContext(self)
 
 
 class _InferenceContext:
@@ -267,6 +302,14 @@ class CheckResult(object):
 
     def succeeded(self):
         return not self.invalid
+
+
+def r_dict_eq(left, right):
+    # r_dict doesn't define sane __eq__
+    return (
+        len(left) == len(right)
+        and all(k in right and right[k] == v for k, v in left.iteritems())
+    )
 
 
 def heading(s):

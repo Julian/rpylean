@@ -1440,13 +1440,6 @@ class W_Definition(DefOrTheorem):
     def get_delta_reduce_target(self):
         return self.value
 
-    def pretty(self):
-        return "<W_Definition type='%s' value='%s' hint='%s'>" % (
-            self.type.pretty(),
-            self.value.pretty(),
-            self.hint,
-        )
-
 
 class W_Opaque(W_Definition):
     """
@@ -1459,12 +1452,6 @@ class W_Opaque(W_Definition):
         self.type = type
         self.value = value
         self.hint = "O"
-
-    def pretty(self):
-        return "<W_Opaque type='%s' value='%s'>" % (
-            self.type.pretty(),
-            self.value.pretty(),
-        )
 
 
 class W_Theorem(DefOrTheorem):

@@ -45,7 +45,7 @@ def interact(env):
             stdout.write(env[name].pretty())
             stdout.write("\n")
         elif command in ["n", "names"]:
-            names = env.names
+            names = env.declarations.keys()
             if len(split) == 2:  # ok, all of them!
                 arg = split[1].strip()
                 if arg.isdigit():  # all names with at most `n` components

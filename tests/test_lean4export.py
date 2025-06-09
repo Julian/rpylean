@@ -4,7 +4,7 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 
 from rpython.rlib.rbigint import rbigint
 
-from rpylean.environment import Environment
+from rpylean.environment import EnvironmentBuilder, Environment, from_lines
 from rpylean.objects import (
     W_LEVEL_ZERO,
     Name,
@@ -18,7 +18,7 @@ from rpylean.objects import (
 
 def from_source(source):
     # TODO: assert Environment.export() == source
-    return Environment.from_lines(source.replace("⏎", "").splitlines())
+    return from_lines(source.replace("⏎", "").splitlines())
 
 
 def test_dump_name():
@@ -30,7 +30,7 @@ def test_dump_name():
         3 #NI 2 1
         4 #NS 3 boo
         """,
-    ) == Environment(
+    ) == EnvironmentBuilder(
         names=[
             Name.ANONYMOUS,
             Name(["foo"]),
@@ -56,7 +56,7 @@ def test_dump_level():
         5 #UP 2
         6 #UIM 4 5
         """,
-    ) == Environment(
+    ) == EnvironmentBuilder(
         levels=[
             W_LEVEL_ZERO,
             W_LEVEL_ZERO.succ(),
@@ -85,7 +85,7 @@ def test_dump_expr_lambda():
         2 #EL #BD 2 1 1
         3 #EL #BI 1 0 2
         """,
-    ) == Environment(
+    ) == EnvironmentBuilder(
         exprs=[
             W_LEVEL_ZERO.succ().sort(),
             bvar,
@@ -117,7 +117,7 @@ def test_dump_expr_let():
         2 #EV 0
         3 #EZ 1 0 1 2
         """,
-    ) == Environment(
+    ) == EnvironmentBuilder(
         exprs=[
             Nat.const(),
             zero.const(),
@@ -138,7 +138,7 @@ def test_dump_expr_proj():
         0 #EV 0
         1 #EJ 1 1 0
         """,
-    ) == Environment(
+    ) == EnvironmentBuilder(
         exprs=[
             bvar,
             W_Proj(
@@ -157,7 +157,9 @@ def test_dump_large_natlit():
         """
         0 #ELN 1000000000000000
         """,
-    ) == Environment(exprs=[W_LitNat(rbigint.fromlong(1000000000000000))])
+    ) == EnvironmentBuilder(
+        exprs=[W_LitNat(rbigint.fromlong(1000000000000000))],
+    )
 
 
 def test_dump_litstr():
@@ -166,7 +168,7 @@ def test_dump_litstr():
         """
         0 #ELS 68 69
         """,
-    ) == Environment(exprs=[W_LitStr("hi")])
+    ) == EnvironmentBuilder(exprs=[W_LitStr("hi")])
 
 
 def test_dump_constant_id():
@@ -200,25 +202,8 @@ def test_dump_constant_id():
         6 #EL #BI 2 0 5
         #DEF 1 4 6 R 1 3
         """,
-    ) == Environment(
-        exprs=[
-            u.sort(),
-            b0,
-            b1,
-            a.binder(type=b0).forall(body=b1),
-            id_type,
-            a.binder(type=b0).fun(body=b0),
-            id_value,
-        ],
-        names=[
-            Name.ANONYMOUS,
-            id,
-            Name.simple("α"),
-            Name.simple("u"),
-            Name.simple("a"),
-        ],
-        levels=[W_LEVEL_ZERO, u],
-        declarations=[
+    ).finish() == Environment.having(
+        [
             id.definition(
                 type=id_type,
                 value=id_value,
@@ -276,44 +261,8 @@ def test_dump_constant_list():
         12 #EP #BI 4 0 11
         #CTOR 3 12 1 1 1 2 5
         """,
-    ) == Environment(
-        exprs=[
-            u.succ().sort(),
-            alpha.forall(body=u.succ().sort()),
-            ListFn,
-            b0,
-            ListFn.app(b0),
-            alpha.to_implicit().forall(body=ListFn.app(b0)),
-            b1,
-            ListFn.app(b1),
-            b2,
-            ListFn.app(b2),
-            tail.binder(type=ListFn.app(b1)).forall(body=ListFn.app(b2)),
-            head.binder(type=b0).forall(
-                body=tail.binder(type=ListFn.app(b1)).forall(
-                    body=ListFn.app(b2),
-                ),
-            ),
-            alpha.to_implicit().forall(
-                body=head.binder(type=b0).forall(
-                    body=tail.binder(type=ListFn.app(b1)).forall(
-                        body=ListFn.app(b2),
-                    ),
-                ),
-            ),
-        ],
-        names=[
-            Name.ANONYMOUS,
-            Name.simple("List"),
-            nil,
-            cons,
-            Name.simple("α"),
-            Name.simple("u"),
-            head,
-            tail,
-        ],
-        levels=[W_LEVEL_ZERO, u, u.succ()],
-        declarations=[
+    ).finish() == Environment.having(
+        [
             List,
             nil.constructor(
                 for_inductive=List,

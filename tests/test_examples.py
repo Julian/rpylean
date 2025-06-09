@@ -3,7 +3,7 @@ Run our export file examples as tests.
 """
 import pytest
 
-from rpylean.environment import Environment
+from rpylean.environment import from_export
 from tests import examples
 
 
@@ -20,13 +20,13 @@ def test_interpret_valid_export(path):
     if examples.name_of(path) == "Init":
         pytest.skip("Type checking Init doesn't work yet and loops for ages.")
 
-    environment = Environment.from_export(path.readlines())
+    environment = from_export(path.readlines())
     assert environment.type_check().succeeded()
 
 
 @pytest.mark.parametrize("path", examples.INVALID, ids=examples.name_of)
 def test_interpret_invalid_export(path):
-    environment = Environment.from_export(path.readlines())
+    environment = from_export(path.readlines())
 
     message = XFAIL.get(path.dirpath().basename)
     if message is not None:

@@ -106,16 +106,6 @@ def test_constructor():
             ),
         ),
     ]
-    from rpylean.environment import Environment
-    print(Environment().from_items(items("""
-        1 #NS 0 True
-        2 #NS 1 intro
-        1 #US 0
-        0 #ES 1
-        #IND 1 0 0 0 0 0 0 1 1 1 2 ⏎
-        1 #EC 1 ⏎
-        #CTOR 2 1 1 0 0 0 ⏎
-    """)))
 
 
 def test_large_litnat():
