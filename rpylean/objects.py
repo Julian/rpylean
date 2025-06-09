@@ -37,8 +37,17 @@ class _Item(object):
         return not self == other
 
     def __repr__(self):
-        attrs = " ".join("=".join((k, repr(v))) for k, v in vars(self).items())
-        return "<%s %s>" % (self.__class__.__name__, attrs)
+        parts = []
+        for k, v in vars(self).items():
+            if isinstance(v, bool):
+                if v:
+                    parts.append(i)
+            elif isinstance(v, (int, list)):
+                if v:
+                    parts.append("=".join((k, repr(v))))
+            else:
+                parts.append("=".join((k, repr(v))))
+        return "<%s %s>" % (self.__class__.__name__, " ".join(parts))
 
 
 class Name(_Item):
