@@ -972,11 +972,10 @@ class W_Proj(W_Expr):
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
     def __init__(self, binder, body):
+        assert body is not None
         self.binder = binder
         self.body = body
         self.finished_reduce = False
-        if self.body is None:
-            raise RuntimeError("W_FunBase: body cannot be None: %s" % self)
 
     # Weak head normal form stops at forall/lambda
     def whnf(self, infcx):
@@ -1091,9 +1090,6 @@ class W_Lambda(W_FunBase):
             body=self.body.subst_levels(substs),
         )
 
-
-#(fun (x : N) => Vector.repeat(1, n))
-#'(n: Nat) -> Vector n'
 
 class W_Let(W_Expr):
     def __init__(self, name, type, value, body):

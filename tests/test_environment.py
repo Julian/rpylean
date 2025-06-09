@@ -3,7 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.objects import W_LEVEL_ZERO, Name, W_TypeError, W_Definition
+from rpylean.objects import W_LEVEL_ZERO, W_TypeError, W_Definition
 
 
 def test_valid_def_type_checks():
