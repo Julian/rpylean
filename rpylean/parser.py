@@ -901,10 +901,10 @@ def to_items(lines):
 
 def _to_item(tokens):
     try:
-        if tokens[0].text.isdigit():
-            token_type = TOKEN_KINDS[tokens[1].text]
-        else:
+        if tokens[0].text.startswith("#"):
             token_type = TOKEN_KINDS[tokens[0].text]
+        else:
+            token_type = TOKEN_KINDS[tokens[1].text]
     except KeyError as e:
         print("Unimplemented token kind: %s" % e)
         return None
