@@ -8,8 +8,10 @@ class W_TypeError(Exception):
         self.w_expected_type = w_expected_type
 
     def str(self):
-        return "%s is not of type %s" % (self.w_term.pretty(),
-                                         self.w_expected_type.pretty())
+        return "%s is not of type %s" % (
+            self.w_term.pretty(),
+            self.w_expected_type.pretty(),
+        )
 
 
 class W_Item(object):
@@ -19,6 +21,8 @@ class W_Item(object):
         return vars(self) == vars(other)
 
     def __ne__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
         return not self == other
 
     def __repr__(self):
