@@ -130,6 +130,11 @@ def help(_, __, ___, stdout, ____):
         stdout.write("\n")
 
 
+@command(["exit", "quit"], help="Quit the REPL.")
+def quit(*args):
+    os._exit(0)
+
+
 def interact(env):
     stdin, stdout, stderr = create_stdio()
 
@@ -137,7 +142,11 @@ def interact(env):
 
     while True:
         stdout.write("L∃∀N> ")
-        input = stdin.readline()
+        try:
+            input = stdin.readline()
+        except KeyboardInterrupt:
+            continue
+
         if not input:
             return
 
