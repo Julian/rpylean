@@ -65,7 +65,7 @@ def dump(env, _, __, stdout, ___):
         "or all declarations if no name is given."
     ),
 )
-def check(env, args, _, stdout, __):
+def check(env, args, _, stdout, stderr):
     if not args:  # ok, all of them!
         env.type_check()
         stdout.write(
@@ -74,7 +74,11 @@ def check(env, args, _, stdout, __):
         return
 
     name = Name.from_str(args[0])
-    declaration = env.declarations[name]
+    declaration = env.declarations.get(name, None)
+    if declaration is None:
+        stderr.write("%s does not exist in the environment.\n" % name.pretty())
+        return
+
     try:
         declaration.type_check(env)
     except W_TypeError as error:
