@@ -61,6 +61,12 @@ class Token(object):
             source_pos=self.source_pos,
         )
 
+    def int(self):
+        """
+        Extract an integer from the token text.
+        """
+        return int(self.text)
+
 
 class Node(object):
     """
@@ -88,8 +94,8 @@ class NameStr(Node):
     def parse(tokens):
         nidx, _ns_token, parent_nidx, name = tokens
         return NameStr(
-            nidx=int(nidx.text),
-            parent_nidx=int(parent_nidx.text),
+            nidx=nidx.int(),
+            parent_nidx=parent_nidx.int(),
             name=name.text,
         )
 
@@ -110,8 +116,8 @@ class NameId(Node):
     def parse(tokens):
         nidx, _ni_token, parent_nidx, id = tokens
         return NameId(
-            nidx=int(nidx.text),
-            parent_nidx=int(parent_nidx.text),
+            nidx=nidx.int(),
+            parent_nidx=parent_nidx.int(),
             id=id.text,  # TODO: do we care that this isn't an int?
         )
 
@@ -135,7 +141,7 @@ class UniverseSucc(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _us_token, parent = tokens
-        return UniverseSucc(uidx=int(uidx.text), parent=int(parent.text))
+        return UniverseSucc(uidx=uidx.int(), parent=parent.int())
 
     def __init__(self, uidx, parent):
         self.uidx = uidx
@@ -154,9 +160,9 @@ class UniverseMax(Universe):
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseMax(
-            uidx=int(uidx.text),
-            lhs=int(lhs.text),
-            rhs=int(rhs.text),
+            uidx=uidx.int(),
+            lhs=lhs.int(),
+            rhs=rhs.int(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -177,9 +183,9 @@ class UniverseIMax(Universe):
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseIMax(
-            uidx=int(uidx.text),
-            lhs=int(lhs.text),
-            rhs=int(rhs.text),
+            uidx=uidx.int(),
+            lhs=lhs.int(),
+            rhs=rhs.int(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -199,7 +205,7 @@ class UniverseParam(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _up_token, nidx = tokens
-        return UniverseParam(uidx=int(uidx.text), nidx=int(nidx.text))
+        return UniverseParam(uidx=uidx.int(), nidx=nidx.int())
 
     def __init__(self, uidx, nidx):
         self.uidx = uidx
@@ -231,8 +237,8 @@ class BVar(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _bval_tok, id = tokens
-        val = BVar(id=int(id.text))
-        return Expr(eidx=int(eidx.text), val=val)
+        val = BVar(id=id.int())
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, id):
         self.id = id
@@ -252,7 +258,7 @@ class LitStr(ExprVal):
         hex_tokens = tokens[2:]
         lit_val = "".join([chr(int(token.text, 16)) for token in hex_tokens]).decode('utf-8')
         val = LitStr(val=lit_val)
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -270,7 +276,7 @@ class LitNat(ExprVal):
         eidx, _eli_token, val = tokens
         val = LitNat(val=rbigint.fromstr(val.text))
         assert val.val.int_ge(0)
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -286,8 +292,8 @@ class Sort(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _sort_tok, level = tokens
-        val = Sort(level=int(level.text))
-        return Expr(eidx=int(eidx.text), val=val)
+        val = Sort(level=level.int())
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, level):
         self.level = level
@@ -304,10 +310,10 @@ class Const(ExprVal):
     def parse(tokens):
         eidx, _, name = tokens[:3]
         val = Const(
-            name=int(name.text),
-            levels=[int(level.text) for level in tokens[3:]],
+            name=name.int(),
+            levels=[level.int() for level in tokens[3:]],
         )
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, name, levels):
         self.name = name
@@ -326,12 +332,12 @@ class Let(ExprVal):
     def parse(tokens):
         eidx, _let_token, name_idx, def_type, def_val, body = tokens
         val = Let(
-            name_idx=int(name_idx.text),
-            def_type=int(def_type.text),
-            def_val=int(def_val.text),
-            body=int(body.text),
+            name_idx=name_idx.int(),
+            def_type=def_type.int(),
+            def_val=def_val.int(),
+            body=body.int(),
         )
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, name_idx, def_type, def_val, body):
         self.name_idx = name_idx
@@ -355,9 +361,9 @@ class App(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _ea_token, fn_eidx, arg_eidx = tokens
-        return Expr(eidx=int(eidx.text), val=App(
-            fn_eidx=int(fn_eidx.text),
-            arg_eidx=int(arg_eidx.text),
+        return Expr(eidx=eidx.int(), val=App(
+            fn_eidx=fn_eidx.int(),
+            arg_eidx=arg_eidx.int(),
         ))
 
     def __init__(self, fn_eidx, arg_eidx):
@@ -391,12 +397,12 @@ class Lambda(ExprVal):
     def parse(tokens):
         eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
         val = Lambda(
-            binder_name=int(binder_name.text),
-            binder_type=int(binder_type.text),
+            binder_name=binder_name.int(),
+            binder_type=binder_type.int(),
             binder_info=binder_info.text,
-            body=int(body.text),
+            body=body.int(),
         )
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -422,12 +428,12 @@ class ForAll(ExprVal):
     def parse(tokens):
         eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
         val = ForAll(
-            binder_name=int(binder_name.text),
-            binder_type=int(binder_type.text),
+            binder_name=binder_name.int(),
+            binder_type=binder_type.int(),
             binder_info=binder_info.text,
-            body=int(body.text),
+            body=body.int(),
         )
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -453,11 +459,11 @@ class Proj(ExprVal):
     def parse(tokens):
         eidx, _, type_name, field_idx, struct_expr = tokens
         val = Proj(
-            type_name=int(type_name.text),
-            field_idx=int(field_idx.text),
-            struct_expr=int(struct_expr.text),
+            type_name=type_name.int(),
+            field_idx=field_idx.int(),
+            struct_expr=struct_expr.int(),
         )
-        return Expr(eidx=int(eidx.text), val=val)
+        return Expr(eidx=eidx.int(), val=val)
 
     def __init__(self, type_name, field_idx, struct_expr):
         self.type_name = type_name
@@ -493,11 +499,11 @@ class Definition(Node):
         if hint.text== "R":
             start += 1
         definition = Definition(
-            name_idx=int(name_idx.text),
-            def_type=int(def_type.text),
-            def_val=int(def_val.text),
+            name_idx=name_idx.int(),
+            def_type=def_type.int(),
+            def_val=def_val.int(),
             hint=hint.text,
-            levels=[int(each.text) for each in tokens[start:]],
+            levels=[each.int() for each in tokens[start:]],
         )
         return Declaration(definition)
 
@@ -528,10 +534,10 @@ class Opaque(Node):
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
         opaque = Opaque(
-            name_idx=int(name_idx.text),
-            def_type=int(def_type.text),
-            def_val=int(def_val.text),
-            levels=[int(each.text) for each in tokens[4:]],
+            name_idx=name_idx.int(),
+            def_type=def_type.int(),
+            def_val=def_val.int(),
+            levels=[each.int() for each in tokens[4:]],
         )
         return Declaration(opaque)
 
@@ -560,10 +566,10 @@ class Theorem(Node):
     def parse(tokens):
         _, name_idx, def_type, def_val = tokens[:4]
         theorem = Theorem(
-            name_idx=int(name_idx.text),
-            def_type=int(def_type.text),
-            def_val=int(def_val.text),
-            levels=[int(each.text) for each in tokens[4:]],
+            name_idx=name_idx.int(),
+            def_type=def_type.int(),
+            def_val=def_val.int(),
+            levels=[each.int() for each in tokens[4:]],
         )
         return Declaration(theorem)
 
@@ -592,9 +598,9 @@ class Axiom(Node):
     def parse(tokens):
         _, name_idx, def_type = tokens[:3]
         axiom = Axiom(
-            name_idx=int(name_idx.text),
-            def_type=int(def_type.text),
-            levels=[int(each.text) for each in tokens[3:]],
+            name_idx=name_idx.int(),
+            def_type=def_type.int(),
+            levels=[each.int() for each in tokens[3:]],
         )
         return Declaration(axiom)
 
@@ -627,20 +633,20 @@ class InductiveSkeleton(Node):
     def parse(tokens):
         pos = 9
         _, name_idx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
-        num_name_idxs = int(num_name_idxs_str.text)
+        num_name_idxs = num_name_idxs_str.int()
         assert num_name_idxs >= 0
         name_idxs = [
-            int(nidx.text)
+            nidx.int()
             for nidx in tokens[pos:(pos + num_name_idxs)]
         ]
         pos += num_name_idxs
 
-        num_ctors = int(tokens[pos].text)
+        num_ctors = tokens[pos].int()
         assert num_ctors >= 0
         pos += 1
 
         ctor_name_idxs = [
-            int(nidx.text)
+            nidx.int()
             for nidx in tokens[pos:(pos + num_ctors)]
         ]
         pos += num_ctors
@@ -654,16 +660,16 @@ class InductiveSkeleton(Node):
         if pos > len(tokens):
             levels = []
         else:
-            levels = [int(each.text) for each in tokens[pos:]]
+            levels = [each.int() for each in tokens[pos:]]
 
         return InductiveSkeleton(
-            name_idx=int(name_idx.text),
-            type_idx=int(type_idx.text),
+            name_idx=name_idx.int(),
+            type_idx=type_idx.int(),
             is_reflexive=is_reflexive.bool(),
             is_recursive=is_recursive.bool(),
-            num_nested=int(num_nested.text),
-            num_params=int(num_params.text),
-            num_indices=int(num_indices.text),
+            num_nested=num_nested.int(),
+            num_params=num_params.int(),
+            num_indices=num_indices.int(),
             name_idxs=name_idxs,
             ctor_name_idxs=ctor_name_idxs,
             levels=levels,
@@ -735,13 +741,13 @@ class Constructor(Node):
     def parse(tokens):
         _, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
         return Constructor(
-            name_idx=int(name_idx.text),
-            type_idx=int(type_idx.text),
-            inductive_nidx=int(inductive_nidx.text),
-            cidx=int(cidx.text),
-            num_params=int(num_params.text),
-            num_fields=int(num_fields.text),
-            levels=[int(each.text) for each in tokens[7:]],
+            name_idx=name_idx.int(),
+            type_idx=type_idx.int(),
+            inductive_nidx=inductive_nidx.int(),
+            cidx=cidx.int(),
+            num_params=num_params.int(),
+            num_fields=num_fields.int(),
+            levels=[each.int() for each in tokens[7:]],
         )
 
     def __init__(
@@ -804,24 +810,24 @@ class Recursor(Node):
     def parse(tokens):
         _rec_token, name_idx, expr_idx, num_ind_name_idxs_str = tokens[:4]
 
-        num_ind_name_idxs = int(num_ind_name_idxs_str.text)
+        num_ind_name_idxs = num_ind_name_idxs_str.int()
         assert num_ind_name_idxs >= 0
 
         pos = 4
         ind_name_idxs = [
-            int(nidx.text)
+            nidx.int()
             for nidx in tokens[pos:(pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
 
         num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[pos:pos + 5]
 
-        num_rule_idxs = int(num_rule_idxs_str.text)
+        num_rule_idxs = num_rule_idxs_str.int()
         assert num_rule_idxs >= 0
         pos += 5
 
         rule_idxs = [
-            int(rule_idx.text)
+            rule_idx.int()
             for rule_idx in tokens[pos:pos + num_rule_idxs]
         ]
         pos += num_rule_idxs
@@ -837,16 +843,16 @@ class Recursor(Node):
         pos += 1
 
         recursor = Recursor(
-            name_idx=int(name_idx.text),
-            type_idx=int(expr_idx.text),
+            name_idx=name_idx.int(),
+            type_idx=expr_idx.int(),
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
             k=int(k),
-            num_params=int(num_params.text),
-            num_indices=int(num_indices.text),
-            num_motives=int(num_motives.text),
-            num_minors=int(num_minors.text),
-            levels=[int(param.text) for param in tokens[pos:]],
+            num_params=num_params.int(),
+            num_indices=num_indices.int(),
+            num_motives=num_motives.int(),
+            num_minors=num_minors.int(),
+            levels=[param.int() for param in tokens[pos:]],
         )
         return Declaration(recursor)
 
@@ -900,10 +906,10 @@ class RecRule(Node):
     def parse(tokens):
         rule_idx, _, ctor_name, num_fields, val = tokens
         return RecRule(
-            rule_idx=int(rule_idx.text),
-            ctor_name_idx=int(ctor_name.text),
-            num_fields=int(num_fields.text),
-            val=int(val.text),
+            rule_idx=rule_idx.int(),
+            ctor_name_idx=ctor_name.int(),
+            num_fields=num_fields.int(),
+            val=val.int(),
         )
 
     def __init__(self, rule_idx, ctor_name_idx, num_fields, val):
