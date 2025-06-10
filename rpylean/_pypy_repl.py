@@ -17,6 +17,7 @@ __example__ = os.environ.get("RPYLEAN_EXAMPLE", "")
 if __example__:
     with open(__example__) as f:
         e = env = environment = from_export(f)
+    del f
 
     msg = "Loaded `e = env = {!r}` from {!r}."
     print(msg.format(e, __example__))
