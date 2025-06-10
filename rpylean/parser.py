@@ -497,21 +497,21 @@ class Definition(Node):
             def_type=int(def_type.text),
             def_val=int(def_val.text),
             hint=hint.text,
-            level_params=[int(each.text) for each in tokens[start:]],
+            levels=[int(each.text) for each in tokens[start:]],
         )
         return Declaration(definition)
 
-    def __init__(self, name_idx, def_type, def_val, hint, level_params):
+    def __init__(self, name_idx, def_type, def_val, hint, levels):
         self.name_idx = name_idx
         self.def_type = def_type
         self.def_val = def_val
         self.hint = hint
-        self.level_params = level_params
+        self.levels = levels
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Definition(
                 type=builder.exprs[self.def_type],
                 value=builder.exprs[self.def_val],
@@ -531,20 +531,20 @@ class Opaque(Node):
             name_idx=int(name_idx.text),
             def_type=int(def_type.text),
             def_val=int(def_val.text),
-            level_params=[int(each.text) for each in tokens[4:]],
+            levels=[int(each.text) for each in tokens[4:]],
         )
         return Declaration(opaque)
 
-    def __init__(self, name_idx, def_type, def_val, level_params):
+    def __init__(self, name_idx, def_type, def_val, levels):
         self.name_idx = name_idx
         self.def_type = def_type
         self.def_val = def_val
-        self.level_params = level_params
+        self.levels = levels
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Opaque(
                 type=builder.exprs[self.def_type],
                 value=builder.exprs[self.def_val],
@@ -563,20 +563,20 @@ class Theorem(Node):
             name_idx=int(name_idx.text),
             def_type=int(def_type.text),
             def_val=int(def_val.text),
-            level_params=[int(each.text) for each in tokens[4:]],
+            levels=[int(each.text) for each in tokens[4:]],
         )
         return Declaration(theorem)
 
-    def __init__(self, name_idx, def_type, def_val, level_params):
+    def __init__(self, name_idx, def_type, def_val, levels):
         self.name_idx = name_idx
         self.def_type = def_type
         self.def_val = def_val
-        self.level_params = level_params
+        self.levels = levels
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Theorem(
                 type=builder.exprs[self.def_type],
                 value=builder.exprs[self.def_val],
@@ -594,19 +594,19 @@ class Axiom(Node):
         axiom = Axiom(
             name_idx=int(name_idx.text),
             def_type=int(def_type.text),
-            level_params=[int(each.text) for each in tokens[3:]],
+            levels=[int(each.text) for each in tokens[3:]],
         )
         return Declaration(axiom)
 
-    def __init__(self, name_idx, def_type, level_params):
+    def __init__(self, name_idx, def_type, levels):
         self.name_idx = name_idx
         self.def_type = def_type
-        self.level_params = level_params
+        self.levels = levels
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Axiom(type=builder.exprs[self.def_type]),
         )
 
@@ -652,9 +652,9 @@ class InductiveSkeleton(Node):
             pos += 1
 
         if pos > len(tokens):
-            level_params = []
+            levels = []
         else:
-            level_params = [int(each.text) for each in tokens[pos:]]
+            levels = [int(each.text) for each in tokens[pos:]]
 
         return InductiveSkeleton(
             name_idx=int(name_idx.text),
@@ -666,7 +666,7 @@ class InductiveSkeleton(Node):
             num_indices=int(num_indices.text),
             name_idxs=name_idxs,
             ctor_name_idxs=ctor_name_idxs,
-            level_params=level_params,
+            levels=levels,
         )
 
     def __init__(
@@ -680,7 +680,7 @@ class InductiveSkeleton(Node):
         num_indices,
         name_idxs,
         ctor_name_idxs,
-        level_params,
+        levels,
     ):
         self.name_idx = name_idx
         self.type_idx = type_idx
@@ -691,7 +691,7 @@ class InductiveSkeleton(Node):
         self.num_indices = num_indices
         self.name_idxs = name_idxs
         self.ctor_name_idxs = ctor_name_idxs
-        self.level_params = level_params
+        self.levels = levels
 
         self.constructors = [None] * len(ctor_name_idxs)
         self.num_remaining_constructors = len(ctor_name_idxs)
@@ -712,7 +712,7 @@ class InductiveSkeleton(Node):
         assert None not in self.constructors
         declaration = objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Inductive(
                 type=builder.exprs[self.type_idx],
                 names=[builder.names[nidx] for nidx in self.name_idxs],
@@ -741,17 +741,26 @@ class Constructor(Node):
             cidx=int(cidx.text),
             num_params=int(num_params.text),
             num_fields=int(num_fields.text),
-            level_params=[int(each.text) for each in tokens[7:]],
+            levels=[int(each.text) for each in tokens[7:]],
         )
 
-    def __init__(self, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields, level_params):
+    def __init__(
+        self,
+        name_idx,
+        type_idx,
+        inductive_nidx,
+        cidx,
+        num_params,
+        num_fields,
+        levels,
+    ):
         self.name_idx = name_idx
         self.type_idx = type_idx
         self.inductive_nidx = inductive_nidx
         self.cidx = cidx
         self.num_params = num_params
         self.num_fields = num_fields
-        self.level_params = level_params
+        self.levels = levels
 
     def compile(self, builder):
         """
@@ -762,7 +771,7 @@ class Constructor(Node):
         """
         constructor = objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Constructor(
                 type=builder.exprs[self.type_idx],
                 num_params=self.num_params,
@@ -825,7 +834,7 @@ class Recursor(Node):
             pos += 1
 
         k = tokens[pos].text
-        level_params = [int(param.text) for param in tokens[(pos + 1):]]
+        levels = [int(param.text) for param in tokens[(pos + 1):]]
 
         recursor = Recursor(
             name_idx=int(name_idx.text),
@@ -837,7 +846,7 @@ class Recursor(Node):
             num_indices=int(num_indices.text),
             num_motives=int(num_motives.text),
             num_minors=int(num_minors.text),
-            level_params=level_params
+            levels=levels,
         )
         return Declaration(recursor)
 
@@ -852,7 +861,7 @@ class Recursor(Node):
         num_minors,
         ind_name_idxs,
         rule_idxs,
-        level_params,
+        levels,
     ):
         self.name_idx = name_idx
         self.expr_idx = expr_idx
@@ -863,12 +872,12 @@ class Recursor(Node):
         self.num_minors = num_minors
         self.ind_name_idxs = ind_name_idxs
         self.rule_idxs = rule_idxs
-        self.level_params = level_params
+        self.levels = levels
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
-            level_params=[builder.names[nidx] for nidx in self.level_params],
+            levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Recursor(
                 expr=builder.exprs[self.expr_idx],
                 k=int(self.k),

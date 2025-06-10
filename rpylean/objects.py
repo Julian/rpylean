@@ -115,46 +115,45 @@ class Name(_Item):
         """
         return Binder.strict_implicit(self, type)
 
-    def const(self, levels=[]):
+    def const(self, levels=None):
         """
         Construct a constant expression for this name.
         """
-        return W_Const(self, levels)
+        return W_Const(
+            name=self,
+            levels=[] if levels is None else levels,
+        )
 
-    def constructor(self, type, level_params=None, **kwargs):
+    def constructor(self, type, levels=None, **kwargs):
         """
         Make a constructor declaration with this name.
         """
         # XXX: Shouldn't this be bundled w/inductives by the time we get here?
         return W_Declaration(
             name=self,
-            level_params=[] if level_params is None else level_params,
+            levels=[] if levels is None else levels,
             w_kind=W_Constructor(type=type, **kwargs),
         )
 
-    def inductive(self, type, level_params=None, **kwargs):
+    def inductive(self, type, levels=None, **kwargs):
         """
         Make an inductive type declaration with this name.
         """
 
         return W_Declaration(
             name=self,
-            level_params=[] if level_params is None else level_params,
+            levels=[] if levels is None else levels,
             w_kind=W_Inductive(type=type, names=[self], **kwargs),
         )
 
-    def definition(self, type, value, level_params=None):
+    def definition(self, type, value, levels=None):
         """
         Make a definition of the given type and value with this name.
         """
         return W_Declaration(
             name=self,
-            level_params=[] if level_params is None else level_params,
-            w_kind=W_Definition(
-                type=type,
-                value=value,
-                hint="R",  # FIXME: proper hints
-            ),
+            levels=[] if levels is None else levels,
+            w_kind=W_Definition(type=type, value=value, hint="R")  # FIXME: proper hints,
         )
 
     def let(self, type, value, body):
@@ -695,9 +694,9 @@ class W_Sort(W_Expr):
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
     decl = env.declarations[const.name]
-    if len(decl.level_params) != len(const.levels):
-        raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.level_params), len(const.levels)))
-    params = decl.level_params
+    if len(decl.levels) != len(const.levels):
+        raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.levels), len(const.levels)))
+    params = decl.levels
     substs = {}
     for i in range(len(params)):
         substs[params[i]] = const.levels[i]
@@ -766,7 +765,7 @@ class W_Const(W_Expr):
 
     def infer(self, infcx):
         decl = infcx.env.declarations[self.name]
-        params = decl.level_params
+        params = decl.levels
 
         if not params:
             return decl.get_type()
@@ -1397,10 +1396,10 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
-    def __init__(self, name, level_params, w_kind):
+    def __init__(self, name, w_kind, levels=None):
         self.name = name
-        self.level_params = level_params
         self.w_kind = w_kind
+        self.levels = [] if levels is None else levels
 
     def get_type(self):
         return self.w_kind.get_type()

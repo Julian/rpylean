@@ -51,7 +51,7 @@ def test_inductive():
             type_idx=0,
             name_idxs=[1],
             ctor_name_idxs=[],
-            level_params=[],
+            levels=[],
             is_reflexive=False,
             is_recursive=False,
             num_nested=0,
@@ -82,7 +82,7 @@ def test_constructor():
             type_idx=0,
             name_idxs=[1],
             ctor_name_idxs=[2],
-            level_params=[],
+            levels=[],
             is_reflexive=False,
             is_recursive=False,
             num_nested=0,
@@ -97,7 +97,7 @@ def test_constructor():
             cidx=0,
             num_fields=0,
             num_params=0,
-            level_params=[],
+            levels=[],
         ),
     ]
 

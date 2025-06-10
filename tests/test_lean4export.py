@@ -206,7 +206,7 @@ def test_dump_constant_id():
             id.definition(
                 type=id_type,
                 value=id_value,
-                level_params=[Name.simple("u")],
+                levels=[Name.simple("u")],
             )
         ],
     )
@@ -223,7 +223,7 @@ def test_dump_constant_list():
     ListFn = Name.simple("List").const(levels=[u])
     nil = Name(["List", "nil"]).constructor(
         type=alpha.to_implicit().forall(body=ListFn.app(b0)),
-        level_params=[Name.simple("u")],
+        levels=[Name.simple("u")],
         num_params=1,
     )
     cons = Name(["List", "cons"]).constructor(
@@ -234,14 +234,14 @@ def test_dump_constant_list():
                 ),
             ),
         ),
-        level_params=[Name.simple("u")],
+        levels=[Name.simple("u")],
         num_params=1,
         num_fields=2,
     )
     List = Name.simple("List").inductive(
         type=alpha.forall(body=u.succ().sort()),
         constructors=[nil, cons],
-        level_params=[Name.simple("u")],
+        levels=[Name.simple("u")],
         num_params=1,
         is_recursive=True,
     )

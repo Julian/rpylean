@@ -83,7 +83,6 @@ class TestName(object):
             value=zero.const(),
         ) == W_Declaration(
             name=foo,
-            level_params=[],
             w_kind=W_Definition(type=Nat.const(), value=zero.const(), hint="R"),
         )
 
@@ -92,7 +91,6 @@ class TestName(object):
         Type = W_LEVEL_ZERO.succ().sort()
         assert Empty.inductive(type=Type) == W_Declaration(
             name=Empty,
-            level_params=[],
             w_kind=W_Inductive(type=Type, names=[Empty]),
         )
 
@@ -102,7 +100,6 @@ class TestName(object):
         intro = True_.child("intro")
         assert intro.constructor(type=True_.const()) == W_Declaration(
             name=intro,
-            level_params=[],
             w_kind=W_Constructor(type=True_.const()),
         )
 
@@ -334,8 +331,6 @@ class TestTheorem(object):
             name=Name.simple("foo"),
             # FIXME: this theorem is not a Prop, but that's too annoying now
             w_kind=W_Theorem(type=NAT, value=NAT_ZERO),
-            level_params=[],
-
         )
         assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
 
@@ -345,7 +340,6 @@ class TestAxiom(object):
         axiom = W_Declaration(
             name=Name.simple("sorryAx"),
             w_kind=W_Axiom(type=NAT),
-            level_params=[],
         )
         assert axiom.pretty() == "axiom sorryAx : Nat"
 

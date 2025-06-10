@@ -97,11 +97,11 @@ class EnvironmentBuilder(object):
 
     def register_declaration(self, decl):
         seen = {}
-        for level in decl.level_params:
+        for level in decl.levels:
             assert level not in seen, "%s has duplicate level %s in all kind: %s" % (
                 decl.name.pretty(),
                 level,
-                decl.level_params,
+                decl.levels,
             )
             seen[level] = True
 
