@@ -882,7 +882,7 @@ class Recursor(Node):
             w_kind=objects.W_Recursor(
                 type=builder.exprs[self.type_idx],
                 names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-                rule_idxs=self.rule_idxs,
+                rules=[builder.rec_rules.pop(idx) for idx in self.rule_idxs],
                 k=self.k,
                 num_params=self.num_params,
                 num_indices=self.num_indices,

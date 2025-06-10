@@ -117,12 +117,22 @@ class EnvironmentBuilder(object):
         Finish building, generating the known-valid and immutable environment.
         """
         assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
-            ", ".join([self.names[nidx].pretty() for nidx in self.inductive_skeletons]),
+            ", ".join(
+                [
+                    self.names[nidx].pretty()
+                    for nidx in self.inductive_skeletons
+                ],
+            ),
         )
-        return Environment(
-            declarations=self.declarations,
-            rec_rules=self.rec_rules,
+        assert not self.rec_rules, "Incomplete recursors: %s" % (
+            ", ".join(
+                [
+                    rule.ctor_name.pretty()
+                    for rule in self.rec_rules.values()
+                ],
+            ),
         )
+        return Environment(declarations=self.declarations)
 
 
 def from_export(export):
@@ -151,9 +161,8 @@ class Environment(object):
     A Lean environment with its declarations.
     """
 
-    def __init__(self, declarations, rec_rules=None):
+    def __init__(self, declarations):
         self.declarations = declarations
-        self.rec_rules = {} if rec_rules is None else rec_rules
 
     def __getitem__(self, name_or_list):
         if isinstance(name_or_list, str):
@@ -163,11 +172,7 @@ class Environment(object):
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
-        return (
-            # r_dict doesn't have sane __eq__
-            r_dict_eq(self.declarations, other.declarations)
-            and self.rec_rules == other.rec_rules
-        )
+        return r_dict_eq(self.declarations, other.declarations)
 
     def __ne__(self, other):
         return not self == other

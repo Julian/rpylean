@@ -124,18 +124,17 @@ class Name(_Item):
             levels=[] if levels is None else levels,
         )
 
-    def constructor(self, type, levels=None, **kwargs):
+    def constructor(self, levels=None, **kwargs):
         """
         Make a constructor declaration with this name.
         """
-        # XXX: Shouldn't this be bundled w/inductives by the time we get here?
         return W_Declaration(
             name=self,
             levels=[] if levels is None else levels,
-            w_kind=W_Constructor(type=type, **kwargs),
+            w_kind=W_Constructor(**kwargs),
         )
 
-    def inductive(self, type, levels=None, **kwargs):
+    def inductive(self, levels=None, **kwargs):
         """
         Make an inductive type declaration with this name.
         """
@@ -143,7 +142,7 @@ class Name(_Item):
         return W_Declaration(
             name=self,
             levels=[] if levels is None else levels,
-            w_kind=W_Inductive(type=type, names=[self], **kwargs),
+            w_kind=W_Inductive(names=[self], **kwargs),
         )
 
     def definition(self, type, value, levels=None):
@@ -161,6 +160,16 @@ class Name(_Item):
         Construct a let expression with this name.
         """
         return W_Let(name=self, type=type, value=value, body=body)
+
+    def recursor(self, type, levels=None, **kwargs):
+        """
+        Make a recursor with this name.
+        """
+        return W_Declaration(
+            name=self,
+            levels=[] if levels is None else levels,
+            w_kind=W_Recursor(names=[self], type=type, **kwargs),
+        )
 
     def level(self):
         """
@@ -1145,8 +1154,8 @@ class W_App(W_Expr):
         skip_count = decl.w_kind.num_params + decl.w_kind.num_indices + decl.w_kind.num_minors + decl.w_kind.num_motives
         major_idx = len(args) - 1 - skip_count
 
-        for rec_rule_id in decl.w_kind.rule_idxs:
-            rec_rule = env.rec_rules[rec_rule_id]
+        # for rec_rule in decl.w_kind.rules:
+        #     pass
 
         # Not enough arguments in our current app - we cannot reduce, since we need to know the major premise
         # to pick the recursor rule to apply
@@ -1238,8 +1247,7 @@ class W_App(W_Expr):
 
         all_ctor_args.reverse()
         # TODO - consider storing these by recursor name
-        for rec_rule_id in decl.w_kind.rule_idxs:
-            rec_rule = env.rec_rules[rec_rule_id]
+        for rec_rule in decl.w_kind.rules:
             if rec_rule.ctor_name.eq(major_premise_ctor.name):
                 #print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
 
@@ -1548,7 +1556,7 @@ class W_Constructor(W_DeclarationKind):
         return self.type
 
     def delaborate(self, name):
-        return "| %s : %s" % (name.pretty(), self.type.pretty())
+        return "constructor %s : %s" % (name.pretty(), self.type.pretty())
 
     def delaborate_in(self, constructor_name, inductive):
         if self.type in [name.const() for name in inductive.names]:
@@ -1562,12 +1570,12 @@ class W_Recursor(W_DeclarationKind):
         self,
         type,
         names,
-        k,
-        num_params,
-        num_indices,
-        num_motives,
-        num_minors,
-        rule_idxs,
+        rules=[],
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=0,
+        k=0,
     ):
         self.type = type
         self.k = k
@@ -1576,7 +1584,7 @@ class W_Recursor(W_DeclarationKind):
         self.num_motives = num_motives
         self.num_minors = num_minors
         self.names = names
-        self.rule_idxs = rule_idxs
+        self.rules = rules
 
     def type_check(self, env):
         # TODO - implement type checking
@@ -1585,16 +1593,10 @@ class W_Recursor(W_DeclarationKind):
     def get_type(self):
         return self.type
 
-    def pretty(self):
-        return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' names='%s' rule_idxs='%s'>" % (
-            self.expr.pretty(),
-            self.k,
-            self.num_params,
-            self.num_indices,
-            self.num_motives,
-            self.num_minors,
-            [each.pretty() for each in self.names],
-            self.rule_idxs,
+    def delaborate(self, name):
+        return "recursor %s : %s" % (
+            name.pretty(),
+            self.type.pretty(),
         )
 
 

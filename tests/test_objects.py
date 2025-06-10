@@ -21,6 +21,7 @@ from rpylean.objects import (
     W_LevelMax,
     W_LevelParam,
     W_LevelSucc,
+    W_Recursor,
     W_Sort,
     W_Theorem,
 )
@@ -95,12 +96,21 @@ class TestName(object):
         )
 
     def test_constructor(self):
-        Type = W_LEVEL_ZERO.succ().sort()
         True_ = Name.simple("True")
         intro = True_.child("intro")
         assert intro.constructor(type=True_.const()) == W_Declaration(
             name=intro,
             w_kind=W_Constructor(type=True_.const()),
+        )
+
+    def test_recursor(self):
+        Empty = Name.simple("Empty")
+        rec = Empty.child("rec")
+        assert rec.recursor(
+            type=Empty.const()
+        ) == W_Declaration(
+            name=rec,
+            w_kind=W_Recursor(names=[rec], type=Empty.const()),
         )
 
     def test_binder(self):

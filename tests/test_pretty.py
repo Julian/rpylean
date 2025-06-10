@@ -6,14 +6,7 @@ from textwrap import dedent
 from rpython.rlib.rbigint import rbigint
 import pytest
 
-from rpylean.objects import (
-    W_LEVEL_ZERO,
-    Name,
-    W_BVar,
-    W_Lambda,
-    W_LitNat,
-    W_LitStr,
-)
+from rpylean.objects import W_LEVEL_ZERO, Name, W_BVar, W_LitNat, W_LitStr
 
 
 @pytest.mark.parametrize(
@@ -156,14 +149,37 @@ class TestInductive(object):
 
 
 class TestConstructor(object):
-    def test_constructor(self):
+    def test_no_params(self):
         True_ = Name.simple("True")
         intro = True_.child("intro").constructor(type=True_.const())
-        assert intro.pretty() == dedent(
-            """
-            | True.intro : True
-            """
-        ).strip("\n")
+        assert intro.pretty() == "constructor True.intro : True"
+
+
+class TestRecursor(object):
+    def test_no_rules(self):
+        Empty = Name.simple("Empty")
+        t = Name.simple("t")
+        motive = Name.simple("motive")
+        rec = Empty.child("rec").recursor(
+            type=motive.binder(
+                type=t.binder(type=Empty.const()).forall(body=u.sort()),
+            ).forall(
+                body=t.binder(type=Empty.const()).forall(
+                    body=W_BVar(1).app(W_BVar(0))
+                ),
+            ),
+            levels=[u],
+        )
+
+        assert rec.pretty() == (
+            "recursor Empty.rec"
+            # FIXME
+            # .{u}
+            " : "
+            # "(motive : Empty → Sort u) → (t : Empty) → motive t"
+            "∀ (motive : ∀ (t : Empty), Sort u), ∀ (t : Empty), "
+            "{motive@1050} {t@1051}"
+        )
 
 
 def test_litnat():
