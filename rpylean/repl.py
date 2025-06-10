@@ -13,6 +13,7 @@ def command(names, help=None):
 
     def _command(func):
         for name in names:
+            assert name not in COMMANDS, "Duplicate command name: %r" % name
             COMMANDS[name] = func
         HELP[names[0]] = help
         return func
@@ -94,6 +95,8 @@ def help(_, __, ___, stdout, ____):
 def interact(env):
     stdin, stdout, stderr = create_stdio()
 
+    last = "help"
+
     while True:
         stdout.write("L∃∀N> ")
         input = stdin.readline()
@@ -102,7 +105,9 @@ def interact(env):
 
         input = input.strip()
         if not input:
-            continue
+            input = last
+
+        last = input
 
         split = input.split(" ", 1)
         command = split[0]
