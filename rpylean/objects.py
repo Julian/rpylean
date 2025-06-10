@@ -119,10 +119,7 @@ class Name(_Item):
         """
         Construct a constant expression for this name.
         """
-        return W_Const(
-            name=self,
-            levels=[] if levels is None else levels,
-        )
+        return W_Const(name=self, levels=[] if levels is None else levels)
 
     def declaration(self, w_kind, levels=None):
         """
@@ -776,6 +773,12 @@ class W_Const(W_Expr):
         self.name = name
         self.levels = levels
 
+    def child(self, part):
+        """
+        A child constant of this one.
+        """
+        return self.name.child(part).const()
+
     def pretty(self):
         name = self.name.pretty()
         if not self.levels:
@@ -849,10 +852,9 @@ class W_Const(W_Expr):
         return self.name.const(new_levels)
 
 
-NAT = Name.simple("Nat")
-NAT_CONST = NAT.const()
-NAT_ZERO = NAT.child("zero").const()
-NAT_SUCC = NAT.child("succ").const()
+NAT = Name.simple("Nat").const()
+NAT_ZERO = NAT.child("zero")
+NAT_SUCC = NAT.child("succ")
 
 
 class W_LitNat(W_Expr):
@@ -903,7 +905,7 @@ class W_LitNat(W_Expr):
         return self
 
     def infer(self, env):
-        return NAT_CONST
+        return NAT
 
 
 class W_Proj(W_Expr):

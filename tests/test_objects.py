@@ -220,12 +220,12 @@ class TestBinder(object):
 
     def test_forall(self):
         P = Name.simple("P").const()
-        x = Name.simple("x").binder(type=NAT.const())
+        x = Name.simple("x").binder(type=NAT)
         forall = x.forall(body=P)
         assert forall == W_ForAll(binder=x, body=P)
 
     def test_lambda(self):
-        x = Name.simple("x").binder(type=NAT.const())
+        x = Name.simple("x").binder(type=NAT)
         y = Name.simple("y").const()
         forall = x.fun(body=y)
         assert forall == W_Lambda(binder=x, body=y)
@@ -406,6 +406,10 @@ class TestAxiom(object):
 
 
 class TestConst(object):
+    def test_child(self):
+        name = Name.simple("foo")
+        assert name.const().child("bar") == name.child("bar").const()
+
     def test_app(self):
         bvar = W_BVar(0)
         id = Name.simple("id").const()
