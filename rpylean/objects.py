@@ -631,7 +631,7 @@ class W_FVar(W_Expr):
         return "(FVar %s %s)" % (self.id, self.binder)
 
     def pretty(self):
-        return "{%s@%s}" % (self.binder.name.pretty(), self.id)
+        return self.binder.name.pretty()
 
 
 class W_LitStr(W_Expr):

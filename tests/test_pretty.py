@@ -177,8 +177,7 @@ class TestRecursor(object):
             # .{u}
             " : "
             # "(motive : Empty → Sort u) → (t : Empty) → motive t"
-            "∀ (motive : ∀ (t : Empty), Sort u), ∀ (t : Empty), "
-            "{motive@1050} {t@1051}"
+            "∀ (motive : ∀ (t : Empty), Sort u), ∀ (t : Empty), motive t"
         )
 
 
