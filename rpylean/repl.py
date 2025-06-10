@@ -88,9 +88,13 @@ def check(env, args, _, stdout, stderr):
 
 
 @command(["print", "p"], nargs=1, help="Pretty print a declaration by name.")
-def print_decl(env, args, _, stdout, __):
-    name, = args
-    stdout.write(env[name].pretty())
+def print_decl(env, args, _, stdout, stderr):
+    name = Name.from_str(args[0])
+    declaration = env.declarations.get(name, None)
+    if declaration is None:
+        stderr.write("%s does not exist in the environment.\n" % name.pretty())
+        return
+    stdout.write(declaration.pretty())
     stdout.write("\n")
 
 
