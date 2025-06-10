@@ -2,21 +2,53 @@
 Interactive REPL for rpylean.
 """
 from rpython.rlib.rfile import create_stdio
+import os
 
 from rpylean.objects import W_TypeError, Name
 
 
 COMMANDS, HELP = {}, {}
 
-def command(names, help=None):
-    assert help is not None, names
+#: Either 0 or 1 arguments.
+OPTIONAL = -2
 
-    def _command(func):
+def command(names, nargs=0, help=None):
+    assert help is not None, "No help given for command %r" % names
+
+    def _command(fn):
+        assert names, "No names given for command %r" % fn.__name__
+        HELP[names[0]] = help
+
+        def wrapper(env, args, stdin, stdout, stderr):
+            """
+            Run the command after checking the number of arguments.
+            """
+            if nargs == OPTIONAL:
+                if len(args) > 1:
+                    stderr.write(
+                        "%s takes 0 or 1 arguments, got %d.\n" % (
+                            names[0],
+                            len(args),
+                        ),
+                    )
+                    return
+            elif len(args) != nargs:
+                stderr.write(
+                    "%s takes %s arguments, got %d.\n" % (
+                        names[0],
+                        nargs if nargs else "no",
+                        len(args),
+                    ),
+                )
+                return
+
+            return fn(env, args, stdin, stdout, stderr)
+
         for name in names:
             assert name not in COMMANDS, "Duplicate command name: %r" % name
-            COMMANDS[name] = func
-        HELP[names[0]] = help
-        return func
+            COMMANDS[name] = wrapper
+
+        return wrapper
     return _command
 
 
@@ -27,6 +59,7 @@ def dump(env, _, __, stdout, ___):
 
 @command(
     ["check", "c"],
+    nargs=OPTIONAL,
     help=(
         "Type check a declaration by name, "
         "or all declarations if no name is given."
@@ -50,7 +83,7 @@ def check(env, args, _, stdout, __):
         stdout.write("%s correctly type checks.\n" % name.pretty())
 
 
-@command(["print", "p"], help="Pretty print a declaration by name.")
+@command(["print", "p"], nargs=1, help="Pretty print a declaration by name.")
 def print_decl(env, args, _, stdout, __):
     name, = args
     stdout.write(env[name].pretty())
@@ -59,6 +92,7 @@ def print_decl(env, args, _, stdout, __):
 
 @command(
     ["names", "n"],
+    nargs=OPTIONAL,
     help=(
         "Show all names in the environment, "
         "or those matching a prefix or length."
