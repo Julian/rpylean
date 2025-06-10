@@ -82,9 +82,9 @@ class EnvironmentBuilder(object):
         assert uidx == len(self.levels), uidx
         self.levels.append(level)
 
-    def register_rec_rule(self, ridx, w_recrule):
-        assert ridx not in self.rec_rules, ridx
-        self.rec_rules[ridx] = w_recrule
+    def register_rec_rule(self, rule_idx, w_recrule):
+        assert rule_idx not in self.rec_rules, rule_idx
+        self.rec_rules[rule_idx] = w_recrule
 
     def register_inductive_skeleton(self, skeleton):
         """

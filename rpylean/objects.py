@@ -1560,7 +1560,7 @@ class W_Constructor(W_DeclarationKind):
 class W_Recursor(W_DeclarationKind):
     def __init__(
         self,
-        expr,
+        type,
         names,
         k,
         num_params,
@@ -1569,7 +1569,7 @@ class W_Recursor(W_DeclarationKind):
         num_minors,
         rule_idxs,
     ):
-        self.expr = expr
+        self.type = type
         self.k = k
         self.num_params = num_params
         self.num_indices = num_indices
@@ -1583,7 +1583,7 @@ class W_Recursor(W_DeclarationKind):
         pass
 
     def get_type(self):
-        return self.expr
+        return self.type
 
     def pretty(self):
         return "<W_Recursor expr='%s' k='%s' num_params='%s' num_indices='%s' num_motives='%s' num_minors='%s' names='%s' rule_idxs='%s'>" % (

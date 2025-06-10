@@ -690,9 +690,9 @@ class InductiveSkeleton(Node):
         self.num_params = num_params
         self.num_indices = num_indices
         self.name_idxs = name_idxs
-        self.ctor_name_idxs = ctor_name_idxs
         self.levels = levels
 
+        self.ctor_name_idxs = ctor_name_idxs
         self.constructors = [None] * len(ctor_name_idxs)
         self.num_remaining_constructors = len(ctor_name_idxs)
 
@@ -838,7 +838,7 @@ class Recursor(Node):
 
         recursor = Recursor(
             name_idx=int(name_idx.text),
-            expr_idx=int(expr_idx.text),
+            type_idx=int(expr_idx.text),
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
             k=int(k),
@@ -853,7 +853,7 @@ class Recursor(Node):
     def __init__(
         self,
         name_idx,
-        expr_idx,
+        type_idx,
         k,
         num_params,
         num_indices,
@@ -864,29 +864,30 @@ class Recursor(Node):
         levels,
     ):
         self.name_idx = name_idx
-        self.expr_idx = expr_idx
+        self.type_idx = type_idx
         self.k = k
         self.num_params = num_params
         self.num_indices = num_indices
         self.num_motives = num_motives
         self.num_minors = num_minors
         self.ind_name_idxs = ind_name_idxs
-        self.rule_idxs = rule_idxs
         self.levels = levels
+
+        self.rule_idxs = rule_idxs
 
     def to_w_decl(self, builder):
         return objects.W_Declaration(
             name=builder.names[self.name_idx],
             levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Recursor(
-                expr=builder.exprs[self.expr_idx],
+                type=builder.exprs[self.type_idx],
+                names=[builder.names[nidx] for nidx in self.ind_name_idxs],
+                rule_idxs=self.rule_idxs,
                 k=self.k,
                 num_params=self.num_params,
                 num_indices=self.num_indices,
                 num_motives=self.num_motives,
                 num_minors=self.num_minors,
-                names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-                rule_idxs=self.rule_idxs,
             ),
         )
 
@@ -897,16 +898,16 @@ class RecRule(Node):
 
     @staticmethod
     def parse(tokens):
-        ridx, _, ctor_name, num_fields, val = tokens
+        rule_idx, _, ctor_name, num_fields, val = tokens
         return RecRule(
-            ridx=int(ridx.text),
+            rule_idx=int(rule_idx.text),
             ctor_name_idx=int(ctor_name.text),
             num_fields=int(num_fields.text),
             val=int(val.text),
         )
 
-    def __init__(self, ridx, ctor_name_idx, num_fields, val):
-        self.ridx = ridx
+    def __init__(self, rule_idx, ctor_name_idx, num_fields, val):
+        self.rule_idx = rule_idx
         self.ctor_name_idx = ctor_name_idx
         self.num_fields = num_fields
         self.val = val
@@ -917,7 +918,7 @@ class RecRule(Node):
             num_fields=self.num_fields,
             val=builder.exprs[self.val]
         )
-        builder.register_rec_rule(self.ridx, w_recrule)
+        builder.register_rec_rule(self.rule_idx, w_recrule)
 
 
 NODES = {}
