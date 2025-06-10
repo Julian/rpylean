@@ -821,7 +821,7 @@ class Recursor(Node):
         pos += 5
 
         rule_idxs = [
-            rule_idx.text
+            int(rule_idx.text)
             for rule_idx in tokens[pos:pos + num_rule_idxs]
         ]
         pos += num_rule_idxs
@@ -834,7 +834,7 @@ class Recursor(Node):
             pos += 1
 
         k = tokens[pos].text
-        levels = [int(param.text) for param in tokens[(pos + 1):]]
+        pos += 1
 
         recursor = Recursor(
             name_idx=int(name_idx.text),
@@ -846,7 +846,7 @@ class Recursor(Node):
             num_indices=int(num_indices.text),
             num_motives=int(num_motives.text),
             num_minors=int(num_minors.text),
-            levels=levels,
+            levels=[int(param.text) for param in tokens[pos:]],
         )
         return Declaration(recursor)
 
@@ -880,13 +880,13 @@ class Recursor(Node):
             levels=[builder.names[nidx] for nidx in self.levels],
             w_kind=objects.W_Recursor(
                 expr=builder.exprs[self.expr_idx],
-                k=int(self.k),
-                num_params=int(self.num_params),
-                num_indices=int(self.num_indices),
-                num_motives=int(self.num_motives),
-                num_minors=int(self.num_minors),
+                k=self.k,
+                num_params=self.num_params,
+                num_indices=self.num_indices,
+                num_motives=self.num_motives,
+                num_minors=self.num_minors,
                 names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-                rule_idxs=[int(ridx) for ridx in self.rule_idxs],
+                rule_idxs=self.rule_idxs,
             ),
         )
 
