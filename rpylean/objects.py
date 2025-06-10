@@ -543,6 +543,9 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = int(id)
 
+    def __repr__(self):
+        return "<BVar %s>" % (self.id,)
+
     def pretty(self):
         return "(BVar [%s])" % (self.id,)
 
