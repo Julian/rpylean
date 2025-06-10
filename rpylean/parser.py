@@ -515,14 +515,11 @@ class Definition(Node):
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        return builder.names[self.name_idx].definition(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Definition(
-                type=builder.exprs[self.def_type],
-                value=builder.exprs[self.def_val],
-                hint=self.hint,
-            ),
+            type=builder.exprs[self.def_type],
+            value=builder.exprs[self.def_val],
+            hint=self.hint,
         )
 
 
@@ -548,13 +545,10 @@ class Opaque(Node):
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        return builder.names[self.name_idx].opaque(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Opaque(
-                type=builder.exprs[self.def_type],
-                value=builder.exprs[self.def_val],
-            ),
+            type=builder.exprs[self.def_type],
+            value=builder.exprs[self.def_val],
         )
 
 
@@ -580,13 +574,10 @@ class Theorem(Node):
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        return builder.names[self.name_idx].theorem(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Theorem(
-                type=builder.exprs[self.def_type],
-                value=builder.exprs[self.def_val],
-            ),
+            type=builder.exprs[self.def_type],
+            value=builder.exprs[self.def_val],
         )
 
 
@@ -610,10 +601,9 @@ class Axiom(Node):
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        return builder.names[self.name_idx].axiom(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Axiom(type=builder.exprs[self.def_type]),
+            type=builder.exprs[self.def_type],
         )
 
 
@@ -716,19 +706,16 @@ class InductiveSkeleton(Node):
         """
         assert len(self.constructors) == len(self.ctor_name_idxs)
         assert None not in self.constructors
-        declaration = objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        declaration = builder.names[self.name_idx].inductive(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Inductive(
-                type=builder.exprs[self.type_idx],
-                names=[builder.names[nidx] for nidx in self.name_idxs],
-                constructors=self.constructors,
-                num_nested=self.num_nested,
-                num_params=self.num_params,
-                num_indices=self.num_indices,
-                is_reflexive=self.is_reflexive,
-                is_recursive=self.is_recursive,
-            ),
+            type=builder.exprs[self.type_idx],
+            names=[builder.names[nidx] for nidx in self.name_idxs],
+            constructors=self.constructors,
+            num_nested=self.num_nested,
+            num_params=self.num_params,
+            num_indices=self.num_indices,
+            is_reflexive=self.is_reflexive,
+            is_recursive=self.is_recursive,
         )
         builder.register_declaration(declaration)
 
@@ -775,14 +762,11 @@ class Constructor(Node):
         Then check whether our parent inductive type has all its constructors
         now set, in which case compile it too.
         """
-        constructor = objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        constructor = builder.names[self.name_idx].constructor(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Constructor(
-                type=builder.exprs[self.type_idx],
-                num_params=self.num_params,
-                num_fields=self.num_fields,
-            ),
+            type=builder.exprs[self.type_idx],
+            num_params=self.num_params,
+            num_fields=self.num_fields,
         )
 
         skeleton = builder.inductive_skeletons[self.inductive_nidx]
@@ -882,19 +866,16 @@ class Recursor(Node):
         self.rule_idxs = rule_idxs
 
     def to_w_decl(self, builder):
-        return objects.W_Declaration(
-            name=builder.names[self.name_idx],
+        return builder.names[self.name_idx].recursor(
             levels=[builder.names[nidx] for nidx in self.levels],
-            w_kind=objects.W_Recursor(
-                type=builder.exprs[self.type_idx],
-                names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-                rules=[builder.rec_rules.pop(idx) for idx in self.rule_idxs],
-                k=self.k,
-                num_params=self.num_params,
-                num_indices=self.num_indices,
-                num_motives=self.num_motives,
-                num_minors=self.num_minors,
-            ),
+            type=builder.exprs[self.type_idx],
+            names=[builder.names[nidx] for nidx in self.ind_name_idxs],
+            rules=[builder.rec_rules.pop(idx) for idx in self.rule_idxs],
+            k=self.k,
+            num_params=self.num_params,
+            num_indices=self.num_indices,
+            num_motives=self.num_motives,
+            num_minors=self.num_minors,
         )
 
 

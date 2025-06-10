@@ -21,6 +21,7 @@ from rpylean.objects import (
     W_LevelMax,
     W_LevelParam,
     W_LevelSucc,
+    W_Opaque,
     W_Recursor,
     W_Sort,
     W_Theorem,
@@ -84,7 +85,30 @@ class TestName(object):
             value=zero.const(),
         ) == W_Declaration(
             name=foo,
-            w_kind=W_Definition(type=Nat.const(), value=zero.const(), hint="R"),
+            levels=[],
+            w_kind=W_Definition(
+                type=Nat.const(),
+                value=zero.const(),
+                hint="R",
+            ),
+        )
+
+    def test_axiom(self):
+        foo = Name.simple("foo")
+        assert foo.axiom(type=NAT) == W_Declaration(
+            name=foo,
+            levels=[],
+            w_kind=W_Axiom(type=NAT),
+        )
+
+    def test_theorem(self):
+        foo = Name.simple("foo")
+        # FIXME: this theorem is not a Prop, but that's too annoying to make
+        theorem = foo.theorem(type=NAT, value=NAT_ZERO)
+        assert theorem == W_Declaration(
+            name=Name.simple("foo"),
+            levels=[],
+            w_kind=W_Theorem(type=NAT, value=NAT_ZERO),
         )
 
     def test_inductive(self):
@@ -92,7 +116,17 @@ class TestName(object):
         Type = W_LEVEL_ZERO.succ().sort()
         assert Empty.inductive(type=Type) == W_Declaration(
             name=Empty,
-            w_kind=W_Inductive(type=Type, names=[Empty]),
+            levels=[],
+            w_kind=W_Inductive(
+                type=Type,
+                names=[Empty],
+                constructors=[],
+                num_nested=0,
+                num_params=0,
+                num_indices=0,
+                is_recursive=False,
+                is_reflexive=False,
+            ),
         )
 
     def test_constructor(self):
@@ -100,17 +134,40 @@ class TestName(object):
         intro = True_.child("intro")
         assert intro.constructor(type=True_.const()) == W_Declaration(
             name=intro,
-            w_kind=W_Constructor(type=True_.const()),
+            levels=[],
+            w_kind=W_Constructor(
+                type=True_.const(),
+                num_params=0,
+                num_fields=0,
+            ),
         )
 
     def test_recursor(self):
         Empty = Name.simple("Empty")
         rec = Empty.child("rec")
-        assert rec.recursor(
-            type=Empty.const()
-        ) == W_Declaration(
+        assert rec.recursor(type=Empty.const()) == W_Declaration(
             name=rec,
-            w_kind=W_Recursor(names=[rec], type=Empty.const()),
+            levels=[],
+            w_kind=W_Recursor(
+                names=[rec],
+                type=Empty.const(),
+                rules=[],
+                num_motives=1,
+                num_params=0,
+                num_indices=0,
+                num_minors=0,
+                k=0,
+            ),
+        )
+
+    def test_opaque(self):
+        o = Name.simple("o")
+        Nat = Name.simple("Nat")
+        zero = Nat.child("zero")
+        assert o.opaque(type=Nat.const(), value=zero.const()) == W_Declaration(
+            name=o,
+            levels=[],
+            w_kind=W_Opaque(type=Nat.const(), value=zero.const()),
         )
 
     def test_binder(self):
@@ -337,20 +394,14 @@ class TestLevel(object):
 
 class TestTheorem(object):
     def test_delaborate(self):
-        theorem = W_Declaration(
-            name=Name.simple("foo"),
-            # FIXME: this theorem is not a Prop, but that's too annoying now
-            w_kind=W_Theorem(type=NAT, value=NAT_ZERO),
-        )
+        # FIXME: this theorem is not a Prop, but that's too annoying now
+        theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
         assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
 
 
 class TestAxiom(object):
     def test_delaborate(self):
-        axiom = W_Declaration(
-            name=Name.simple("sorryAx"),
-            w_kind=W_Axiom(type=NAT),
-        )
+        axiom = Name.simple("sorryAx").axiom(type=NAT)
         assert axiom.pretty() == "axiom sorryAx : Nat"
 
 

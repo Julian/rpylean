@@ -124,52 +124,108 @@ class Name(_Item):
             levels=[] if levels is None else levels,
         )
 
-    def constructor(self, levels=None, **kwargs):
+    def declaration(self, w_kind, levels=None):
         """
-        Make a constructor declaration with this name.
+        Make a declaration with this name.
         """
         return W_Declaration(
             name=self,
             levels=[] if levels is None else levels,
-            w_kind=W_Constructor(**kwargs),
+            w_kind=w_kind,
         )
 
-    def inductive(self, levels=None, **kwargs):
+    def constructor(self, type, num_params=0, num_fields=0, levels=None):
+        """
+        Make a constructor declaration with this name.
+        """
+        constructor = W_Constructor(
+            type=type,
+            num_params=num_params,
+            num_fields=num_fields,
+        )
+        return self.declaration(constructor, levels=levels)
+
+    def inductive(
+        self,
+        type,
+        names=None,
+        constructors=None,
+        num_nested=0,
+        num_params=0,
+        num_indices=0,
+        is_reflexive=False,
+        is_recursive=False,
+        levels=None,
+    ):
         """
         Make an inductive type declaration with this name.
         """
 
-        return W_Declaration(
-            name=self,
-            levels=[] if levels is None else levels,
-            w_kind=W_Inductive(names=[self], **kwargs),
+        inductive = W_Inductive(
+            names=[self] if names is None else names,
+            type=type,
+            constructors=[] if constructors is None else constructors,
+            num_nested=num_nested,
+            num_params=num_params,
+            num_indices=num_indices,
+            is_reflexive=is_reflexive,
+            is_recursive=is_recursive,
         )
+        return self.declaration(inductive, levels=levels)
 
-    def definition(self, type, value, levels=None):
+    def definition(self, type, value, hint="R", levels=None):
         """
         Make a definition of the given type and value with this name.
         """
-        return W_Declaration(
-            name=self,
-            levels=[] if levels is None else levels,
-            w_kind=W_Definition(type=type, value=value, hint="R")  # FIXME: proper hints,
-        )
+        definition = W_Definition(type=type, value=value, hint=hint)
+        return self.declaration(definition, levels=levels)
 
-    def let(self, type, value, body):
-        """
-        Construct a let expression with this name.
-        """
-        return W_Let(name=self, type=type, value=value, body=body)
+    def opaque(self, type, value, levels=None):
+        opaque = W_Opaque(type=type, value=value)
+        return self.declaration(opaque, levels=levels)
 
-    def recursor(self, type, levels=None, **kwargs):
+    def axiom(self, type, levels=None):
+        return self.declaration(W_Axiom(type=type), levels=levels)
+
+    def theorem(self, type, value, levels=None):
+        """
+        Make a theorem with this name.
+        """
+        theorem = W_Theorem(type=type, value=value)
+        return self.declaration(theorem, levels=levels)
+
+    def recursor(
+        self,
+        type,
+        rules=None,
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=0,
+        k=0,
+        names=None,
+        levels=None,
+    ):
         """
         Make a recursor with this name.
         """
-        return W_Declaration(
-            name=self,
-            levels=[] if levels is None else levels,
-            w_kind=W_Recursor(names=[self], type=type, **kwargs),
+        recursor = W_Recursor(
+            names=[self] if names is None else names,
+            type=type,
+            rules=[] if rules is None else rules,
+            k=k,
+            num_params=num_params,
+            num_indices=num_indices,
+            num_motives=num_motives,
+            num_minors=num_minors,
         )
+        return self.declaration(recursor, levels=levels)
+
+    def let(self, **kwargs):
+        """
+        Construct a let expression with this name.
+        """
+        return W_Let(name=self, **kwargs)
 
     def level(self):
         """
@@ -1341,8 +1397,6 @@ class W_App(W_Expr):
                 return self
         return self
 
-
-
     def strong_reduce_step(self, env):
         # First, try beta reduction
         if isinstance(self.fn, W_FunBase):
@@ -1407,10 +1461,10 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
-    def __init__(self, name, w_kind, levels=None):
+    def __init__(self, name, w_kind, levels):
         self.name = name
         self.w_kind = w_kind
-        self.levels = [] if levels is None else levels
+        self.levels = levels
 
     def get_type(self):
         return self.w_kind.get_type()
@@ -1503,16 +1557,16 @@ class W_Inductive(W_DeclarationKind):
         type,
         names,       # ??: What is this? Inductives know their names?
                      #     Is this for mutual inductives which have multiple?
-        constructors=None,
-        num_nested=0,
-        num_params=0,
-        num_indices=0,
-        is_reflexive=False,
-        is_recursive=False,
+        constructors,
+        num_nested,
+        num_params,
+        num_indices,
+        is_reflexive,
+        is_recursive,
     ):
         self.type = type
         self.names = names
-        self.constructors = [] if constructors is None else constructors
+        self.constructors = constructors
         self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices
@@ -1542,7 +1596,7 @@ class W_Inductive(W_DeclarationKind):
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, type, num_params=0, num_fields=0):
+    def __init__(self, type, num_params, num_fields):
         self.type = type
         self.num_params = num_params
         self.num_fields = num_fields
@@ -1570,12 +1624,12 @@ class W_Recursor(W_DeclarationKind):
         self,
         type,
         names,
-        rules=[],
-        num_motives=1,
-        num_params=0,
-        num_indices=0,
-        num_minors=0,
-        k=0,
+        rules,
+        num_motives,
+        num_params,
+        num_indices,
+        num_minors,
+        k,
     ):
         self.type = type
         self.k = k
