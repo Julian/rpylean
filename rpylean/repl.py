@@ -42,7 +42,7 @@ def check(env, args, _, stdout, __):
     name = Name.from_str(args[0])
     declaration = env.declarations[name]
     try:
-        declaration.type_check(env.inference_context())
+        declaration.type_check(env)
     except W_TypeError as error:
         stdout.write("Type error: %s\n" % error)
     else:

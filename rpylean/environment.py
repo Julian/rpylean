@@ -189,13 +189,10 @@ class Environment(object):
         """
         Type check each declaration in the environment.
         """
-        ctx = self.inference_context()
-
         invalid = []
         for name, each in self.declarations.items():
-            print(name.pretty())
             try:
-                each.type_check(ctx)
+                each.type_check(self)
             except W_TypeError as error:
                 invalid.append((name, each, error))
             except Exception as error:
@@ -210,26 +207,19 @@ class Environment(object):
         for decl in self.declarations.values():
             stdout.write("%s\n" % (decl.pretty(),))
 
-    def inference_context(self):
-        return _InferenceContext(self)
-
-
-class _InferenceContext(object):
-    def __init__(self, env):
-        self.env = env
-
-    # Checks if two expressions are definitionally equal.
     def def_eq(self, expr1, expr2):
+        """
+        Check if two expressions are definitionally equal.
+        """
         #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
         # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
-            if expr1.id != expr2.id:
-                return False
-            return True
+            return expr1.id == expr2.id
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
-            if not expr1.level.eq(expr2.level):
-                return False
-            return True
+            return expr1.level.eq(expr2.level)
+        # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
+        elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+            return expr1.val == expr2.val
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
             if not self.def_eq(expr1.binder.type, expr2.binder.type):
                 return False
@@ -239,11 +229,6 @@ class _InferenceContext(object):
             other_body = expr2.body.instantiate(fvar, 0)
 
             return self.def_eq(body, other_body)
-        # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
-        elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
-            if expr1.val != expr2.val:
-                return False
-            return True
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
         if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name.eq(expr2.name):

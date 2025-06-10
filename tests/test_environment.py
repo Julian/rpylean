@@ -11,7 +11,7 @@ def test_valid_def_type_checks():
     W_Type1 = W_LEVEL_ZERO.succ().succ().sort()
 
     valid = W_Definition(type=W_Type1, value=W_Type, hint="R")
-    valid.type_check(Environment.having([]).inference_context())
+    valid.type_check(Environment.having([]))
 
 
 def test_invalid_def_does_not_type_check():
@@ -25,7 +25,7 @@ def test_invalid_def_does_not_type_check():
 
     invalid = W_Definition(type=W_Prop, value=W_Type, hint="R")
 
-    ctx = Environment.having([]).inference_context()
+    env = Environment.having([])
     with pytest.raises(W_TypeError) as e:
-        invalid.type_check(ctx)
+        invalid.type_check(env)
     assert e.value.w_expected_type == W_Type1
