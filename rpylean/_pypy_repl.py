@@ -18,9 +18,7 @@ if __example__:
     with open(__example__) as f:
         e = env = environment = from_export(f)
     del f
-
-    msg = "Loaded `e = env = {!r}` from {!r}."
-    print(msg.format(e, __example__))
+    print("Loaded `e = env = {!r}` from {!r}.".format(e, __example__))
 else:
     Prop = o.W_LEVEL_ZERO.sort()
     Type = o.W_LEVEL_ZERO.succ().sort()
