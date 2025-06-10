@@ -1241,7 +1241,7 @@ class W_App(W_Expr):
         for rec_rule_id in decl.w_kind.rule_idxs:
             rec_rule = env.rec_rules[rec_rule_id]
             if rec_rule.ctor_name.eq(major_premise_ctor.name):
-                #print("Have n_fields %s and num_params=%s" % (rec_rule.n_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
+                #print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
 
 
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
@@ -1281,7 +1281,7 @@ class W_App(W_Expr):
                 # We want to include all of the arguments up to the motive (which is the major premise)
 
                 ctor_start = decl.w_kind.num_params
-                ctor_end = decl.w_kind.num_params + rec_rule.n_fields
+                ctor_end = decl.w_kind.num_params + rec_rule.num_fields
                 assert ctor_start >= 0
                 assert ctor_end >= 0
 
@@ -1385,15 +1385,15 @@ class W_App(W_Expr):
 
 
 class W_RecRule(_Item):
-    def __init__(self, ctor_name, n_fields, val):
+    def __init__(self, ctor_name, num_fields, val):
         self.ctor_name = ctor_name
-        self.n_fields = n_fields
+        self.num_fields = num_fields
         self.val = val
 
     def pretty(self):
-        return "<RecRule ctor_name='%s' n_fields='%s' val='%s'>" % (
+        return "<RecRule ctor_name='%s' num_fields='%s' val='%s'>" % (
             self.ctor_name.pretty(),
-            self.n_fields,
+            self.num_fields,
             self.val.pretty(),
         )
 

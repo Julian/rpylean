@@ -897,24 +897,24 @@ class RecRule(Node):
 
     @staticmethod
     def parse(tokens):
-        ridx, _, ctor_name, n_fields, val = tokens
+        ridx, _, ctor_name, num_fields, val = tokens
         return RecRule(
             ridx=int(ridx.text),
-            ctor_name=int(ctor_name.text),
-            n_fields=int(n_fields.text),
+            ctor_name_idx=int(ctor_name.text),
+            num_fields=int(num_fields.text),
             val=int(val.text),
         )
 
-    def __init__(self, ridx, ctor_name, n_fields, val):
+    def __init__(self, ridx, ctor_name_idx, num_fields, val):
         self.ridx = ridx
-        self.ctor_name = ctor_name
-        self.n_fields = n_fields
+        self.ctor_name_idx = ctor_name_idx
+        self.num_fields = num_fields
         self.val = val
 
     def compile(self, builder):
         w_recrule = objects.W_RecRule(
-            ctor_name=builder.names[self.ctor_name],
-            n_fields=self.n_fields,
+            ctor_name=builder.names[self.ctor_name_idx],
+            num_fields=self.num_fields,
             val=builder.exprs[self.val]
         )
         builder.register_rec_rule(self.ridx, w_recrule)
