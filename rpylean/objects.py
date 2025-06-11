@@ -218,11 +218,11 @@ class Name(_Item):
         )
         return self.declaration(recursor, levels=levels)
 
-    def let(self, **kwargs):
+    def let(self, type, value, body):
         """
         Construct a let expression with this name.
         """
-        return W_Let(name=self, **kwargs)
+        return W_Let(name=self, type=type, value=value, body=body)
 
     def level(self):
         """

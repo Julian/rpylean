@@ -359,8 +359,7 @@ class Let(ExprVal):
         self.body = body
 
     def to_w_expr(self, builder):
-        return objects.W_Let(
-            name=builder.names[self.nidx],
+        return builder.names[self.nidx].let(
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
             body=builder.exprs[self.body],
@@ -454,9 +453,9 @@ class ForAll(ExprVal):
 
     def to_w_expr(self, builder):
         return binder(
-                name=builder.names[self.binder_name],
-                type=builder.exprs[self.binder_type],
-                info=self.binder_info,
+            name=builder.names[self.binder_name],
+            type=builder.exprs[self.binder_type],
+            info=self.binder_info,
         ).forall(body=builder.exprs[self.body])
 
 
@@ -488,14 +487,6 @@ class Proj(ExprVal):
         )
 
 
-class Declaration(Node):
-    def __init__(self, decl):
-        self.decl = decl
-
-    def compile(self, builder):
-        builder.register_declaration(self.decl.to_w_decl(builder))
-
-
 class Definition(Node):
 
     kind = "DEF"
@@ -507,14 +498,13 @@ class Definition(Node):
         # TODO actually use the argument to 'R"
         if hint.text== "R":
             start += 1
-        definition = Definition(
+        return Definition(
             nidx=nidx.uint(),
             def_type=def_type.uint(),
             def_val=def_val.uint(),
             hint=hint.text,
             levels=[each.uint() for each in tokens[start:]],
         )
-        return Declaration(definition)
 
     def __init__(self, nidx, def_type, def_val, hint, levels):
         self.nidx = nidx
@@ -523,13 +513,14 @@ class Definition(Node):
         self.hint = hint
         self.levels = levels
 
-    def to_w_decl(self, builder):
-        return builder.names[self.nidx].definition(
+    def compile(self, builder):
+        declaration = builder.names[self.nidx].definition(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
             hint=self.hint,
         )
+        builder.register_declaration(declaration)
 
 
 class Opaque(Node):
@@ -539,13 +530,12 @@ class Opaque(Node):
     @staticmethod
     def parse(tokens):
         _, nidx, def_type, def_val = tokens[:4]
-        opaque = Opaque(
+        return Opaque(
             nidx=nidx.uint(),
             def_type=def_type.uint(),
             def_val=def_val.uint(),
             levels=[each.uint() for each in tokens[4:]],
         )
-        return Declaration(opaque)
 
     def __init__(self, nidx, def_type, def_val, levels):
         self.nidx = nidx
@@ -553,12 +543,13 @@ class Opaque(Node):
         self.def_val = def_val
         self.levels = levels
 
-    def to_w_decl(self, builder):
-        return builder.names[self.nidx].opaque(
+    def compile(self, builder):
+        declaration = builder.names[self.nidx].opaque(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
         )
+        builder.register_declaration(declaration)
 
 
 class Theorem(Node):
@@ -568,13 +559,12 @@ class Theorem(Node):
     @staticmethod
     def parse(tokens):
         _, nidx, def_type, def_val = tokens[:4]
-        theorem = Theorem(
+        return Theorem(
             nidx=nidx.uint(),
             def_type=def_type.uint(),
             def_val=def_val.uint(),
             levels=[each.uint() for each in tokens[4:]],
         )
-        return Declaration(theorem)
 
     def __init__(self, nidx, def_type, def_val, levels):
         self.nidx = nidx
@@ -582,12 +572,13 @@ class Theorem(Node):
         self.def_val = def_val
         self.levels = levels
 
-    def to_w_decl(self, builder):
-        return builder.names[self.nidx].theorem(
+    def compile(self, builder):
+        declaration = builder.names[self.nidx].theorem(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
         )
+        builder.register_declaration(declaration)
 
 
 class Axiom(Node):
@@ -597,23 +588,23 @@ class Axiom(Node):
     @staticmethod
     def parse(tokens):
         _, nidx, def_type = tokens[:3]
-        axiom = Axiom(
+        return Axiom(
             nidx=nidx.uint(),
             def_type=def_type.uint(),
             levels=[each.uint() for each in tokens[3:]],
         )
-        return Declaration(axiom)
 
     def __init__(self, nidx, def_type, levels):
         self.nidx = nidx
         self.def_type = def_type
         self.levels = levels
 
-    def to_w_decl(self, builder):
-        return builder.names[self.nidx].axiom(
+    def compile(self, builder):
+        declaration = builder.names[self.nidx].axiom(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
         )
+        builder.register_declaration(declaration)
 
 
 class InductiveSkeleton(Node):
@@ -822,7 +813,7 @@ class Recursor(Node):
         k = tokens[pos]
         pos += 1
 
-        recursor = Recursor(
+        return Recursor(
             nidx=nidx.uint(),
             type_idx=expr_idx.uint(),
             ind_name_idxs=ind_name_idxs,
@@ -834,7 +825,6 @@ class Recursor(Node):
             num_minors=num_minors.uint(),
             levels=[param.uint() for param in tokens[pos:]],
         )
-        return Declaration(recursor)
 
     def __init__(
         self,
@@ -861,8 +851,8 @@ class Recursor(Node):
 
         self.rule_idxs = rule_idxs
 
-    def to_w_decl(self, builder):
-        return builder.names[self.nidx].recursor(
+    def compile(self, builder):
+        declaration = builder.names[self.nidx].recursor(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             names=[builder.names[nidx] for nidx in self.ind_name_idxs],
@@ -873,6 +863,7 @@ class Recursor(Node):
             num_motives=self.num_motives,
             num_minors=self.num_minors,
         )
+        builder.register_declaration(declaration)
 
 
 class RecRule(Node):
