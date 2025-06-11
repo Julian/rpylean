@@ -271,8 +271,8 @@ class LitStr(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx = tokens[0]
-        lit_val = "".join([chr(int(token.text, 16)) for token in tokens[2:]]).decode("utf-8")
-        val = LitStr(val=lit_val)
+        utf8 = "".join([chr(int(token.text, 16)) for token in tokens[2:]])
+        val = LitStr(val=utf8)
         return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, val):
