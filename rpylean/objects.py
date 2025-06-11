@@ -692,13 +692,16 @@ class W_FVar(W_Expr):
 
 class W_LitStr(W_Expr):
     def __init__(self, val):
+        assert isinstance(val, str)
         self.val = val
 
     def __repr__(self):
         return repr(self.val)
 
+    def infer(self, env):
+        return STRING
+
     def pretty(self):
-        assert isinstance(self.val, str)
         return '"%s"' % (self.val,)
 
     def instantiate(self, expr, depth):
@@ -858,6 +861,7 @@ class W_Const(W_Expr):
 NAT = Name.simple("Nat").const()
 NAT_ZERO = NAT.child("zero")
 NAT_SUCC = NAT.child("succ")
+STRING = Name.simple("String").const()
 
 
 class W_LitNat(W_Expr):
