@@ -67,6 +67,22 @@ class Token(object):
         """
         return int(self.text)
 
+    def uint(self):
+        """
+        Extract an unsigned integer from the token text.
+        """
+        value = int(self.text)
+        assert value >= 0
+        return value
+
+    def nat(self):
+        """
+        Extract a (big)nat from the token text.
+        """
+        value = rbigint.fromstr(self.text)
+        assert value.int_ge(0)
+        return value
+
 
 class Node(object):
     """
@@ -274,9 +290,7 @@ class LitNat(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _eli_token, val = tokens
-        val = LitNat(val=rbigint.fromstr(val.text))
-        assert val.val.int_ge(0)
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.int(), val=LitNat(val=val.nat()))
 
     def __init__(self, val):
         self.val = val
@@ -623,16 +637,14 @@ class InductiveSkeleton(Node):
     def parse(tokens):
         pos = 9
         _, name_idx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
-        num_name_idxs = num_name_idxs_str.int()
-        assert num_name_idxs >= 0
+        num_name_idxs = num_name_idxs_str.uint()
         name_idxs = [
             nidx.int()
             for nidx in tokens[pos:(pos + num_name_idxs)]
         ]
         pos += num_name_idxs
 
-        num_ctors = tokens[pos].int()
-        assert num_ctors >= 0
+        num_ctors = tokens[pos].uint()
         pos += 1
 
         ctor_name_idxs = [
@@ -794,8 +806,7 @@ class Recursor(Node):
     def parse(tokens):
         _rec_token, name_idx, expr_idx, num_ind_name_idxs_str = tokens[:4]
 
-        num_ind_name_idxs = num_ind_name_idxs_str.int()
-        assert num_ind_name_idxs >= 0
+        num_ind_name_idxs = num_ind_name_idxs_str.uint()
 
         pos = 4
         ind_name_idxs = [
@@ -806,8 +817,7 @@ class Recursor(Node):
 
         num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[pos:pos + 5]
 
-        num_rule_idxs = num_rule_idxs_str.int()
-        assert num_rule_idxs >= 0
+        num_rule_idxs = num_rule_idxs_str.uint()
         pos += 5
 
         rule_idxs = [
