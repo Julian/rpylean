@@ -32,6 +32,13 @@ repl *ARGS:
 lean4export *ARGS:
     lake --dir "${LEAN4EXPORT_CHECKOUT}" exe lean4export {{ ARGS }}
 
+# Run lean4export on some self-contained source code in a single file.
+export-simple path:
+    olean_output_dir=$(mktemp -d); \
+    lean -o "$olean_output_dir/JustfileTemporary.olean" "{{ path }}" && \
+    LEAN_PATH=$olean_output_dir just lean4export JustfileTemporary; \
+    rm "$olean_output_dir/JustfileTemporary.olean"; \
+    rmdir "$olean_output_dir"
 
 # Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:

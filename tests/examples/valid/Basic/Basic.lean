@@ -1,6 +1,6 @@
 prelude
 
-inductive MyTrue : Prop where
-  | intro : MyTrue
+inductive True : Prop where
+  | intro : True
 
-theorem trueByRfl: MyTrue := MyTrue.intro
+theorem trueByRfl : True := True.intro
