@@ -110,19 +110,19 @@ class NameStr(Node):
     def parse(tokens):
         nidx, _ns_token, parent_nidx, name = tokens
         return NameStr(
-            nidx=nidx.int(),
-            parent_nidx=parent_nidx.int(),
-            name=name.text,
+            nidx=nidx.uint(),
+            parent_nidx=parent_nidx.uint(),
+            part=name.text,
         )
 
-    def __init__(self, nidx, parent_nidx, name):
+    def __init__(self, nidx, parent_nidx, part):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
-        self.name = name
+        self.part = part
 
     def compile(self, builder):
-        builder.register_name(self.nidx, self.parent_nidx, self.name)
-
+        parent = builder.names[self.parent_nidx]
+        builder.register_name(nidx=self.nidx, name=parent.child(self.part))
 
 class NameId(Node):
 
@@ -132,8 +132,8 @@ class NameId(Node):
     def parse(tokens):
         nidx, _ni_token, parent_nidx, id = tokens
         return NameId(
-            nidx=nidx.int(),
-            parent_nidx=parent_nidx.int(),
+            nidx=nidx.uint(),
+            parent_nidx=parent_nidx.uint(),
             id=id.text,  # TODO: do we care that this isn't an int?
         )
 
@@ -143,7 +143,8 @@ class NameId(Node):
         self.id = id
 
     def compile(self, builder):
-        builder.register_name(self.nidx, self.parent_nidx, self.id)
+        parent = builder.names[self.parent_nidx]
+        builder.register_name(nidx=self.nidx, name=parent.child(self.id))
 
 
 class Universe(Node):
@@ -157,7 +158,7 @@ class UniverseSucc(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _us_token, parent = tokens
-        return UniverseSucc(uidx=uidx.int(), parent=parent.int())
+        return UniverseSucc(uidx=uidx.uint(), parent=parent.uint())
 
     def __init__(self, uidx, parent):
         self.uidx = uidx
@@ -176,9 +177,9 @@ class UniverseMax(Universe):
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseMax(
-            uidx=uidx.int(),
-            lhs=lhs.int(),
-            rhs=rhs.int(),
+            uidx=uidx.uint(),
+            lhs=lhs.uint(),
+            rhs=rhs.uint(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -199,9 +200,9 @@ class UniverseIMax(Universe):
     def parse(tokens):
         uidx, _um_token, lhs, rhs = tokens
         return UniverseIMax(
-            uidx=uidx.int(),
-            lhs=lhs.int(),
-            rhs=rhs.int(),
+            uidx=uidx.uint(),
+            lhs=lhs.uint(),
+            rhs=rhs.uint(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -221,7 +222,7 @@ class UniverseParam(Universe):
     @staticmethod
     def parse(tokens):
         uidx, _up_token, nidx = tokens
-        return UniverseParam(uidx=uidx.int(), nidx=nidx.int())
+        return UniverseParam(uidx=uidx.uint(), nidx=nidx.uint())
 
     def __init__(self, uidx, nidx):
         self.uidx = uidx
@@ -253,8 +254,8 @@ class BVar(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _bval_tok, id = tokens
-        val = BVar(id=id.int())
-        return Expr(eidx=eidx.int(), val=val)
+        val = BVar(id=id.uint())
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, id):
         self.id = id
@@ -270,11 +271,9 @@ class LitStr(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx = tokens[0]
-        _els_tok  = tokens[1]
-        hex_tokens = tokens[2:]
-        lit_val = "".join([chr(int(token.text, 16)) for token in hex_tokens]).decode('utf-8')
+        lit_val = "".join([chr(int(token.text, 16)) for token in tokens[2:]]).decode("utf-8")
         val = LitStr(val=lit_val)
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -290,7 +289,7 @@ class LitNat(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _eli_token, val = tokens
-        return Expr(eidx=eidx.int(), val=LitNat(val=val.nat()))
+        return Expr(eidx=eidx.uint(), val=LitNat(val=val.nat()))
 
     def __init__(self, val):
         self.val = val
@@ -306,8 +305,8 @@ class Sort(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _sort_tok, level = tokens
-        val = Sort(level=level.int())
-        return Expr(eidx=eidx.int(), val=val)
+        val = Sort(level=level.uint())
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, level):
         self.level = level
@@ -322,20 +321,20 @@ class Const(ExprVal):
 
     @staticmethod
     def parse(tokens):
-        eidx, _, name = tokens[:3]
+        eidx, _, nidx = tokens[:3]
         val = Const(
-            name=name.int(),
-            levels=[level.int() for level in tokens[3:]],
+            nidx=nidx.uint(),
+            levels=[level.uint() for level in tokens[3:]],
         )
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
-    def __init__(self, name, levels):
-        self.name = name
+    def __init__(self, nidx, levels):
+        self.nidx = nidx
         self.levels = levels
 
     def to_w_expr(self, builder):
         levels = [builder.levels[level] for level in self.levels]
-        return builder.names[self.name].const(levels)
+        return builder.names[self.nidx].const(levels)
 
 
 class Let(ExprVal):
@@ -344,24 +343,24 @@ class Let(ExprVal):
 
     @staticmethod
     def parse(tokens):
-        eidx, _let_token, name_idx, def_type, def_val, body = tokens
+        eidx, _let_token, nidx, def_type, def_val, body = tokens
         val = Let(
-            name_idx=name_idx.int(),
-            def_type=def_type.int(),
-            def_val=def_val.int(),
-            body=body.int(),
+            nidx=nidx.uint(),
+            def_type=def_type.uint(),
+            def_val=def_val.uint(),
+            body=body.uint(),
         )
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
-    def __init__(self, name_idx, def_type, def_val, body):
-        self.name_idx = name_idx
+    def __init__(self, nidx, def_type, def_val, body):
+        self.nidx = nidx
         self.def_type = def_type
         self.def_val = def_val
         self.body = body
 
     def to_w_expr(self, builder):
         return objects.W_Let(
-            name=builder.names[self.name_idx],
+            name=builder.names[self.nidx],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
             body=builder.exprs[self.body],
@@ -375,10 +374,8 @@ class App(ExprVal):
     @staticmethod
     def parse(tokens):
         eidx, _ea_token, fn_eidx, arg_eidx = tokens
-        return Expr(eidx=eidx.int(), val=App(
-            fn_eidx=fn_eidx.int(),
-            arg_eidx=arg_eidx.int(),
-        ))
+        app = App(fn_eidx=fn_eidx.uint(), arg_eidx=arg_eidx.uint())
+        return Expr(eidx=eidx.uint(), val=app)
 
     def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
@@ -411,12 +408,12 @@ class Lambda(ExprVal):
     def parse(tokens):
         eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
         val = Lambda(
-            binder_name=binder_name.int(),
-            binder_type=binder_type.int(),
+            binder_name=binder_name.uint(),
+            binder_type=binder_type.uint(),
             binder_info=binder_info.text,
-            body=body.int(),
+            body=body.uint(),
         )
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -442,12 +439,12 @@ class ForAll(ExprVal):
     def parse(tokens):
         eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
         val = ForAll(
-            binder_name=binder_name.int(),
-            binder_type=binder_type.int(),
+            binder_name=binder_name.uint(),
+            binder_type=binder_type.uint(),
             binder_info=binder_info.text,
-            body=body.int(),
+            body=body.uint(),
         )
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -460,9 +457,7 @@ class ForAll(ExprVal):
                 name=builder.names[self.binder_name],
                 type=builder.exprs[self.binder_type],
                 info=self.binder_info,
-        ).forall(
-            body=builder.exprs[self.body],
-        )
+        ).forall(body=builder.exprs[self.body])
 
 
 class Proj(ExprVal):
@@ -473,11 +468,11 @@ class Proj(ExprVal):
     def parse(tokens):
         eidx, _, type_name, field_idx, struct_expr = tokens
         val = Proj(
-            type_name=type_name.int(),
-            field_idx=field_idx.int(),
-            struct_expr=struct_expr.int(),
+            type_name=type_name.uint(),
+            field_idx=field_idx.uint(),
+            struct_expr=struct_expr.uint(),
         )
-        return Expr(eidx=eidx.int(), val=val)
+        return Expr(eidx=eidx.uint(), val=val)
 
     def __init__(self, type_name, field_idx, struct_expr):
         self.type_name = type_name
@@ -507,29 +502,29 @@ class Definition(Node):
 
     @staticmethod
     def parse(tokens):
-        _, name_idx, def_type, def_val, hint = tokens[:5]
+        _, nidx, def_type, def_val, hint = tokens[:5]
         start = 5
         # TODO actually use the argument to 'R"
         if hint.text== "R":
             start += 1
         definition = Definition(
-            name_idx=name_idx.int(),
-            def_type=def_type.int(),
-            def_val=def_val.int(),
+            nidx=nidx.uint(),
+            def_type=def_type.uint(),
+            def_val=def_val.uint(),
             hint=hint.text,
-            levels=[each.int() for each in tokens[start:]],
+            levels=[each.uint() for each in tokens[start:]],
         )
         return Declaration(definition)
 
-    def __init__(self, name_idx, def_type, def_val, hint, levels):
-        self.name_idx = name_idx
+    def __init__(self, nidx, def_type, def_val, hint, levels):
+        self.nidx = nidx
         self.def_type = def_type
         self.def_val = def_val
         self.hint = hint
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return builder.names[self.name_idx].definition(
+        return builder.names[self.nidx].definition(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
@@ -543,23 +538,23 @@ class Opaque(Node):
 
     @staticmethod
     def parse(tokens):
-        _, name_idx, def_type, def_val = tokens[:4]
+        _, nidx, def_type, def_val = tokens[:4]
         opaque = Opaque(
-            name_idx=name_idx.int(),
-            def_type=def_type.int(),
-            def_val=def_val.int(),
-            levels=[each.int() for each in tokens[4:]],
+            nidx=nidx.uint(),
+            def_type=def_type.uint(),
+            def_val=def_val.uint(),
+            levels=[each.uint() for each in tokens[4:]],
         )
         return Declaration(opaque)
 
-    def __init__(self, name_idx, def_type, def_val, levels):
-        self.name_idx = name_idx
+    def __init__(self, nidx, def_type, def_val, levels):
+        self.nidx = nidx
         self.def_type = def_type
         self.def_val = def_val
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return builder.names[self.name_idx].opaque(
+        return builder.names[self.nidx].opaque(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
@@ -572,23 +567,23 @@ class Theorem(Node):
 
     @staticmethod
     def parse(tokens):
-        _, name_idx, def_type, def_val = tokens[:4]
+        _, nidx, def_type, def_val = tokens[:4]
         theorem = Theorem(
-            name_idx=name_idx.int(),
-            def_type=def_type.int(),
-            def_val=def_val.int(),
-            levels=[each.int() for each in tokens[4:]],
+            nidx=nidx.uint(),
+            def_type=def_type.uint(),
+            def_val=def_val.uint(),
+            levels=[each.uint() for each in tokens[4:]],
         )
         return Declaration(theorem)
 
-    def __init__(self, name_idx, def_type, def_val, levels):
-        self.name_idx = name_idx
+    def __init__(self, nidx, def_type, def_val, levels):
+        self.nidx = nidx
         self.def_type = def_type
         self.def_val = def_val
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return builder.names[self.name_idx].theorem(
+        return builder.names[self.nidx].theorem(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
             value=builder.exprs[self.def_val],
@@ -601,21 +596,21 @@ class Axiom(Node):
 
     @staticmethod
     def parse(tokens):
-        _, name_idx, def_type = tokens[:3]
+        _, nidx, def_type = tokens[:3]
         axiom = Axiom(
-            name_idx=name_idx.int(),
-            def_type=def_type.int(),
-            levels=[each.int() for each in tokens[3:]],
+            nidx=nidx.uint(),
+            def_type=def_type.uint(),
+            levels=[each.uint() for each in tokens[3:]],
         )
         return Declaration(axiom)
 
-    def __init__(self, name_idx, def_type, levels):
-        self.name_idx = name_idx
+    def __init__(self, nidx, def_type, levels):
+        self.nidx = nidx
         self.def_type = def_type
         self.levels = levels
 
     def to_w_decl(self, builder):
-        return builder.names[self.name_idx].axiom(
+        return builder.names[self.nidx].axiom(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.def_type],
         )
@@ -636,21 +631,15 @@ class InductiveSkeleton(Node):
     @staticmethod
     def parse(tokens):
         pos = 9
-        _, name_idx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
+        _, nidx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
         num_name_idxs = num_name_idxs_str.uint()
-        name_idxs = [
-            nidx.int()
-            for nidx in tokens[pos:(pos + num_name_idxs)]
-        ]
+        name_idxs = [each.uint() for each in tokens[pos:(pos + num_name_idxs)]]
         pos += num_name_idxs
 
         num_ctors = tokens[pos].uint()
         pos += 1
 
-        ctor_name_idxs = [
-            nidx.int()
-            for nidx in tokens[pos:(pos + num_ctors)]
-        ]
+        ctor_name_idxs = [n.uint() for n in tokens[pos:(pos + num_ctors)]]
         pos += num_ctors
         # Hack for double space in the case of 0 ctors
         if num_ctors == 0:
@@ -662,16 +651,16 @@ class InductiveSkeleton(Node):
         if pos > len(tokens):
             levels = []
         else:
-            levels = [each.int() for each in tokens[pos:]]
+            levels = [each.uint() for each in tokens[pos:]]
 
         return InductiveSkeleton(
-            name_idx=name_idx.int(),
-            type_idx=type_idx.int(),
+            nidx=nidx.uint(),
+            type_idx=type_idx.uint(),
             is_reflexive=is_reflexive.bool(),
             is_recursive=is_recursive.bool(),
-            num_nested=num_nested.int(),
-            num_params=num_params.int(),
-            num_indices=num_indices.int(),
+            num_nested=num_nested.uint(),
+            num_params=num_params.uint(),
+            num_indices=num_indices.uint(),
             name_idxs=name_idxs,
             ctor_name_idxs=ctor_name_idxs,
             levels=levels,
@@ -679,7 +668,7 @@ class InductiveSkeleton(Node):
 
     def __init__(
         self,
-        name_idx,
+        nidx,
         type_idx,
         is_reflexive,
         is_recursive,
@@ -690,7 +679,7 @@ class InductiveSkeleton(Node):
         ctor_name_idxs,
         levels,
     ):
-        self.name_idx = name_idx
+        self.nidx = nidx
         self.type_idx = type_idx
         self.is_reflexive = is_reflexive
         self.is_recursive = is_recursive
@@ -718,7 +707,7 @@ class InductiveSkeleton(Node):
         """
         assert len(self.constructors) == len(self.ctor_name_idxs)
         assert None not in self.constructors
-        declaration = builder.names[self.name_idx].inductive(
+        declaration = builder.names[self.nidx].inductive(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             names=[builder.names[nidx] for nidx in self.name_idxs],
@@ -738,20 +727,20 @@ class Constructor(Node):
 
     @staticmethod
     def parse(tokens):
-        _, name_idx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
+        _, nidx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
         return Constructor(
-            name_idx=name_idx.int(),
-            type_idx=type_idx.int(),
-            inductive_nidx=inductive_nidx.int(),
-            cidx=cidx.int(),
-            num_params=num_params.int(),
-            num_fields=num_fields.int(),
-            levels=[each.int() for each in tokens[7:]],
+            nidx=nidx.uint(),
+            type_idx=type_idx.uint(),
+            inductive_nidx=inductive_nidx.uint(),
+            cidx=cidx.uint(),
+            num_params=num_params.uint(),
+            num_fields=num_fields.uint(),
+            levels=[each.uint() for each in tokens[7:]],
         )
 
     def __init__(
         self,
-        name_idx,
+        nidx,
         type_idx,
         inductive_nidx,
         cidx,
@@ -759,7 +748,7 @@ class Constructor(Node):
         num_fields,
         levels,
     ):
-        self.name_idx = name_idx
+        self.nidx = nidx
         self.type_idx = type_idx
         self.inductive_nidx = inductive_nidx
         self.cidx = cidx
@@ -774,7 +763,7 @@ class Constructor(Node):
         Then check whether our parent inductive type has all its constructors
         now set, in which case compile it too.
         """
-        constructor = builder.names[self.name_idx].constructor(
+        constructor = builder.names[self.nidx].constructor(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             num_params=self.num_params,
@@ -785,7 +774,7 @@ class Constructor(Node):
         assert skeleton.constructors[self.cidx] is None, (
             "Constructor %s.%s already defined at index %d" % (
                 builder.names[self.inductive_nidx].pretty(),
-                builder.names[self.name_idx].pretty(),
+                builder.names[self.nidx].pretty(),
                 self.cidx,
             )
         )
@@ -804,14 +793,14 @@ class Recursor(Node):
 
     @staticmethod
     def parse(tokens):
-        _rec_token, name_idx, expr_idx, num_ind_name_idxs_str = tokens[:4]
+        _rec_token, nidx, expr_idx, num_ind_name_idxs_str = tokens[:4]
 
         num_ind_name_idxs = num_ind_name_idxs_str.uint()
 
         pos = 4
         ind_name_idxs = [
-            nidx.int()
-            for nidx in tokens[pos:(pos + num_ind_name_idxs)]
+            each.uint()
+            for each in tokens[pos:(pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
 
@@ -820,10 +809,7 @@ class Recursor(Node):
         num_rule_idxs = num_rule_idxs_str.uint()
         pos += 5
 
-        rule_idxs = [
-            rule_idx.int()
-            for rule_idx in tokens[pos:pos + num_rule_idxs]
-        ]
+        rule_idxs = [each.uint() for each in tokens[pos:pos + num_rule_idxs]]
         pos += num_rule_idxs
 
         # Hack for double space in the case of 0 rules
@@ -833,26 +819,26 @@ class Recursor(Node):
                 assert tokens[pos].text == ""
             pos += 1
 
-        k = tokens[pos].text
+        k = tokens[pos]
         pos += 1
 
         recursor = Recursor(
-            name_idx=name_idx.int(),
-            type_idx=expr_idx.int(),
+            nidx=nidx.uint(),
+            type_idx=expr_idx.uint(),
             ind_name_idxs=ind_name_idxs,
             rule_idxs=rule_idxs,
-            k=int(k),
-            num_params=num_params.int(),
-            num_indices=num_indices.int(),
-            num_motives=num_motives.int(),
-            num_minors=num_minors.int(),
-            levels=[param.int() for param in tokens[pos:]],
+            k=k.uint(),
+            num_params=num_params.uint(),
+            num_indices=num_indices.uint(),
+            num_motives=num_motives.uint(),
+            num_minors=num_minors.uint(),
+            levels=[param.uint() for param in tokens[pos:]],
         )
         return Declaration(recursor)
 
     def __init__(
         self,
-        name_idx,
+        nidx,
         type_idx,
         k,
         num_params,
@@ -863,7 +849,7 @@ class Recursor(Node):
         rule_idxs,
         levels,
     ):
-        self.name_idx = name_idx
+        self.nidx = nidx
         self.type_idx = type_idx
         self.k = k
         self.num_params = num_params
@@ -876,7 +862,7 @@ class Recursor(Node):
         self.rule_idxs = rule_idxs
 
     def to_w_decl(self, builder):
-        return builder.names[self.name_idx].recursor(
+        return builder.names[self.nidx].recursor(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             names=[builder.names[nidx] for nidx in self.ind_name_idxs],
@@ -897,10 +883,10 @@ class RecRule(Node):
     def parse(tokens):
         rule_idx, _, ctor_name, num_fields, val = tokens
         return RecRule(
-            rule_idx=rule_idx.int(),
-            ctor_name_idx=ctor_name.int(),
-            num_fields=num_fields.int(),
-            val=val.int(),
+            rule_idx=rule_idx.uint(),
+            ctor_name_idx=ctor_name.uint(),
+            num_fields=num_fields.uint(),
+            val=val.uint(),
         )
 
     def __init__(self, rule_idx, ctor_name_idx, num_fields, val):

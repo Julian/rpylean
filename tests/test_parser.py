@@ -19,8 +19,8 @@ def test_ns():
         2 #NS 1 intro
         """
     ) == [
-        parser.NameStr(nidx=1, parent_nidx=0, name="MyTrue"),
-        parser.NameStr(nidx=2, parent_nidx=1, name="intro"),
+        parser.NameStr(nidx=1, parent_nidx=0, part="MyTrue"),
+        parser.NameStr(nidx=2, parent_nidx=1, part="intro"),
     ]
 
 
@@ -43,11 +43,11 @@ def test_inductive():
         #IND 1 0 0 0 0 0 0 1 1 0 ⏎
         """
     ) == [
-        parser.NameStr(nidx=1, parent_nidx=0, name="Empty"),
+        parser.NameStr(nidx=1, parent_nidx=0, part="Empty"),
         parser.UniverseSucc(uidx=1, parent=0),
         parser.Expr(eidx=0, val=parser.Sort(level=1)),
         parser.InductiveSkeleton(
-            name_idx=1,
+            nidx=1,
             type_idx=0,
             name_idxs=[1],
             ctor_name_idxs=[],
@@ -73,12 +73,12 @@ def test_constructor():
         #CTOR 2 1 1 0 0 0 ⏎
         """
     ) == [
-        parser.NameStr(nidx=1, parent_nidx=0, name="True"),
-        parser.NameStr(nidx=2, parent_nidx=1, name="intro"),
+        parser.NameStr(nidx=1, parent_nidx=0, part="True"),
+        parser.NameStr(nidx=2, parent_nidx=1, part="intro"),
         parser.UniverseSucc(uidx=1, parent=0),
         parser.Expr(eidx=0, val=parser.Sort(level=1)),
         parser.InductiveSkeleton(
-            name_idx=1,
+            nidx=1,
             type_idx=0,
             name_idxs=[1],
             ctor_name_idxs=[2],
@@ -89,9 +89,9 @@ def test_constructor():
             num_params=0,
             num_indices=0,
         ),
-        parser.Expr(eidx=1, val=parser.Const(name=1, levels=[])),
+        parser.Expr(eidx=1, val=parser.Const(nidx=1, levels=[])),
         parser.Constructor(
-            name_idx=2,
+            nidx=2,
             type_idx=1,
             inductive_nidx=1,
             cidx=0,

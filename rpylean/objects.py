@@ -673,6 +673,9 @@ class W_FVar(W_Expr):
         )
 
     def infer(self, env):
+        """
+        A free variable's type comes from the binder's type which it replaced.
+        """
         return self.binder.type
 
     def bind_fvar(self, fvar, depth):

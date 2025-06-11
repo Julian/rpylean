@@ -68,10 +68,9 @@ class EnvironmentBuilder(object):
             item.compile(self)
         return self
 
-    def register_name(self, nidx, parent_nidx, name):
+    def register_name(self, nidx, name):
         assert nidx == len(self.names), nidx
-        parent = self.names[parent_nidx]
-        self.names.append(parent.child(name))
+        self.names.append(name)
 
     def register_expr(self, eidx, w_expr):
         assert eidx == len(self.exprs), eidx
@@ -92,8 +91,8 @@ class EnvironmentBuilder(object):
 
         It will be finished when we see all of its constructors.
         """
-        assert skeleton.name_idx not in self.inductive_skeletons
-        self.inductive_skeletons[skeleton.name_idx] = skeleton
+        assert skeleton.nidx not in self.inductive_skeletons
+        self.inductive_skeletons[skeleton.nidx] = skeleton
 
     def register_declaration(self, decl):
         seen = {}
