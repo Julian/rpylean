@@ -767,6 +767,10 @@ class W_Sort(W_Expr):
         return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
 
 
+PROP = W_LEVEL_ZERO.sort()
+TYPE = W_LEVEL_ZERO.succ().sort()
+
+
 # Takes the level params from 'const', and substitutes them into 'target'
 def apply_const_level_params(const, target, env):
     decl = env.declarations[const.name]

@@ -6,7 +6,15 @@ from textwrap import dedent
 from rpython.rlib.rbigint import rbigint
 import pytest
 
-from rpylean.objects import W_LEVEL_ZERO, Name, W_BVar, W_LitNat, W_LitStr
+from rpylean.objects import (
+    W_LEVEL_ZERO,
+    PROP,
+    TYPE,
+    Name,
+    W_BVar,
+    W_LitNat,
+    W_LitStr,
+)
 
 
 @pytest.mark.parametrize(
@@ -115,7 +123,7 @@ class TestInductive(object):
     def test_multiple_constructors(self):
         name = Name.simple("Foo")
         Foo = name.inductive(
-            type=W_LEVEL_ZERO.sort(),
+            type=PROP,
             constructors=[
                 name.child("bar").constructor(type=name.const()),
                 name.child("baz").constructor(type=name.const()),
@@ -133,7 +141,7 @@ class TestInductive(object):
     def test_one_constructor(self):
         name = Name.simple("Foo")
         Foo = name.inductive(
-            type=W_LEVEL_ZERO.sort(),
+            type=PROP,
             constructors=[name.child("bar").constructor(type=name.const())],
         )
         assert Foo.pretty() == dedent(
@@ -144,7 +152,7 @@ class TestInductive(object):
         ).strip("\n")
 
     def test_no_constructors(self):
-        Empty = Name.simple("Empty").inductive(type=W_LEVEL_ZERO.succ().sort())
+        Empty = Name.simple("Empty").inductive(type=TYPE)
         assert Empty.pretty() == "inductive Empty : Type"
 
 

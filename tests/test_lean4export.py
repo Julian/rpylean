@@ -7,6 +7,7 @@ from rpython.rlib.rbigint import rbigint
 from rpylean.environment import EnvironmentBuilder, Environment, from_lines
 from rpylean.objects import (
     W_LEVEL_ZERO,
+    TYPE,
     Name,
     W_BVar,
     W_Let,
@@ -72,7 +73,6 @@ def test_dump_level():
 def test_dump_expr_lambda():
     bvar = W_BVar(0)
     fun = Name.simple("a").binder(type=bvar).fun(body=bvar)
-    Type = W_LEVEL_ZERO.succ().sort()
     assert from_source(
         #eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
         """
@@ -86,10 +86,10 @@ def test_dump_expr_lambda():
         """,
     ) == EnvironmentBuilder(
         exprs=[
-            W_LEVEL_ZERO.succ().sort(),
+            TYPE,
             bvar,
             fun,
-            Name.simple("A").implicit_binder(type=Type).fun(body=fun),
+            Name.simple("A").implicit_binder(type=TYPE).fun(body=fun),
         ],
         levels=[
             W_LEVEL_ZERO,

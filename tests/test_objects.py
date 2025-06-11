@@ -3,6 +3,8 @@ import pytest
 from rpylean.objects import (
     NAT,
     NAT_ZERO,
+    PROP,
+    TYPE,
     W_LEVEL_ZERO,
     Binder,
     Name,
@@ -113,12 +115,11 @@ class TestName(object):
 
     def test_inductive(self):
         Empty = Name.simple("Empty")
-        Type = W_LEVEL_ZERO.succ().sort()
-        assert Empty.inductive(type=Type) == W_Declaration(
+        assert Empty.inductive(type=TYPE) == W_Declaration(
             name=Empty,
             levels=[],
             w_kind=W_Inductive(
-                type=Type,
+                type=TYPE,
                 names=[Empty],
                 constructors=[],
                 num_nested=0,
@@ -389,7 +390,7 @@ class TestLevel(object):
         assert W_LEVEL_ZERO.succ() == W_LevelSucc(W_LEVEL_ZERO)
 
     def test_sort(self):
-        assert W_LEVEL_ZERO.sort() == W_Sort(W_LEVEL_ZERO)
+        assert W_LEVEL_ZERO.sort() == W_Sort(W_LEVEL_ZERO) == PROP
 
 
 class TestTheorem(object):
