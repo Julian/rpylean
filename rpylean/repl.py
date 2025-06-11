@@ -87,6 +87,28 @@ def check(env, args, _, stdout, stderr):
         stdout.write("%s correctly type checks.\n" % name.pretty())
 
 
+@command(
+    ["first", "f"],
+    help="Find the first declaration which does not type check.",
+)
+def first(env, _, __, stdout, stderr):
+    for name, each in env.declarations.items():
+        try:
+            each.type_check(env)
+        except W_TypeError as error:
+            stdout.write(error.str())
+            return
+        except Exception as error:
+            stderr.write(
+                "Unexpected error when checking %s: %s\n" % (
+                    name.pretty(),
+                    error,
+                ),
+            )
+            return
+    stdout.write("All declarations type check.\n")
+
+
 @command(["print", "p"], nargs=1, help="Pretty print a declaration by name.")
 def print_decl(env, args, _, stdout, stderr):
     name = Name.from_str(args[0])
