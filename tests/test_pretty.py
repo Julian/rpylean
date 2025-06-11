@@ -17,29 +17,36 @@ from rpylean.objects import (
 )
 
 
-@pytest.mark.parametrize(
-    "parts, expected",
-    [
-        (["foo"], "foo"),
-        (["Lean", "Meta", "whnf"], "Lean.Meta.whnf"),
-        (["Foo", "bar.baz"], "Foo.«bar.baz»"),
-        (["_uniq", 231], "_uniq.231"),
-        ([], "[anonymous]"),
-    ],
-    ids=[
-        "simple",
-        "multipart_hierarchical",
-        "with_atomic_part",
-        "with_number",
-        "anonymous",
-    ]
-)
-def test_name(parts, expected):
-    assert Name(parts).pretty() == expected
-
-
 u = Name.simple("u").level()
 v = Name.simple("v").level()
+
+
+class TestName(object):
+    @pytest.mark.parametrize(
+        "parts, expected",
+        [
+            (["foo"], "foo"),
+            (["Lean", "Meta", "whnf"], "Lean.Meta.whnf"),
+            (["Foo", "bar.baz"], "Foo.«bar.baz»"),
+            (["_uniq", 231], "_uniq.231"),
+            ([], "[anonymous]"),
+        ],
+        ids=[
+            "simple",
+            "multipart_hierarchical",
+            "with_atomic_part",
+            "with_number",
+            "anonymous",
+        ]
+    )
+    def test_no_levels(self, parts, expected):
+        assert Name(parts).pretty() == expected
+
+    def test_one_level(self):
+        assert Name.simple("foo").pretty_with_levels([u]) == "foo.{u}"
+
+    def test_multiple_levels(self):
+        assert Name.simple("bar").pretty_with_levels([u, v]) == "bar.{u, v}"
 
 
 @pytest.mark.parametrize(
@@ -97,12 +104,13 @@ def test_let():
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
-def test_forall():
-    x = Name.simple("x")
-    forall = x.binder(type=Name.simple("Nat").const()).forall(
-        Name.simple("P").const(),
-    )
-    assert forall.pretty() == "∀ (x : Nat), P"
+class TestForall(object):
+    def test_default_binder(self):
+        x = Name.simple("x")
+        forall = x.binder(type=Name.simple("Nat").const()).forall(
+            Name.simple("P").const(),
+        )
+        assert forall.pretty() == "(x : Nat) → P"
 
 
 class TestConst(object):
@@ -180,12 +188,9 @@ class TestRecursor(object):
         )
 
         assert rec.pretty() == (
-            "recursor Empty.rec"
-            # FIXME
-            # .{u}
-            " : "
-            # "(motive : Empty → Sort u) → (t : Empty) → motive t"
-            "∀ (motive : ∀ (t : Empty), Sort u), ∀ (t : Empty), motive t"
+            "recursor Empty.rec.{u} : "
+            # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
+            "(motive : (t : Empty) → Sort u) → (t : Empty) → motive t"
         )
 
 

@@ -91,6 +91,15 @@ class Name(_Item):
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
 
+    def pretty_with_levels(self, levels):
+        pretty = self.pretty()
+        if not levels:
+            return pretty
+        return "%s.{%s}" % (
+            pretty,
+            ", ".join([level.pretty() for level in levels]),
+        )
+
     def binder(self, type):
         """
         Bind this name in a (default) binder.
@@ -1084,7 +1093,7 @@ class W_FunBase(W_Expr):
 class W_ForAll(W_FunBase):
     def pretty(self):
         body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
-        return "∀ %s, %s" % (self.binder.pretty(), body_pretty)
+        return "%s → %s" % (self.binder.pretty(), body_pretty)
 
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)
@@ -1494,7 +1503,9 @@ class W_Declaration(_Item):
         return self.w_kind.type_check(*args)
 
     def pretty(self):
-        return self.w_kind.delaborate(self.name)  # Is this the right vocabulary?!
+        # Is delaborate the right vocabulary for what we're doing?!
+        pretty = self.name.pretty_with_levels(self.levels)
+        return self.w_kind.delaborate(pretty)
 
 
 class W_DeclarationKind(_Item):
@@ -1517,9 +1528,9 @@ class W_Definition(DefOrTheorem):
         self.value = value
         self.hint = hint
 
-    def delaborate(self, name):
+    def delaborate(self, name_with_levels):
         return "def %s : %s := %s" % (
-            name.pretty(),
+            name_with_levels,
             self.type.pretty(),
             self.value.pretty(),
         )
@@ -1549,9 +1560,9 @@ class W_Theorem(DefOrTheorem):
         self.type = type
         self.value = value
 
-    def delaborate(self, name):
+    def delaborate(self, name_with_levels):
         return "theorem %s : %s := %s" % (
-            name.pretty(),
+            name_with_levels,
             self.type.pretty(),
             self.value.pretty(),
         )
@@ -1564,8 +1575,8 @@ class W_Axiom(W_DeclarationKind):
     def __init__(self, type):
         self.type = type
 
-    def delaborate(self, name):
-        return "axiom %s : %s" % (name.pretty(), self.type.pretty())
+    def delaborate(self, name_with_levels):
+        return "axiom %s : %s" % (name_with_levels, self.type.pretty())
 
     def type_check(self, env):
         # TODO - implement type checking
@@ -1601,7 +1612,7 @@ class W_Inductive(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def delaborate(self, name):
+    def delaborate(self, name_with_levels):
         ctors = [
             each.w_kind.delaborate_in(
                 constructor_name=each.name,
@@ -1610,7 +1621,7 @@ class W_Inductive(W_DeclarationKind):
             for each in self.constructors
         ]
         return "inductive %s : %s%s" % (
-            name.pretty(),
+            name_with_levels,
             self.type.pretty(),
             ("\n" + "\n".join(ctors)) if ctors else "",
         )
@@ -1630,8 +1641,8 @@ class W_Constructor(W_DeclarationKind):
     def get_type(self):
         return self.type
 
-    def delaborate(self, name):
-        return "constructor %s : %s" % (name.pretty(), self.type.pretty())
+    def delaborate(self, name_with_levels):
+        return "constructor %s : %s" % (name_with_levels, self.type.pretty())
 
     def delaborate_in(self, constructor_name, inductive):
         if self.type in [name.const() for name in inductive.names]:
@@ -1668,11 +1679,8 @@ class W_Recursor(W_DeclarationKind):
     def get_type(self):
         return self.type
 
-    def delaborate(self, name):
-        return "recursor %s : %s" % (
-            name.pretty(),
-            self.type.pretty(),
-        )
+    def delaborate(self, name_with_levels):
+        return "recursor %s : %s" % (name_with_levels, self.type.pretty())
 
 
 def warn(message):
