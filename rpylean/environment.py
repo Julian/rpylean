@@ -68,6 +68,10 @@ class EnvironmentBuilder(object):
             item.compile(self)
         return self
 
+    # We assume nidx, eidx and uidx are always the next index to use.
+    # This seems to hold for exports we've seen, but if it ever weren't the
+    # case we could just have these methods renumber the indices so they're
+    # still contiguous.
     def register_name(self, nidx, name):
         assert nidx == len(self.names), nidx
         self.names.append(name)
@@ -77,11 +81,13 @@ class EnvironmentBuilder(object):
         self.exprs.append(w_expr)
 
     def register_level(self, uidx, level):
-        # Are levels always dense? If not, we can presumably renumber them?
         assert uidx == len(self.levels), uidx
         self.levels.append(level)
 
     def register_rec_rule(self, rule_idx, w_recrule):
+        """
+        Store a rule until its recursor comes to grab it with its siblings.
+        """
         assert rule_idx not in self.rec_rules, rule_idx
         self.rec_rules[rule_idx] = w_recrule
 
