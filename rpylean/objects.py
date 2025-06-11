@@ -393,7 +393,7 @@ class W_Level(_Item):
         """
         Return the (simplified) max of this level with another.
         """
-        if self == other:
+        if self is other:
             return self
 
         if isinstance(self, W_LevelSucc):
@@ -416,8 +416,9 @@ class W_Level(_Item):
         """
         Return the (simplified) imax of this level with another.
         """
-        if self == other:
+        if self is other:
             return self
+
         if isinstance(other, W_LevelZero):
             return W_LEVEL_ZERO
         if isinstance(self, W_LevelZero) or self == W_LEVEL_ZERO.succ():
@@ -656,6 +657,9 @@ class W_FVar(W_Expr):
         assert isinstance(binder, Binder)
         self.binder = binder
 
+    def __repr__(self):
+        return "<FVar id={} binder={}>".format(self.id, self.binder.pretty())
+
     def incr_free_bvars(self, count, depth):
         return self
 
@@ -683,9 +687,6 @@ class W_FVar(W_Expr):
             return W_BVar(depth)
         return self
 
-    def __repr__(self):
-        return "(FVar %s %s)" % (self.id, self.binder)
-
     def pretty(self):
         return self.binder.name.pretty()
 
@@ -699,6 +700,9 @@ class W_LitStr(W_Expr):
         return repr(self.val)
 
     def infer(self, env):
+        """
+        String literals infer as the constant named String.
+        """
         return STRING
 
     def pretty(self):
@@ -716,6 +720,7 @@ class W_Sort(W_Expr):
         self.level = level
 
     def __repr__(self):
+        # No class name here, as we wouldn't want to see <Sort Type>
         return "<%s>" % (self.pretty(),)
 
     def whnf(self, env):
@@ -912,6 +917,9 @@ class W_LitNat(W_Expr):
         return self
 
     def infer(self, env):
+        """
+        Nat literals infer as the constant named Nat.
+        """
         return NAT
 
 
