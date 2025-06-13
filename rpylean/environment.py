@@ -321,6 +321,10 @@ class Environment(object):
         raise RuntimeError("Expected Sort, got %s" % expr_type)
 
 
+#: The empty environment.
+Environment.EMPTY = Environment.having([])
+
+
 class CheckResult(object):
     """
     The result of type checking an environment.
