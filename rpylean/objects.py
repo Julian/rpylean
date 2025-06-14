@@ -306,6 +306,13 @@ class Binder(_Item):
             self.right,
         )
 
+    def is_default(self):
+        """
+        Is this a default binder (i.e. not implicit, instance or strict)?
+        """
+        return (self.left, self.right) == ("(", ")")
+
+
     def fvar(self):
         """
         An FVar for this binder.
@@ -1092,8 +1099,26 @@ class W_FunBase(W_Expr):
 
 class W_ForAll(W_FunBase):
     def pretty(self):
-        body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
-        return "%s → %s" % (self.binder.pretty(), body_pretty)
+        """
+        Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
+
+        ForAll represents two concepts which implementation-wise are
+        "the "same", but which are differentiated when pretty printing.
+        Those are:
+
+            * universally quantified propositions, i.e. "true" foralls
+            * dependent function types
+
+        We try to follow Lean's real pretty printer for deciding when to
+        render which.
+        """
+        lhs = (
+            self.binder.type.pretty()
+            if self.binder.is_default()
+            else self.binder.pretty()
+        )
+        rhs = self.body.instantiate(self.binder.fvar(), 0).pretty()
+        return "%s → %s" % (lhs, rhs)
 
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)

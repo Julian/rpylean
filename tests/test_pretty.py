@@ -8,6 +8,7 @@ import pytest
 
 from rpylean.objects import (
     W_LEVEL_ZERO,
+    NAT,
     PROP,
     TYPE,
     Name,
@@ -104,13 +105,36 @@ def test_let():
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
-class TestForall(object):
-    def test_default_binder(self):
-        x = Name.simple("x")
-        forall = x.binder(type=Name.simple("Nat").const()).forall(
-            Name.simple("P").const(),
-        )
-        assert forall.pretty() == "(x : Nat) → P"
+i = Name.simple("i")
+p, q = Name.simple("p").const(), Name.simple("q").const()
+P = Name.simple("P").const()
+alpha = Name.simple("α").const()
+
+
+@pytest.mark.parametrize(
+    "forall, expected",
+    [
+        (   # (i : Nat) → Nat
+            i.binder(type=NAT).forall(body=NAT),
+            "Nat → Nat",
+        ),
+
+            # {i : Nat} → Nat  -- {i : Nat} → Nat
+            # (h : p) → q      -- p → q
+            # (i : Nat) → p    --  ∀ (i : Nat), p
+            # (i : Nat) → α i  -- (i : Nat) → α i
+            # {i : Nat} → α i  -- {i : Nat} → α i
+            # (i : Nat) → P i  -- ∀ (i : Nat), P i
+            # {i : Nat} → P i  -- ∀ {i : Nat}, P i
+            # {i : Nat} → p    -- ∀ {i : Nat}, p
+    ],
+    ids=[
+        "type_default_binder_to_type",
+        # "type_implicit_binder_to_type",
+    ],
+)
+def test_forall(forall, expected):
+    assert forall.pretty() == expected
 
 
 class TestConst(object):
@@ -190,7 +214,7 @@ class TestRecursor(object):
         assert rec.pretty() == (
             "recursor Empty.rec.{u} : "
             # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
-            "(motive : (t : Empty) → Sort u) → (t : Empty) → motive t"
+            "Empty → Sort u → Empty → motive t"
         )
 
 

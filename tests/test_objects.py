@@ -231,6 +231,12 @@ class TestBinder(object):
         forall = x.fun(body=y)
         assert forall == W_Lambda(binder=x, body=y)
 
+    def test_default_is_default(self):
+        assert Name.simple("x").binder(type=NAT).is_default()
+
+    def test_not_default_is_not_default(self):
+        assert not Name.simple("x").implicit_binder(type=NAT).is_default()
+
 
 u = Name.simple("u").level()
 v = Name.simple("v").level()
