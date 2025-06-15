@@ -11,7 +11,7 @@ from rpylean.environment import from_export
 from rpylean import objects as o  # noqa: F401
 
 Name = o.Name
-n = Name.simple
+n = names = o.names
 
 __example__ = os.environ.get("RPYLEAN_EXAMPLE", "")
 if __example__:

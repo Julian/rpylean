@@ -27,6 +27,7 @@ from rpylean.objects import (
     W_Recursor,
     W_Sort,
     W_Theorem,
+    names,
 )
 
 
@@ -210,6 +211,10 @@ class TestName(object):
             left="⦃",
             right="⦄",
         )
+
+
+def test_names():
+    assert names("foo", "A.b") == [Name.simple("foo"), Name(["A", "b"])]
 
 
 class TestBinder(object):

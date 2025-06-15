@@ -240,6 +240,13 @@ class Name(_Item):
         return W_LevelParam(self)
 
 
+def names(*many):
+    """
+    Create a bunch of names at once.
+    """
+    return [Name.from_str(each) for each in many]
+
+
 #: The anonymous name.
 Name.ANONYMOUS = Name([])
 
