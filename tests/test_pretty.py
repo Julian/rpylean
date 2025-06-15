@@ -9,6 +9,7 @@ import pytest
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
+    NAT_ZERO,
     PROP,
     TYPE,
     Name,
@@ -216,6 +217,19 @@ class TestRecursor(object):
             # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
             "Empty → Sort u → Empty → motive t"
         )
+
+
+class TestTheorem(object):
+    def test_delaborate(self):
+        # FIXME: this theorem is not a Prop, but that's too annoying now
+        theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
+        assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
+
+
+class TestAxiom(object):
+    def test_delaborate(self):
+        axiom = Name.simple("sorryAx").axiom(type=NAT)
+        assert axiom.pretty() == "axiom sorryAx : Nat"
 
 
 def test_litnat():

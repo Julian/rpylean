@@ -399,19 +399,6 @@ class TestLevel(object):
         assert W_LEVEL_ZERO.sort() == W_Sort(W_LEVEL_ZERO) == PROP
 
 
-class TestTheorem(object):
-    def test_delaborate(self):
-        # FIXME: this theorem is not a Prop, but that's too annoying now
-        theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
-        assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
-
-
-class TestAxiom(object):
-    def test_delaborate(self):
-        axiom = Name.simple("sorryAx").axiom(type=NAT)
-        assert axiom.pretty() == "axiom sorryAx : Nat"
-
-
 class TestConst(object):
     def test_child(self):
         name = Name.simple("foo")
