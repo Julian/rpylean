@@ -170,6 +170,9 @@ class Environment(object):
     def __init__(self, declarations):
         self.declarations = declarations
 
+        #: Any declarations we have already type checked.
+        self._constants = r_dict(Name.eq, Name.hash)
+
     def __getitem__(self, name_or_list):
         if isinstance(name_or_list, str):
             name_or_list = [name_or_list]
@@ -196,6 +199,12 @@ class Environment(object):
             by_name[declaration.name] = declaration
         return Environment(declarations=by_name)
 
+    def pretty(self, name):
+        """
+        Pretty-print the declaration with the given name.
+        """
+        return self.declarations[name].pretty(self._constants)
+
     def type_check(self):
         """
         Type check each declaration in the environment.
@@ -203,9 +212,14 @@ class Environment(object):
         invalid = []
         for name, each in self.declarations.items():
             try:
-                each.type_check(self)
+                inferred = each.type_check(self)
             except W_TypeError as error:
                 invalid.append((name, each, error))
+            else:
+                if inferred is not None:
+                    # TODO: assert we're not already in _constants,
+                    #       or at least that we're identical to what's there
+                    self._constants[name] = inferred
         return CheckResult(self, invalid)
 
     def dump_pretty(self, stdout):

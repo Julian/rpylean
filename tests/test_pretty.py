@@ -6,6 +6,7 @@ from textwrap import dedent
 from rpython.rlib.rbigint import rbigint
 import pytest
 
+from rpylean.environment import Environment
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
@@ -16,6 +17,7 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    names,
 )
 
 
@@ -106,23 +108,42 @@ def test_let():
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
-i = Name.simple("i")
-p, q = Name.simple("p").const(), Name.simple("q").const()
-P = Name.simple("P").const()
-alpha = Name.simple("α").const()
+# TODO: something like the `variable` command?
+Nat = Name.simple("Nat").inductive(
+    type=TYPE,
+    constructors=[],  # FIXME: zero, succ obviously
+)
+print()
+i, h, p, q, P, alpha = names("i", "h", "p", "q", "P", "α")
+constants = {
+    Name.simple("Nat"): Nat,
+    i: Nat,
+    p: PROP,
+    q: PROP,
+    P: P.binder(type=NAT).forall(body=PROP),
+    alpha: alpha.binder(type=NAT).forall(body=TYPE),
+}
 
 
 @pytest.mark.parametrize(
     "forall, expected",
     [
-        (   # (i : Nat) → Nat
+        (  # (i : Nat) → Nat
             i.binder(type=NAT).forall(body=NAT),
             "Nat → Nat",
         ),
-
-            # {i : Nat} → Nat  -- {i : Nat} → Nat
-            # (h : p) → q      -- p → q
-            # (i : Nat) → p    --  ∀ (i : Nat), p
+        (  # {i : Nat} → Nat
+            i.implicit_binder(type=NAT).forall(body=NAT),
+            "{i : Nat} → Nat",
+        ),
+        (  # (h : p) → q
+            h.binder(type=p.const()).forall(body=q.const()),
+            "p → q",
+        ),
+        (  # (i : Nat) → p
+            i.binder(type=NAT).forall(body=p.const()),
+            "∀ (i : Nat), p",
+        ),
             # (i : Nat) → α i  -- (i : Nat) → α i
             # {i : Nat} → α i  -- {i : Nat} → α i
             # (i : Nat) → P i  -- ∀ (i : Nat), P i
@@ -131,11 +152,13 @@ alpha = Name.simple("α").const()
     ],
     ids=[
         "type_default_binder_to_type",
-        # "type_implicit_binder_to_type",
+        "type_implicit_binder_to_type",
+        "prop_default_binder_to_prop",
+        "type_default_binder_to_prop",
     ],
 )
 def test_forall(forall, expected):
-    assert forall.pretty() == expected
+    assert forall.pretty(constants=constants) == expected
 
 
 class TestConst(object):

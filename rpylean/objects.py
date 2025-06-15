@@ -86,7 +86,7 @@ class Name(_Item):
             hash_val ^= compute_hash(c)
         return hash_val
 
-    def pretty(self):
+    def pretty(self, constants=None):
         if not self.components:
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
@@ -305,7 +305,7 @@ class Binder(_Item):
     def fun(self, body):
         return W_Lambda(binder=self, body=body)
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "%s%s : %s%s" % (
             self.left,
             self.name.pretty(),
@@ -382,7 +382,7 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    def pretty(self):
+    def pretty(self, constants=None):
         parts = []
         text, balance = self.pretty_parts()
         if text:
@@ -632,7 +632,7 @@ class W_BVar(W_Expr):
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "(BVar [%s])" % (self.id,)
 
     def syntactic_eq(self, other):
@@ -710,7 +710,7 @@ class W_FVar(W_Expr):
             return W_BVar(depth)
         return self
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return self.binder.name.pretty()
 
 
@@ -728,7 +728,7 @@ class W_LitStr(W_Expr):
         """
         return STRING
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return '"%s"' % (self.val,)
 
     def instantiate(self, expr, depth):
@@ -758,7 +758,7 @@ class W_Sort(W_Expr):
     def instantiate(self, expr, depth):
         return self
 
-    def pretty(self):
+    def pretty(self, constants=None):
         """
         Pretty format this Sort.
         """
@@ -817,7 +817,7 @@ class W_Const(W_Expr):
         """
         return self.name.child(part).const()
 
-    def pretty(self):
+    def pretty(self, constants=None):
         name = self.name.pretty()
         if not self.levels:
             return name
@@ -903,7 +903,7 @@ class W_LitNat(W_Expr):
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return self.val.str()
 
     def instantiate(self, expr, depth):
@@ -998,7 +998,7 @@ class W_Proj(W_Expr):
     def instantiate(self, expr, depth):
         return W_Proj(self.struct_name, self.field_idx, self.struct_expr.instantiate(expr, depth))
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "<W_Proj struct_name='%s' field_idx='%s' struct_expr='%s'>" % (
             self.struct_name.pretty(),
             self.field_idx,
@@ -1105,7 +1105,7 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
-    def pretty(self):
+    def pretty(self, constants={}):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
 
@@ -1119,13 +1119,19 @@ class W_ForAll(W_FunBase):
         We try to follow Lean's real pretty printer for deciding when to
         render which.
         """
-        lhs = (
-            self.binder.type.pretty()
-            if self.binder.is_default()
-            else self.binder.pretty()
-        )
-        rhs = self.body.instantiate(self.binder.fvar(), 0).pretty()
-        return "%s → %s" % (lhs, rhs)
+        lhs_type = None
+        if isinstance(self.binder.type, W_Const):
+            lhs_type = constants.get(self.binder.type.name, None)
+
+        rhs = self.body.instantiate(self.binder.fvar(), 0)
+        rhs_type = None
+        if isinstance(rhs, W_Const):
+            rhs_type = constants.get(rhs.name, None)
+        if lhs_type is not PROP and rhs_type is PROP:
+            return "∀ %s, %s" % (self.binder.pretty(), rhs.pretty())
+        else:
+            lhs = self.binder.type if self.binder.is_default() else self.binder
+            return "%s → %s" % (lhs.pretty(), rhs.pretty())
 
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)
@@ -1164,7 +1170,7 @@ class W_ForAll(W_FunBase):
 
 
 class W_Lambda(W_FunBase):
-    def pretty(self):
+    def pretty(self, constants=None):
         body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
         return "fun %s ↦ %s" % (self.binder.pretty(), body_pretty)
 
@@ -1215,7 +1221,7 @@ class W_Let(W_Expr):
         self.value = value
         self.body = body
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "let %s : %s := %s\n%s" % (
             self.name.pretty(),
             self.type.pretty(),
@@ -1500,7 +1506,7 @@ class W_App(W_Expr):
             self.arg.incr_free_bvars(count, depth),
         )
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "%s %s" % (self.fn.pretty(), self.arg.pretty())
 
 
@@ -1514,7 +1520,7 @@ class W_RecRule(_Item):
         self.num_fields = num_fields
         self.val = val
 
-    def pretty(self):
+    def pretty(self, constants=None):
         return "<RecRule ctor_name='%s' num_fields='%s' val='%s'>" % (
             self.ctor_name.pretty(),
             self.num_fields,
@@ -1534,7 +1540,7 @@ class W_Declaration(_Item):
     def type_check(self, *args):
         return self.w_kind.type_check(*args)
 
-    def pretty(self):
+    def pretty(self, constants=None):
         # Is delaborate the right vocabulary for what we're doing?!
         pretty = self.name.pretty_with_levels(self.levels)
         return self.w_kind.delaborate(pretty)
