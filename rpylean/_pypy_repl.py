@@ -5,6 +5,7 @@ Expected to be used via `pypy -i`.
 """
 from __future__ import print_function
 
+from pprint import pprint as pp
 import os
 
 from rpylean.environment import from_export
@@ -23,6 +24,6 @@ else:
     Prop, Type = o.PROP, o.TYPE
 
 for k, v in sorted(locals().items()):
-    if k.startswith("_") or k in {"os", "print", "print_function"}:
+    if k.startswith("_") or k in {"os", "print", "pp", "print_function"}:
         continue
     print("{} = {!r}".format(k, v))

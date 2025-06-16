@@ -121,12 +121,13 @@ class Name(_Item):
         """
         return W_Const(name=self, levels=[] if levels is None else levels)
 
-    def declaration(self, w_kind, levels=None):
+    def declaration(self, type, w_kind, levels=None):
         """
         Make a declaration with this name.
         """
         return W_Declaration(
             name=self,
+            type=type,
             levels=[] if levels is None else levels,
             w_kind=w_kind,
         )
@@ -136,11 +137,10 @@ class Name(_Item):
         Make a constructor declaration with this name.
         """
         constructor = W_Constructor(
-            type=type,
             num_params=num_params,
             num_fields=num_fields,
         )
-        return self.declaration(constructor, levels=levels)
+        return self.declaration(type=type, w_kind=constructor, levels=levels)
 
     def inductive(
         self,
@@ -159,7 +159,6 @@ class Name(_Item):
         """
         inductive = W_Inductive(
             names=[self] if names is None else names,
-            type=type,
             constructors=[] if constructors is None else constructors,
             num_nested=num_nested,
             num_params=num_params,
@@ -167,34 +166,34 @@ class Name(_Item):
             is_reflexive=is_reflexive,
             is_recursive=is_recursive,
         )
-        return self.declaration(inductive, levels=levels)
+        return self.declaration(type=type, w_kind=inductive, levels=levels)
 
     def definition(self, type, value, hint="R", levels=None):
         """
         Make a definition of the given type and value with this name.
         """
-        definition = W_Definition(type=type, value=value, hint=hint)
-        return self.declaration(definition, levels=levels)
+        definition = W_Definition(value=value, hint=hint)
+        return self.declaration(type=type, w_kind=definition, levels=levels)
 
     def opaque(self, type, value, levels=None):
         """
         Make an opaque declaration with this name.
         """
-        opaque = W_Opaque(type=type, value=value)
-        return self.declaration(opaque, levels=levels)
+        opaque = W_Opaque(value=value)
+        return self.declaration(type=type, w_kind=opaque, levels=levels)
 
     def axiom(self, type, levels=None):
         """
         Make an axiom with this name.
         """
-        return self.declaration(W_Axiom(type=type), levels=levels)
+        return self.declaration(type=type, w_kind=W_Axiom(), levels=levels)
 
     def theorem(self, type, value, levels=None):
         """
         Make a theorem with this name.
         """
-        theorem = W_Theorem(type=type, value=value)
-        return self.declaration(theorem, levels=levels)
+        theorem = W_Theorem(value=value)
+        return self.declaration(type=type, w_kind=theorem, levels=levels)
 
     def recursor(
         self,
@@ -213,7 +212,6 @@ class Name(_Item):
         """
         recursor = W_Recursor(
             names=[self] if names is None else names,
-            type=type,
             rules=[] if rules is None else rules,
             k=k,
             num_params=num_params,
@@ -221,7 +219,7 @@ class Name(_Item):
             num_motives=num_motives,
             num_minors=num_minors,
         )
-        return self.declaration(recursor, levels=levels)
+        return self.declaration(type=type, w_kind=recursor, levels=levels)
 
     def let(self, type, value, body):
         """
@@ -866,9 +864,9 @@ class W_Const(W_Expr):
         params = decl.levels
 
         if not params:
-            return decl.get_type()
+            return decl.type
 
-        res = apply_const_level_params(self, decl.get_type(), env)
+        res = apply_const_level_params(self, decl.type, env)
         return res
 
     def subst_levels(self, substs):
@@ -1030,7 +1028,7 @@ class W_Proj(W_Expr):
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
-        ctor_type = ctor_decl.w_kind.type
+        ctor_type = ctor_decl.type
         ctor_type = apply_const_level_params(struct_expr_type, ctor_type, env)
 
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
@@ -1518,21 +1516,19 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
-    def __init__(self, name, w_kind, levels):
+    def __init__(self, name, type, w_kind, levels):
         self.name = name
+        self.type = type
         self.w_kind = w_kind
         self.levels = levels
 
-    def get_type(self):
-        return self.w_kind.get_type()
-
-    def type_check(self, *args):
-        return self.w_kind.type_check(*args)
+    def type_check(self, env):
+        return self.w_kind.type_check(self.type, env)
 
     def pretty(self, constants=None):
         # Is delaborate the right vocabulary for what we're doing?!
         pretty = self.name.pretty_with_levels(self.levels)
-        return self.w_kind.delaborate(pretty)
+        return self.w_kind.delaborate(pretty, self.type)
 
 
 class W_DeclarationKind(_Item):
@@ -1543,27 +1539,23 @@ class W_DeclarationKind(_Item):
 
 
 class DefOrTheorem(W_DeclarationKind):
-    def type_check(self, env):
+    def type_check(self, type, env):
         val_type = self.value.infer(env)
-        if not env.def_eq(self.type, val_type):
-            raise W_TypeError(self.type, val_type)
+        if not env.def_eq(type, val_type):
+            raise W_TypeError(type, val_type)
 
 
 class W_Definition(DefOrTheorem):
-    def __init__(self, type, value, hint):
-        self.type = type
+    def __init__(self, value, hint):
         self.value = value
         self.hint = hint
 
-    def delaborate(self, name_with_levels):
+    def delaborate(self, name_with_levels, type):
         return "def %s : %s := %s" % (
             name_with_levels,
-            self.type.pretty(),
+            type.pretty(),
             self.value.pretty(),
         )
-
-    def get_type(self):
-        return self.type
 
     def get_delta_reduce_target(self):
         return self.value
@@ -1576,36 +1568,28 @@ class W_Opaque(W_Definition):
     This is like a definition with hint 'opaque', but even
     stronger (we will never unfold it).
     """
-    def __init__(self, type, value):
-        self.type = type
+    def __init__(self, value):
         self.value = value
         self.hint = "O"
 
 
 class W_Theorem(DefOrTheorem):
-    def __init__(self, type, value):
-        self.type = type
+    def __init__(self, value):
         self.value = value
 
-    def delaborate(self, name_with_levels):
+    def delaborate(self, name_with_levels, type):
         return "theorem %s : %s := %s" % (
             name_with_levels,
-            self.type.pretty(),
+            type.pretty(),
             self.value.pretty(),
         )
 
-    def get_type(self):
-        return self.type
-
 
 class W_Axiom(W_DeclarationKind):
-    def __init__(self, type):
-        self.type = type
+    def delaborate(self, name_with_levels, type):
+        return "axiom %s : %s" % (name_with_levels, type.pretty())
 
-    def delaborate(self, name_with_levels):
-        return "axiom %s : %s" % (name_with_levels, self.type.pretty())
-
-    def type_check(self, env):
+    def type_check(self, type, env):
         # TODO - implement type checking
         pass
 
@@ -1613,7 +1597,6 @@ class W_Axiom(W_DeclarationKind):
 class W_Inductive(W_DeclarationKind):
     def __init__(
         self,
-        type,
         names,       # ??: What is this? Inductives know their names?
                      #     Is this for mutual inductives which have multiple?
         constructors,
@@ -1623,7 +1606,6 @@ class W_Inductive(W_DeclarationKind):
         is_reflexive,
         is_recursive,
     ):
-        self.type = type
         self.names = names
         self.constructors = constructors
         self.num_nested = num_nested
@@ -1632,56 +1614,49 @@ class W_Inductive(W_DeclarationKind):
         self.is_reflexive = is_reflexive
         self.is_recursive = is_recursive
 
-    def get_type(self):
-        return self.type
-
-    def type_check(self, env):
+    def type_check(self, type, env):
         # TODO - implement type checking
         pass
 
-    def delaborate(self, name_with_levels):
+    def delaborate(self, name_with_levels, type):
         ctors = [
             each.w_kind.delaborate_in(
                 constructor_name=each.name,
+                type=each.type,
                 inductive=self,
             )
             for each in self.constructors
         ]
         return "inductive %s : %s%s" % (
             name_with_levels,
-            self.type.pretty(),
+            type.pretty(),
             ("\n" + "\n".join(ctors)) if ctors else "",
         )
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, type, num_params, num_fields):
-        self.type = type
+    def __init__(self, num_params, num_fields):
         self.num_params = num_params
         self.num_fields = num_fields
 
-    def type_check(self, env):
+    def type_check(self, type, env):
         # TODO - implement type checking
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def get_type(self):
-        return self.type
+    def delaborate(self, name_with_levels, type):
+        return "constructor %s : %s" % (name_with_levels, type.pretty())
 
-    def delaborate(self, name_with_levels):
-        return "constructor %s : %s" % (name_with_levels, self.type.pretty())
-
-    def delaborate_in(self, constructor_name, inductive):
-        if self.type in [name.const() for name in inductive.names]:
+    def delaborate_in(self, constructor_name, type, inductive):
+        if type in [name.const() for name in inductive.names]:
             # TODO: is this exactly right?
             return "| %s" % (constructor_name.pretty(),)
-        return "| %s : %s" % (constructor_name.pretty(), self.type.pretty())
+        return "| %s : %s" % (constructor_name.pretty(), type.pretty())
 
 
 class W_Recursor(W_DeclarationKind):
     def __init__(
         self,
-        type,
         names,
         rules,
         num_motives,
@@ -1690,7 +1665,6 @@ class W_Recursor(W_DeclarationKind):
         num_minors,
         k,
     ):
-        self.type = type
         self.k = k
         self.num_params = num_params
         self.num_indices = num_indices
@@ -1699,15 +1673,12 @@ class W_Recursor(W_DeclarationKind):
         self.names = names
         self.rules = rules
 
-    def type_check(self, env):
+    def type_check(self, type, env):
         # TODO - implement type checking
         pass
 
-    def get_type(self):
-        return self.type
-
-    def delaborate(self, name_with_levels):
-        return "recursor %s : %s" % (name_with_levels, self.type.pretty())
+    def delaborate(self, name_with_levels, type):
+        return "recursor %s : %s" % (name_with_levels, type.pretty())
 
 
 def warn(message):

@@ -88,20 +88,18 @@ class TestName(object):
             value=zero.const(),
         ) == W_Declaration(
             name=foo,
+            type=Nat.const(),
             levels=[],
-            w_kind=W_Definition(
-                type=Nat.const(),
-                value=zero.const(),
-                hint="R",
-            ),
+            w_kind=W_Definition(value=zero.const(), hint="R"),
         )
 
     def test_axiom(self):
         foo = Name.simple("foo")
         assert foo.axiom(type=NAT) == W_Declaration(
             name=foo,
+            type=NAT,
             levels=[],
-            w_kind=W_Axiom(type=NAT),
+            w_kind=W_Axiom(),
         )
 
     def test_theorem(self):
@@ -110,17 +108,18 @@ class TestName(object):
         theorem = foo.theorem(type=NAT, value=NAT_ZERO)
         assert theorem == W_Declaration(
             name=Name.simple("foo"),
+            type=NAT,
             levels=[],
-            w_kind=W_Theorem(type=NAT, value=NAT_ZERO),
+            w_kind=W_Theorem(value=NAT_ZERO),
         )
 
     def test_inductive(self):
         Empty = Name.simple("Empty")
         assert Empty.inductive(type=TYPE) == W_Declaration(
             name=Empty,
+            type=TYPE,
             levels=[],
             w_kind=W_Inductive(
-                type=TYPE,
                 names=[Empty],
                 constructors=[],
                 num_nested=0,
@@ -136,12 +135,9 @@ class TestName(object):
         intro = True_.child("intro")
         assert intro.constructor(type=True_.const()) == W_Declaration(
             name=intro,
+            type=True_.const(),
             levels=[],
-            w_kind=W_Constructor(
-                type=True_.const(),
-                num_params=0,
-                num_fields=0,
-            ),
+            w_kind=W_Constructor(num_params=0, num_fields=0),
         )
 
     def test_recursor(self):
@@ -149,10 +145,10 @@ class TestName(object):
         rec = Empty.child("rec")
         assert rec.recursor(type=Empty.const()) == W_Declaration(
             name=rec,
+            type=Empty.const(),
             levels=[],
             w_kind=W_Recursor(
                 names=[rec],
-                type=Empty.const(),
                 rules=[],
                 num_motives=1,
                 num_params=0,
@@ -168,8 +164,9 @@ class TestName(object):
         zero = Nat.child("zero")
         assert o.opaque(type=Nat.const(), value=zero.const()) == W_Declaration(
             name=o,
+            type=Nat.const(),
             levels=[],
-            w_kind=W_Opaque(type=Nat.const(), value=zero.const()),
+            w_kind=W_Opaque(value=zero.const()),
         )
 
     def test_binder(self):
