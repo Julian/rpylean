@@ -3,6 +3,7 @@ from __future__ import print_function
 from rpython.rlib.objectmodel import r_dict
 
 from rpylean import parser
+from rpylean.exceptions import AlreadyDeclared, DuplicateLevels
 from rpylean.objects import (
     W_TypeError,
     W_LEVEL_ZERO,
@@ -35,19 +36,12 @@ class EnvironmentBuilder(object):
         self.names = [Name.ANONYMOUS] + names
         self.rec_rules = {}
         self.inductive_skeletons = {}
-        self.declarations = r_dict(Name.eq, Name.hash)
+        self.declarations = []
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
-        # r_dict doesn't have sane __eq__
-        if not all(
-            v == getattr(other, k)
-            for k, v in vars(self).iteritems()
-            if k != "declarations"
-        ):
-            return False
-        return r_dict_eq(self.declarations, other.declarations)
+        return vars(self) == vars(other)
 
     def __ne__(self, other):
         if self.__class__ is not other.__class__:
@@ -102,21 +96,7 @@ class EnvironmentBuilder(object):
         self.inductive_skeletons[skeleton.nidx] = skeleton
 
     def register_declaration(self, decl):
-        seen = {}
-        for level in decl.levels:
-            assert level not in seen, "%s has duplicate level %s in all kind: %s" % (
-                decl.name.pretty(),
-                level,
-                decl.levels,
-            )
-            seen[level] = True
-
-        # > the kernel requires that the declaration is not already
-        # > declared in the environment
-        #
-        #  -- from https://ammkrn.github.io/type_checking_in_lean4/kernel_concepts/the_big_picture.html
-        assert decl.name not in self.declarations, "Duplicate declaration: %s" % (decl.name.pretty(),)
-        self.declarations[decl.name] = decl
+        self.declarations.append(decl)
 
     def finish(self):
         """
@@ -138,7 +118,7 @@ class EnvironmentBuilder(object):
                 ],
             ),
         )
-        return Environment(declarations=self.declarations)
+        return Environment.having(self.declarations)
 
 
 def from_export(export):
@@ -195,8 +175,17 @@ class Environment(object):
         Construct an environment with the given declarations.
         """
         by_name = r_dict(Name.eq, Name.hash)
-        for declaration in declarations:
-            by_name[declaration.name] = declaration
+        for each in declarations:
+            if each.name in by_name:
+                raise AlreadyDeclared(each, by_name[each.name])
+
+            levels = {}
+            for level in each.levels:
+                if level in levels:
+                    raise DuplicateLevels(each, level)
+                levels[level] = True
+
+            by_name[each.name] = each
         return Environment(declarations=by_name)
 
     def pretty(self, name):
