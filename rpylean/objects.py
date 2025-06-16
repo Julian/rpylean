@@ -1,19 +1,8 @@
 from rpython.rlib.rbigint import rbigint
 from rpython.rlib.objectmodel import compute_hash
 
+from rpylean.exceptions import W_TypeError
 from rpylean._rlib import count
-
-
-class W_TypeError(Exception):
-    def __init__(self, w_term, w_expected_type):
-        self.w_term = w_term
-        self.w_expected_type = w_expected_type
-
-    def str(self):
-        return "%s is not of type %s" % (
-            self.w_term.pretty(),
-            self.w_expected_type.pretty(),
-        )
 
 
 class _Item(object):

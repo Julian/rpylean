@@ -16,7 +16,22 @@ class W_Error(Exception):
         return "Unexpected error!"
 
 
-class InvalidDeclaration(Exception):
+class W_TypeError(W_Error):
+    """
+    A term does not type check.
+    """
+    def __init__(self, term, expected_type):  # TODO: inferred_type
+        self.term = term
+        self.expected_type = expected_type
+
+    def str(self):
+        return "%s is not of type %s" % (
+            self.term.pretty(),
+            self.expected_type.pretty(),
+        )
+
+
+class InvalidDeclaration(W_Error):
     """
     A declaration is invalid.
     """
