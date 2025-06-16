@@ -23,4 +23,4 @@ def test_invalid_def_does_not_type_check():
         invalid.type_check(Environment.EMPTY)
 
     TYPE_1 = W_LEVEL_ZERO.succ().succ().sort()
-    assert e.value.w_expected_type == TYPE_1
+    assert e.value.expected_type == TYPE_1
