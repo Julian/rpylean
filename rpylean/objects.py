@@ -1,6 +1,8 @@
 from rpython.rlib.rbigint import rbigint
 from rpython.rlib.objectmodel import compute_hash
 
+from rpylean._rlib import count
+
 
 class W_TypeError(Exception):
     def __init__(self, w_term, w_expected_type):
@@ -104,25 +106,25 @@ class Name(_Item):
         """
         Bind this name in a (default) binder.
         """
-        return Binder.default(self, type)
+        return Binder.default(name=self, type=type)
 
     def implicit_binder(self, type):
         """
         Bind this name in an implicit binder.
         """
-        return Binder.implicit(self, type)
+        return Binder.implicit(name=self, type=type)
 
     def instance_binder(self, type):
         """
         Bind this name in an instance-implicit binder.
         """
-        return Binder.instance(self, type)
+        return Binder.instance(name=self, type=type)
 
     def strict_implicit_binder(self, type):
         """
         Bind this name in a strict implicit binder.
         """
-        return Binder.strict_implicit(self, type)
+        return Binder.strict_implicit(name=self, type=type)
 
     def const(self, levels=None):
         """
@@ -166,7 +168,6 @@ class Name(_Item):
         """
         Make an inductive type declaration with this name.
         """
-
         inductive = W_Inductive(
             names=[self] if names is None else names,
             type=type,
@@ -187,10 +188,16 @@ class Name(_Item):
         return self.declaration(definition, levels=levels)
 
     def opaque(self, type, value, levels=None):
+        """
+        Make an opaque declaration with this name.
+        """
         opaque = W_Opaque(type=type, value=value)
         return self.declaration(opaque, levels=levels)
 
     def axiom(self, type, levels=None):
+        """
+        Make an axiom with this name.
+        """
         return self.declaration(W_Axiom(type=type), levels=levels)
 
     def theorem(self, type, value, levels=None):
@@ -352,6 +359,9 @@ class Binder(_Item):
         )
 
     def with_type(self, type):
+        """
+        Create a new binder of the same name and kind but with a new type.
+        """
         return Binder(
             name=self.name,
             type=type,
@@ -627,7 +637,7 @@ class W_Expr(_Item):
 
 class W_BVar(W_Expr):
     def __init__(self, id):
-        self.id = int(id)
+        self.id = id
 
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
@@ -661,22 +671,12 @@ class W_BVar(W_Expr):
         return self
 
 
-# RPython prevents mutating global variable bindings, so we need a class instance
-class FVarCounter(object):
-    def __init__(self):
-        self.count = 0
-
-    def next(self):
-        count, self.count = self.count, self.count + 1
-        return count
-
-
-FVAR_COUNTER = FVarCounter()
-
-
 class W_FVar(W_Expr):
+
+    _counter = count()
+
     def __init__(self, binder):
-        self.id = next(FVAR_COUNTER)
+        self.id = next(self._counter)
         assert isinstance(binder, Binder)
         self.binder = binder
 
