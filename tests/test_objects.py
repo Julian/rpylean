@@ -50,6 +50,52 @@ class TestName(object):
     def test_child_anonymous(self):
         assert Name.ANONYMOUS.child("foo") == Name.simple("foo")
 
+    @pytest.mark.parametrize(
+        "base, name, expected",
+        [
+            (
+                Name.simple("foo"),
+                Name(["foo", "bar"]),
+                Name.simple("bar"),
+            ),
+            (
+                Name.simple("foo"),
+                Name(["foo", "bar", "baz"]),
+                Name(["bar", "baz"]),
+            ),
+            (
+                Name(["foo", "bar"]),
+                Name(["foo", "spam", "eggs"]),
+                Name(["spam", "eggs"]),
+            ),
+            (
+                Name.simple("foo"),
+                Name.simple("bar"),
+                Name.simple("bar"),
+            ),
+            (
+                Name.ANONYMOUS,
+                Name.simple("foo"),
+                Name.simple("foo"),
+            ),
+            (
+                Name.simple("foo"),
+                Name.ANONYMOUS,
+                Name.ANONYMOUS,
+            ),
+        ],
+        ids=[
+            "child_simple",
+            "child_nested",
+            "cousin",
+            "unrelated",
+            "in_anonymous",
+            "anonymous",
+        ],
+    )
+    def test_in_namespace(self, base, name, expected):
+        assert name.in_namespace(base) == expected
+
     def test_const_no_levels(self):
         bar = Name(["foo", "bar"])
         assert bar.const() == W_Const(bar, [])

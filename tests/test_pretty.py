@@ -216,8 +216,8 @@ class TestInductive(object):
         assert Foo.pretty() == dedent(
             """
             inductive Foo : Prop
-            | Foo.bar
-            | Foo.baz
+            | bar
+            | baz
             """,
         ).strip("\n")
 
@@ -230,7 +230,7 @@ class TestInductive(object):
         assert Foo.pretty() == dedent(
             """
             inductive Foo : Prop
-            | Foo.bar
+            | bar
             """,
         ).strip("\n")
 

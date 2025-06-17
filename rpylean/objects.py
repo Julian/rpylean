@@ -91,6 +91,18 @@ class Name(_Item):
             ", ".join([level.pretty() for level in levels]),
         )
 
+    def in_namespace(self, base):
+        """
+        Calculate what this name looks like inside the given base namespace.
+
+        Essentially, remove common parts from this name which match the base.
+        """
+        i = 0
+        for i, part in enumerate(self.components):
+            if i >= len(base.components) or base.components[i] != part:
+                break
+        return Name(self.components[i:])
+
     def binder(self, type):
         """
         Bind this name in a (default) binder.
@@ -1648,10 +1660,11 @@ class W_Constructor(W_DeclarationKind):
         return "constructor %s : %s" % (name_with_levels, type.pretty())
 
     def delaborate_in(self, constructor_name, type, inductive):
-        if type in [name.const() for name in inductive.names]:
-            # TODO: is this exactly right?
-            return "| %s" % (constructor_name.pretty(),)
-        return "| %s : %s" % (constructor_name.pretty(), type.pretty())
+        name = constructor_name.in_namespace(inductive.names[0])
+        if type in [each.const() for each in inductive.names]:
+            # TODO: is this right? Probably it needs to use some _eq method
+            return "| %s" % (name.pretty(),)
+        return "| %s : %s" % (name.pretty(), type.pretty())
 
 
 class W_Recursor(W_DeclarationKind):
