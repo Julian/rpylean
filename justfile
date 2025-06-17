@@ -22,7 +22,7 @@ example name:
 
 # Run a PyPy REPL with rpylean imported.
 pypy $RPYLEAN_EXAMPLE='' *ARGS:
-    PYTHONPATH="{{ pypy_checkout }}:{{ justfile_directory() }}" "{{ pypy }}" $@ -i "{{ package }}/_pypy_repl.py"
+    PYTHONPATH="{{ pypy_checkout }}:{{ justfile_directory() }}" "{{ pypy }}" {{ ARGS }} -i "{{ package }}/_pypy_repl.py"
 
 # Run the translated rpylean REPL under rlwrap.
 repl *ARGS:
