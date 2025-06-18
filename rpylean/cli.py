@@ -10,6 +10,7 @@ from rpython.rlib.streamio import open_file_as_stream
 from rpython.rlib.rfile import create_stdio
 
 from rpylean import environment
+from rpylean.objects import Name
 
 
 TAGLINE = "A type checker for the Lean theorem prover."
@@ -50,20 +51,27 @@ class Command(object):
     def __init__(self, name, help, metavars, run):
         assert name not in Command.ALL, name
         self.ALL[name] = self
-
         self.name = name
         self._help = help
         self._metavars = metavars
         self._run = run
 
     def run(self, args, stdin, stdout, stderr):
-        expected = len(self._metavars)
-        if len(args) > expected:
+        expected, varargs = len(self._metavars), []
+
+        if self._metavars and self._metavars[-1].startswith("*"):
+            nfixed = expected = expected - 1
+            assert nfixed >= 0
+
+            if len(args) > nfixed:
+                args, varargs = args[:nfixed], args[nfixed:]
+        elif len(args) > expected:
             self.usage_error("Unknown arguments: %s" % (args[expected:]))
-        elif len(args) < expected:
+
+        if len(args) < expected:
             self.usage_error("Expected an %s" % (self._metavars[len(args)],))
 
-        return self._run(self, args, stdin, stdout, stderr)
+        return self._run(self, args, varargs, stdin, stdout, stderr)
 
     def help(self, executable):
         if executable.endswith("__main__.py"):
@@ -97,17 +105,28 @@ def subcommand(metavars, help):
 
 
 @subcommand(
-    ["EXPORT_FILE"],
+    ["EXPORT_FILE", "*DECLS"],
     help="Type check an exported Lean environment.",
 )
-def check(self, args, stdin, stdout, stderr):
+def check(self, args, varargs, stdin, stdout, stderr):
     path, = args
     environment = environment_from(path=path, stdin=stdin)
+    ncheck = len(varargs) or len(environment.declarations)
     stdout.write(
-        "Checking %s declarations...\n" % (len(environment.declarations)),
+        "Checking %s declaration%s...\n" % (
+            ncheck,
+            "s" if ncheck != 1 else "",
+        ),
     )
 
-    result = environment.type_check()
+    if varargs:
+        declarations = []
+        for each in varargs:
+            name = Name.from_str(each)
+            declarations.append((name, environment.declarations[name]))
+        result = environment.type_check(declarations)
+    else:
+        result = environment.type_check()
 
     for name, decl, w_error in result.invalid:
         stderr.write(
@@ -125,7 +144,7 @@ def check(self, args, stdin, stdout, stderr):
     ["EXPORT_FILE"],
     help="Dump an exported Lean environment.",
 )
-def dump(self, args, stdin, stdout, stderr):
+def dump(self, args, _, stdin, stdout, stderr):
     path, = args
     environment = environment_from(path=path, stdin=stdin)
     environment.dump_pretty(stdout)
@@ -136,7 +155,7 @@ def dump(self, args, stdin, stdout, stderr):
     ["EXPORT_FILE"],
     help="Open a REPL with the given export's environment loaded into it.",
 )
-def repl(self, args, stdin, stdout, stderr):
+def repl(self, args, _, stdin, stdout, stderr):
     path, = args
     environment = environment_from(path=path, stdin=stdin)
     from rpylean import repl

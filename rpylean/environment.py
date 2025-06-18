@@ -194,12 +194,16 @@ class Environment(object):
         """
         return self.declarations[name].pretty(self._constants)
 
-    def type_check(self):
+    def type_check(self, declarations=None):
         """
         Type check each declaration in the environment.
         """
+
+        if declarations is None:
+            declarations = self.declarations.items()
+
         invalid = []
-        for name, each in self.declarations.items():
+        for name, each in declarations:
             try:
                 inferred = each.type_check(self)
             except W_TypeError as error:
@@ -209,6 +213,7 @@ class Environment(object):
                     # TODO: assert we're not already in _constants,
                     #       or at least that we're identical to what's there
                     self._constants[name] = inferred
+
         return CheckResult(self, invalid)
 
     def dump_pretty(self, stdout):
