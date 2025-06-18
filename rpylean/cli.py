@@ -13,33 +13,7 @@ from rpylean import environment
 
 
 TAGLINE = "A type checker for the Lean theorem prover."
-USAGE = """\
-USAGE
-
-  %s <subcommand> [<args>]
-
-COMMANDS
-
-  check: type check a given file
-  dump: parse an export file and simply dump its contents
-  repl: load an export file into an interactive REPL
-""".rstrip("\n")
-COMMAND_USAGE = """\
-%s
-
-USAGE
-
-    %s %s %s
-"""
-USAGE_ERROR = """\
-%s
-
-%s
-
-USAGE
-
-    rpylean %s %s
-"""
+SUBCOMMANDS = {}  # { name: short_help }
 
 
 class UsageError(Exception):
@@ -113,8 +87,11 @@ class Command(object):
 
 
 def subcommand(metavars, help):
+    short_help = help.strip().split("\n", 1)[0]
+
     def _subcommand(fn):
         name = fn.__name__
+        SUBCOMMANDS[name] = short_help
         return Command(name, help.strip("\n"), metavars, fn)
     return _subcommand
 
@@ -157,7 +134,7 @@ def dump(self, args, stdin, stdout, stderr):
 
 @subcommand(
     ["EXPORT_FILE"],
-    help="Open a REPL with the environment loaded from the given export.",
+    help="Open a REPL with the given export's environment loaded into it.",
 )
 def repl(self, args, stdin, stdout, stderr):
     path, = args
@@ -200,6 +177,32 @@ def environment_from(path, stdin):
         file.close()
 
     return environment.from_export(source.splitlines())
+
+
+USAGE = """\
+USAGE
+
+  %s <subcommand> [<args>]
+
+COMMANDS
+
+""" + "\n".join("  %s: %s" % each for each in SUBCOMMANDS.items())
+COMMAND_USAGE = """\
+%s
+
+USAGE
+
+    %s %s %s
+"""
+USAGE_ERROR = """\
+%s
+
+%s
+
+USAGE
+
+  rpylean %s %s
+"""
 
 
 if __name__ == '__main__':
