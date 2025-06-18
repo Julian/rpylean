@@ -4,6 +4,7 @@ Extra RPython standard library.
 Could in theory move upstream if desired.
 """
 
+
 class count(object):
     """
     An equivalent of `itertools.count`.

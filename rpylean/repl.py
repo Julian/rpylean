@@ -12,6 +12,7 @@ COMMANDS, HELP = {}, {}
 #: Either 0 or 1 arguments.
 OPTIONAL = -2
 
+
 def command(names, nargs=0, help=None):
     assert help is not None, "No help given for command %r" % names
 

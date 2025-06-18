@@ -124,6 +124,7 @@ class NameStr(Node):
         parent = builder.names[self.parent_nidx]
         builder.register_name(nidx=self.nidx, name=parent.child(self.part))
 
+
 class NameId(Node):
 
     kind = "NI"
@@ -422,9 +423,9 @@ class Lambda(ExprVal):
 
     def to_w_expr(self, builder):
         return binder(
-                name=builder.names[self.binder_name],
-                type=builder.exprs[self.binder_type],
-                info=self.binder_info,
+            name=builder.names[self.binder_name],
+            type=builder.exprs[self.binder_type],
+            info=self.binder_info,
         ).fun(
             body=builder.exprs[self.body],
         )
@@ -495,8 +496,8 @@ class Definition(Node):
     def parse(tokens):
         _, nidx, def_type, def_val, hint = tokens[:5]
         start = 5
-        # TODO actually use the argument to 'R"
-        if hint.text== "R":
+        # TODO: actually use the argument to 'R"
+        if hint.text == "R":
             start += 1
         return Definition(
             nidx=nidx.uint(),

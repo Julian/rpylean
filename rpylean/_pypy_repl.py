@@ -5,7 +5,7 @@ Expected to be used via `pypy -i`.
 """
 from __future__ import print_function
 
-from pprint import pprint as pp
+from pprint import pprint as pp  # noqa: F401
 import os
 
 from rpylean.environment import from_export

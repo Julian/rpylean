@@ -260,7 +260,7 @@ class Environment(object):
 
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
             if (
-                    self.def_eq(expr1.fn, expr2.fn)
+                self.def_eq(expr1.fn, expr2.fn)
                 and self.def_eq(expr1.arg, expr2.arg)
             ):
                 return True
@@ -293,7 +293,6 @@ class Environment(object):
         expr1_eta = self.try_eta_expand(expr2, expr1)
         if expr1_eta is not None:
             return self.def_eq(expr1_eta, expr2)
-
 
         # Perform this check late, as it can be very slow for large nested App expressiosn
         if expr1.syntactic_eq(expr2):

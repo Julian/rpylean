@@ -6,7 +6,6 @@ from textwrap import dedent
 from rpython.rlib.rbigint import rbigint
 import pytest
 
-from rpylean.environment import Environment
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,

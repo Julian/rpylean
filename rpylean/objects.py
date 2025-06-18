@@ -325,7 +325,6 @@ class Binder(_Item):
         """
         return (self.left, self.right) == ("(", ")")
 
-
     def fvar(self):
         """
         An FVar for this binder.
@@ -350,11 +349,11 @@ class Binder(_Item):
         """
         # TODO - does syntactic equality really care about binder info/name?
         return (
-            isinstance(other, Binder) and
-            self.name.eq(other.name) and
-            self.type.syntactic_eq(other.type) and
-            self.left == other.left and
-            self.right == other.right
+            isinstance(other, Binder)
+            and self.name.eq(other.name)
+            and self.type.syntactic_eq(other.type)
+            and self.left == other.left
+            and self.right == other.right
         )
 
     def with_type(self, type):
@@ -960,7 +959,6 @@ class W_Proj(W_Expr):
         if progress:
             return (True, W_Proj(self.struct_name, self.field_idx, new_struct_expr))
 
-
         # Look for a projection of a constructor, which allows us to just pick
         # out the argument corresponding to 'field_idx'
 
@@ -1262,7 +1260,6 @@ class W_App(W_Expr):
             args.append(target.arg)
             target = target.fn
 
-
         if not isinstance(target, W_Const):
             return False, self
 
@@ -1286,8 +1283,6 @@ class W_App(W_Expr):
             return False, self
         major_premise = args[major_idx]
 
-
-
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
         if decl.w_kind.k == 1:
@@ -1300,7 +1295,6 @@ class W_App(W_Expr):
             while isinstance(old_ty_base, W_App):
                 old_ty_base = old_ty_base.fn
             assert isinstance(old_ty_base, W_Const)
-
 
             assert len(decl.w_kind.names) == 1
             inductive_decl = env.declarations[decl.w_kind.names[0]]
@@ -1373,8 +1367,6 @@ class W_App(W_Expr):
         for rec_rule in decl.w_kind.rules:
             if rec_rule.ctor_name.eq(major_premise_ctor.name):
                 #print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
-
-
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 # import pdb; pdb.set_trace()
                 # assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
@@ -1392,9 +1384,6 @@ class W_App(W_Expr):
                 # new_args.reverse()
                 # # Remove the major premise
                 # #new_args.pop()
-
-
-
                 # Construct an application of the recursor rule, using all of the parameters except the major premise
                 # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
                 new_app = rec_rule.val
@@ -1437,9 +1426,7 @@ class W_App(W_Expr):
                 #new_app = new_app.whnf(env)
                 return True, new_app
 
-
         return False, self
-
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def whnf(self, env):
@@ -1507,7 +1494,6 @@ class W_App(W_Expr):
 
     def pretty(self, constants=None):
         return "%s %s" % (self.fn.pretty(), self.arg.pretty())
-
 
     def subst_levels(self, substs):
         return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))

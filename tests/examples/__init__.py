@@ -1,7 +1,6 @@
 from __future__ import print_function
 
 import py
-import pytest
 
 
 EXAMPLES = py.path.local(__file__).dirpath()
