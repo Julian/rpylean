@@ -1168,8 +1168,9 @@ class W_ForAll(W_FunBase):
 
 class W_Lambda(W_FunBase):
     def pretty(self, constants=None):
-        body_pretty = self.body.instantiate(self.binder.fvar(), 0).pretty()
-        return "fun %s ↦ %s" % (self.binder.pretty(), body_pretty)
+        lhs = self.binder.name if self.binder.is_default() else self.binder
+        body = self.body.instantiate(self.binder.fvar(), 0)
+        return "fun %s ↦ %s" % (lhs.pretty(), body.pretty())
 
     def bind_fvar(self, fvar, depth):
         return self.binder.bind_fvar(fvar, depth).fun(

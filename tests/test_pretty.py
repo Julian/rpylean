@@ -291,10 +291,15 @@ def test_litstr():
     assert hi.pretty() == '"hi"'
 
 
-def test_lambda_binder_default():
-    Nat = Name.simple("Nat")
-    zero = Nat.child("zero")
+class TestLambda(object):
+    def test_binder_default(self):
+        fun = Name.simple("a").binder(type=NAT).fun(body=NAT_ZERO)
+        assert fun.pretty() == "fun a ↦ Nat.zero"
 
-    fun = Name.simple("a").binder(type=Nat.const()).fun(body=zero.const())
-
-    assert fun.pretty() == "fun (a : Nat) ↦ Nat.zero"
+    def test_definition(self):
+        x, bvar = Name.simple("x"), W_BVar(0)
+        f = Name.simple("f").definition(
+            type=x.binder(type=NAT).forall(body=NAT),
+            value=x.binder(type=NAT).fun(body=bvar),
+        )
+        assert f.pretty() == "def f : Nat → Nat := fun x ↦ x"
