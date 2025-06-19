@@ -101,10 +101,10 @@ def test_sort(level, expected):
     assert level.sort().pretty() == expected
 
 
-def test_let():
-    x = Name.simple("x")
-    let = x.let(type=NAT, value=NAT_ZERO, body=W_BVar(0))
-    assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
+class TestLet(object):
+    def test_basic(self):
+        let = a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO)
+        assert let.pretty() == "let a : Nat := Nat.zero\nNat.zero"
 
 
 # TODO: something like the `variable` command?
@@ -112,7 +112,6 @@ Nat = Name.simple("Nat").inductive(
     type=TYPE,
     constructors=[],  # FIXME: zero, succ obviously
 )
-print()
 i, h, p, q, P, alpha = names("i", "h", "p", "q", "P", "α")
 constants = {
     Name.simple("Nat"): Nat,
