@@ -1244,6 +1244,13 @@ class W_Let(W_Expr):
             self.body.pretty(),
         )
 
+    def instantiate(self, expr, depth):
+        return self.name.let(
+            type=self.type.instantiate(expr, depth),
+            value=self.value.instantiate(expr, depth),
+            body=self.body.instantiate(expr, depth + 1),
+        )
+
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):

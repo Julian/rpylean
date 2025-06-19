@@ -23,7 +23,7 @@ from rpylean.objects import (
 u = Name.simple("u").level()
 v = Name.simple("v").level()
 
-a = Name.simple("a")
+a, x = Name.simple("a"), Name.simple("x")
 
 
 class TestName(object):
@@ -304,9 +304,24 @@ class TestLambda(object):
         assert binder(type=NAT).fun(body=NAT_ZERO).pretty() == expected
 
     def test_definition(self):
-        x, bvar = Name.simple("x"), W_BVar(0)
         f = Name.simple("f").definition(
-            type=x.binder(type=NAT).forall(body=NAT),
-            value=x.binder(type=NAT).fun(body=bvar),
+            type=a.binder(type=NAT).forall(body=NAT),
+            value=a.binder(type=NAT).fun(body=W_BVar(0)),
         )
-        assert f.pretty() == "def f : Nat → Nat := fun x ↦ x"
+        assert f.pretty() == "def f : Nat → Nat := fun a ↦ a"
+
+    def test_let(self):
+        f = Name.simple("f").definition(
+            type=NAT,
+            value=a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO),
+        )
+        assert f.pretty() == "def f : Nat := let a : Nat := Nat.zero\nNat.zero"
+
+    def test_let_inside_lambda(self):
+        f = Name.simple("f").definition(
+            type=a.binder(type=NAT).forall(body=NAT),
+            value=a.binder(type=NAT).fun(
+                body=x.let(type=NAT, value=NAT_ZERO, body=W_BVar(1))
+            ),
+        )
+        assert f.pretty() == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
