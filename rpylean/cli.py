@@ -141,13 +141,19 @@ def check(self, args, varargs, stdin, stdout, stderr):
 
 
 @subcommand(
-    ["EXPORT_FILE"],
-    help="Dump an exported Lean environment.",
+    ["EXPORT_FILE", "*DECLS"],
+    help="Dump an exported Lean environment or specific declarations from it.",
 )
-def dump(self, args, _, stdin, stdout, stderr):
+def dump(self, args, varargs, stdin, stdout, stderr):
     path, = args
     environment = environment_from(path=path, stdin=stdin)
-    environment.dump_pretty(stdout)
+    if varargs:
+        for each in varargs:
+            declaration = environment.declarations[Name.from_str(each)]
+            stdout.write(declaration.pretty())
+            stdout.write("\n")
+    else:
+        environment.dump_pretty(stdout)
     return 0
 
 
