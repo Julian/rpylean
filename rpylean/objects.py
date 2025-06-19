@@ -319,11 +319,29 @@ class Binder(_Item):
             self.right,
         )
 
+    def pretty_shortened(self):
+        """
+        Pretty print this binder for appearing in the LHS of a lambda.
+        """
+        # TBD if this kind of pretty printing is used elsewhere by Lean
+        if self.is_default():
+            return self.name.pretty()
+        elif self.is_instance():
+            return "%s%s%s" % (self.left, self.type.pretty(), self.right)
+        else:
+            return "%s%s%s" % (self.left, self.name.pretty(), self.right)
+
     def is_default(self):
         """
         Is this a default binder (i.e. not implicit, instance or strict)?
         """
         return (self.left, self.right) == ("(", ")")
+
+    def is_instance(self):
+        """
+        Is this a typeclass instance binder?
+        """
+        return (self.left, self.right) == ("[", "]")
 
     def fvar(self):
         """
@@ -1168,9 +1186,8 @@ class W_ForAll(W_FunBase):
 
 class W_Lambda(W_FunBase):
     def pretty(self, constants=None):
-        lhs = self.binder.name if self.binder.is_default() else self.binder
         body = self.body.instantiate(self.binder.fvar(), 0)
-        return "fun %s ↦ %s" % (lhs.pretty(), body.pretty())
+        return "fun %s ↦ %s" % (self.binder.pretty_shortened(), body.pretty())
 
     def bind_fvar(self, fvar, depth):
         return self.binder.bind_fvar(fvar, depth).fun(

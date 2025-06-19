@@ -23,6 +23,8 @@ from rpylean.objects import (
 u = Name.simple("u").level()
 v = Name.simple("v").level()
 
+a = Name.simple("a")
+
 
 class TestName(object):
     @pytest.mark.parametrize(
@@ -100,10 +102,8 @@ def test_sort(level, expected):
 
 
 def test_let():
-    Nat = Name.simple("Nat")
-    zero = Nat.child("zero")
     x = Name.simple("x")
-    let = x.let(type=Nat.const(), value=zero.const(), body=W_BVar(0))
+    let = x.let(type=NAT, value=NAT_ZERO, body=W_BVar(0))
     assert let.pretty() == "let x : Nat := Nat.zero\n(BVar [0])"
 
 
@@ -292,9 +292,17 @@ def test_litstr():
 
 
 class TestLambda(object):
-    def test_binder_default(self):
-        fun = Name.simple("a").binder(type=NAT).fun(body=NAT_ZERO)
-        assert fun.pretty() == "fun a ↦ Nat.zero"
+    @pytest.mark.parametrize(
+        "binder, expected",
+        [
+            (a.binder, "fun a ↦ Nat.zero"),
+            (a.implicit_binder, "fun {a} ↦ Nat.zero"),
+            (a.instance_binder, "fun [Nat] ↦ Nat.zero"),
+            (a.strict_implicit_binder, "fun ⦃a⦄ ↦ Nat.zero"),
+        ],
+    )
+    def test_with_binder(self, binder, expected):
+        assert binder(type=NAT).fun(body=NAT_ZERO).pretty() == expected
 
     def test_definition(self):
         x, bvar = Name.simple("x"), W_BVar(0)
