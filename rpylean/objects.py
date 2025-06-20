@@ -834,13 +834,7 @@ class W_Const(W_Expr):
         return self.name.child(part).const()
 
     def pretty(self, constants=None):
-        name = self.name.pretty()
-        if not self.levels:
-            return name
-        return "%s.{%s}" % (
-            name,
-            ", ".join([level.pretty() for level in self.levels]),
-        )
+        return self.name.pretty_with_levels(self.levels)
 
     def syntactic_eq(self, other):
         if not isinstance(other, W_Const):
