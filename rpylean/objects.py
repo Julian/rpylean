@@ -1251,6 +1251,17 @@ class W_App(W_Expr):
         self.fn = fn
         self.arg = arg
 
+    def pretty(self, constants=None):
+        fn = self.fn.pretty()
+        if isinstance(self.fn, W_Lambda):
+            fn = "(%s)" % (fn,)
+
+        arg = self.arg.pretty()
+        if isinstance(self.arg, W_App):
+            arg = "(%s)" % (arg,)
+
+        return "%s %s" % (fn, arg)
+
     def infer(self, env):
         fn_type_base = self.fn.infer(env)
         fn_type = fn_type_base.whnf(env)
@@ -1510,9 +1521,6 @@ class W_App(W_Expr):
         return self.fn.incr_free_bvars(count, depth).app(
             self.arg.incr_free_bvars(count, depth),
         )
-
-    def pretty(self, constants=None):
-        return "%s %s" % (self.fn.pretty(), self.arg.pretty())
 
     def subst_levels(self, substs):
         return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))

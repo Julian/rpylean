@@ -23,7 +23,7 @@ from rpylean.objects import (
 u = Name.simple("u").level()
 v = Name.simple("v").level()
 
-a, x = Name.simple("a"), Name.simple("x")
+a, f, x = Name.simple("a"), Name.simple("f"), Name.simple("x")
 
 
 class TestName(object):
@@ -325,3 +325,24 @@ class TestLambda(object):
             ),
         )
         assert f.pretty() == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
+
+
+class TestApp(object):
+    def test_simple(self):
+        app = f.const().app(a.const())
+        assert app.pretty() == "f a"
+
+    def test_nested_application_left_associative(self):
+        app = f.const().app(a.const()).app(x.const())
+        assert app.pretty() == "f a x"
+
+    def test_application_with_parentheses_needed(self):
+        g = Name.simple("g").const()
+        inner = g.app(a.const())
+        outer = f.const().app(inner)
+        assert outer.pretty() == "f (g a)"
+
+    def test_lambda(self):
+        id = x.binder(type=NAT).fun(body=W_BVar(0))
+        app = id.app(a.const())
+        assert app.pretty() == "(fun x ↦ x) a"
