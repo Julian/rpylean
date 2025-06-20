@@ -3,6 +3,7 @@ from __future__ import print_function
 from rpython.rlib.objectmodel import r_dict
 
 from rpylean import parser
+from rpylean._rlib import r_dict_eq
 from rpylean.exceptions import AlreadyDeclared, DuplicateLevels
 from rpylean.objects import (
     W_TypeError,

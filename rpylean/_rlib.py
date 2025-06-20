@@ -19,3 +19,11 @@ class count(object):
     def next(self):
         count, self.count = self.count, self.count + 1
         return count
+
+
+def r_dict_eq(left, right):
+    # r_dict doesn't define sane __eq__
+    return (
+        len(left) == len(right)
+        and all(k in right and right[k] == v for k, v in left.iteritems())
+    )
