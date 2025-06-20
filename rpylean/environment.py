@@ -346,13 +346,5 @@ class CheckResult(object):
         return not self.invalid
 
 
-def r_dict_eq(left, right):
-    # r_dict doesn't define sane __eq__
-    return (
-        len(left) == len(right)
-        and all(k in right and right[k] == v for k, v in left.iteritems())
-    )
-
-
 def heading(s):
     return "%s\n%s\n\n" % (s, "-" * len(s))
