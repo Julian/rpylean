@@ -11,9 +11,16 @@ from rpylean.objects import (
     TYPE,
     W_LEVEL_ZERO,
     Name,
+    W_BVar,
     W_LitNat,
     W_LitStr,
+    names,
 )
+
+
+Empty, T, true, a, f, x = names("Empty", "T", "True", "a", "f", "x")
+EMPTY = Empty.inductive(type=TYPE)
+u, v = Name.simple("u").level(), Name.simple("v").level()
 
 
 def test_fvar():
@@ -36,3 +43,20 @@ def test_nat():
 def test_str():
     lit = W_LitStr("hello")
     assert lit.infer(Environment.EMPTY) is STRING
+
+
+class TestLambda(object):
+    def test_simple(self):
+        intro = true.child("intro").constructor(type=true.const())
+        TRUE = true.inductive(type=TYPE, constructors=[intro])
+
+        env = Environment.having([T.inductive(type=TYPE), TRUE, intro])
+        X = x.binder(type=T.const())
+        fun = X.fun(body=true.child("intro").const())
+        assert fun.infer(env) == X.forall(body=true.const())
+
+    def test_with_dependent_body(self):
+        env = Environment.having([EMPTY])
+        X = x.binder(type=Empty.const())
+        fun = X.fun(body=W_BVar(0))
+        assert fun.infer(env) == X.forall(body=Empty.const())
