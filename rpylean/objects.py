@@ -319,18 +319,6 @@ class Binder(_Item):
             self.right,
         )
 
-    def pretty_shortened(self):
-        """
-        Pretty print this binder for appearing in the LHS of a lambda.
-        """
-        # TBD if this kind of pretty printing is used elsewhere by Lean
-        if self.is_default():
-            return self.name.pretty()
-        elif self.is_instance():
-            return "%s%s%s" % (self.left, self.type.pretty(), self.right)
-        else:
-            return "%s%s%s" % (self.left, self.name.pretty(), self.right)
-
     def is_default(self):
         """
         Is this a default binder (i.e. not implicit, instance or strict)?
@@ -675,7 +663,7 @@ class W_BVar(W_Expr):
             # This variable is not bound here (e.g. 'fun x => BVar(1)')
             # Instantiation has removed the outermost binder, so we need to decrement this
             # TODO - should we take in a context instead of relying on 'bvar.id'?
-            return W_BVar(self.id - depth)
+            return W_BVar(self.id - 1)
         return self
 
     def incr_free_bvars(self, count, depth):
@@ -1178,10 +1166,53 @@ class W_ForAll(W_FunBase):
         )
 
 
+def group_to_str(group):
+    assert not group[-1].is_instance()
+
+    names = " ".join([each.name.pretty() for each in group])
+    if group[-1].is_default():
+        return names
+
+    return "%s%s%s" % (group[-1].left, names, group[-1].right)
+
+
 class W_Lambda(W_FunBase):
     def pretty(self, constants=None):
-        body = self.body.instantiate(self.binder.fvar(), 0)
-        return "fun %s ↦ %s" % (self.binder.pretty_shortened(), body.pretty())
+        binders = []
+        current = self
+        while isinstance(current, W_Lambda):
+            binders.append(current.binder)
+            current = current.body
+
+        groups, current_group, last_style = [], [], binders[0].left
+
+        for binder in binders:
+            if binder.is_instance():  # always shown separate
+                if current_group:
+                    groups.append(group_to_str(current_group))
+                    current_group = []
+                groups.append(
+                    "%s%s : %s%s" % (
+                        binder.left,
+                        binder.name.pretty(),
+                        binder.type.pretty(),
+                        binder.right,
+                    ),
+                )
+                last_style = None
+            elif binder.left != last_style and current_group:
+                groups.append(group_to_str(current_group))
+                current_group, last_style = [binder], binder.left
+            else:
+                current_group.append(binder)
+        if current_group:
+            groups.append(group_to_str(current_group))
+
+        body = current
+        for binder in reversed(binders):
+            body = body.instantiate(binder.fvar(), 0)
+
+        return "fun %s ↦ %s" % (" ".join(groups), body.pretty())
 
     def bind_fvar(self, fvar, depth):
         return self.binder.bind_fvar(fvar, depth).fun(
@@ -1231,11 +1262,12 @@ class W_Let(W_Expr):
         self.body = body
 
     def pretty(self, constants=None):
+        fvar = self.name.binder(type=self.type).fvar()
         return "let %s : %s := %s\n%s" % (
             self.name.pretty(),
             self.type.pretty(),
             self.value.pretty(),
-            self.body.pretty(),
+            self.body.instantiate(fvar, 0).pretty(),
         )
 
     def instantiate(self, expr, depth):

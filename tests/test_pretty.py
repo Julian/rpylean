@@ -23,7 +23,8 @@ from rpylean.objects import (
 u = Name.simple("u").level()
 v = Name.simple("v").level()
 
-a, f, x = Name.simple("a"), Name.simple("f"), Name.simple("x")
+a, f, x, y = names("a", "f", "x", "y")
+b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
 
 
 class TestName(object):
@@ -254,7 +255,7 @@ class TestRecursor(object):
                 type=t.binder(type=Empty.const()).forall(body=u.sort()),
             ).forall(
                 body=t.binder(type=Empty.const()).forall(
-                    body=W_BVar(1).app(W_BVar(0))
+                    body=b1.app(b0)
                 ),
             ),
             levels=[u],
@@ -300,13 +301,87 @@ class TestLambda(object):
             (a.strict_implicit_binder, "fun ⦃a⦄ ↦ Nat.zero"),
         ],
     )
-    def test_with_binder(self, binder, expected):
+    def test_simple(self, binder, expected):
+        if "[Nat]" in expected:
+            pytest.xfail(
+                "Instance binder pretty-printing doesn't yet hide unused "
+                "names when pretty printing.",
+            )
         assert binder(type=NAT).fun(body=NAT_ZERO).pretty() == expected
+
+    def test_nested_default(self):
+        nested = x.binder(type=NAT).fun(
+            body=y.binder(type=NAT).fun(
+                body=f.const().app(b1).app(b0)
+            )
+        )
+        assert nested.pretty() == "fun x y ↦ f x y"
+
+    def test_nested_implicit(self):
+        nested = x.implicit_binder(type=NAT).fun(
+            body=y.implicit_binder(type=NAT).fun(
+                body=f.const().app(b1).app(b0)
+            )
+        )
+        assert nested.pretty() == "fun {x y} ↦ f x y"
+
+    def test_nested_instance(self):
+        nested = x.instance_binder(type=NAT).fun(
+            body=y.instance_binder(type=NAT).fun(
+                body=f.const().app(b1).app(b0)
+            )
+        )
+        assert nested.pretty() == "fun [x : Nat] [y : Nat] ↦ f x y"
+
+    def test_mixed_default_implicit(self):
+        nested = x.binder(type=NAT).fun(
+            body=y.implicit_binder(type=NAT).fun(
+                body=f.const().app(b1).app(b0)
+            )
+        )
+        assert nested.pretty() == "fun x {y} ↦ f x y"
+
+    def test_mixed_implicit_default(self):
+        nested = x.implicit_binder(type=NAT).fun(
+            body=y.binder(type=NAT).fun(
+                body=f.const().app(b1).app(b0)
+            )
+        )
+        assert nested.pretty() == "fun {x} y ↦ f x y"
+
+    def test_more_nested(self):
+        nested = x.binder(type=NAT).fun(
+            body=y.binder(type=NAT).fun(
+                body=a.binder(type=NAT).fun(
+                    body=f.const().app(f.const().app(b2).app(b1)).app(b0)
+                )
+            )
+        )
+        assert nested.pretty() == "fun x y a ↦ f (f x y) a"
+
+    def test_more_nested_mixed(self):
+        nested = x.binder(type=NAT).fun(
+            body=y.implicit_binder(type=NAT).fun(
+                body=a.instance_binder(type=NAT).fun(
+                    body=f.binder(type=NAT).fun(body=b0)
+                )
+            )
+        )
+        pytest.xfail(
+            "Instance binder pretty-printing doesn't yet hide unused "
+            "names when pretty printing.",
+        )
+        assert nested.pretty() == "fun x {y} [Nat] f ↦ f"
+
+    def test_nested_non_lambda_body(self):
+        let = y.let(type=NAT, value=NAT_ZERO, body=b0)
+        nested = x.binder(type=NAT).fun(body=let)
+        assert nested.pretty() == "fun x ↦ let y : Nat := Nat.zero\ny"
 
     def test_definition(self):
         f = Name.simple("f").definition(
             type=a.binder(type=NAT).forall(body=NAT),
-            value=a.binder(type=NAT).fun(body=W_BVar(0)),
+            value=a.binder(type=NAT).fun(body=b0),
         )
         assert f.pretty() == "def f : Nat → Nat := fun a ↦ a"
 
@@ -321,7 +396,7 @@ class TestLambda(object):
         f = Name.simple("f").definition(
             type=a.binder(type=NAT).forall(body=NAT),
             value=a.binder(type=NAT).fun(
-                body=x.let(type=NAT, value=NAT_ZERO, body=W_BVar(1))
+                body=x.let(type=NAT, value=NAT_ZERO, body=b1)
             ),
         )
         assert f.pretty() == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
@@ -343,6 +418,6 @@ class TestApp(object):
         assert outer.pretty() == "f (g a)"
 
     def test_lambda(self):
-        id = x.binder(type=NAT).fun(body=W_BVar(0))
+        id = x.binder(type=NAT).fun(body=b0)
         app = id.app(a.const())
         assert app.pretty() == "(fun x ↦ x) a"
