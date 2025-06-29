@@ -9,7 +9,7 @@ import sys
 from rpython.rlib.streamio import open_file_as_stream
 from rpython.rlib.rfile import create_stdio
 
-from rpylean import environment
+from rpylean.environment import from_export
 from rpylean.objects import Name
 
 
@@ -201,7 +201,7 @@ def environment_from(path, stdin):
         source = file.readall()
         file.close()
 
-    return environment.from_export(source.splitlines())
+    return from_export(source.splitlines())
 
 
 USAGE = """\
