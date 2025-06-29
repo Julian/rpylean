@@ -47,5 +47,23 @@ def test_forall_vs_lambda_not_equal():
     assert not syntactic_eq(forall_expr, lambda_expr)
 
 
+def test_let_equal():
+    let1 = x.let(type=NAT, value=NAT, body=b0)
+    let2 = x.let(type=NAT, value=NAT, body=b0)
+    assert syntactic_eq(let1, let2)
+
+
+def test_let_different_name():
+    let1 = x.let(type=NAT, value=NAT, body=b0)
+    let2 = y.let(type=NAT, value=NAT, body=b0)
+    assert not syntactic_eq(let1, let2)
+
+
+def test_let_different_body():
+    let1 = x.let(type=NAT, value=NAT, body=b0)
+    let2 = x.let(type=NAT, value=NAT, body=b1)
+    assert not syntactic_eq(let1, let2)
+
+
 def test_different_types():
     assert not syntactic_eq(b0, NAT)

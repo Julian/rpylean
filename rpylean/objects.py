@@ -1292,6 +1292,14 @@ class W_Let(W_Expr):
             body=self.body.instantiate(expr, depth + 1),
         )
 
+    def syntactic_eq(self, other):
+        return (
+            self.name.eq(other.name)
+            and syntactic_eq(self.type, other.type)
+            and syntactic_eq(self.value, other.value)
+            and syntactic_eq(self.body, other.body)
+        )
+
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):
