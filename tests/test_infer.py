@@ -60,3 +60,25 @@ class TestLambda(object):
         X = x.binder(type=Empty.const())
         fun = X.fun(body=W_BVar(0))
         assert fun.infer(env) == X.forall(body=Empty.const())
+
+
+class TestConst(object):
+    def test_level_param_substitution(self):
+        decl = a.axiom(type=u.sort(), levels=[u])
+        const = a.const(levels=[u])
+        inferred = const.infer(Environment.having([decl]))
+        assert inferred == u.sort()
+
+    def test_level_max_substitution(self):
+        uv = u.max(v).sort()
+        decl = a.axiom(type=uv, levels=[u, v])
+        const = a.const(levels=[u, v])
+        inferred = const.infer(Environment.having([decl]))
+        assert inferred == uv
+
+    def test_level_imax_substitution(self):
+        uv = u.imax(v).sort()
+        decl = a.axiom(type=uv, levels=[u, v])
+        const = a.const(levels=[u, v])
+        inferred = const.infer(Environment.having([decl]))
+        assert inferred == uv

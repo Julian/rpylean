@@ -31,6 +31,10 @@ from rpylean.objects import (
 )
 
 
+u = Name.simple("u").level()
+v = Name.simple("v").level()
+
+
 class TestName(object):
     def test_simple(self):
         assert Name.simple("foo") == Name(["foo"])
@@ -102,8 +106,6 @@ class TestName(object):
 
     def test_const_with_levels(self):
         bar = Name(["foo", "bar"])
-        u = Name.simple("u").level()
-        v = Name.simple("v").level()
         assert bar.const([u, v]) == W_Const(bar, [u, v])
 
     def test_let(self):
@@ -284,10 +286,6 @@ class TestBinder(object):
 
     def test_not_default_is_not_default(self):
         assert not Name.simple("x").implicit_binder(type=NAT).is_default()
-
-
-u = Name.simple("u").level()
-v = Name.simple("v").level()
 
 
 class TestLevel(object):

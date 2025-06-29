@@ -582,6 +582,11 @@ class W_LevelIMax(W_Level):
         rhs, _ = self.rhs.pretty_parts()
         return "(imax %s %s)" % (lhs, rhs), 0
 
+    def subst_levels(self, substs):
+        new_lhs = self.lhs.subst_levels(substs)
+        new_rhs = self.rhs.subst_levels(substs)
+        return new_lhs.imax(new_rhs)
+
     def syntactic_eq(self, other):
         if not isinstance(other, W_LevelIMax):
             return False
