@@ -278,8 +278,8 @@ class TestBinder(object):
     def test_lambda(self):
         x = Name.simple("x").binder(type=NAT)
         y = Name.simple("y").const()
-        forall = x.fun(body=y)
-        assert forall == W_Lambda(binder=x, body=y)
+        fun = x.fun(body=y)
+        assert fun == W_Lambda(binder=x, body=y)
 
     def test_default_is_default(self):
         assert Name.simple("x").binder(type=NAT).is_default()
