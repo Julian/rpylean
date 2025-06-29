@@ -426,3 +426,16 @@ class TestApp(object):
         id = x.binder(type=NAT).fun(body=b0)
         app = f.const().app(id)
         assert app.pretty() == "f fun x ↦ x"
+
+    def test_lambda_lambda_app(self):
+        fun_fn = f.binder(type=NAT).fun(body=x.binder(type=NAT).fun(body=b0))
+        fun_arg = y.binder(type=NAT).fun(body=b0)
+        app = fun_fn.app(fun_arg).app(NAT_ZERO)
+        assert app.pretty() == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
+
+    def test_app_multiple_lambda(self):
+        fun1 = x.binder(type=NAT).fun(body=b0)
+        fun2 = y.binder(type=NAT).fun(body=b0)
+        fun3 = a.binder(type=NAT).fun(body=b0)
+        app = f.const().app(fun1).app(fun2).app(fun3)
+        assert app.pretty() == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"

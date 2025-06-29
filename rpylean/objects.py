@@ -1289,15 +1289,31 @@ class W_App(W_Expr):
         self.arg = arg
 
     def pretty(self, constants=None):
-        fn = self.fn.pretty()
-        if isinstance(self.fn, W_Lambda):
-            fn = "(%s)" % (fn,)
+        args = []
+        current = self
+        while isinstance(current, W_App):
+            args.append(current.arg)
+            current = current.fn
 
-        arg = self.arg.pretty()
-        if isinstance(self.arg, W_App):
-            arg = "(%s)" % (arg,)
+        fn_pretty = current.pretty()
+        if isinstance(current, W_Lambda):
+            fn_pretty = "(%s)" % fn_pretty
 
-        return "%s %s" % (fn, arg)
+        arg_parts = []
+        for i in range(len(args) - 1, 0, -1):
+            arg = args[i]
+            arg_pretty = arg.pretty()
+            if isinstance(arg, W_Lambda) or isinstance(arg, W_App):
+                arg_pretty = "(%s)" % arg_pretty
+            arg_parts.append(arg_pretty)
+
+        last_arg = args[0]
+        last_arg_pretty = last_arg.pretty()
+        if isinstance(last_arg, W_App):
+            last_arg_pretty = "(%s)" % last_arg_pretty
+        arg_parts.append(last_arg_pretty)
+
+        return "%s %s" % (fn_pretty, " ".join(arg_parts))
 
     def infer(self, env):
         fn_type_base = self.fn.infer(env)
