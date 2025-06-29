@@ -18,6 +18,7 @@ from rpylean.objects import (
     W_Lambda,
     W_LitNat,
     W_Sort,
+    syntactic_eq,
 )
 
 import sys
@@ -281,7 +282,7 @@ class Environment(object):
         # If these types are themselves Prop (Sort 0), and the types are equal, then our original expressions are proofs of the same `Prop`
         expr1_ty_kind = expr1_ty.infer(self)
         expr2_ty_kind = expr2_ty.infer(self)
-        if expr1_ty_kind.syntactic_eq(PROP) and expr2_ty_kind.syntactic_eq(PROP):
+        if syntactic_eq(expr1_ty_kind, PROP) and syntactic_eq(expr2_ty_kind, PROP):
             if self.def_eq(expr1_ty, expr2_ty):
                 return True
 
@@ -296,7 +297,7 @@ class Environment(object):
             return self.def_eq(expr1_eta, expr2)
 
         # Perform this check late, as it can be very slow for large nested App expressiosn
-        if expr1.syntactic_eq(expr2):
+        if syntactic_eq(expr1, expr2):
             return True
 
         # As the *very* last step, try converting NatLit exprs

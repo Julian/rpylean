@@ -355,11 +355,9 @@ class Binder(_Item):
         """
         # TODO - does syntactic equality really care about binder info/name?
         return (
-            isinstance(other, Binder)
-            and self.name.eq(other.name)
-            and self.type.syntactic_eq(other.type)
+            self.name.eq(other.name)
             and self.left == other.left
-            and self.right == other.right
+            and syntactic_eq(self.type, other.type)
         )
 
     def with_type(self, type):
@@ -482,7 +480,7 @@ class W_LevelZero(W_Level):
         return self
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LevelZero)
+        return True
 
 
 W_LEVEL_ZERO = W_LevelZero()
@@ -512,7 +510,7 @@ class W_LevelSucc(W_Level):
         return new_parent.succ()
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LevelSucc) and self.parent.syntactic_eq(other.parent)
+        return syntactic_eq(self.parent, other.parent)
 
 
 class W_LevelMax(W_Level):
@@ -556,9 +554,10 @@ class W_LevelMax(W_Level):
         return new_lhs.max(new_rhs)
 
     def syntactic_eq(self, other):
-        if not isinstance(other, W_LevelMax):
-            return False
-        return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
+        return (
+            syntactic_eq(self.lhs, other.lhs)
+            and syntactic_eq(self.rhs, other.rhs)
+        )
 
 
 class W_LevelIMax(W_Level):
@@ -588,9 +587,10 @@ class W_LevelIMax(W_Level):
         return new_lhs.imax(new_rhs)
 
     def syntactic_eq(self, other):
-        if not isinstance(other, W_LevelIMax):
-            return False
-        return self.lhs.syntactic_eq(other.lhs) and self.rhs.syntactic_eq(other.rhs)
+        return (
+            syntactic_eq(self.lhs, other.lhs)
+            and syntactic_eq(self.rhs, other.rhs)
+        )
 
 
 class W_LevelParam(W_Level):
@@ -620,7 +620,7 @@ class W_LevelParam(W_Level):
         return self.name.pretty(), 0
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LevelParam) and self.name.eq(other.name)
+        return self.name.eq(other.name)
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
@@ -655,7 +655,7 @@ class W_BVar(W_Expr):
         return "(BVar [%s])" % (self.id,)
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_BVar) and self.id == other.id
+        return self.id == other.id
 
     def bind_fvar(self, fvar, depth):
         return self
@@ -702,10 +702,10 @@ class W_FVar(W_Expr):
         return self
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_FVar)
         return (
-            isinstance(other, W_FVar)
-            and self.id == other.id
-            and self.binder.syntactic_eq(other.binder)
+            self.id == other.id
+            and syntactic_eq(self.binder, other.binder)
         )
 
     def infer(self, env):
@@ -744,7 +744,8 @@ class W_LitStr(W_Expr):
         return self
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LitStr) and self.val == other.val
+        assert isinstance(other, W_LitStr)
+        return self.val == other.val
 
 
 class W_Sort(W_Expr):
@@ -796,7 +797,8 @@ class W_Sort(W_Expr):
         return self.level.subst_levels(substs).sort()
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_Sort) and self.level.syntactic_eq(other.level)
+        assert isinstance(other, W_Sort)
+        return syntactic_eq(self.level, other.level)
 
 
 PROP = W_LEVEL_ZERO.sort()
@@ -830,14 +832,10 @@ class W_Const(W_Expr):
         return self.name.pretty_with_levels(self.levels)
 
     def syntactic_eq(self, other):
-        if not isinstance(other, W_Const):
+        if self.name != other.name or len(self.levels) != len(other.levels):
             return False
-        if self.name != other.name:
-            return False
-
-        assert len(self.levels) == len(other.levels), "W_Const syntactic_eq: levels length mismatch: %s vs %s" % (self.levels, other.levels)
-        for i in range(len(self.levels)):
-            if not self.levels[i].syntactic_eq(other.levels[i]):
+        for i, level in enumerate(self.levels):
+            if not syntactic_eq(level, other.levels[i]):
                 return False
         return True
 
@@ -919,7 +917,8 @@ class W_LitNat(W_Expr):
         return self
 
     def syntactic_eq(self, other):
-        return isinstance(other, W_LitNat) and self.val == other.val
+        assert isinstance(other, W_LitNat)
+        return self.val == other.val
 
     def build_nat_expr(self):
         if rbigint.fromint(100).lt(self.val):
@@ -1017,7 +1016,11 @@ class W_Proj(W_Expr):
     def syntactic_eq(self, other):
         # Our 'struct_type' is a '_Item' (which is only constructed once, during parsing),
         # so we can compare by object identity with '=='
-        return isinstance(other, W_Proj) and self.struct_name == other.struct_name and self.field_idx == other.field_idx and self.struct_expr.syntactic_eq(other.struct_expr)
+        return (
+            self.struct_name == other.struct_name
+            and self.field_idx == other.field_idx
+            and syntactic_eq(self.struct_expr, other.struct_expr)
+        )
 
     def infer(self, env):
         struct_expr_type = self.struct_expr.infer(env).whnf(env)
@@ -1074,6 +1077,7 @@ class W_Proj(W_Expr):
 class W_FunBase(W_Expr):
     def __init__(self, binder, body):
         assert body is not None
+        assert isinstance(binder, Binder)
         self.binder = binder
         self.body = body
         self.finished_reduce = False
@@ -1081,14 +1085,6 @@ class W_FunBase(W_Expr):
     # Weak head normal form stops at forall/lambda
     def whnf(self, env):
         return self
-
-    def syntactic_eq(self, other):
-        if not isinstance(other, W_FunBase):
-            return False
-        if not self.binder.syntactic_eq(other.binder):
-            return False
-        # Compare the body expressions
-        return self.body.syntactic_eq(other.body)
 
     def strong_reduction_helper(self, env):
         progress, binder_type = self.binder.type.strong_reduce_step(env)
@@ -1145,6 +1141,13 @@ class W_ForAll(W_FunBase):
         # Don't increment - not yet inside a binder
         return self.binder.instantiate(expr, depth).forall(
             body=self.body.instantiate(expr, depth + 1),
+        )
+
+    def syntactic_eq(self, other):
+        assert isinstance(other, W_ForAll)
+        return (
+            syntactic_eq(self.binder, other.binder)
+            and syntactic_eq(self.body, other.body)
         )
 
     def bind_fvar(self, fvar, depth):
@@ -1218,6 +1221,13 @@ class W_Lambda(W_FunBase):
             body = body.instantiate(binder.fvar(), 0)
 
         return "fun %s ↦ %s" % (" ".join(groups), body.pretty())
+
+    def syntactic_eq(self, other):
+        assert isinstance(other, W_Lambda)
+        return (
+            syntactic_eq(self.binder, other.binder)
+            and syntactic_eq(self.body, other.body)
+        )
 
     def bind_fvar(self, fvar, depth):
         return self.binder.bind_fvar(fvar, depth).fun(
@@ -1332,9 +1342,10 @@ class W_App(W_Expr):
         return body_type
 
     def syntactic_eq(self, other):
-        if not isinstance(other, W_App):
-            return False
-        return self.fn.syntactic_eq(other.fn) and self.arg.syntactic_eq(other.arg)
+        return (
+            syntactic_eq(self.fn, other.fn)
+            and syntactic_eq(self.arg, other.arg)
+        )
 
     def try_iota_reduce(self, env):
         args = []
@@ -1764,6 +1775,15 @@ class W_Recursor(W_DeclarationKind):
 
     def delaborate(self, name_with_levels, type):
         return "recursor %s : %s" % (name_with_levels, type.pretty())
+
+
+def syntactic_eq(expr1, expr2):
+    """
+    Check if two expressions are syntactically equal.
+    """
+    if expr1.__class__ is not expr2.__class__:
+        return False
+    return expr1.syntactic_eq(expr2)
 
 
 def warn(message):
