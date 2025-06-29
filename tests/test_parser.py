@@ -119,7 +119,7 @@ def test_empty():
     """
     Nothing to check, but that's fine.
     """
-    items("") == []
+    assert items("") == []
 
 
 def test_wrong_version():
