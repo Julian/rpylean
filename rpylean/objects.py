@@ -1584,13 +1584,19 @@ class W_Declaration(_Item):
         self.w_kind = w_kind
         self.levels = levels
 
-    def type_check(self, env):
-        return self.w_kind.type_check(self.type, env)
+    def const(self, **kwargs):
+        """
+        Create a constant referring to this declaration by name.
+        """
+        return self.name.const(**kwargs)
 
     def pretty(self, constants=None):
         # Is delaborate the right vocabulary for what we're doing?!
         pretty = self.name.pretty_with_levels(self.levels)
         return self.w_kind.delaborate(pretty, self.type)
+
+    def type_check(self, env):
+        return self.w_kind.type_check(self.type, env)
 
 
 class W_DeclarationKind(_Item):

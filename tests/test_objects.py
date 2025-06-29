@@ -288,6 +288,12 @@ class TestBinder(object):
         assert not Name.simple("x").implicit_binder(type=NAT).is_default()
 
 
+class TestDeclaration(object):
+    def test_const(self):
+        decl = Name.simple("foo").axiom(type=NAT)
+        assert decl.const() == W_Const(Name.simple("foo"), [])
+
+
 class TestLevel(object):
 
     @pytest.mark.parametrize(
