@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from rpython.rlib.objectmodel import r_dict
+from rpython.rlib.objectmodel import not_rpython, r_dict
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq
@@ -154,10 +154,10 @@ class Environment(object):
         #: Any declarations we have already type checked.
         self._constants = r_dict(Name.eq, Name.hash)
 
-    def __getitem__(self, name_or_list):
-        if isinstance(name_or_list, str):
-            name_or_list = [name_or_list]
-        return self.declarations[Name(name_or_list)]
+    @not_rpython
+    def __getitem__(self, value):
+        name = value if isinstance(value, Name) else Name.from_str(value)
+        return self.declarations[name]
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
