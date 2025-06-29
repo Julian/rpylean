@@ -417,7 +417,12 @@ class TestApp(object):
         outer = f.const().app(inner)
         assert outer.pretty() == "f (g a)"
 
-    def test_lambda(self):
+    def test_lambda_app(self):
         id = x.binder(type=NAT).fun(body=b0)
         app = id.app(a.const())
         assert app.pretty() == "(fun x ↦ x) a"
+
+    def test_app_lambda(self):
+        id = x.binder(type=NAT).fun(body=b0)
+        app = f.const().app(id)
+        assert app.pretty() == "f fun x ↦ x"
