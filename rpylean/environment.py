@@ -190,17 +190,16 @@ class Environment(object):
             by_name[each.name] = each
         return Environment(declarations=by_name)
 
-    def pretty(self, name):
+    def pretty(self, declaration):
         """
-        Pretty-print the declaration with the given name.
+        Pretty-print the given declaration.
         """
-        return self.declarations[name].pretty(self._constants)
+        return declaration.pretty(self._constants)
 
     def type_check(self, declarations=None):
         """
         Type check each declaration in the environment.
         """
-
         if declarations is None:
             declarations = self.declarations.items()
 
