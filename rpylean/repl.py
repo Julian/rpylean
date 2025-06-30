@@ -77,7 +77,7 @@ def check(env, args, _, stdout, stderr):
     name = Name.from_str(args[0])
     declaration = env.declarations.get(name, None)
     if declaration is None:
-        stderr.write("%s does not exist in the environment.\n" % name.pretty())
+        stderr.write("%s does not exist in the environment.\n" % name.str())
         return
 
     try:
@@ -85,7 +85,7 @@ def check(env, args, _, stdout, stderr):
     except W_TypeError as error:
         stdout.write("Type error: %s\n" % error)
     else:
-        stdout.write("%s correctly type checks.\n" % name.pretty())
+        stdout.write("%s correctly type checks.\n" % name.str())
 
 
 @command(
@@ -102,7 +102,7 @@ def first(env, _, __, stdout, stderr):
         except Exception as error:
             stderr.write(
                 "Unexpected error when checking %s: %s\n" % (
-                    name.pretty(),
+                    name.str(),
                     error,
                 ),
             )
@@ -115,7 +115,7 @@ def print_decl(env, args, _, stdout, stderr):
     name = Name.from_str(args[0])
     declaration = env.declarations.get(name, None)
     if declaration is None:
-        stderr.write("%s does not exist in the environment.\n" % name.pretty())
+        stderr.write("%s does not exist in the environment.\n" % name.str())
         return
     stdout.write(declaration.pretty())
     stdout.write("\n")
@@ -140,11 +140,11 @@ def names(env, args, stdin, stdout, stderr):
             ]
         else:              # all names starting with the given prefix
             names = [
-                name for name in names if name.pretty().startswith(arg)
+                name for name in names if name.str().startswith(arg)
             ]
 
     for name in names:
-        stdout.write(name.pretty())
+        stdout.write(name.str())
         stdout.write("\n")
 
 

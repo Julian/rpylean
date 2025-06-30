@@ -107,7 +107,7 @@ class EnvironmentBuilder(object):
         assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
             ", ".join(
                 [
-                    self.names[nidx].pretty()
+                    self.names[nidx].str()
                     for nidx in self.inductive_skeletons
                 ],
             ),
@@ -115,7 +115,7 @@ class EnvironmentBuilder(object):
         assert not self.rec_rules, "Incomplete recursors: %s" % (
             ", ".join(
                 [
-                    rule.ctor_name.pretty()
+                    rule.ctor_name.str()
                     for rule in self.rec_rules.values()
                 ],
             ),

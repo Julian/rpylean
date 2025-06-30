@@ -46,7 +46,7 @@ class Name(_Item):
         self.components = components
 
     def __repr__(self):
-        return "<Name %s>" % (self.pretty(),)
+        return "<Name %s>" % (self.str(),)
 
     @staticmethod
     def simple(part):
@@ -90,6 +90,11 @@ class Name(_Item):
             pretty,
             ", ".join([level.pretty() for level in levels]),
         )
+
+    def str(self):
+        if not self.components:
+            return "[anonymous]"
+        return ".".join([pretty_part(each) for each in self.components])
 
     def in_namespace(self, base):
         """
@@ -300,7 +305,7 @@ class Binder(_Item):
         self.right = right
 
     def __repr__(self):
-        return "<Binder %s>" % (self.pretty())
+        return "<Binder %s>" % (self.str())
 
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
@@ -314,7 +319,7 @@ class Binder(_Item):
     def pretty(self, constants=None):
         return "%s%s : %s%s" % (
             self.left,
-            self.name.pretty(),
+            self.name.str(),
             self.type.pretty(),
             self.right,
         )
@@ -598,7 +603,7 @@ class W_LevelParam(W_Level):
         self.name = name
 
     def __repr__(self):
-        return "<Level {}>".format(self.name.pretty())
+        return "<Level {}>".format(self.name.str())
 
     @leq
     def leq(self, other, balance):
@@ -617,7 +622,7 @@ class W_LevelParam(W_Level):
         return False
 
     def pretty_parts(self):
-        return self.name.pretty(), 0
+        return self.name.str(), 0
 
     def syntactic_eq(self, other):
         return self.name.eq(other.name)
@@ -652,6 +657,9 @@ class W_BVar(W_Expr):
         return "<BVar %s>" % (self.id,)
 
     def pretty(self, constants=None):
+        return self.str()
+
+    def str(self):
         return "(BVar [%s])" % (self.id,)
 
     def syntactic_eq(self, other):
@@ -720,7 +728,10 @@ class W_FVar(W_Expr):
         return self
 
     def pretty(self, constants=None):
-        return self.binder.name.pretty()
+        return self.str()
+
+    def str(self):
+        return self.binder.name.str()
 
 
 class W_LitStr(W_Expr):
@@ -738,6 +749,9 @@ class W_LitStr(W_Expr):
         return STRING
 
     def pretty(self, constants=None):
+        return self.str()
+
+    def str(self):
         return '"%s"' % (self.val,)
 
     def instantiate(self, expr, depth):
@@ -905,6 +919,9 @@ class W_LitNat(W_Expr):
         return "<LitNat %s>" % (self.val.str(),)
 
     def pretty(self, constants=None):
+        return self.str()
+
+    def str(self):
         return self.val.str()
 
     def instantiate(self, expr, depth):
@@ -1001,7 +1018,7 @@ class W_Proj(W_Expr):
 
     def pretty(self, constants=None):
         return "<W_Proj struct_name='%s' field_idx='%s' struct_expr='%s'>" % (
-            self.struct_name.pretty(),
+            self.struct_name.str(),
             self.field_idx,
             self.struct_expr.pretty(),
         )
@@ -1177,7 +1194,7 @@ class W_ForAll(W_FunBase):
 def group_to_str(group):
     assert not group[-1].is_instance()
 
-    names = " ".join([each.name.pretty() for each in group])
+    names = " ".join([each.name.str() for each in group])
     if group[-1].is_default():
         return names
 
@@ -1202,7 +1219,7 @@ class W_Lambda(W_FunBase):
                 groups.append(
                     "%s%s : %s%s" % (
                         binder.left,
-                        binder.name.pretty(),
+                        binder.name.str(),
                         binder.type.pretty(),
                         binder.right,
                     ),
@@ -1279,7 +1296,7 @@ class W_Let(W_Expr):
     def pretty(self, constants=None):
         fvar = self.name.binder(type=self.type).fvar()
         return "let %s : %s := %s\n%s" % (
-            self.name.pretty(),
+            self.name.str(),
             self.type.pretty(),
             self.value.pretty(),
             self.body.instantiate(fvar, 0).pretty(),
@@ -1606,7 +1623,7 @@ class W_RecRule(_Item):
 
     def pretty(self, constants=None):
         return "<RecRule ctor_name='%s' num_fields='%s' val='%s'>" % (
-            self.ctor_name.pretty(),
+            self.ctor_name.str(),
             self.num_fields,
             self.val.pretty(),
         )
@@ -1754,8 +1771,11 @@ class W_Constructor(W_DeclarationKind):
         name = constructor_name.in_namespace(inductive.names[0])
         if type in [each.const() for each in inductive.names]:
             # TODO: is this right? Probably it needs to use some _eq method
-            return "| %s" % (name.pretty(),)
-        return "| %s : %s" % (name.pretty(), type.pretty())
+            return "| %s" % (name.str(),)
+        return "| %s : %s" % (
+            name.str(),
+            type.pretty(),
+        )
 
 
 class W_Recursor(W_DeclarationKind):

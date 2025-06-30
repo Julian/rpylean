@@ -41,7 +41,7 @@ class InvalidDeclaration(W_Error):
 
     def str(self):
         return "Invalid declaration %s: %s" % (
-            self.declaration.name.pretty(),
+            self.declaration.name.str(),
             self.reason,
         )
 
@@ -52,7 +52,7 @@ class AlreadyDeclared(InvalidDeclaration):
     """
     def __init__(self, declaration, existing):
         reason = "%s is already declared as %s" % (
-            declaration.name.pretty(),
+            declaration.name.str(),
             existing.pretty(),
         )
         InvalidDeclaration.__init__(self, declaration, reason)
@@ -65,7 +65,7 @@ class DuplicateLevels(InvalidDeclaration):
     """
     def __init__(self, declaration, duplicate):
         reason = "%s has duplicate level parameter %s" % (
-            declaration.name.pretty(),
+            declaration.name.str(),
             duplicate,
         )
         InvalidDeclaration.__init__(self, declaration, reason)
