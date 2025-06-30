@@ -30,7 +30,7 @@ repl *ARGS:
 
 # Run lean4export with the provided arguments.
 lean4export *ARGS:
-    lake --dir "${LEAN4EXPORT_CHECKOUT}" exe lean4export {{ ARGS }}
+    cd "${LEAN4EXPORT_CHECKOUT}" && lake exe lean4export {{ ARGS }}
 
 # Run lean4export on some self-contained source code in a single file.
 export-simple path:
