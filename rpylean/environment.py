@@ -132,16 +132,32 @@ class EnvironmentBuilder(object):
         )
 
         if self.quotient:
-            from rpylean.quot import QUOT_DECLS
+            from rpylean.quot import QUOT, QUOT_MK, QUOT_IND, QUOT_LIFT
 
             for name, type in self.quotient:
-                if name not in QUOT_DECLS:
+                n = len(name.components)
+                if (
+                    n == 0
+                    or n > 2
+                    or name.components[0] != "Quot"
+                ):
                     raise UnknownQuotient(name, type)
 
-                expected = QUOT_DECLS[name]
+                if n == 1:
+                    expected = QUOT
+                elif name.components[1] == "mk":
+                    expected = QUOT_MK
+                elif name.components[1] == "ind":
+                    expected = QUOT_IND
+                elif name.components[1] == "lift":
+                    expected = QUOT_LIFT
+                else:
+                    raise UnknownQuotient(name, type)
+
                 print(name.pretty())
                 print(type.pretty())
                 print(expected.pretty())
+
 
         return Environment.having(self.declarations)
 
