@@ -131,7 +131,6 @@ def test_totally_empty():
     with pytest.raises(parser.ExportVersionError):
         parser.from_export("")
 
-
 @pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
 def test_valid_examples_parse_successfully(path):
     """

@@ -18,6 +18,9 @@ class ParseError(Exception):
         self.message = message
         self.source_pos = source_pos
 
+    def __str__(self):
+        return self.message
+
 
 class ExportVersionError(ParseError):
     """
@@ -588,24 +591,41 @@ class Axiom(Node):
 
     @staticmethod
     def parse(tokens):
-        _, nidx, def_type = tokens[:3]
-        return Axiom(
-            nidx=nidx.uint(),
-            def_type=def_type.uint(),
-            levels=[each.uint() for each in tokens[3:]],
-        )
+        _, nidx, type = tokens[:3]
+        levels = [each.uint() for each in tokens[3:]]
+        return Axiom(nidx=nidx.uint(), type=type.uint(), levels=levels)
 
-    def __init__(self, nidx, def_type, levels):
+    def __init__(self, nidx, type, levels):
         self.nidx = nidx
-        self.def_type = def_type
+        self.type = type
         self.levels = levels
 
     def compile(self, builder):
         declaration = builder.names[self.nidx].axiom(
             levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.def_type],
+            type=builder.exprs[self.type],
         )
         builder.register_declaration(declaration)
+
+
+class Quot(Node):
+
+    kind = "QUOT"
+
+    @staticmethod
+    def parse(tokens):
+        _, nidx_token, type = tokens[:3]
+        levels = [each.uint() for each in tokens[3:]]
+        return Quot(nidx_token=nidx_token, type=type.uint(), levels=levels)
+
+    def __init__(self, nidx_token, type, levels):
+        self.nidx_token = nidx_token
+        self.type = type
+        self.levels = levels
+
+    def compile(self, builder):
+        name = builder.names[self.nidx_token.uint()]
+        builder.register_quotient(name, builder.exprs[self.type])
 
 
 class InductiveSkeleton(Node):
@@ -922,6 +942,7 @@ for cls in [
     InductiveSkeleton,
     Opaque,
     Axiom,
+    Quot,
 ]:
     cls.parse.func_name += "_" + cls.__name__
     NODES["#" + cls.kind] = cls

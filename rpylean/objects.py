@@ -1,5 +1,5 @@
-from rpython.rlib.rbigint import rbigint
 from rpython.rlib.objectmodel import compute_hash
+from rpython.rlib.rbigint import rbigint
 
 from rpylean.exceptions import W_TypeError
 from rpylean._rlib import count

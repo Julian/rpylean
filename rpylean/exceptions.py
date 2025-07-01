@@ -70,3 +70,18 @@ class DuplicateLevels(InvalidDeclaration):
         )
         InvalidDeclaration.__init__(self, declaration, reason)
         self.duplicate = duplicate
+
+
+class UnknownQuotient(W_Error):
+    """
+    An unknown quotient declaration was found.
+
+    Only a specific set of Quot declarations are expected and known compatible
+    with Lean's type theory.
+    """
+    def __init__(self, name, type):
+        self.name = name
+        self.type = type
+
+    def str(self):
+        return "Unknown quotient declaration: %s" % (self.name.str(),)

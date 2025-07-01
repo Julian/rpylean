@@ -3,7 +3,9 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
 
 from rpython.rlib.rbigint import rbigint
+import pytest
 
+from rpylean.exceptions import UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_lines
 from rpylean.objects import (
     W_LEVEL_ZERO,
@@ -275,3 +277,23 @@ def test_dump_constant_list():
         #CTOR 3 12 1 1 1 2 5
         """,
     ).finish() == Environment.having([List, nil, cons])
+
+
+# ------------------------
+# |  Extra tests we add  |
+# ------------------------
+
+
+def test_unknown_quotient():
+    with pytest.raises(UnknownQuotient) as e:
+        from_source(
+            """
+            1 #NS 0 Quot
+            2 #NS 1 something
+            1 #US 0
+            0 #ES 1
+            #QUOT 2 0
+            """
+        ).finish()
+
+    assert e.value.str() == "Unknown quotient declaration: Quot.something"

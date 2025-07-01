@@ -4,7 +4,11 @@ from rpython.rlib.objectmodel import not_rpython, r_dict
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq
-from rpylean.exceptions import AlreadyDeclared, DuplicateLevels
+from rpylean.exceptions import (
+    AlreadyDeclared,
+    DuplicateLevels,
+    UnknownQuotient,
+)
 from rpylean.objects import (
     W_TypeError,
     W_LEVEL_ZERO,
@@ -38,6 +42,8 @@ class EnvironmentBuilder(object):
         self.names = [Name.ANONYMOUS] + names
         self.rec_rules = {}
         self.inductive_skeletons = {}
+        self.quotient = []
+
         self.declarations = []
 
     def __eq__(self, other):
@@ -97,6 +103,9 @@ class EnvironmentBuilder(object):
         assert skeleton.nidx not in self.inductive_skeletons
         self.inductive_skeletons[skeleton.nidx] = skeleton
 
+    def register_quotient(self, name, type):
+        self.quotient.append((name, type))
+
     def register_declaration(self, decl):
         self.declarations.append(decl)
 
@@ -104,6 +113,7 @@ class EnvironmentBuilder(object):
         """
         Finish building, generating the known-valid and immutable environment.
         """
+        # TODO: Make these all proper exceptions.
         assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
             ", ".join(
                 [
@@ -120,6 +130,19 @@ class EnvironmentBuilder(object):
                 ],
             ),
         )
+
+        if self.quotient:
+            from rpylean.quot import QUOT_DECLS
+
+            for name, type in self.quotient:
+                if name not in QUOT_DECLS:
+                    raise UnknownQuotient(name, type)
+
+                expected = QUOT_DECLS[name]
+                print(name.pretty())
+                print(type.pretty())
+                print(expected.pretty())
+
         return Environment.having(self.declarations)
 
 
