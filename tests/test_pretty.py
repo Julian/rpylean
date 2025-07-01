@@ -106,13 +106,13 @@ class TestNameWithLevels(object):
     ]
 )
 def test_sort(level, expected):
-    assert level.sort().pretty() == expected
+    assert level.sort().pretty({}) == expected
 
 
 class TestLet(object):
     def test_basic(self):
         let = a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO)
-        assert let.pretty() == "let a : Nat := Nat.zero\nNat.zero"
+        assert let.pretty({}) == "let a : Nat := Nat.zero\nNat.zero"
 
 
 # TODO: something like the `variable` command?
@@ -197,15 +197,15 @@ def test_forall(forall, expected):
 class TestConst(object):
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
-        assert foo.pretty() == "foo.{u, v}"
+        assert foo.pretty({}) == "foo.{u, v}"
 
     def test_one_level(self):
         List = Name.simple("List").const(levels=[u])
-        assert List.pretty() == "List.{u}"
+        assert List.pretty({}) == "List.{u}"
 
     def test_no_levels(self):
         foo = Name.simple("foo").const()
-        assert foo.pretty() == "foo"
+        assert foo.pretty({}) == "foo"
 
 
 class TestInductive(object):
@@ -219,7 +219,7 @@ class TestInductive(object):
                 # TODO: test constructors with params
             ],
         )
-        assert Foo.pretty() == dedent(
+        assert Foo.pretty({}) == dedent(
             """
             inductive Foo : Prop
             | bar
@@ -233,7 +233,7 @@ class TestInductive(object):
             type=PROP,
             constructors=[name.child("bar").constructor(type=name.const())],
         )
-        assert Foo.pretty() == dedent(
+        assert Foo.pretty({}) == dedent(
             """
             inductive Foo : Prop
             | bar
@@ -242,14 +242,14 @@ class TestInductive(object):
 
     def test_no_constructors(self):
         Empty = Name.simple("Empty").inductive(type=TYPE)
-        assert Empty.pretty() == "inductive Empty : Type"
+        assert Empty.pretty({}) == "inductive Empty : Type"
 
 
 class TestConstructor(object):
     def test_no_params(self):
         True_ = Name.simple("True")
         intro = True_.child("intro").constructor(type=True_.const())
-        assert intro.pretty() == "constructor True.intro : True"
+        assert intro.pretty({}) == "constructor True.intro : True"
 
 
 class TestRecursor(object):
@@ -268,7 +268,7 @@ class TestRecursor(object):
             levels=[u],
         )
 
-        assert rec.pretty() == (
+        assert rec.pretty({}) == (
             "recursor Empty.rec.{u} : "
             # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
             "Empty → Sort u → Empty → motive t"
@@ -279,23 +279,23 @@ class TestTheorem(object):
     def test_delaborate(self):
         # FIXME: this theorem is not a Prop, but that's too annoying now
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
-        assert theorem.pretty() == "theorem foo : Nat := Nat.zero"
+        assert theorem.pretty({}) == "theorem foo : Nat := Nat.zero"
 
 
 class TestAxiom(object):
     def test_delaborate(self):
         axiom = Name.simple("sorryAx").axiom(type=NAT)
-        assert axiom.pretty() == "axiom sorryAx : Nat"
+        assert axiom.pretty({}) == "axiom sorryAx : Nat"
 
 
 def test_litnat():
     nat = W_LitNat(rbigint.fromlong(1000000000000000))
-    assert nat.pretty() == "1000000000000000"
+    assert nat.pretty({}) == "1000000000000000"
 
 
 def test_litstr():
     hi = W_LitStr("hi")
-    assert hi.pretty() == '"hi"'
+    assert hi.pretty({}) == '"hi"'
 
 
 class TestLambda(object):
@@ -314,7 +314,7 @@ class TestLambda(object):
                 "Instance binder pretty-printing doesn't yet hide unused "
                 "names when pretty printing.",
             )
-        assert binder(type=NAT).fun(body=NAT_ZERO).pretty() == expected
+        assert binder(type=NAT).fun(body=NAT_ZERO).pretty({}) == expected
 
     def test_nested_default(self):
         nested = x.binder(type=NAT).fun(
@@ -322,7 +322,7 @@ class TestLambda(object):
                 body=f.const().app(b1).app(b0)
             )
         )
-        assert nested.pretty() == "fun x y ↦ f x y"
+        assert nested.pretty({}) == "fun x y ↦ f x y"
 
     def test_nested_implicit(self):
         nested = x.implicit_binder(type=NAT).fun(
@@ -330,7 +330,7 @@ class TestLambda(object):
                 body=f.const().app(b1).app(b0)
             )
         )
-        assert nested.pretty() == "fun {x y} ↦ f x y"
+        assert nested.pretty({}) == "fun {x y} ↦ f x y"
 
     def test_nested_instance(self):
         nested = x.instance_binder(type=NAT).fun(
@@ -338,7 +338,7 @@ class TestLambda(object):
                 body=f.const().app(b1).app(b0)
             )
         )
-        assert nested.pretty() == "fun [x : Nat] [y : Nat] ↦ f x y"
+        assert nested.pretty({}) == "fun [x : Nat] [y : Nat] ↦ f x y"
 
     def test_mixed_default_implicit(self):
         nested = x.binder(type=NAT).fun(
@@ -346,7 +346,7 @@ class TestLambda(object):
                 body=f.const().app(b1).app(b0)
             )
         )
-        assert nested.pretty() == "fun x {y} ↦ f x y"
+        assert nested.pretty({}) == "fun x {y} ↦ f x y"
 
     def test_mixed_implicit_default(self):
         nested = x.implicit_binder(type=NAT).fun(
@@ -354,7 +354,7 @@ class TestLambda(object):
                 body=f.const().app(b1).app(b0)
             )
         )
-        assert nested.pretty() == "fun {x} y ↦ f x y"
+        assert nested.pretty({}) == "fun {x} y ↦ f x y"
 
     def test_more_nested(self):
         nested = x.binder(type=NAT).fun(
@@ -364,7 +364,7 @@ class TestLambda(object):
                 )
             )
         )
-        assert nested.pretty() == "fun x y a ↦ f (f x y) a"
+        assert nested.pretty({}) == "fun x y a ↦ f (f x y) a"
 
     def test_more_nested_mixed(self):
         nested = x.binder(type=NAT).fun(
@@ -378,26 +378,26 @@ class TestLambda(object):
             "Instance binder pretty-printing doesn't yet hide unused "
             "names when pretty printing.",
         )
-        assert nested.pretty() == "fun x {y} [Nat] f ↦ f"
+        assert nested.pretty({}, []) == "fun x {y} [Nat] f ↦ f"
 
     def test_nested_non_lambda_body(self):
         let = y.let(type=NAT, value=NAT_ZERO, body=b0)
         nested = x.binder(type=NAT).fun(body=let)
-        assert nested.pretty() == "fun x ↦ let y : Nat := Nat.zero\ny"
+        assert nested.pretty({}) == "fun x ↦ let y : Nat := Nat.zero\ny"
 
     def test_definition(self):
         f = Name.simple("f").definition(
             type=a.binder(type=NAT).forall(body=NAT),
             value=a.binder(type=NAT).fun(body=b0),
         )
-        assert f.pretty() == "def f : Nat → Nat := fun a ↦ a"
+        assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ a"
 
     def test_let(self):
         f = Name.simple("f").definition(
             type=NAT,
             value=a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO),
         )
-        assert f.pretty() == "def f : Nat := let a : Nat := Nat.zero\nNat.zero"
+        assert f.pretty({}) == "def f : Nat := let a : Nat := Nat.zero\nNat.zero"
 
     def test_let_inside_lambda(self):
         f = Name.simple("f").definition(
@@ -406,43 +406,43 @@ class TestLambda(object):
                 body=x.let(type=NAT, value=NAT_ZERO, body=b1)
             ),
         )
-        assert f.pretty() == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
+        assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
 
 
 class TestApp(object):
     def test_simple(self):
         app = f.const().app(a.const())
-        assert app.pretty() == "f a"
+        assert app.pretty({}) == "f a"
 
     def test_nested_application_left_associative(self):
         app = f.const().app(a.const()).app(x.const())
-        assert app.pretty() == "f a x"
+        assert app.pretty({}) == "f a x"
 
     def test_application_with_parentheses_needed(self):
         g = Name.simple("g").const()
         inner = g.app(a.const())
         outer = f.const().app(inner)
-        assert outer.pretty() == "f (g a)"
+        assert outer.pretty({}) == "f (g a)"
 
     def test_lambda_app(self):
         id = x.binder(type=NAT).fun(body=b0)
         app = id.app(a.const())
-        assert app.pretty() == "(fun x ↦ x) a"
+        assert app.pretty({}) == "(fun x ↦ x) a"
 
     def test_app_lambda(self):
         id = x.binder(type=NAT).fun(body=b0)
         app = f.const().app(id)
-        assert app.pretty() == "f fun x ↦ x"
+        assert app.pretty({}) == "f fun x ↦ x"
 
     def test_lambda_lambda_app(self):
         fun_fn = f.binder(type=NAT).fun(body=x.binder(type=NAT).fun(body=b0))
         fun_arg = y.binder(type=NAT).fun(body=b0)
         app = fun_fn.app(fun_arg).app(NAT_ZERO)
-        assert app.pretty() == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
+        assert app.pretty({}) == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
 
     def test_app_multiple_lambda(self):
         fun1 = x.binder(type=NAT).fun(body=b0)
         fun2 = y.binder(type=NAT).fun(body=b0)
         fun3 = a.binder(type=NAT).fun(body=b0)
         app = f.const().app(fun1).app(fun2).app(fun3)
-        assert app.pretty() == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"
+        assert app.pretty({}) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"

@@ -117,7 +117,7 @@ def print_decl(env, args, _, stdout, stderr):
     if declaration is None:
         stderr.write("%s does not exist in the environment.\n" % name.str())
         return
-    stdout.write(declaration.pretty())
+    stdout.write(env.pretty(declaration))
     stdout.write("\n")
 
 

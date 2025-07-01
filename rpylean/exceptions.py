@@ -20,14 +20,15 @@ class W_TypeError(W_Error):
     """
     A term does not type check.
     """
-    def __init__(self, term, expected_type):  # TODO: inferred_type
+    def __init__(self, environment, term, expected_type):  # TODO: inferred_type
+        self.environment = environment
         self.term = term
         self.expected_type = expected_type
 
     def str(self):
         return "%s is not of type %s" % (
-            self.term.pretty(),
-            self.expected_type.pretty(),
+            self.environment.pretty(self.term),
+            self.environment.pretty(self.expected_type),
         )
 
 
@@ -50,13 +51,13 @@ class AlreadyDeclared(InvalidDeclaration):
     """
     A declaration already exists in the environment.
     """
-    def __init__(self, declaration, existing):
+    def __init__(self, declaration, constants):
         reason = "%s is already declared as %s" % (
             declaration.name.str(),
-            existing.pretty(),
+            constants[declaration.name].pretty(constants),
         )
         InvalidDeclaration.__init__(self, declaration, reason)
-        self.existing = existing
+        self.constants = constants
 
 
 class DuplicateLevels(InvalidDeclaration):

@@ -154,9 +154,9 @@ class EnvironmentBuilder(object):
                 else:
                     raise UnknownQuotient(name, type)
 
-                print(name.pretty())
-                print(type.pretty())
-                print(expected.pretty())
+                print(name.str())
+                print(type)
+                print(expected)
 
 
         return Environment.having(self.declarations)
@@ -218,7 +218,7 @@ class Environment(object):
         by_name = r_dict(Name.eq, Name.hash)
         for each in declarations:
             if each.name in by_name:
-                raise AlreadyDeclared(each, by_name[each.name])
+                raise AlreadyDeclared(each, by_name)
 
             levels = {}
             for level in each.levels:
@@ -261,7 +261,7 @@ class Environment(object):
         Dump the contents of this environment to the given stream.
         """
         for decl in self.declarations.values():
-            stdout.write("%s\n" % (decl.pretty(),))
+            stdout.write("%s\n" % (self.pretty(decl),))
 
     def def_eq(self, expr1, expr2):
         """

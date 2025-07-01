@@ -88,7 +88,7 @@ class Name(_Item):
             hash_val ^= compute_hash(c)
         return hash_val
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -316,11 +316,11 @@ class Binder(_Item):
     def fun(self, body):
         return W_Lambda(binder=self, body=body)
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return "%s%s : %s%s" % (
             self.left,
             self.name.str(),
-            self.type.pretty(),
+            self.type.pretty(constants),
             self.right,
         )
 
@@ -399,7 +399,7 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -659,7 +659,7 @@ class W_BVar(W_Expr):
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -730,7 +730,7 @@ class W_FVar(W_Expr):
             return W_BVar(depth)
         return self
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -751,7 +751,7 @@ class W_LitStr(W_Expr):
         """
         return STRING
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -773,7 +773,7 @@ class W_Sort(W_Expr):
         # No class name here, as we wouldn't want to see <Sort Type>
         return "<%s>" % (self.str(),)
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         """
         Pretty format this Sort.
         """
@@ -848,7 +848,7 @@ class W_Const(W_Expr):
         """
         return self.name.child(part).const()
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return name_with_levels(self.name, self.levels)
 
     def str(self):
@@ -884,7 +884,7 @@ class W_Const(W_Expr):
         decl = env.declarations[self.name]
         if decl is None:
             print("Missing decl: %s" % self.name.components)
-            raise RuntimeError("Missing decl: %s" % self.pretty())
+            raise RuntimeError("Missing decl: %s" % self.str())
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_delta_reduce_target()
         if not isinstance(decl.w_kind, W_Definition):
@@ -927,7 +927,7 @@ class W_LitNat(W_Expr):
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return self.str()
 
     def str(self):
@@ -1025,11 +1025,11 @@ class W_Proj(W_Expr):
     def instantiate(self, expr, depth):
         return W_Proj(self.struct_name, self.field_idx, self.struct_expr.instantiate(expr, depth))
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return "<W_Proj struct_name='%s' field_idx='%s' struct_expr='%s'>" % (
             self.struct_name.str(),
             self.field_idx,
-            self.struct_expr.pretty(),
+            self.struct_expr.pretty(constants),
         )
 
     def subst_levels(self, substs):
@@ -1129,7 +1129,7 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
-    def pretty(self, constants={}):
+    def pretty(self, constants):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
 
@@ -1152,10 +1152,16 @@ class W_ForAll(W_FunBase):
         if isinstance(rhs, W_Const):
             rhs_type = constants.get(rhs.name, None)
         if lhs_type is not PROP and rhs_type is PROP:
-            return "∀ %s, %s" % (self.binder.pretty(), rhs.pretty())
+            return "∀ %s, %s" % (
+                self.binder.pretty(constants),
+                rhs.pretty(constants),
+            )
         else:
             lhs = self.binder.type if self.binder.is_default() else self.binder
-            return "%s → %s" % (lhs.pretty(), rhs.pretty())
+            return "%s → %s" % (
+                lhs.pretty(constants),
+                rhs.pretty(constants),
+            )
 
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)
@@ -1211,7 +1217,7 @@ def group_to_str(group):
 
 
 class W_Lambda(W_FunBase):
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         binders = []
         current = self
         while isinstance(current, W_Lambda):
@@ -1229,7 +1235,7 @@ class W_Lambda(W_FunBase):
                     "%s%s : %s%s" % (
                         binder.left,
                         binder.name.str(),
-                        binder.type.pretty(),
+                        binder.type.pretty(constants),
                         binder.right,
                     ),
                 )
@@ -1246,7 +1252,10 @@ class W_Lambda(W_FunBase):
         for binder in reversed(binders):
             body = body.instantiate(binder.fvar(), 0)
 
-        return "fun %s ↦ %s" % (" ".join(groups), body.pretty())
+        return "fun %s ↦ %s" % (
+            " ".join(groups),
+            body.pretty(constants),
+        )
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Lambda)
@@ -1278,7 +1287,7 @@ class W_Lambda(W_FunBase):
         body_type_fvar = self.body.instantiate(fvar, 0).infer(env)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
-            raise RuntimeError("W_Lambda.infer: body_type is None: %s" % self.pretty())
+            raise RuntimeError("W_Lambda.infer: body_type is None: %s" % env.pretty(self))
         return self.binder.forall(body=body_type)
 
     def strong_reduce_step(self, env):
@@ -1302,13 +1311,13 @@ class W_Let(W_Expr):
         self.value = value
         self.body = body
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         fvar = self.name.binder(type=self.type).fvar()
         return "let %s : %s := %s\n%s" % (
             self.name.str(),
-            self.type.pretty(),
-            self.value.pretty(),
-            self.body.instantiate(fvar, 0).pretty(),
+            self.type.pretty(constants),
+            self.value.pretty(constants),
+            self.body.instantiate(fvar, 0).pretty(constants),
         )
 
     def instantiate(self, expr, depth):
@@ -1332,27 +1341,27 @@ class W_App(W_Expr):
         self.fn = fn
         self.arg = arg
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         args = []
         current = self
         while isinstance(current, W_App):
             args.append(current.arg)
             current = current.fn
 
-        fn_pretty = current.pretty()
+        fn_pretty = current.pretty(constants)
         if isinstance(current, W_Lambda):
             fn_pretty = "(%s)" % fn_pretty
 
         arg_parts = []
         for i in range(len(args) - 1, 0, -1):
             arg = args[i]
-            arg_pretty = arg.pretty()
+            arg_pretty = arg.pretty(constants)
             if isinstance(arg, W_Lambda) or isinstance(arg, W_App):
                 arg_pretty = "(%s)" % arg_pretty
             arg_parts.append(arg_pretty)
 
         last_arg = args[0]
-        last_arg_pretty = last_arg.pretty()
+        last_arg_pretty = last_arg.pretty(constants)
         if isinstance(last_arg, W_App):
             last_arg_pretty = "(%s)" % last_arg_pretty
         arg_parts.append(last_arg_pretty)
@@ -1368,8 +1377,8 @@ class W_App(W_Expr):
         if not env.def_eq(fn_type.binder.type, arg_type):
             raise RuntimeError(
                 "W_App.infer: type mismatch:\n%s\n  !=\n%s" % (
-                    fn_type.binder.type.pretty(),
-                    arg_type.pretty(),
+                    env.pretty(fn_type.binder.type),
+                    env.pretty(arg_type),
                 ),
             )
         body_type = fn_type.body.instantiate(self.arg, 0)
@@ -1630,11 +1639,11 @@ class W_RecRule(_Item):
         self.num_fields = num_fields
         self.val = val
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         return "<RecRule ctor_name='%s' num_fields='%s' val='%s'>" % (
             self.ctor_name.str(),
             self.num_fields,
-            self.val.pretty(),
+            self.val.pretty(constants),
         )
 
 
@@ -1651,10 +1660,10 @@ class W_Declaration(_Item):
         """
         return self.name.const(**kwargs)
 
-    def pretty(self, constants=None):
+    def pretty(self, constants):
         # Is delaborate the right vocabulary for what we're doing?!
         pretty = name_with_levels(self.name, self.levels)
-        return self.w_kind.delaborate(pretty, self.type)
+        return self.w_kind.delaborate(pretty, self.type, constants)
 
     def type_check(self, env):
         return self.w_kind.type_check(self.type, env)
@@ -1671,7 +1680,7 @@ class DefOrTheorem(W_DeclarationKind):
     def type_check(self, type, env):
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
-            raise W_TypeError(type, val_type)
+            raise W_TypeError(env, type, val_type)
 
 
 class W_Definition(DefOrTheorem):
@@ -1679,11 +1688,11 @@ class W_Definition(DefOrTheorem):
         self.value = value
         self.hint = hint
 
-    def delaborate(self, name_with_levels, type):
+    def delaborate(self, name_with_levels, type, constants):
         return "def %s : %s := %s" % (
             name_with_levels,
-            type.pretty(),
-            self.value.pretty(),
+            type.pretty(constants),
+            self.value.pretty(constants),
         )
 
     def get_delta_reduce_target(self):
@@ -1706,17 +1715,17 @@ class W_Theorem(DefOrTheorem):
     def __init__(self, value):
         self.value = value
 
-    def delaborate(self, name_with_levels, type):
+    def delaborate(self, name_with_levels, type, constants):
         return "theorem %s : %s := %s" % (
             name_with_levels,
-            type.pretty(),
-            self.value.pretty(),
+            type.pretty(constants),
+            self.value.pretty(constants),
         )
 
 
 class W_Axiom(W_DeclarationKind):
-    def delaborate(self, name_with_levels, type):
-        return "axiom %s : %s" % (name_with_levels, type.pretty())
+    def delaborate(self, name_with_levels, type, constants):
+        return "axiom %s : %s" % (name_with_levels, type.pretty(constants))
 
     def type_check(self, type, env):
         # TODO - implement type checking
@@ -1747,18 +1756,19 @@ class W_Inductive(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def delaborate(self, name_with_levels, type):
+    def delaborate(self, name_with_levels, type, constants):
         ctors = [
             each.w_kind.delaborate_in(
                 constructor_name=each.name,
                 type=each.type,
                 inductive=self,
+                constants=constants,
             )
             for each in self.constructors
         ]
         return "inductive %s : %s%s" % (
             name_with_levels,
-            type.pretty(),
+            type.pretty(constants),
             ("\n" + "\n".join(ctors)) if ctors else "",
         )
 
@@ -1773,17 +1783,26 @@ class W_Constructor(W_DeclarationKind):
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def delaborate(self, name_with_levels, type):
-        return "constructor %s : %s" % (name_with_levels, type.pretty())
+    def delaborate(self, name_with_levels, type, constants):
+        return "constructor %s : %s" % (
+            name_with_levels,
+            type.pretty(constants),
+        )
 
-    def delaborate_in(self, constructor_name, type, inductive):
+    def delaborate_in(
+        self,
+        constructor_name,
+        type,
+        inductive,
+        constants,
+    ):
         name = constructor_name.in_namespace(inductive.names[0])
         if type in [each.const() for each in inductive.names]:
             # TODO: is this right? Probably it needs to use some _eq method
             return "| %s" % (name.str(),)
         return "| %s : %s" % (
             name.str(),
-            type.pretty(),
+            type.pretty(constants),
         )
 
 
@@ -1810,8 +1829,11 @@ class W_Recursor(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def delaborate(self, name_with_levels, type):
-        return "recursor %s : %s" % (name_with_levels, type.pretty())
+    def delaborate(self, name_with_levels, type, constants):
+        return "recursor %s : %s" % (
+            name_with_levels,
+            type.pretty(constants),
+        )
 
 
 def syntactic_eq(expr1, expr2):

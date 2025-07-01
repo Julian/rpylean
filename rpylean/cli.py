@@ -130,7 +130,10 @@ def check(self, args, varargs, stdin, stdout, stderr):
 
     for name, decl, w_error in result.invalid:
         stderr.write(
-            "%s is not type-correct: %s\n" % (decl.pretty(), w_error.str())
+            "%s is not type-correct: %s\n" % (
+                environment.pretty(decl),
+                w_error.str(),
+            ),
         )
 
     if not result.succeeded():
@@ -150,7 +153,7 @@ def dump(self, args, varargs, stdin, stdout, stderr):
     if varargs:
         for each in varargs:
             declaration = environment.declarations[Name.from_str(each)]
-            stdout.write(declaration.pretty())
+            stdout.write(environment.pretty(declaration))
             stdout.write("\n")
     else:
         environment.dump_pretty(stdout)
