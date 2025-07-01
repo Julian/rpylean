@@ -1,6 +1,12 @@
 # rpylean
 
-A Lean (4) type checker written in (R)Python.
+A [Lean (4)](https://lean-lang.org/) type checker written in [(R)Python](https://rpython.readthedocs.io/).
+
+## Running
+
+`rpylean` isn't complete yet.
+
+Binaries are regardless currently built via GitHub Actions, so if you'd like you should be able to download and run one for your OS by visiting the latest CI run for the main branch.
 
 ## Development
 
