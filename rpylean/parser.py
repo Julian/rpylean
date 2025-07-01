@@ -785,8 +785,8 @@ class Constructor(Node):
         skeleton = builder.inductive_skeletons[self.inductive_nidx]
         assert skeleton.constructors[self.cidx] is None, (
             "Constructor %s.%s already defined at index %d" % (
-                builder.names[self.inductive_nidx].pretty(),
-                builder.names[self.nidx].pretty(),
+                builder.names[self.inductive_nidx].str(),
+                builder.names[self.nidx].str(),
                 self.cidx,
             )
         )

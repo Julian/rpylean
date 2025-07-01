@@ -41,6 +41,17 @@ class _Item(object):
         return "<%s %s>" % (self.__class__.__name__, " ".join(parts))
 
 
+def name_with_levels(name, levels):
+    pretty = name.str()
+    if not levels:
+        return pretty
+    return "%s.{%s}" % (
+        pretty,
+        ", ".join([level.str() for level in levels]),
+    )
+
+
+
 class Name(_Item):
     def __init__(self, components):
         self.components = components
@@ -78,18 +89,7 @@ class Name(_Item):
         return hash_val
 
     def pretty(self, constants=None):
-        if not self.components:
-            return "[anonymous]"
-        return ".".join([pretty_part(each) for each in self.components])
-
-    def pretty_with_levels(self, levels):
-        pretty = self.pretty()
-        if not levels:
-            return pretty
-        return "%s.{%s}" % (
-            pretty,
-            ", ".join([level.pretty() for level in levels]),
-        )
+        return self.str()
 
     def str(self):
         if not self.components:
@@ -305,7 +305,7 @@ class Binder(_Item):
         self.right = right
 
     def __repr__(self):
-        return "<Binder %s>" % (self.str())
+        return "<Binder %s>" % (self.name.str())
 
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
@@ -400,6 +400,9 @@ def leq(fn):
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
     def pretty(self, constants=None):
+        return self.str()
+
+    def str(self):
         parts = []
         text, balance = self.pretty_parts()
         if text:
@@ -698,7 +701,7 @@ class W_FVar(W_Expr):
         self.binder = binder
 
     def __repr__(self):
-        return "<FVar id={} binder={}>".format(self.id, self.binder.pretty())
+        return "<FVar id={} binder={!r}>".format(self.id, self.binder)
 
     def incr_free_bvars(self, count, depth):
         return self
@@ -768,24 +771,15 @@ class W_Sort(W_Expr):
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
-        return "<%s>" % (self.pretty(),)
-
-    def whnf(self, env):
-        return self
-
-    def incr_free_bvars(self, count, depth):
-        return self
-
-    def bind_fvar(self, fvar, depth):
-        return self
-
-    def instantiate(self, expr, depth):
-        return self
+        return "<%s>" % (self.str(),)
 
     def pretty(self, constants=None):
         """
         Pretty format this Sort.
         """
+        return self.str()
+
+    def str(self):
         text, balance = self.level.pretty_parts()
 
         if balance == 0:
@@ -803,6 +797,18 @@ class W_Sort(W_Expr):
         if balance == 0:
             return "%s %s" % (prefix, text)
         return "%s (%s + %s)" % (prefix, text, balance)
+
+    def whnf(self, env):
+        return self
+
+    def incr_free_bvars(self, count, depth):
+        return self
+
+    def bind_fvar(self, fvar, depth):
+        return self
+
+    def instantiate(self, expr, depth):
+        return self
 
     def infer(self, env):
         return self.level.succ().sort()
@@ -843,7 +849,10 @@ class W_Const(W_Expr):
         return self.name.child(part).const()
 
     def pretty(self, constants=None):
-        return self.name.pretty_with_levels(self.levels)
+        return name_with_levels(self.name, self.levels)
+
+    def str(self):
+        return self.name.str()
 
     def syntactic_eq(self, other):
         if self.name != other.name or len(self.levels) != len(other.levels):
@@ -1644,7 +1653,7 @@ class W_Declaration(_Item):
 
     def pretty(self, constants=None):
         # Is delaborate the right vocabulary for what we're doing?!
-        pretty = self.name.pretty_with_levels(self.levels)
+        pretty = name_with_levels(self.name, self.levels)
         return self.w_kind.delaborate(pretty, self.type)
 
     def type_check(self, env):

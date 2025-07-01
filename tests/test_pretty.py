@@ -16,6 +16,7 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    name_with_levels,
     names,
 )
 
@@ -45,14 +46,20 @@ class TestName(object):
             "anonymous",
         ]
     )
-    def test_no_levels(self, parts, expected):
-        assert Name(parts).pretty() == expected
+    def test_str(self, parts, expected):
+        name = Name(parts)
+        assert name.pretty({}) == name.str() == expected
 
+
+class TestNameWithLevels(object):
     def test_one_level(self):
-        assert Name.simple("foo").pretty_with_levels([u]) == "foo.{u}"
+        assert name_with_levels(x, [u]) == "x.{u}"
 
     def test_multiple_levels(self):
-        assert Name.simple("bar").pretty_with_levels([u, v]) == "bar.{u, v}"
+        assert name_with_levels(y, [u, v]) == "y.{u, v}"
+
+    def test_no_levels(self):
+        assert name_with_levels(a, []) == "a"
 
 
 @pytest.mark.parametrize(
