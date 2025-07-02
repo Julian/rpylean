@@ -120,21 +120,17 @@ def check(self, args, varargs, stdin, stdout, stderr):
     )
 
     if varargs:
-        declarations = []
-        for each in varargs:
-            name = Name.from_str(each)
-            declarations.append((name, environment.declarations[name]))
+        declarations = [
+            environment.declarations[Name.from_str(each)]
+            for each in varargs
+        ]
         result = environment.type_check(declarations)
     else:
         result = environment.type_check()
 
-    for name, decl, w_error in result.invalid:
-        stderr.write(
-            "%s is not type-correct: %s\n" % (
-                environment.pretty(decl),
-                w_error.str(),
-            ),
-        )
+    for w_error in result.invalid:
+        stderr.write(w_error.str())
+        stderr.write("\n")
 
     if not result.succeeded():
         return 1

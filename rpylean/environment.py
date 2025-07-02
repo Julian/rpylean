@@ -240,19 +240,19 @@ class Environment(object):
         Type check each declaration in the environment.
         """
         if declarations is None:
-            declarations = self.declarations.items()
+            declarations = self.declarations.values()
 
         invalid = []
-        for name, each in declarations:
+        for each in declarations:
             try:
                 inferred = each.type_check(self)
             except W_TypeError as error:
-                invalid.append((name, each, error))
+                invalid.append(error)
             else:
                 if inferred is not None:
                     # TODO: assert we're not already in _constants,
                     #       or at least that we're identical to what's there
-                    self._constants[name] = inferred
+                    self._constants[each.name] = inferred
 
         return CheckResult(self, invalid)
 

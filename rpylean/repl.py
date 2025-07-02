@@ -68,10 +68,13 @@ def dump(env, _, __, stdout, ___):
 )
 def check(env, args, _, stdout, stderr):
     if not args:  # ok, all of them!
-        env.type_check()
-        stdout.write(
-            "Checked %d declarations.\n" % len(env.declarations),
-        )
+        result = env.type_check()
+        if result.succeeded():
+            stdout.write("Checked %d declarations.\n" % len(env.declarations))
+        else:
+            for each in result.invalid:
+                stderr.write(each.str())
+                stderr.write("\n")
         return
 
     name = Name.from_str(args[0])
