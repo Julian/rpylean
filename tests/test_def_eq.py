@@ -9,6 +9,7 @@ from rpylean.environment import Environment
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
+    TYPE,
     Name,
     W_BVar,
     W_FVar,
@@ -22,7 +23,7 @@ b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
 u, v = Name.simple("u").level(), Name.simple("v").level()
 
 
-class TestFVar:
+class TestFVar(object):
     def test_eq(self):
         fvar = W_FVar(x.binder(type=NAT))
         assert env.def_eq(fvar, fvar)
@@ -32,7 +33,7 @@ class TestFVar:
         assert not env.def_eq(W_FVar(binder), W_FVar(binder))
 
 
-class TestLitNat:
+class TestLitNat(object):
     def test_eq(self):
         assert env.def_eq(
             W_LitNat(rbigint.fromint(37)),
@@ -46,7 +47,7 @@ class TestLitNat:
         )
 
 
-class TestSort:
+class TestSort(object):
     @pytest.mark.parametrize(
         "level1, level2",
         [
@@ -94,3 +95,69 @@ class TestSort:
     )
     def test_not_eq(self, level1, level2):
         assert not env.def_eq(level1.sort(), level2.sort())
+
+
+class TestConst(object):
+    @pytest.mark.parametrize(
+        "const1, const2, decls",
+        [
+            (
+                x.const(),
+                x.const(),
+                [x.axiom(type=TYPE)],
+            ),
+            (
+                x.const(levels=[u]),
+                x.const(levels=[u]),
+                [x.axiom(type=TYPE, levels=[u])],
+            ),
+            (
+                x.const(levels=[u, v]),
+                x.const(levels=[u, v]),
+                [x.axiom(type=TYPE, levels=[u, v])],
+            ),
+        ],
+        ids=[
+            "same",
+            "with_level",
+            "multiple_levels",
+        ]
+    )
+    def test_eq(self, const1, const2, decls):
+        env = Environment.having(decls)
+        assert env.def_eq(const1, const2)
+
+    @pytest.mark.parametrize(
+        "const1, const2, decls",
+        [
+            (
+                x.const(),
+                y.const(),
+                [x.axiom(type=TYPE), y.axiom(type=TYPE)],
+            ),
+            (
+                x.const(),
+                x.const(levels=[u]),
+                [x.axiom(type=TYPE, levels=[u])],
+            ),
+            (
+                x.const(levels=[u]),
+                x.const(),
+                [x.axiom(type=TYPE, levels=[u])],
+            ),
+            (
+                x.const(levels=[u, v]),
+                x.const(levels=[v, u]),
+                [x.axiom(type=TYPE, levels=[u, v])],
+            ),
+        ],
+        ids=[
+            "different_name",
+            "missing_level",
+            "extra_level",
+            "different_level_order",
+        ]
+    )
+    def test_not_eq(self, const1, const2, decls):
+        env = Environment.having(decls)
+        assert not env.def_eq(const1, const2)

@@ -281,16 +281,17 @@ class Environment(object):
             return self.def_eq(body, other_body)
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
-        if isinstance(expr1, W_Const) and isinstance(expr2, W_Const) and expr1.name.eq(expr2.name):
-            # A given constant always has the same number of universe parameters
-            assert len(expr1.levels) == len(expr2.levels)
-            all_match = True
-            for i in range(len(expr1.levels)):
-                if not expr1.levels[i].eq(expr2.levels[i]):
-                    all_match = False
-                    break
-            if all_match:
-                return True
+        if (
+                isinstance(expr1, W_Const)
+                and isinstance(expr2, W_Const)
+                and expr1.name.eq(expr2.name)
+        ):
+            if len(expr1.levels) != len(expr2.levels):
+                return False
+            for i, level in enumerate(expr1.levels):
+                if not level.eq(expr2.levels[i]):
+                    return False
+            return True
 
         if isinstance(expr1, W_App) and isinstance(expr2, W_App):
             if (
