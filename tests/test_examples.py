@@ -21,7 +21,7 @@ def test_interpret_valid_export(path):
         pytest.skip("Type checking Init doesn't work yet and loops for ages.")
 
     environment = from_export(path.readlines())
-    assert environment.type_check().succeeded()
+    assert not list(environment.type_check())
 
 
 @pytest.mark.parametrize("path", examples.INVALID, ids=examples.name_of)
@@ -32,4 +32,4 @@ def test_interpret_invalid_export(path):
     if message is not None:
         pytest.xfail(message)
 
-    assert not environment.type_check().succeeded()
+    assert list(environment.type_check())

@@ -10,7 +10,6 @@ from rpylean.exceptions import (
     UnknownQuotient,
 )
 from rpylean.objects import (
-    W_TypeError,
     W_LEVEL_ZERO,
     PROP,
     Name,
@@ -242,19 +241,15 @@ class Environment(object):
         if declarations is None:
             declarations = self.declarations.values()
 
-        invalid = []
         for each in declarations:
-            try:
-                inferred = each.type_check(self)
-            except W_TypeError as error:
-                invalid.append(error)
+            error = each.type_check(self)
+            if error is None:
+                # TODO: assert we're not already in _constants,
+                #       or at least that we're identical to what's there
+                # self._constants[each.name] = inferred
+                pass
             else:
-                if inferred is not None:
-                    # TODO: assert we're not already in _constants,
-                    #       or at least that we're identical to what's there
-                    self._constants[each.name] = inferred
-
-        return CheckResult(self, invalid)
+                yield error
 
     def dump_pretty(self, stdout):
         """
@@ -370,19 +365,6 @@ class Environment(object):
 
 #: The empty environment.
 Environment.EMPTY = Environment.having([])
-
-
-class CheckResult(object):
-    """
-    The result of type checking an environment.
-    """
-
-    def __init__(self, environment, invalid=None):
-        self.environment = environment
-        self.invalid = invalid
-
-    def succeeded(self):
-        return not self.invalid
 
 
 def heading(s):

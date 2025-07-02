@@ -1,8 +1,23 @@
 from rpython.rlib.objectmodel import compute_hash
 from rpython.rlib.rbigint import rbigint
 
-from rpylean.exceptions import W_TypeError
 from rpylean._rlib import count
+
+
+class W_TypeError(object):
+    """
+    A term does not type check.
+    """
+    def __init__(self, environment, term, expected_type):  # TODO: inferred_type
+        self.environment = environment
+        self.term = term
+        self.expected_type = expected_type
+
+    def str(self):
+        return "%s is not of type %s" % (
+            self.environment.pretty(self.term),
+            self.environment.pretty(self.expected_type),
+        )
 
 
 class _Item(object):
@@ -1680,7 +1695,7 @@ class DefOrTheorem(W_DeclarationKind):
     def type_check(self, type, env):
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
-            raise W_TypeError(env, type, val_type)
+            return W_TypeError(env, type, val_type)
 
 
 class W_Definition(DefOrTheorem):

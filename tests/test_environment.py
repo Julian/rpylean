@@ -1,7 +1,7 @@
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.objects import PROP, TYPE, W_LEVEL_ZERO, Name, W_TypeError
+from rpylean.objects import PROP, TYPE, W_LEVEL_ZERO, Name
 
 
 def test_valid_def_type_checks():
@@ -19,11 +19,11 @@ def test_invalid_def_does_not_type_check():
 
     invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
 
-    with pytest.raises(W_TypeError) as e:
-        invalid.type_check(Environment.EMPTY)
+    error = invalid.type_check(Environment.EMPTY)
+    assert error is not None
 
     TYPE_1 = W_LEVEL_ZERO.succ().succ().sort()
-    assert e.value.expected_type == TYPE_1
+    assert error.expected_type == TYPE_1
 
 
 class TestNotRPython:

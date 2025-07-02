@@ -68,13 +68,13 @@ def dump(env, _, __, stdout, ___):
 )
 def check(env, args, _, stdout, stderr):
     if not args:  # ok, all of them!
-        result = env.type_check()
-        if result.succeeded():
+        succeeded, result = True, env.type_check()
+        for w_error in result:
+            succeeded = False
+            stderr.write(w_error.str())
+            stderr.write("\n")
+        if succeeded:
             stdout.write("Checked %d declarations.\n" % len(env.declarations))
-        else:
-            for each in result.invalid:
-                stderr.write(each.str())
-                stderr.write("\n")
         return
 
     name = Name.from_str(args[0])
@@ -83,12 +83,11 @@ def check(env, args, _, stdout, stderr):
         stderr.write("%s does not exist in the environment.\n" % name.str())
         return
 
-    try:
-        declaration.type_check(env)
-    except W_TypeError as error:
-        stdout.write("Type error: %s\n" % error)
-    else:
+    error = declaration.type_check(env)
+    if error is None:
         stdout.write("%s correctly type checks.\n" % name.str())
+    else:
+        stdout.write(error.str())
 
 
 @command(
@@ -96,19 +95,19 @@ def check(env, args, _, stdout, stderr):
     help="Find the first declaration which does not type check.",
 )
 def first(env, _, __, stdout, stderr):
-    for name, each in env.declarations.items():
+    for each in env.declarations.values():
         try:
-            each.type_check(env)
-        except W_TypeError as error:
-            stdout.write(error.str())
-            return
+            error = each.type_check(env)
         except Exception as error:
             stderr.write(
                 "Unexpected error when checking %s: %s\n" % (
-                    name.str(),
+                    each.name.str(),
                     error,
                 ),
             )
+            return
+        if error is not None:
+            stdout.write(error.str())
             return
     stdout.write("All declarations type check.\n")
 
