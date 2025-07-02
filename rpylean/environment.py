@@ -282,9 +282,9 @@ class Environment(object):
 
         # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
         if (
-                isinstance(expr1, W_Const)
-                and isinstance(expr2, W_Const)
-                and expr1.name.eq(expr2.name)
+            isinstance(expr1, W_Const)
+            and isinstance(expr2, W_Const)
+            and expr1.name.eq(expr2.name)
         ):
             if len(expr1.levels) != len(expr2.levels):
                 return False

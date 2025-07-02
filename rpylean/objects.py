@@ -907,8 +907,7 @@ class W_Const(W_Expr):
         if val is None:
             return None
 
-        val = apply_const_level_params(self, val, env)
-        return val
+        return apply_const_level_params(self, val, env)
 
     def infer(self, env):
         decl = env.declarations[self.name]
@@ -917,8 +916,7 @@ class W_Const(W_Expr):
         if not params:
             return decl.type
 
-        res = apply_const_level_params(self, decl.type, env)
-        return res
+        return apply_const_level_params(self, decl.type, env)
 
     def subst_levels(self, substs):
         new_levels = []
@@ -1086,8 +1084,11 @@ class W_Proj(W_Expr):
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
-        ctor_type = ctor_decl.type
-        ctor_type = apply_const_level_params(struct_expr_type, ctor_type, env)
+        ctor_type = apply_const_level_params(
+            struct_expr_type,
+            ctor_decl.type,
+            env,
+        )
 
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
         # so start iteration from the end

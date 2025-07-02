@@ -161,3 +161,164 @@ class TestConst(object):
     def test_not_eq(self, const1, const2, decls):
         env = Environment.having(decls)
         assert not env.def_eq(const1, const2)
+
+
+class TestForAll(object):
+    @pytest.mark.parametrize(
+        "forall1, forall2, decls",
+        [
+            (
+                x.binder(type=NAT).forall(body=NAT),
+                x.binder(type=NAT).forall(body=NAT),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+            (
+                x.binder(type=NAT).forall(body=NAT),
+                y.binder(type=NAT).forall(body=NAT),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+            (
+                x.binder(type=NAT).forall(body=b0),
+                y.binder(type=NAT).forall(body=b0),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+            (
+                x.binder(type=NAT).forall(
+                    body=y.binder(type=NAT).forall(body=b0)
+                ),
+                a.binder(type=NAT).forall(
+                    body=f.binder(type=NAT).forall(body=b0)
+                ),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+        ],
+        ids=[
+            "same",
+            "alpha_equivalent",
+            "same_body_reference",
+            "nested_same",
+        ]
+    )
+    def test_eq(self, forall1, forall2, decls):
+        env = Environment.having(decls)
+        assert env.def_eq(forall1, forall2)
+
+    @pytest.mark.parametrize(
+        "forall1, forall2, decls",
+        [
+            (
+                x.binder(type=NAT).forall(body=NAT),
+                x.binder(type=TYPE).forall(body=NAT),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+            (
+                x.binder(type=NAT).forall(body=NAT),
+                x.binder(type=NAT).forall(body=TYPE),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+            (
+                x.binder(type=NAT).forall(body=NAT),
+                x.binder(type=NAT).forall(
+                    body=y.binder(type=NAT).forall(body=NAT)
+                ),
+                [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
+            ),
+        ],
+        ids=[
+            "different_binder_types",
+            "different_bodies",
+            "different_structure",
+        ]
+    )
+    def test_not_eq(self, forall1, forall2, decls):
+        env = Environment.having(decls)
+        assert not env.def_eq(forall1, forall2)
+
+
+class TestApp(object):
+    @pytest.mark.parametrize(
+        "app1, app2, decls",
+        [
+            (
+                f.const().app(x.const()),
+                f.const().app(x.const()),
+                [
+                    x.axiom(type=TYPE),
+                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                ],
+            ),
+            (
+                f.const().app(x.const()).app(y.const()),
+                f.const().app(x.const()).app(y.const()),
+                [
+                    x.axiom(type=TYPE),
+                    y.axiom(type=TYPE),
+                    f.axiom(type=x.binder(type=TYPE).forall(
+                        body=y.binder(type=TYPE).forall(body=TYPE)
+                    )),
+                ],
+            ),
+            (
+                f.const(levels=[u]).app(x.const()),
+                f.const(levels=[u]).app(x.const()),
+                [
+                    x.axiom(type=TYPE),
+                    f.axiom(
+                        type=x.binder(type=TYPE).forall(body=TYPE),
+                        levels=[u],
+                    ),
+                ],
+            ),
+        ],
+        ids=[
+            "simple",
+            "nested_app",
+            "with_levels",
+        ]
+    )
+    def test_eq(self, app1, app2, decls):
+        env = Environment.having(decls)
+        assert env.def_eq(app1, app2)
+
+    @pytest.mark.parametrize(
+        "app1, app2, decls",
+        [
+            (
+                f.const().app(x.const()),
+                g.const().app(x.const()),
+                [
+                    x.axiom(type=TYPE),
+                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                    g.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                ],
+            ),
+            (
+                f.const().app(x.const()),
+                f.const().app(y.const()),
+                [
+                    x.axiom(type=TYPE),
+                    y.axiom(type=TYPE),
+                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                ],
+            ),
+            (
+                f.const().app(x.const()).app(y.const()),
+                f.const().app(y.const()).app(x.const()),
+                [
+                    x.axiom(type=TYPE),
+                    y.axiom(type=TYPE),
+                    f.axiom(type=x.binder(type=TYPE).forall(
+                        body=y.binder(type=TYPE).forall(body=TYPE)
+                    )),
+                ],
+            ),
+        ],
+        ids=[
+            "different_function",
+            "different_argument",
+            "different_app_order",
+        ]
+    )
+    def test_not_eq(self, app1, app2, decls):
+        env = Environment.having(decls)
+        assert not env.def_eq(app1, app2)
