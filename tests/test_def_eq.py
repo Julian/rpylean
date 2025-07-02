@@ -19,7 +19,7 @@ from rpylean.objects import (
 env = Environment.EMPTY
 a, f, g, x, y = names("a", "f", "g", "x", "y")
 b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
-u, v = Name.simple("u").level(),  Name.simple("v").level()
+u, v = Name.simple("u").level(), Name.simple("v").level()
 
 
 class TestFVar:

@@ -4,7 +4,7 @@ Interactive REPL for rpylean.
 from rpython.rlib.rfile import create_stdio
 import os
 
-from rpylean.objects import W_TypeError, Name
+from rpylean.objects import Name
 
 
 COMMANDS, HELP = {}, {}

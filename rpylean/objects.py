@@ -66,7 +66,6 @@ def name_with_levels(name, levels):
     )
 
 
-
 class Name(_Item):
     def __init__(self, components):
         self.components = components

@@ -157,7 +157,6 @@ class EnvironmentBuilder(object):
                 print(type)
                 print(expected)
 
-
         return Environment.having(self.declarations)
 
 
