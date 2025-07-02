@@ -14,6 +14,7 @@ from rpylean.objects import (
     W_BVar,
     W_FVar,
     W_LitNat,
+    W_LitStr,
     names,
 )
 
@@ -45,6 +46,14 @@ class TestLitNat(object):
             W_LitNat(rbigint.fromint(37)),
             W_LitNat(rbigint.fromint(73)),
         )
+
+
+class TestLitStr(object):
+    def test_eq(self):
+        assert env.def_eq(W_LitStr("foo"), W_LitStr("foo"))
+
+    def test_not_eq(self):
+        assert not env.def_eq(W_LitStr("foo"), W_LitStr("bar"))
 
 
 class TestSort(object):

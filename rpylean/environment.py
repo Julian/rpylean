@@ -20,6 +20,7 @@ from rpylean.objects import (
     W_ForAll,
     W_Lambda,
     W_LitNat,
+    W_LitStr,
     W_Sort,
     syntactic_eq,
 )
@@ -269,6 +270,8 @@ class Environment(object):
             return expr1.level.eq(expr2.level)
         # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
         elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+            return expr1.val == expr2.val
+        elif isinstance(expr1, W_LitStr) and isinstance(expr2, W_LitStr):
             return expr1.val == expr2.val
         elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
             if not self.def_eq(expr1.binder.type, expr2.binder.type):
