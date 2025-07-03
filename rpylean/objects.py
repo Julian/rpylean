@@ -1359,6 +1359,15 @@ class W_App(W_Expr):
         self.fn = fn
         self.arg = arg
 
+    def __repr__(self):
+        args = []
+        current = self
+        while isinstance(current, W_App):
+            args.append(current.arg)
+            current = current.fn
+        args.reverse()
+        return "<W_App fn={!r} args={!r}>".format(current, args)
+
     def pretty(self, constants):
         args = []
         current = self
