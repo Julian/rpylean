@@ -129,10 +129,14 @@ def check(self, args, varargs, stdin, stdout, stderr):
     else:
         errors = environment.type_check()
 
-    for w_error in errors:
-        succeeded = False
-        stderr.write(w_error.str())
-        stderr.write("\n")
+    try:
+        for w_error in errors:
+            succeeded = False
+            stderr.write(w_error.str())
+            stderr.write("\n")
+    except Exception as e:
+        stderr.write("Unexpected error during type checking: %s\n" % (str(e),))
+        return 2
 
     if not succeeded:
         return 1
