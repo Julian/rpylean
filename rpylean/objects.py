@@ -649,11 +649,14 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
-    def app(self, arg):
+    def app(self, *args):
         """
-        Apply this (which better be a function) to an argument.
+        Apply this (which better be a function) to the given argument(s).
         """
-        return W_App(fn=self, arg=arg)
+        expr = self
+        for arg in args:
+            expr = W_App(expr, arg)
+        return expr
 
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:

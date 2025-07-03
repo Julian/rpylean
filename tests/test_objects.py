@@ -459,4 +459,9 @@ class TestConst(object):
     def test_app(self):
         bvar = W_BVar(0)
         id = Name.simple("id").const()
-        assert id.app(bvar) == W_App(fn=id, arg=bvar)
+        assert id.app(bvar) == W_App(id, bvar)
+
+    def test_app_multiarg(self):
+        b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
+        foo = Name.simple("foo").const()
+        assert foo.app(b0, b1, b2) == W_App(W_App(W_App(foo, b0), b1), b2)

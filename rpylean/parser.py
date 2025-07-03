@@ -387,7 +387,7 @@ class App(ExprVal):
     def to_w_expr(self, builder):
         fn = builder.exprs[self.fn_eidx]
         arg = builder.exprs[self.arg_eidx]
-        return fn.app(arg=arg)
+        return fn.app(arg)
 
 
 def binder(name, info, type):
