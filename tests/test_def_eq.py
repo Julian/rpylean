@@ -171,6 +171,17 @@ class TestConst(object):
         env = Environment.having(decls)
         assert not env.def_eq(const1, const2)
 
+    def test_defeq_different_names_via_unfolding(self):
+        """
+        If def foo := bar, the two are def eq.
+        """
+        foo, bar = Name.simple("foo"), Name.simple("bar")
+        decls = [
+            bar.axiom(type=TYPE),
+            foo.definition(type=TYPE, value=bar.const()),
+        ]
+        env = Environment.having(decls)
+        assert env.def_eq(foo.const(), bar.const())
 
 class TestForAll(object):
     @pytest.mark.parametrize(
