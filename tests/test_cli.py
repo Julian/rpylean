@@ -1,6 +1,6 @@
 from io import BytesIO
 
-from rpylean._rcli import CLI
+from rpylean._rcli import CLI, Args
 
 
 def run(cli, argv, exit=0):
@@ -14,8 +14,7 @@ def run(cli, argv, exit=0):
 def test_usage_error_on_no_args():
     cli = CLI()
     @cli.subcommand(["ARG"], help="Test command help.")
-    def test(self, args, varargs, stdin, stdout, stderr):
-        stdout.write("ran test with %s\n" % args[0])
+    def test(self, args, stdin, stdout, stderr):
         return 0
     out, err = run(cli, ["prog"])
     assert "USAGE" in err
@@ -24,8 +23,8 @@ def test_usage_error_on_no_args():
 def test_known_command_runs():
     cli = CLI()
     @cli.subcommand(["ARG"], help="Test command help.")
-    def test(self, args, varargs, stdin, stdout, stderr):
-        stdout.write("ran test with %s\n" % args[0])
+    def test(self, args, stdin, stdout, stderr):
+        stdout.write("ran test with %s\n" % args.args[0])
         return 0
     out, err = run(cli, ["prog", "test", "foo"])
     assert "ran test with foo" in out
@@ -34,8 +33,8 @@ def test_known_command_runs():
 def test_unknown_command_falls_back_to_default():
     cli = CLI(default="foo")
     @cli.subcommand(["ARG"], help="Fallback here.")
-    def foo(self, args, varargs, stdin, stdout, stderr):
-        assert args == ["unknown"]
+    def foo(self, args, stdin, stdout, stderr):
+        assert args == Args(args=["unknown"])
         stdout.write("ran foo\n")
         return 0
     out, err = run(cli, ["prog", "unknown"])
@@ -51,8 +50,8 @@ def test_help_no_command():
 def test_varargs_command():
     cli = CLI()
     @cli.subcommand(["A", "*REST"], help="Command with varargs.")
-    def vargs(self, args, varargs, stdin, stdout, stderr):
-        stdout.write("args=%r varargs=%r\n" % (args, varargs))
+    def vargs(self, args, stdin, stdout, stderr):
+        stdout.write("args=%r varargs=%r\n" % (args.args, args.varargs))
         return 0
     out, err = run(cli, ["prog", "vargs", "foo", "bar", "baz"])
     assert "args=['foo'] varargs=['bar', 'baz']" in out
@@ -61,7 +60,7 @@ def test_varargs_command():
 def test_too_few_args():
     cli = CLI()
     @cli.subcommand(["A", "B"], help="Needs two args.")
-    def tworeq(self, args, varargs, stdin, stdout, stderr):
+    def tworeq(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
         return 0
     out, err = run(cli, ["prog", "tworeq", "onlyone"], exit=1)
@@ -72,7 +71,7 @@ def test_too_few_args():
 def test_too_many_args():
     cli = CLI()
     @cli.subcommand(["A"], help="Only one arg.")
-    def onearg(self, args, varargs, stdin, stdout, stderr):
+    def onearg(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
         return 0
     out, err = run(cli, ["prog", "onearg", "a", "b"], exit=1)
@@ -83,9 +82,58 @@ def test_too_many_args():
 def test_help_for_command():
     cli = CLI()
     @cli.subcommand(["A"], help="Help for foo command.")
-    def foo(self, args, varargs, stdin, stdout, stderr):
+    def foo(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
         return 0
     out, err = run(cli, ["prog", "foo", "--help"])
     assert "Help for foo command." in err
     assert "USAGE" in err
+
+
+def test_short_help():
+    cli = CLI()
+    @cli.subcommand(["A"], help="Help for bar command.\n\nLonger description.")
+    def bar(self, args, stdin, stdout, stderr):
+        return 0
+    out, err = run(cli, ["prog", "--help"])
+    assert "bar: Help for bar command.\n" in err
+
+
+class TestOption(object):
+
+    cli = CLI()
+    @cli.subcommand(
+        ["A"],
+        options=[("opt", "Option with argument.")],
+        help="Command with option.",
+    )
+    def foo(self, args, stdin, stdout, stderr):
+        stdout.write("args=%r options=%r\n" % (args.args, args.options))
+        return 0
+
+    def test_option_before_argument(self):
+        out, err = run(self.cli, ["prog", "foo", "--opt", "val", "arg"])
+        assert "args=['arg']" in out
+        assert "options={'opt': 'val'}" in out
+        assert err == ""
+
+    def test_option_after_argument(self):
+        out, err = run(self.cli, ["prog", "foo", "arg", "--opt", "val"])
+        assert "args=['arg']" in out
+        assert "options={'opt': 'val'}" in out
+        assert err == ""
+
+    def test_missing_argument(self):
+        out, err = run(self.cli, ["prog", "foo", "--opt"], exit=1)
+        assert "Option --opt requires an argument" in err
+        assert out == ""
+
+    def test_help(self):
+        out, err = run(self.cli, ["prog", "foo", "--help"])
+        assert "--opt" in err
+        assert "Option with argument." in err
+
+    def test_unknown_option(self):
+        out, err = run(self.cli, ["prog", "foo", "--bar", "1", "2"], exit=1)
+        assert "Unknown option: --bar" in err
+        assert out == ""

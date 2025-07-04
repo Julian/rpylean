@@ -23,10 +23,10 @@ cli = CLI(
     ["EXPORT_FILE", "*DECLS"],
     help="Type check an exported Lean environment.",
 )
-def check(self, args, varargs, stdin, stdout, stderr):
-    path, = args
+def check(self, args, stdin, stdout, stderr):
+    path, = args.args
     environment = environment_from(path=path, stdin=stdin)
-    ncheck = len(varargs) or len(environment.declarations)
+    ncheck = len(args.varargs) or len(environment.declarations)
     stdout.write(
         "Checking %s declaration%s...\n" % (
             ncheck,
@@ -35,10 +35,10 @@ def check(self, args, varargs, stdin, stdout, stderr):
     )
 
     succeeded = True
-    if varargs:
+    if args.varargs:
         declarations = [
             environment.declarations[Name.from_str(each)]
-            for each in varargs
+            for each in args.varargs
         ]
         errors = environment.type_check(declarations)
     else:
@@ -64,11 +64,11 @@ def check(self, args, varargs, stdin, stdout, stderr):
     ["EXPORT_FILE", "*DECLS"],
     help="Dump an exported Lean environment or specific declarations from it.",
 )
-def dump(self, args, varargs, stdin, stdout, stderr):
-    path, = args
+def dump(self, args, stdin, stdout, stderr):
+    path, = args.args
     environment = environment_from(path=path, stdin=stdin)
-    if varargs:
-        for each in varargs:
+    if args.varargs:
+        for each in args.varargs:
             declaration = environment.declarations[Name.from_str(each)]
             stdout.write(environment.pretty(declaration))
             stdout.write("\n")
@@ -81,8 +81,8 @@ def dump(self, args, varargs, stdin, stdout, stderr):
     ["EXPORT_FILE"],
     help="Open a REPL with the given export's environment loaded into it.",
 )
-def repl(self, args, _, stdin, stdout, stderr):
-    path, = args
+def repl(self, args, stdin, stdout, stderr):
+    path, = args.args
     environment = environment_from(path=path, stdin=stdin)
     from rpylean import repl
     repl.interact(environment)
@@ -92,9 +92,16 @@ def repl(self, args, _, stdin, stdout, stderr):
 @cli.subcommand(
     ["*MODULES"],
     help="Directly extract an environment via FFI to a real Lean toolchain.",
+    options=[
+        (
+            "prefix",
+            "path to the Lean prefix to link against "
+            "[default: `lean --print-prefix`]",
+        ),
+    ],
 )
-def ffi(self, _, varargs, stdin, stdout, stderr):
-    modules = varargs
+def ffi(self, args, stdin, stdout, stderr):
+    modules = args.varargs
     if not modules:
         return 1  # TODO: some default, maybe Init
     with leanffi.initialize():

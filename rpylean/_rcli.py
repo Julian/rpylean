@@ -13,38 +13,99 @@ class UsageError(Exception):
         return self.message
 
 
+_USAGE = """\
+USAGE
+
+  %s <subcommand> [<args>]
+
+COMMANDS
+
+"""
+COMMAND_USAGE = """\
+%s
+
+USAGE
+
+    %s %s %s%s
+"""
+USAGE_ERROR = """\
+%s
+
+%s
+
+USAGE
+
+  rpylean %s %s
+"""
+
+
 class Command(object):
-    def __init__(self, name, help, metavars, run):
+    def __init__(self, name, help, metavars, options, run, short_help=None):
+        if short_help is None:
+            short_help = help.strip().split("\n", 1)[0]
+
         self.name = name
+        self.short_help = short_help
         self._help = help
         self._metavars = metavars
+        self._options = dict(options)
         self._run = run
 
-    def run(self, args, stdin, stdout, stderr):
-        expected, varargs = len(self._metavars), []
+    def run(self, executable, args, stdin, stdout, stderr):
+        expected, parsed_args, varargs = len(self._metavars), [], []
+        options = {}
+        for k in self._options:
+            options[k] = None
+
+        positional = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg.startswith("--"):
+                opt = arg[2:]
+                if opt == "help":
+                    raise self.help(executable)
+                if opt not in self._options:
+                    self.usage_error("Unknown option: --%s" % opt)
+                if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                    self.usage_error("Option --%s requires an argument" % opt)
+                options[opt] = args[i + 1]
+                i += 2
+            else:
+                positional.append(arg)
+                i += 1
 
         if self._metavars and self._metavars[-1].startswith("*"):
             nfixed = expected = expected - 1
             assert nfixed >= 0
 
-            if len(args) > nfixed:
-                args, varargs = args[:nfixed], args[nfixed:]
-        elif len(args) > expected:
-            self.usage_error("Unknown arguments: %s" % (args[expected:]))
+            if len(positional) > nfixed:
+                parsed_args, varargs = positional[:nfixed], positional[nfixed:]
+            else:
+                parsed_args = positional
+        else:
+            if len(positional) > expected:
+                self.usage_error("Unknown arguments: %s" % (positional[expected:],))
+            parsed_args = positional
 
-        if len(args) < expected:
-            self.usage_error("Expected an %s" % (self._metavars[len(args)],))
+        if len(parsed_args) < expected:
+            self.usage_error("Expected an %s" % (self._metavars[len(parsed_args)],))
 
-        return self._run(self, args, varargs, stdin, stdout, stderr)
+        combined = Args(args=parsed_args, varargs=varargs, options=options)
+        return self._run(self, combined, stdin, stdout, stderr)
 
     def help(self, executable):
         if executable.endswith("__main__.py"):
             executable = "pypy -m rpylean"
+        options = [
+            "    --%s: %s" % (opt, desc) for opt, desc in self._options.items()
+        ]
         message = COMMAND_USAGE % (
             self._help,
             executable,
             self.name,
             " ".join(self._metavars),
+            "\n\nOPTIONS\n\n%s" % "\n".join(options) if options else "",
         )
         raise UsageError(message, exit_code=0)
 
@@ -63,16 +124,19 @@ class CLI(object):
         self.executable = executable
         self.tagline = tagline
         self._default = default
-        self._subcommands = {}
+        self._commands = {}
 
-    def subcommand(self, metavars, help):
-        short_help = help.strip().split("\n", 1)[0]
-
+    def subcommand(self, metavars, help, options=None):
         def _subcommand(fn):
             name = fn.__name__
-            assert name not in self._subcommands, name
-            command = Command(name, help.strip("\n"), metavars, fn)
-            self._subcommands[name] = (command, short_help)
+            assert name not in self._commands, name
+            command = self._commands[name] = Command(
+                name=name,
+                help=help.strip("\n"),
+                metavars=metavars,
+                options=options or [],
+                run=fn,
+            )
             return command
         return _subcommand
 
@@ -80,14 +144,11 @@ class CLI(object):
         if len(argv) == 1 or argv[1] == "--help":
             raise self.with_tagline(argv[0])
 
-        command, _ = self._subcommands.get(argv[1], (None, None))
+        command = self._commands.get(argv[1])
         if command is None:
-            command, args = self._subcommands[self._default][0], argv[1:]
+            command, args = self._commands[self._default], argv[1:]
         else:
             args = argv[2:]
-
-        if "--help" in args:
-            raise command.help(argv[0])
 
         return command, args
 
@@ -98,7 +159,7 @@ class CLI(object):
 
         try:
             command, args = self.parse(argv)
-            return command.run(args, stdin, stdout, stderr)
+            return command.run(argv[0], args, stdin, stdout, stderr)
         except UsageError as error:
             stderr.write(error.__str__())
             stderr.write("\n")
@@ -108,8 +169,8 @@ class CLI(object):
     def usage(self, executable):
         return _USAGE % (executable,) + "\n".join(
             [
-                "  %s: %s" % (k, v)
-                for k, (_, v) in self._subcommands.items()
+                "  %s: %s" % (k, cmd.short_help)
+                for k, cmd in self._commands.items()
             ],
         )
 
@@ -122,27 +183,13 @@ class CLI(object):
         )
 
 
-_USAGE = """\
-USAGE
+class Args(object):
+    def __init__(self, args=None, varargs=None, options=None):
+        self.args = args if args is not None else []
+        self.varargs = varargs if varargs is not None else []
+        self.options = options if options is not None else {}
 
-  %s <subcommand> [<args>]
-
-COMMANDS
-
-"""
-COMMAND_USAGE = """\
-%s
-
-USAGE
-
-    %s %s %s
-"""
-USAGE_ERROR = """\
-%s
-
-%s
-
-USAGE
-
-  rpylean %s %s
-"""
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return vars(self) == vars(other)
