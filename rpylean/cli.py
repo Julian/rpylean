@@ -9,6 +9,7 @@ import sys
 from rpython.rlib.streamio import open_file_as_stream
 from rpython.rlib.rfile import create_stdio
 
+from rpylean import leanffi
 from rpylean.environment import from_export
 from rpylean.objects import Name
 
@@ -172,6 +173,23 @@ def repl(self, args, _, stdin, stdout, stderr):
     from rpylean import repl
     repl.interact(environment)
     return 0
+
+
+@subcommand(
+    ["*MODULES"],
+    help="Directly extract an environment via FFI to a real Lean toolchain.",
+)
+def ffi(self, _, varargs, stdin, stdout, stderr):
+    modules = varargs
+    if not modules:
+        return 1  # TODO: some default, maybe Init
+    with leanffi.initialize():
+        for name in modules:
+            result = leanffi.initialize_module(name)
+            stdout.write("Module %s initialized (raw result: %s)\n" % (name, result))
+        stdout.write("Would import modules via FFI: %s\n" % ", ".join(modules))
+    return 0
+
 
 
 def subcommand_from(argv):

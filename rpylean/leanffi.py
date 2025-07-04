@@ -5,6 +5,7 @@ from __future__ import print_function
 
 from subprocess import check_output
 
+from rpython.rlib import rdynload
 from rpython.rtyper.lltypesystem import lltype, rffi
 from rpython.translator.tool.cbuild import ExternalCompilationInfo
 import py
@@ -18,9 +19,10 @@ LeanObjectP = lltype.Ptr(lltype.Struct('lean_object'))
 
 info = ExternalCompilationInfo(
     includes=["lean/lean.h"],
-    include_dirs=[str(LEAN_INCLUDE)],
+    include_dirs=[LEAN_INCLUDE],
     libraries=["Init_shared", "leanshared_1", "leanshared"],
-    library_dirs=[str(LEAN_LIBDIR)],
+    library_dirs=[LEAN_LIBDIR],
+    post_include_bits=["void lean_initialize(void);"],
 )
 
 lean_initialize_runtime_module = rffi.llexternal(
@@ -62,8 +64,34 @@ lean_utf8_strlen = rffi.llexternal(
     compilation_info=info,
 )
 
+# -- inlined in lean.h --
+
+def lean_box(n):
+    return rffi.cast(LeanObjectP, (n << 1) | 1)
+
+def lean_io_mk_world():
+    return lean_box(0)
+
+# -- our own helpers --
+
+LeanModuleInitFunc = lltype.Ptr(
+    lltype.FuncType([rffi.UINT, LeanObjectP], LeanObjectP),
+)
+
+def initialize_module(name, builtin=True):
+    """
+    Initialize a Lean module by name.
+    """
+    handle = rdynload.dlopen(None)
+    func_ptr = rdynload.dlsym(handle, "initialize_" + name)
+    initialize = rffi.cast(LeanModuleInitFunc, func_ptr)
+    return initialize(rffi.cast(rffi.UINT, builtin), lean_io_mk_world())
+
 
 class initialize(object):
+    """
+    Initialize the Lean runtime environment.
+    """
     def __enter__(self):
         lean_initialize()
 
