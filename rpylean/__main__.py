@@ -1,6 +1,6 @@
 import sys
 
-from rpylean.cli import main
+from rpylean.cli import cli
 
 
-main(sys.argv)
+cli.main(sys.argv)
