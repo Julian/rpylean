@@ -22,35 +22,36 @@ jobs:
         arch: [x64, arm64]
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: Julian/setup-lean@c93774d9180849a5b6c4034c3c63d4544bdd943c
 
-    - name: Set up PyPy 2.7
-      uses: actions/setup-python@v5
-      with:
-        python-version: "pypy-2.7"
+      - name: Set up PyPy 2.7
+        uses: actions/setup-python@v5
+        with:
+          python-version: "pypy-2.7"
 
-    - name: Checkout PyPy
-      uses: actions/checkout@v4
-      with:
-        repository: pypy/pypy
-        path: pypy
+      - name: Checkout PyPy
+        uses: actions/checkout@v4
+        with:
+          repository: pypy/pypy
+          path: pypy
 
-    - run: pypy --version
+      - run: pypy --version
 
-    - name: Install py.test
-      run: pypy -m pip install pytest
+      - name: Install py.test
+        run: pypy -m pip install pytest
 
-    - name: Run Tests
-      run: PYTHONPATH=pypy pypy -m pytest tests
+      - name: Run Tests
+        run: PYTHONPATH=pypy pypy -m pytest tests
 
-    - name: Translate
-      run: pypy pypy/rpython/bin/rpython targetrpylean.py
+      - name: Translate
+        run: pypy pypy/rpython/bin/rpython targetrpylean.py
 
-    - name: Run Post-Translation Tests
-      run: PYTHONPATH=pypy pypy -m pytest translated-tests
+      - name: Run Post-Translation Tests
+        run: PYTHONPATH=pypy pypy -m pytest translated-tests
 
-    - name: Upload Translated Binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: rpylean-${{ runner.os }}-${{ matrix.arch }}
-        path: ./rpylean-c
+      - name: Upload Translated Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpylean-${{ runner.os }}-${{ matrix.arch }}
+          path: ./rpylean-c
