@@ -4,11 +4,12 @@ CLI for rpylean.
 from __future__ import print_function
 
 import errno
+import os
 
 from rpython.rlib.streamio import open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
-from rpylean import leanffi
+from rpylean.leanffi import FFI
 from rpylean.environment import from_export
 from rpylean.objects import Name
 
@@ -96,7 +97,7 @@ def repl(self, args, stdin, stdout, stderr):
         (
             "prefix",
             "path to the Lean prefix to link against "
-            "[default: `lean --print-prefix`]",
+            # TODO: "[default: `lean --print-prefix`]",
         ),
     ],
 )
@@ -104,11 +105,14 @@ def ffi(self, args, stdin, stdout, stderr):
     modules = args.varargs
     if not modules:
         return 1  # TODO: some default, maybe Init
-    with leanffi.initialize():
+
+    prefix = args.options["prefix"]
+    if prefix is None:
+        return 1  # TODO: some default, lean --print-prefix but RPython spawn??
+    with FFI.from_prefix(prefix) as ffi:
         for name in modules:
-            result = leanffi.initialize_module(name)
-            stdout.write("Module %s initialized (raw result: %s)\n" % (name, result))
-        stdout.write("Would import modules via FFI: %s\n" % ", ".join(modules))
+            module = ffi.initialize_module(name)
+            stdout.write("%s: %s\n" % (name, module))
     return 0
 
 
