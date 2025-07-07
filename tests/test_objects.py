@@ -100,6 +100,18 @@ class TestName(object):
     def test_in_namespace(self, base, name, expected):
         assert name.in_namespace(base) == expected
 
+    def test_is_private_via_prefix(self):
+        assert Name(["_private", "foo"]).is_private()
+
+    def test_is_private_via_nested(self):
+        assert Name.from_str("foo._private.bar.0.baz").is_private()
+
+    def test_not_private(self):
+        assert not Name(["foo"]).is_private()
+
+    def test_not_private_nested(self):
+        assert not Name(["foo", "bar"]).is_private()
+
     def test_const_no_levels(self):
         bar = Name(["foo", "bar"])
         assert bar.const() == W_Const(bar, [])

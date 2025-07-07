@@ -110,6 +110,18 @@ class Name(_Item):
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
 
+    def is_private(self):
+        """
+        Is this a private name?
+
+        See `Lean.PrivateName` for Lean's "real" implementation which we try to
+        follow here.
+        """
+        for part in self.components:
+            if part == "_private":
+                return True
+        return False
+
     def in_namespace(self, base):
         """
         Calculate what this name looks like inside the given base namespace.

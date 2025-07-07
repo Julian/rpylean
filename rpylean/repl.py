@@ -127,13 +127,15 @@ def print_decl(env, args, _, stdout, stderr):
     ["names", "n"],
     nargs=OPTIONAL,
     help=(
-        "Show all names in the environment, "
+        "Show all non-private names in the environment, "
         "or those matching a prefix or length."
     ),
 )
 def names(env, args, stdin, stdout, stderr):
     names = env.declarations.keys()
-    if len(args) == 1:  # ok, all of them!
+    if not args:
+        names = [name for name in names if not name.is_private()]
+    elif len(args) == 1:
         arg = args[0].strip()
         if arg.isdigit():  # all names with at most `n` components
             n = int(arg)
