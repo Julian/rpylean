@@ -269,41 +269,16 @@ class Environment(object):
             "unexpectedly encountered BVar in def_eq: %s" % expr2
         )
 
-        if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
-            return expr1.id == expr2.id
-        elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
-            return expr1.level.eq(expr2.level)
-        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-            return (
-                self.def_eq(expr1.fn, expr2.fn)
-                and self.def_eq(expr1.arg, expr2.arg)
-            )
-        elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
-            return expr1.val == expr2.val
-        elif isinstance(expr1, W_LitStr) and isinstance(expr2, W_LitStr):
-            return expr1.val == expr2.val
-        elif (isinstance(expr1, W_ForAll) and isinstance(expr2, W_ForAll)) or (isinstance(expr1, W_Lambda) and isinstance(expr2, W_Lambda)):
-            if not self.def_eq(expr1.binder.type, expr2.binder.type):
-                return False
-
-            fvar = expr1.binder.fvar()
-            body = expr1.body.instantiate(fvar, 0)
-            other_body = expr2.body.instantiate(fvar, 0)
-
-            return self.def_eq(body, other_body)
-
-        # Fast path for constants - if the name and levels are all equal, then they are definitionally equal
-        if (
-            isinstance(expr1, W_Const)
-            and isinstance(expr2, W_Const)
-            and expr1.name.eq(expr2.name)
+        cls = expr1.__class__
+        if cls is expr2.__class__ and (
+            # returning NotImplemented (from W_Const.def_eq)
+            # isn't valid RPython, and the point is these are not comparable
+            # until they're reduced...
+            # Still would love to think of a better way.
+            cls is not W_Const
+            or expr1.name == expr2.name
         ):
-            if len(expr1.levels) != len(expr2.levels):
-                return False
-            for i, level in enumerate(expr1.levels):
-                if not level.eq(expr2.levels[i]):
-                    return False
-            return True
+            return expr1.def_eq(expr2, self.def_eq)
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)

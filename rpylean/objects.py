@@ -736,6 +736,15 @@ class W_FVar(W_Expr):
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
 
+    def def_eq(self, other, def_eq):
+        return self.id == other.id
+
+    def pretty(self, constants):
+        return self.str()
+
+    def str(self):
+        return self.binder.name.str()
+
     def incr_free_bvars(self, count, depth):
         return self
 
@@ -763,12 +772,6 @@ class W_FVar(W_Expr):
             return W_BVar(depth)
         return self
 
-    def pretty(self, constants):
-        return self.str()
-
-    def str(self):
-        return self.binder.name.str()
-
 
 class W_LitStr(W_Expr):
     def __init__(self, val):
@@ -778,17 +781,21 @@ class W_LitStr(W_Expr):
     def __repr__(self):
         return repr(self.val)
 
-    def infer(self, env):
-        """
-        String literals infer as the constant named String.
-        """
-        return STRING
+    def def_eq(self, other, def_eq):
+        assert isinstance(other, W_LitStr)
+        return self.val == other.val
 
     def pretty(self, constants):
         return self.str()
 
     def str(self):
         return '"%s"' % (self.val,)
+
+    def infer(self, env):
+        """
+        String literals infer as the constant named String.
+        """
+        return STRING
 
     def instantiate(self, expr, depth):
         return self
@@ -805,6 +812,9 @@ class W_Sort(W_Expr):
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
         return "<%s>" % (self.str(),)
+
+    def def_eq(self, other, def_eq):
+        return self.level.eq(other.level)
 
     def pretty(self, constants):
         """
@@ -880,6 +890,14 @@ class W_Const(W_Expr):
         A child constant of this one.
         """
         return self.name.child(part).const()
+
+    def def_eq(self, other, def_eq):
+        if len(self.levels) != len(other.levels):
+            return False
+        for i, level in enumerate(self.levels):
+            if not level.eq(other.levels[i]):
+                return False
+        return True
 
     def pretty(self, constants):
         return name_with_levels(self.name, self.levels)
@@ -957,6 +975,10 @@ class W_LitNat(W_Expr):
 
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
+
+    def def_eq(self, other, def_eq):
+        assert isinstance(other, W_LitNat)
+        return self.val == other.val
 
     def pretty(self, constants):
         return self.str()
@@ -1163,6 +1185,16 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
+    def def_eq(self, other, def_eq):
+        if not def_eq(self.binder.type, other.binder.type):
+            return False
+
+        fvar = self.binder.fvar()
+        body = self.body.instantiate(fvar, 0)
+        other_body = other.body.instantiate(fvar, 0)
+
+        return def_eq(body, other_body)
+
     def pretty(self, constants):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
@@ -1251,6 +1283,16 @@ def group_to_str(group):
 
 
 class W_Lambda(W_FunBase):
+    def def_eq(self, other, def_eq):
+        if not def_eq(self.binder.type, other.binder.type):
+            return False
+
+        fvar = self.binder.fvar()
+        body = self.body.instantiate(fvar, 0)
+        other_body = other.body.instantiate(fvar, 0)
+
+        return def_eq(body, other_body)
+
     def pretty(self, constants):
         binders = []
         current = self
@@ -1383,6 +1425,9 @@ class W_App(W_Expr):
             current = current.fn
         args.reverse()
         return "<W_App fn={!r} args={!r}>".format(current, args)
+
+    def def_eq(self, other, def_eq):
+        return def_eq(self.fn, other.fn) and def_eq(self.arg, other.arg)
 
     def pretty(self, constants):
         args = []
