@@ -8,21 +8,25 @@ from rpython.rtyper.lltypesystem import rffi
 
 
 Object = Ptr(Struct('lean_object'))
-Initialize = Ptr(FuncType([], Void))
-IoMarkEndInitialization = Ptr(FuncType([], Void))
 
-InitializeRuntimeModuleFunc = Ptr(FuncType([], Void))
-IoResultShowErrorFunc = Ptr(FuncType([Object], Void))
-MkStringFunc = Ptr(FuncType([rffi.CCHARP], Object))
-Utf8StrlenFunc = Ptr(FuncType([rffi.CONST_CCHARP], rffi.SIZE_T))
+initialize = Ptr(FuncType([], Void))
+initialize_runtime_module = Ptr(FuncType([], Void))
+io_mark_end_initialization = Ptr(FuncType([], Void))
 
-InitializeModule = Ptr(FuncType([rffi.UINT, Object], Object))
+io_result_show_error = Ptr(FuncType([Object], Void))
+mk_string = Ptr(FuncType([rffi.CCHARP], Object))
+utf8_strlen = Ptr(FuncType([rffi.CONST_CCHARP], rffi.SIZE_T))
+
+initialize_module = Ptr(FuncType([rffi.UINT, Object], Object))
+
+is_private_name = Ptr(FuncType([Object], rffi.INT))
 
 
 # -- inlined in lean.h --
 
 def box(n):
     return rffi.cast(Object, (n << 1) | 1)
+
 
 def io_mk_world():
     return box(0)

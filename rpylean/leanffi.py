@@ -50,12 +50,12 @@ class FFI(object):
         Initialize the Lean runtime environment.
         """
         sym = dlsym(self.leanshared, "lean_initialize_runtime_module")
-        rffi.cast(_lean.Initialize, sym)()
+        rffi.cast(_lean.initialize_runtime_module, sym)()
         return self
 
     def __exit__(self, *args):
         sym = dlsym(self.leanshared, "lean_io_mark_end_initialization")
-        rffi.cast(_lean.IoMarkEndInitialization, sym)()
+        rffi.cast(_lean.io_mark_end_initialization, sym)()
 
         if self._close:
             dlclose(self.Init_shared)
@@ -68,5 +68,10 @@ class FFI(object):
         """
         handle = dlopen(None, RTLD_LAZY)
         sym = dlsym(handle, "initialize_" + name.replace(".", "_"))
-        initialize = rffi.cast(_lean.InitializeModule, sym)
+        initialize = rffi.cast(_lean.initialize_module, sym)
         return initialize(rffi.cast(rffi.UINT, builtin), _lean.io_mk_world())
+
+    def is_private_name(self, name):
+        sym = dlsym(self.leanshared, "lean_is_private_name")
+        func = rffi.cast(_lean.is_private_name, sym)
+        return func(name)
