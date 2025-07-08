@@ -262,13 +262,15 @@ class Environment(object):
         """
         Check if two expressions are definitionally equal.
         """
-        #print("Checking:\n  %s\n  %s" % (expr1.pretty(), expr2.pretty()))
-        # Simple cases - expressions are the same type, so we just recurse
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             return expr1.id == expr2.id
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
             return expr1.level.eq(expr2.level)
-        # Fast path for nat lits to avoid unnecessary conversion into 'Nat.succ' form
+        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
+            return (
+                self.def_eq(expr1.fn, expr2.fn)
+                and self.def_eq(expr1.arg, expr2.arg)
+            )
         elif isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
             return expr1.val == expr2.val
         elif isinstance(expr1, W_LitStr) and isinstance(expr2, W_LitStr):
@@ -295,13 +297,6 @@ class Environment(object):
                 if not level.eq(expr2.levels[i]):
                     return False
             return True
-
-        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-            if (
-                self.def_eq(expr1.fn, expr2.fn)
-                and self.def_eq(expr1.arg, expr2.arg)
-            ):
-                return True
 
         # Try a reduction step
         progress1, expr1_reduced = expr1.strong_reduce_step(self)
