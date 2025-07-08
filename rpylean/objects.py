@@ -53,7 +53,11 @@ class _Item(object):
                     parts.append("=".join((k, repr(v))))
             else:
                 parts.append("=".join((k, repr(v))))
-        return "<%s %s>" % (self.__class__.__name__, " ".join(parts))
+        return "<%s%s%s>" % (
+            self.__class__.__name__,
+            " " if parts else "",
+            " ".join(parts),
+        )
 
 
 def name_with_levels(name, levels):
