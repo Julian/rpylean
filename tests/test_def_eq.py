@@ -79,6 +79,7 @@ class TestSort(object):
         ]
     )
     def test_eq(self, level1, level2):
+        assert level1.eq(level2)
         assert env.def_eq(level1.sort(), level2.sort())
 
     @pytest.mark.parametrize(
@@ -103,6 +104,7 @@ class TestSort(object):
         ]
     )
     def test_not_eq(self, level1, level2):
+        assert not level1.eq(level2)
         assert not env.def_eq(level1.sort(), level2.sort())
 
 

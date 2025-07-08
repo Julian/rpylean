@@ -262,6 +262,13 @@ class Environment(object):
         """
         Check if two expressions are definitionally equal.
         """
+        assert not isinstance(expr1, W_BVar), (
+            "unexpectedly encountered BVar in def_eq: %s" % expr1
+        )
+        assert not isinstance(expr2, W_BVar), (
+            "unexpectedly encountered BVar in def_eq: %s" % expr2
+        )
+
         if isinstance(expr1, W_FVar) and isinstance(expr2, W_FVar):
             return expr1.id == expr2.id
         elif isinstance(expr1, W_Sort) and isinstance(expr2, W_Sort):
