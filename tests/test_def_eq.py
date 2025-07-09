@@ -185,6 +185,7 @@ class TestConst(object):
         env = Environment.having(decls)
         assert env.def_eq(foo.const(), bar.const())
 
+
 class TestForAll(object):
     @pytest.mark.parametrize(
         "forall1, forall2, decls",

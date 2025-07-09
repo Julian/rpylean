@@ -1,3 +1,4 @@
+from rpython.rlib.rbigint import rbigint
 import pytest
 
 from rpylean.objects import (
@@ -23,6 +24,7 @@ from rpylean.objects import (
     W_LevelMax,
     W_LevelParam,
     W_LevelSucc,
+    W_LitNat,
     W_Opaque,
     W_Recursor,
     W_Sort,
@@ -482,3 +484,8 @@ class TestConst(object):
         b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
         foo = Name.simple("foo").const()
         assert foo.app(b0, b1, b2) == W_App(W_App(W_App(foo, b0), b1), b2)
+
+
+class TestLitNat(object):
+    def test_char(self):
+        assert W_LitNat.char("o") == W_LitNat(rbigint.fromint(111))
