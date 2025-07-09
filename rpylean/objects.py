@@ -138,6 +138,12 @@ class Name(_Item):
                 break
         return Name(self.components[i:])
 
+    def app(self, *args):
+        """
+        Apply this name to the given argument(s).
+        """
+        return self.const().app(*args)
+
     def binder(self, type):
         """
         Bind this name in a (default) binder.

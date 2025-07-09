@@ -151,23 +151,23 @@ constants = {
             "∀ (i : Nat), p",
         ),
         (
-            i.implicit_binder(type=NAT).forall(alpha.const().app(i.const())),
+            i.implicit_binder(type=NAT).forall(alpha.app(i.const())),
             "{i : Nat} → α i",
         ),
         (
-            i.binder(type=NAT).forall(alpha.const().app(i.const())),
+            i.binder(type=NAT).forall(alpha.app(i.const())),
             "(i : Nat) → α i",
         ),
         (
-            i.implicit_binder(type=NAT).forall(alpha.const().app(i.const())),
+            i.implicit_binder(type=NAT).forall(alpha.app(i.const())),
             "{i : Nat} → α i",
         ),
         (
-            i.binder(type=NAT).forall(P.const().app(i.const())),
+            i.binder(type=NAT).forall(P.app(i.const())),
             "∀ (i : Nat), P i",
         ),
         (
-            i.implicit_binder(type=NAT).forall(P.const().app(i.const())),
+            i.implicit_binder(type=NAT).forall(P.app(i.const())),
             "∀ {i : Nat}, P i",
         ),
         (
@@ -318,51 +318,39 @@ class TestLambda(object):
 
     def test_nested_default(self):
         nested = x.binder(type=NAT).fun(
-            body=y.binder(type=NAT).fun(
-                body=f.const().app(b1).app(b0)
-            )
+            body=y.binder(type=NAT).fun(body=f.app(b1).app(b0))
         )
         assert nested.pretty({}) == "fun x y ↦ f x y"
 
     def test_nested_implicit(self):
         nested = x.implicit_binder(type=NAT).fun(
-            body=y.implicit_binder(type=NAT).fun(
-                body=f.const().app(b1).app(b0)
-            )
+            body=y.implicit_binder(type=NAT).fun(body=f.app(b1).app(b0))
         )
         assert nested.pretty({}) == "fun {x y} ↦ f x y"
 
     def test_nested_instance(self):
         nested = x.instance_binder(type=NAT).fun(
-            body=y.instance_binder(type=NAT).fun(
-                body=f.const().app(b1).app(b0)
-            )
+            body=y.instance_binder(type=NAT).fun(body=f.app(b1).app(b0))
         )
         assert nested.pretty({}) == "fun [x : Nat] [y : Nat] ↦ f x y"
 
     def test_mixed_default_implicit(self):
         nested = x.binder(type=NAT).fun(
-            body=y.implicit_binder(type=NAT).fun(
-                body=f.const().app(b1).app(b0)
-            )
+            body=y.implicit_binder(type=NAT).fun(body=f.app(b1).app(b0))
         )
         assert nested.pretty({}) == "fun x {y} ↦ f x y"
 
     def test_mixed_implicit_default(self):
         nested = x.implicit_binder(type=NAT).fun(
-            body=y.binder(type=NAT).fun(
-                body=f.const().app(b1).app(b0)
-            )
+            body=y.binder(type=NAT).fun(body=f.app(b1).app(b0))
         )
         assert nested.pretty({}) == "fun {x} y ↦ f x y"
 
     def test_more_nested(self):
         nested = x.binder(type=NAT).fun(
             body=y.binder(type=NAT).fun(
-                body=a.binder(type=NAT).fun(
-                    body=f.const().app(f.const().app(b2).app(b1)).app(b0)
-                )
-            )
+                body=a.binder(type=NAT).fun(body=f.app(f.app(b2, b1), b0))
+            ),
         )
         assert nested.pretty({}) == "fun x y a ↦ f (f x y) a"
 
@@ -411,17 +399,16 @@ class TestLambda(object):
 
 class TestApp(object):
     def test_simple(self):
-        app = f.const().app(a.const())
+        app = f.app(a.const())
         assert app.pretty({}) == "f a"
 
     def test_nested_application_left_associative(self):
-        app = f.const().app(a.const()).app(x.const())
+        app = f.app(a.const()).app(x.const())
         assert app.pretty({}) == "f a x"
 
     def test_application_with_parentheses_needed(self):
         g = Name.simple("g").const()
-        inner = g.app(a.const())
-        outer = f.const().app(inner)
+        outer = f.app(g.app(a.const()))
         assert outer.pretty({}) == "f (g a)"
 
     def test_lambda_app(self):
@@ -431,7 +418,7 @@ class TestApp(object):
 
     def test_app_lambda(self):
         id = x.binder(type=NAT).fun(body=b0)
-        app = f.const().app(id)
+        app = f.app(id)
         assert app.pretty({}) == "f fun x ↦ x"
 
     def test_lambda_lambda_app(self):
@@ -444,5 +431,5 @@ class TestApp(object):
         fun1 = x.binder(type=NAT).fun(body=b0)
         fun2 = y.binder(type=NAT).fun(body=b0)
         fun3 = a.binder(type=NAT).fun(body=b0)
-        app = f.const().app(fun1).app(fun2).app(fun3)
+        app = f.app(fun1).app(fun2).app(fun3)
         assert app.pretty({}) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"

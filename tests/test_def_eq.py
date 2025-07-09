@@ -262,16 +262,16 @@ class TestApp(object):
         "app1, app2, decls",
         [
             (
-                f.const().app(x.const()),
-                f.const().app(x.const()),
+                f.app(x.const()),
+                f.app(x.const()),
                 [
                     x.axiom(type=TYPE),
                     f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
                 ],
             ),
             (
-                f.const().app(x.const()).app(y.const()),
-                f.const().app(x.const()).app(y.const()),
+                f.app(x.const(), y.const()),
+                f.app(x.const(), y.const()),
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),
@@ -306,8 +306,8 @@ class TestApp(object):
         "app1, app2, decls",
         [
             (
-                f.const().app(x.const()),
-                g.const().app(x.const()),
+                f.app(x.const()),
+                g.app(x.const()),
                 [
                     x.axiom(type=TYPE),
                     f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
@@ -315,8 +315,8 @@ class TestApp(object):
                 ],
             ),
             (
-                f.const().app(x.const()),
-                f.const().app(y.const()),
+                f.app(x.const()),
+                f.app(y.const()),
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),
@@ -324,8 +324,8 @@ class TestApp(object):
                 ],
             ),
             (
-                f.const().app(x.const()).app(y.const()),
-                f.const().app(y.const()).app(x.const()),
+                f.app(x.const(), y.const()),
+                f.app(y.const(), x.const()),
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),

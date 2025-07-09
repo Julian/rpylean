@@ -112,6 +112,11 @@ class TestName(object):
     def test_not_private_nested(self):
         assert not Name(["foo", "bar"]).is_private()
 
+    def test_app(self):
+        bar = Name(["foo", "bar"])
+        bvar = W_BVar(0)
+        assert bar.app(bvar) == W_App(bar.const(), bvar)
+
     def test_const_no_levels(self):
         bar = Name(["foo", "bar"])
         assert bar.const() == W_Const(bar, [])
