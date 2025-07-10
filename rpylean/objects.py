@@ -671,14 +671,14 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
-    def app(self, *args):
+    def app(self, arg, *more):
         """
         Apply this (which better be a function) to the given argument(s).
         """
-        expr = self
-        for arg in args:
-            expr = W_App(expr, arg)
-        return expr
+        expr = W_App(self, arg)
+        if not more:
+            return expr
+        return expr.app(*more)
 
     # Tries to perform a single step of strong reduction.
     # Currently implemented reduction steps:
@@ -797,6 +797,16 @@ class W_LitStr(W_Expr):
     def str(self):
         return '"%s"' % (self.val,)
 
+    def build_str_expr(self, env):
+        if len(self.val) > 5:
+            print("Building large str expr for %s" % self.val[:10])
+        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO])
+        expr = Name(["List", "nil"]).const([W_LEVEL_ZERO])
+        for i in range(len(self.val) - 1, -1, -1):
+            char_expr = Name(["Char", "ofNat"]).app(W_LitNat.char(self.val[i]))
+            expr = cons.app(char_expr, expr)
+        return Name(["String", "mk"]).app(expr)
+
     def infer(self, env):
         """
         String literals infer as the constant named String.
@@ -889,6 +899,8 @@ def apply_const_level_params(const, target, env):
 class W_Const(W_Expr):
     def __init__(self, name, levels):
         self.name = name
+        for each in levels:
+            assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
 
     def child(self, part):
@@ -972,6 +984,7 @@ class W_Const(W_Expr):
 NAT = Name.simple("Nat").const()
 NAT_ZERO = NAT.child("zero")
 NAT_SUCC = NAT.child("succ")
+CHAR = Name.simple("Char").const()
 STRING = Name.simple("String").const()
 
 
@@ -1471,14 +1484,6 @@ class W_App(W_Expr):
         fn_type = fn_type_base.whnf(env)
         if not isinstance(fn_type, W_ForAll):
             raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
-        arg_type = self.arg.infer(env)
-        if not env.def_eq(fn_type.binder.type, arg_type):
-            raise RuntimeError(
-                "W_App.infer: type mismatch:\n%s\n  !=\n%s" % (
-                    env.pretty(fn_type.binder.type),
-                    env.pretty(arg_type),
-                ),
-            )
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
 
@@ -1750,6 +1755,8 @@ class W_Declaration(_Item):
         self.name = name
         self.type = type
         self.w_kind = w_kind
+        for each in levels:
+            assert isinstance(each, Name), "%s is not a level name" % (each,)
         self.levels = levels
 
     def const(self, **kwargs):

@@ -265,7 +265,7 @@ class TestRecursor(object):
                     body=b1.app(b0)
                 ),
             ),
-            levels=[u],
+            levels=[u.name],
         )
 
         assert rec.pretty({}) == (

@@ -9,6 +9,7 @@ from rpylean.environment import Environment
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
+    STRING,
     TYPE,
     Name,
     W_BVar,
@@ -54,6 +55,74 @@ class TestLitStr(object):
 
     def test_not_eq(self):
         assert not env.def_eq(W_LitStr("foo"), W_LitStr("bar"))
+
+    def test_eq_expanded(self):
+        """
+        "ok" = String.mk (List.nil.cons (Char.ofNat 107) |>.cons <| Char.ofNat 111)
+        """
+        alpha = Name.simple("α").binder(type=u.succ().sort())
+        b0, b1, b2 = [W_BVar(i) for i in range(3)]
+
+        head, tail = names("head", "tail")
+
+        ListFn = Name.simple("List").const(levels=[u])
+        nil_ctor = Name(["List", "nil"]).constructor(
+            type=alpha.to_implicit().forall(body=ListFn.app(b0)),
+            levels=[u.name],
+            num_params=1,
+        )
+        cons_ctor = Name(["List", "cons"]).constructor(
+            type=alpha.to_implicit().forall(
+                body=head.binder(type=b0).forall(
+                    body=tail.binder(type=ListFn.app(b1)).forall(
+                        body=ListFn.app(b2),
+                    ),
+                ),
+            ),
+            levels=[u.name],
+            num_params=1,
+            num_fields=2,
+        )
+        List = Name.simple("List").inductive(
+            type=alpha.forall(body=u.succ().sort()),
+            constructors=[nil_ctor, cons_ctor],
+            levels=[u.name],
+            num_params=1,
+            is_recursive=True,
+        )
+
+        Char, ofNat, String_mk = names("Char", "Char.ofNat", "String.mk")
+
+        # List.{0} Char = List Char
+        List_Char = Name.simple("List").const([W_LEVEL_ZERO]).app(Char.const())
+
+        String = Name.simple("String").inductive(
+            type=TYPE,
+            constructors=[
+                String_mk.constructor(
+                    type=x.binder(type=List_Char).forall(body=STRING),
+                ),
+            ],
+        )
+
+        decls = [
+            List,
+            nil_ctor,
+            cons_ctor,
+            String,
+            String.w_kind.constructors[0],
+            Char.axiom(type=TYPE),
+            NAT.name.axiom(type=TYPE),
+            ofNat.axiom(type=x.binder(type=NAT).forall(body=Char.const())),
+        ]
+        env = Environment.having(decls)
+
+        o = ofNat.app(W_LitNat.char("o"))
+        k = ofNat.app(W_LitNat.char("k"))
+        nil = Name(["List", "nil"]).const([W_LEVEL_ZERO])
+        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO])
+        o_k = cons.app(o, cons.app(k, nil))
+        assert env.def_eq(W_LitStr("ok"), String_mk.app(o_k))
 
 
 class TestSort(object):
@@ -120,12 +189,12 @@ class TestConst(object):
             (
                 x.const(levels=[u]),
                 x.const(levels=[u]),
-                [x.axiom(type=TYPE, levels=[u])],
+                [x.axiom(type=TYPE, levels=[u.name])],
             ),
             (
                 x.const(levels=[u, v]),
                 x.const(levels=[u, v]),
-                [x.axiom(type=TYPE, levels=[u, v])],
+                [x.axiom(type=TYPE, levels=[u.name, v.name])],
             ),
         ],
         ids=[
@@ -149,17 +218,17 @@ class TestConst(object):
             (
                 x.const(),
                 x.const(levels=[u]),
-                [x.axiom(type=TYPE, levels=[u])],
+                [x.axiom(type=TYPE, levels=[u.name])],
             ),
             (
                 x.const(levels=[u]),
                 x.const(),
-                [x.axiom(type=TYPE, levels=[u])],
+                [x.axiom(type=TYPE, levels=[u.name])],
             ),
             (
                 x.const(levels=[u, v]),
                 x.const(levels=[v, u]),
-                [x.axiom(type=TYPE, levels=[u, v])],
+                [x.axiom(type=TYPE, levels=[u.name, v.name])],
             ),
         ],
         ids=[
@@ -288,7 +357,7 @@ class TestApp(object):
                     x.axiom(type=TYPE),
                     f.axiom(
                         type=x.binder(type=TYPE).forall(body=TYPE),
-                        levels=[u],
+                        levels=[u.name],
                     ),
                 ],
             ),

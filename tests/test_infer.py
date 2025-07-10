@@ -64,18 +64,18 @@ class TestLambda(object):
 
 class TestConst(object):
     def test_level_param_substitution(self):
-        decl = a.axiom(type=u.sort(), levels=[u])
+        decl = a.axiom(type=u.sort(), levels=[u.name])
         env = Environment.having([decl])
         assert decl.const(levels=[u]).infer(env) == u.sort()
 
     def test_level_max_substitution(self):
         uv = u.max(v).sort()
-        decl = a.axiom(type=uv, levels=[u, v])
+        decl = a.axiom(type=uv, levels=[u.name, v.name])
         env = Environment.having([decl])
         assert decl.const(levels=[u, v]).infer(env) == uv
 
     def test_level_imax_substitution(self):
         uv = u.imax(v).sort()
-        decl = a.axiom(type=uv, levels=[u, v])
+        decl = a.axiom(type=uv, levels=[u.name, v.name])
         env = Environment.having([decl])
         assert decl.const(levels=[u, v]).infer(env) == uv

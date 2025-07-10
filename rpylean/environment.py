@@ -18,6 +18,7 @@ from rpylean.objects import (
     W_ForAll,
     W_Lambda,
     W_LitNat,
+    W_LitStr,
     W_Sort,
     syntactic_eq,
 )
@@ -315,10 +316,15 @@ class Environment(object):
         # we need to try everything else before actually calling 'build_nat_expr'
         # (so that checks like syntactic equality can succeed and prevent us from
         # building up ~4 billion `Nat` expressions)
-        if isinstance(expr1, W_LitNat):
+        if cls is W_LitNat:
             return self.def_eq(expr1.build_nat_expr(), expr2)
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
+
+        if cls is W_LitStr:
+            return self.def_eq(expr1.build_str_expr(self), expr2)
+        elif isinstance(expr2, W_LitStr):
+            return self.def_eq(expr1, expr2.build_str_expr(self))
 
         return False
 
