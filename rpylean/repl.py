@@ -1,6 +1,7 @@
 """
 Interactive REPL for rpylean.
 """
+from __future__ import print_function
 from rpython.rlib.rfile import create_stdio
 import os
 
@@ -119,8 +120,7 @@ def print_decl(env, args, _, stdout, stderr):
     if declaration is None:
         stderr.write("%s does not exist in the environment.\n" % name.str())
         return
-    stdout.write(env.pretty(declaration))
-    stdout.write("\n")
+    env.print(declaration, stdout)
 
 
 @command(
@@ -148,8 +148,7 @@ def names(env, args, stdin, stdout, stderr):
             ]
 
     for name in names:
-        stdout.write(name.str())
-        stdout.write("\n")
+        env.print(name, stdout)
 
 
 @command(["help", "commands", "?"], help="Show the available REPL commands.")

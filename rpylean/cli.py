@@ -71,8 +71,7 @@ def dump(self, args, stdin, stdout, stderr):
     if args.varargs:
         for each in args.varargs:
             declaration = environment.declarations[Name.from_str(each)]
-            stdout.write(environment.pretty(declaration))
-            stdout.write("\n")
+            environment.print(declaration, stdout)
     else:
         environment.dump_pretty(stdout)
     return 0

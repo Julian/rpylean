@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 from rpython.rlib.objectmodel import not_rpython, r_dict
+import sys
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq
@@ -232,6 +233,13 @@ class Environment(object):
         """
         return declaration.pretty(self._constants)
 
+    def print(self, declaration, file, end="\n"):
+        """
+        Pretty-print the declaration to the given file.
+        """
+        file.write(self.pretty(declaration))
+        file.write(end)
+
     def type_check(self, declarations=None):
         """
         Type check each declaration in the environment.
@@ -254,7 +262,7 @@ class Environment(object):
         Dump the contents of this environment to the given stream.
         """
         for decl in self.declarations.values():
-            stdout.write("%s\n" % (self.pretty(decl),))
+            self.print(decl, stdout)
 
     def def_eq(self, expr1, expr2):
         """
