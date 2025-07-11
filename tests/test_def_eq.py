@@ -414,3 +414,30 @@ class TestApp(object):
     def test_not_eq(self, app1, app2, decls):
         env = Environment.having(decls)
         assert not env.def_eq(app1, app2)
+
+
+class TestProj(object):
+    def test_eq(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        foo_type = Foo.inductive(type=TYPE)
+        mk_decl = mk.constructor(type=Foo.const())
+        bar = Name.simple("bar")
+        x_decl = x.axiom(type=Foo.const())
+        bar_def = bar.definition(type=Foo.const(), value=x.const())
+        env = Environment.having([foo_type, mk_decl, x_decl, bar_def])
+        proj1 = Foo.proj(0, x.const())
+        proj2 = Foo.proj(0, bar.const())
+        assert env.def_eq(proj1, proj2)
+
+    def test_not_def_eq(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        foo_type = Foo.inductive(type=TYPE)
+        mk_decl = mk.constructor(type=Foo.const())
+        x_decl = x.axiom(type=Foo.const())
+        y_decl = y.axiom(type=Foo.const())
+        env = Environment.having([foo_type, mk_decl, x_decl, y_decl])
+        proj1 = Foo.proj(0, x.const())
+        proj2 = Foo.proj(0, y.const())
+        assert not env.def_eq(proj1, proj2)

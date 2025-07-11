@@ -1066,6 +1066,13 @@ class W_Proj(W_Expr):
         self.field_index = field_index
         self.struct_expr = struct_expr
 
+    def def_eq(self, other, def_eq):
+        return (
+            self.struct_name == other.struct_name
+            and self.field_index == other.field_index
+            and def_eq(self.struct_expr, other.struct_expr)
+        )
+
     def pretty(self, constants):
         struct_decl = constants[self.struct_name]
         inductive = struct_decl.w_kind
