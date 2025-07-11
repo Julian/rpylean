@@ -57,6 +57,31 @@ class DuplicateLevels(InvalidDeclaration):
         self.duplicate = duplicate
 
 
+class InvalidProjection(W_Error):
+    """
+    An attempt was made to project a structure field that does not exist.
+    """
+    def __init__(self, structure, field_index, num_fields):
+        self.structure = structure
+        self.field_index = field_index
+        self.num_fields = num_fields
+
+    def str(self):
+        if self.num_fields == 0:
+            info = "no fields"
+        elif self.num_fields == 1:
+            info = "only 1 field"
+        else:
+            info = "only %d fields" % self.num_fields
+        return (
+            "index %d is not valid for %s, which has %s" % (
+                self.field_index,
+                self.structure.name.str(),
+                info,
+            )
+        )
+
+
 class UnknownQuotient(W_Error):
     """
     An unknown quotient declaration was found.

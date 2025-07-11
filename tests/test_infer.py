@@ -4,7 +4,10 @@ Type inference of Lean objects.
 
 from rpython.rlib.rbigint import rbigint
 
+import pytest
+
 from rpylean.environment import Environment
+from rpylean.exceptions import InvalidProjection
 from rpylean.objects import (
     NAT,
     STRING,
@@ -79,3 +82,60 @@ class TestConst(object):
         decl = a.axiom(type=uv, levels=[u.name, v.name])
         env = Environment.having([decl])
         assert decl.const(levels=[u, v]).infer(env) == uv
+
+
+class TestProj(object):
+    def test_returns_field_type(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        mk_decl = mk.constructor(type=a.binder(type=NAT).forall(body=Foo.const()))
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        x_decl = x.axiom(type=Foo.const())
+        env = Environment.having([Foo_decl, mk_decl, x_decl])
+        proj = Foo.proj(0, mk.app(NAT))
+        inferred = proj.infer(env)
+        assert inferred == NAT
+
+    def test_out_of_bounds_1(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        ctor_type = a.binder(type=NAT).forall(body=Foo.const())
+        mk_decl = mk.constructor(type=ctor_type)
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(1, mk.app(NAT))
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+
+        assert str(e.value) == (
+            "index 1 is not valid for Foo, which has only 1 field"
+        )
+
+    def test_out_of_bounds_0(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        mk_decl = mk.constructor(type=Foo.const())
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(0, mk.const())
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+
+        assert str(e.value) == (
+            "index 0 is not valid for Foo, which has no fields"
+        )
+
+    def test_out_of_bounds_3(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        ctor_type = a.binder(type=NAT).forall(body=Foo.const())
+        mk_decl = mk.constructor(type=ctor_type)
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(3, mk.app(NAT))
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+
+        assert str(e.value) == (
+            "index 3 is not valid for Foo, which has only 2 fields"
+        )

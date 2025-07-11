@@ -2,6 +2,7 @@ from rpython.rlib.objectmodel import compute_hash
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count
+from rpylean.exceptions import InvalidProjection
 
 
 class W_TypeError(object):
@@ -1181,8 +1182,7 @@ class W_Proj(W_Expr):
         # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
         # so start iteration from the end
         # TODO: handle levels
-        apps.reverse()
-        for app in apps:
+        for app in reversed(apps):
             ctor_type = ctor_type.whnf(env)
             assert isinstance(ctor_type, W_ForAll)
             new_type = ctor_type.body.instantiate(app.arg, 0)
@@ -1192,13 +1192,22 @@ class W_Proj(W_Expr):
         # expressions for all of the previous fields ('self.field_idx' is 0-based)
 
         # Substitute in 'proj' expressions for all of the previous fields
+        i = -1
         for i in range(self.field_index):
             ctor_type = ctor_type.whnf(env)
-            assert isinstance(ctor_type, W_ForAll)
-            ctor_type = ctor_type.body.instantiate(W_Proj(struct_type, i, self.struct_expr), 0)
+            if not isinstance(ctor_type, W_ForAll):
+                raise InvalidProjection(struct_type, self.field_index, i + 1)
+            # FIXME: this is totally broken, it should be:
+            #        proj = self.struct_name.proj(i, self.struct_expr)
+            #        but RPython seems to freak out with the same hop
+            #        assertion error, even though the type as-is is clearly
+            #        wrong...
+            proj = W_Proj(struct_type, i, self.struct_expr)
+            ctor_type = ctor_type.body.instantiate(proj, 0)
 
         ctor_type = ctor_type.whnf(env)
-        assert isinstance(ctor_type, W_ForAll)
+        if not isinstance(ctor_type, W_ForAll):
+            raise InvalidProjection(struct_type, self.field_index, i + 1)
         return ctor_type.binder.type
 
 
