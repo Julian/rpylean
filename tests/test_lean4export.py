@@ -144,7 +144,7 @@ def test_dump_expr_proj():
             bvar,
             W_Proj(
                 struct_name=Name.simple("Prod"),
-                field_idx=1,
+                field_index=1,
                 struct_expr=bvar,
             ),
         ],

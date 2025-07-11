@@ -26,6 +26,7 @@ from rpylean.objects import (
     W_LevelSucc,
     W_LitNat,
     W_Opaque,
+    W_Proj,
     W_Recursor,
     W_Sort,
     W_Theorem,
@@ -235,6 +236,12 @@ class TestName(object):
             levels=[],
             w_kind=W_Opaque(value=zero.const()),
         )
+
+    def test_proj(self):
+        Prod = Name.simple("Prod")
+        mk = Prod.child("mk")
+        expr = mk.app(NAT_ZERO, NAT_ZERO)
+        assert Prod.proj(0, expr) == W_Proj(Prod, 0, expr)
 
     def test_binder(self):
         x = Name.simple("x")

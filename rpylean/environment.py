@@ -315,10 +315,6 @@ class Environment(object):
         if expr1_eta is not None:
             return self.def_eq(expr1_eta, expr2)
 
-        # Perform this check late, as it can be very slow for large nested App expressiosn
-        if syntactic_eq(expr1, expr2):
-            return True
-
         # As the *very* last step, try converting NatLit exprs
         # In order to be able to type check things like 'UInt32.size',
         # we need to try everything else before actually calling 'build_nat_expr'

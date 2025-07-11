@@ -75,7 +75,7 @@ class Name(_Item):
         self.components = components
 
     def __repr__(self):
-        return "<Name %s>" % (self.str(),)
+        return "`%s" % (self.str(),)
 
     @staticmethod
     def simple(part):
@@ -279,6 +279,12 @@ class Name(_Item):
         Construct a let expression with this name.
         """
         return W_Let(name=self, type=type, value=value, body=body)
+
+    def proj(self, field_index, expr):
+        """
+        Construct a projection with this name.
+        """
+        return W_Proj(self, field_index, expr)
 
     def level(self):
         """
@@ -1055,15 +1061,34 @@ class W_LitNat(W_Expr):
 
 
 class W_Proj(W_Expr):
-    def __init__(self, struct_name, field_idx, struct_expr):
+    def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
-        self.field_idx = field_idx
+        self.field_index = field_index
         self.struct_expr = struct_expr
+
+    def pretty(self, constants):
+        struct_decl = constants[self.struct_name]
+        inductive = struct_decl.w_kind
+        # TODO: better cache/calculate field names for structures
+        # TODO: out of bounds projection, non-structure type
+        assert isinstance(inductive, W_Inductive)
+        assert len(inductive.constructors) == 1
+        constructor, = inductive.constructors
+        field_names = []
+        constructor_type = constructor.type
+        while isinstance(constructor_type, W_ForAll):
+            field_names.append(constructor_type.binder.name.str())
+            constructor_type = constructor_type.body
+        field_name = field_names[self.field_index]
+        return "(%s).%s" % (
+            self.struct_expr.pretty(constants),
+            field_name,
+        )
 
     def strong_reduce_step(self, env):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(env)
         if progress:
-            return (True, W_Proj(self.struct_name, self.field_idx, new_struct_expr))
+            return (True, W_Proj(self.struct_name, self.field_index, new_struct_expr))
 
         # Look for a projection of a constructor, which allows us to just pick
         # out the argument corresponding to 'field_idx'
@@ -1084,34 +1109,27 @@ class W_Proj(W_Expr):
 
         num_params = ctor_decl.w_kind.num_params
         args.reverse()
-        target_arg = args[num_params + self.field_idx]
+        target_arg = args[num_params + self.field_index]
 
         return (True, target_arg)
 
     def whnf(self, env):
         # TODO - do we need to try reducing the projection?
-        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.whnf(env))
+        return W_Proj(self.struct_name, self.field_index, self.struct_expr.whnf(env))
 
     def incr_free_bvars(self, count, depth):
-        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.incr_free_bvars(count, depth))
+        return W_Proj(self.struct_name, self.field_index, self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
-        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.bind_fvar(fvar, depth))
+        return W_Proj(self.struct_name, self.field_index, self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
-        return W_Proj(self.struct_name, self.field_idx, self.struct_expr.instantiate(expr, depth))
-
-    def pretty(self, constants):
-        return "<W_Proj struct_name='%s' field_idx='%s' struct_expr='%s'>" % (
-            self.struct_name.str(),
-            self.field_idx,
-            self.struct_expr.pretty(constants),
-        )
+        return W_Proj(self.struct_name, self.field_index, self.struct_expr.instantiate(expr, depth))
 
     def subst_levels(self, substs):
         return W_Proj(
             self.struct_name,
-            self.field_idx,
+            self.field_index,
             self.struct_expr.subst_levels(substs)
         )
 
@@ -1120,7 +1138,7 @@ class W_Proj(W_Expr):
         # so we can compare by object identity with '=='
         return (
             self.struct_name == other.struct_name
-            and self.field_idx == other.field_idx
+            and self.field_index == other.field_index
             and syntactic_eq(self.struct_expr, other.struct_expr)
         )
 
@@ -1168,7 +1186,7 @@ class W_Proj(W_Expr):
         # expressions for all of the previous fields ('self.field_idx' is 0-based)
 
         # Substitute in 'proj' expressions for all of the previous fields
-        for i in range(self.field_idx):
+        for i in range(self.field_index):
             ctor_type = ctor_type.whnf(env)
             assert isinstance(ctor_type, W_ForAll)
             ctor_type = ctor_type.body.instantiate(W_Proj(struct_type, i, self.struct_expr), 0)

@@ -288,6 +288,35 @@ class TestAxiom(object):
         assert axiom.pretty({}) == "axiom sorryAx : Nat"
 
 
+class TestProj(object):
+
+    Foo = Name.simple("Foo")
+    mk = Foo.child("mk")
+    Nat = Name.simple("Nat").const()
+    ctor_type = a.binder(type=Nat).forall(
+        body=x.binder(type=Nat).forall(
+            body=y.binder(type=Nat).forall(body=Foo.const()),
+        ),
+    )
+    mk_decl = mk.constructor(type=ctor_type)
+    constants = {
+        Foo: Foo.inductive(type=TYPE, constructors=[mk_decl]),
+        mk: mk_decl,
+    }
+
+    def test_fst(self):
+        proj = self.Foo.proj(0, self.mk.app(NAT_ZERO, NAT_ZERO))
+        assert proj.pretty(self.constants) == (
+            "(Foo.mk Nat.zero Nat.zero).a"
+        )
+
+    def test_third(self):
+        proj = self.Foo.proj(2, self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO))
+        assert proj.pretty(self.constants) == (
+            "(Foo.mk Nat.zero Nat.zero Nat.zero).y"
+        )
+
+
 def test_litnat():
     nat = W_LitNat(rbigint.fromlong(1000000000000000))
     assert nat.pretty({}) == "1000000000000000"
