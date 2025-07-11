@@ -1095,7 +1095,7 @@ class W_Proj(W_Expr):
     def strong_reduce_step(self, env):
         progress, new_struct_expr = self.struct_expr.strong_reduce_step(env)
         if progress:
-            return (True, W_Proj(self.struct_name, self.field_index, new_struct_expr))
+            return True, self.with_expr(new_struct_expr)
 
         # Look for a projection of a constructor, which allows us to just pick
         # out the argument corresponding to 'field_idx'
@@ -1122,23 +1122,22 @@ class W_Proj(W_Expr):
 
     def whnf(self, env):
         # TODO - do we need to try reducing the projection?
-        return W_Proj(self.struct_name, self.field_index, self.struct_expr.whnf(env))
+        return self.with_expr(self.struct_expr.whnf(env))
 
     def incr_free_bvars(self, count, depth):
-        return W_Proj(self.struct_name, self.field_index, self.struct_expr.incr_free_bvars(count, depth))
+        return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
-        return W_Proj(self.struct_name, self.field_index, self.struct_expr.bind_fvar(fvar, depth))
+        return self.with_expr(self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
-        return W_Proj(self.struct_name, self.field_index, self.struct_expr.instantiate(expr, depth))
+        return self.with_expr(self.struct_expr.instantiate(expr, depth))
 
     def subst_levels(self, substs):
-        return W_Proj(
-            self.struct_name,
-            self.field_index,
-            self.struct_expr.subst_levels(substs)
-        )
+        return self.with_expr(self.struct_expr.subst_levels(substs))
+
+    def with_expr(self, expr):
+        return self.struct_name.proj(self.field_index, expr)
 
     def syntactic_eq(self, other):
         # Our 'struct_type' is a '_Item' (which is only constructed once, during parsing),
