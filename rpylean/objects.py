@@ -1452,6 +1452,12 @@ class W_Let(W_Expr):
             self.body.instantiate(fvar, 0).pretty(constants),
         )
 
+    def infer(self, env):
+        assert env.infer_sort_of(self.type) is not None
+        assert env.def_eq(self.value.infer(env), self.type)
+        body_type = self.body.instantiate(self.value, 0)
+        return body_type.infer(env)
+
     def instantiate(self, expr, depth):
         return self.name.let(
             type=self.type.instantiate(expr, depth),

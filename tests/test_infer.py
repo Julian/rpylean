@@ -24,6 +24,7 @@ from rpylean.objects import (
 Empty, T, true, a, f, x = names("Empty", "T", "True", "a", "f", "x")
 EMPTY = Empty.inductive(type=TYPE)
 u, v = Name.simple("u").level(), Name.simple("v").level()
+b0 = W_BVar(0)
 
 
 def test_fvar():
@@ -46,6 +47,21 @@ def test_nat():
 def test_str():
     lit = W_LitStr("hello")
     assert lit.infer(Environment.EMPTY) is STRING
+
+
+class TestLet(object):
+    def test_simple(self):
+        env = Environment.having([Name.simple("Nat").inductive(type=TYPE)])
+
+        zero = W_LitNat(rbigint.fromint(0))
+        let = x.let(type=NAT, value=zero, body=b0)
+        assert let.infer(env) == NAT
+
+    def test_body(self):
+        env = Environment.having([Name.simple("Nat").inductive(type=TYPE)])
+        zero = W_LitNat(rbigint.fromint(0))
+        let = x.let(type=NAT, value=zero, body=W_LitStr("hi"))
+        assert let.infer(env) == STRING
 
 
 class TestLambda(object):
