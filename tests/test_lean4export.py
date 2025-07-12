@@ -1,8 +1,6 @@
 """
 Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
-
-from rpython.rlib.rbigint import rbigint
 import pytest
 
 from rpylean.exceptions import UnknownQuotient
@@ -12,10 +10,8 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
-    W_Let,
     W_LitNat,
     W_LitStr,
-    W_Proj,
 )
 
 
@@ -123,7 +119,7 @@ def test_dump_expr_let():
             Nat.const(),
             zero.const(),
             bvar,
-            W_Let(name=x, type=Nat.const(), value=zero.const(), body=bvar),
+            x.let(type=Nat.const(), value=zero.const(), body=bvar),
         ],
         names=[x, Nat, zero],
     )
@@ -154,9 +150,7 @@ def test_dump_large_natlit():
         """
         0 #ELN 1000000000000000
         """,
-    ) == EnvironmentBuilder(
-        exprs=[W_LitNat(rbigint.fromlong(1000000000000000))],
-    )
+    ) == EnvironmentBuilder(exprs=[W_LitNat.long(1000000000000000)])
 
 
 def test_dump_litstr():

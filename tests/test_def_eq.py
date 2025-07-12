@@ -3,8 +3,6 @@ Tests for definitional equality of Lean objects.
 """
 import pytest
 
-from rpython.rlib.rbigint import rbigint
-
 from rpylean.environment import Environment
 from rpylean.objects import (
     W_LEVEL_ZERO,
@@ -37,16 +35,10 @@ class TestFVar(object):
 
 class TestLitNat(object):
     def test_eq(self):
-        assert env.def_eq(
-            W_LitNat(rbigint.fromint(37)),
-            W_LitNat(rbigint.fromint(37)),
-        )
+        assert env.def_eq(W_LitNat.int(37), W_LitNat.int(37))
 
     def test_not_eq(self):
-        assert not env.def_eq(
-            W_LitNat(rbigint.fromint(37)),
-            W_LitNat(rbigint.fromint(73)),
-        )
+        assert not env.def_eq(W_LitNat.int(37), W_LitNat.int(73))
 
 
 class TestLitStr(object):

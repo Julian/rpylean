@@ -3,7 +3,6 @@ Pretty printing of Lean objects.
 """
 from textwrap import dedent
 
-from rpython.rlib.rbigint import rbigint
 import pytest
 
 from rpylean.objects import (
@@ -318,7 +317,7 @@ class TestProj(object):
 
 
 def test_litnat():
-    nat = W_LitNat(rbigint.fromlong(1000000000000000))
+    nat = W_LitNat.long(1000000000000000)
     assert nat.pretty({}) == "1000000000000000"
 
 

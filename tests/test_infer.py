@@ -1,9 +1,6 @@
 """
 Type inference of Lean objects.
 """
-
-from rpython.rlib.rbigint import rbigint
-
 import pytest
 
 from rpylean.environment import Environment
@@ -40,26 +37,24 @@ class TestSort(object):
 
 
 def test_nat():
-    lit = W_LitNat(rbigint.fromint(42))
-    assert lit.infer(Environment.EMPTY) is NAT
+    assert W_LitNat.int(37).infer(Environment.EMPTY) is NAT
 
 
 def test_str():
-    lit = W_LitStr("hello")
-    assert lit.infer(Environment.EMPTY) is STRING
+    assert W_LitStr("hello").infer(Environment.EMPTY) is STRING
 
 
 class TestLet(object):
     def test_simple(self):
         env = Environment.having([Name.simple("Nat").inductive(type=TYPE)])
 
-        zero = W_LitNat(rbigint.fromint(0))
+        zero = W_LitNat.int(0)
         let = x.let(type=NAT, value=zero, body=b0)
         assert let.infer(env) == NAT
 
     def test_body(self):
         env = Environment.having([Name.simple("Nat").inductive(type=TYPE)])
-        zero = W_LitNat(rbigint.fromint(0))
+        zero = W_LitNat.int(0)
         let = x.let(type=NAT, value=zero, body=W_LitStr("hi"))
         assert let.infer(env) == STRING
 

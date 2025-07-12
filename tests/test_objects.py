@@ -495,4 +495,7 @@ class TestConst(object):
 
 class TestLitNat(object):
     def test_char(self):
-        assert W_LitNat.char("o") == W_LitNat(rbigint.fromint(111))
+        assert W_LitNat.char("o") == W_LitNat.int(111)
+
+    def test_int(self):
+        assert W_LitNat.int(37) == W_LitNat(rbigint.fromint(37))

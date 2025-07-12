@@ -1006,6 +1006,14 @@ class W_LitNat(W_Expr):
     def char(char):
         return W_LitNat(rbigint.fromint(ord(char)))
 
+    @staticmethod
+    def int(i):
+        return W_LitNat(rbigint.fromint(i))
+
+    @staticmethod
+    def long(i):
+        return W_LitNat(rbigint.fromlong(i))
+
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitNat)
         return self.val == other.val
