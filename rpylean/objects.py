@@ -71,6 +71,13 @@ def name_with_levels(name, levels):
     )
 
 
+def name_eq(name, other):
+    # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
+    #        that directly, RPython seems unable to be convinced that name and
+    #        other are always Names no matter how much I assert.
+    return name.components == other.components
+
+
 class Name(_Item):
     def __init__(self, components):
         self.components = components
@@ -98,15 +105,6 @@ class Name(_Item):
         """
         return Name(self.components + [part])
 
-    def syntactic_eq(self, other):
-        return self.components == other.components
-
-    def hash(self):
-        hash_val = 0
-        for c in self.components:
-            hash_val ^= compute_hash(c)
-        return hash_val
-
     def pretty(self, constants):
         return self.str()
 
@@ -114,6 +112,15 @@ class Name(_Item):
         if not self.components:
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
+
+    def hash(self):
+        hash_val = 0
+        for c in self.components:
+            hash_val ^= compute_hash(c)
+        return hash_val
+
+    def syntactic_eq(self, other):
+        return self.components == other.components
 
     def is_private(self):
         """
