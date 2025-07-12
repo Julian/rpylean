@@ -1205,12 +1205,8 @@ class W_Proj(W_Expr):
             ctor_type = ctor_type.whnf(env)
             if not isinstance(ctor_type, W_ForAll):
                 raise InvalidProjection(struct_type, self.field_index, i + 1)
-            # FIXME: this is totally broken, it should be:
-            #        proj = self.struct_name.proj(i, self.struct_expr)
-            #        but RPython seems to freak out with the same hop
-            #        assertion error, even though the type as-is is clearly
-            #        wrong...
-            proj = W_Proj(struct_type, i, self.struct_expr)
+            proj = self.struct_name.proj(i, self.struct_expr)
+            # proj = W_Proj(struct_type, i, self.struct_expr)
             ctor_type = ctor_type.body.instantiate(proj, 0)
 
         ctor_type = ctor_type.whnf(env)

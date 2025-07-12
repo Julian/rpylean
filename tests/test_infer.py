@@ -150,3 +150,23 @@ class TestProj(object):
         assert str(e.value) == (
             "index 3 is not valid for Foo, which has only 2 fields"
         )
+
+    def test_with_dependent_body(self):
+        """
+        structure T where
+          n : Nat
+          val : Fin n
+        #check T.val -- T.val (self : T) : Fin self.n
+        """
+        Fin = Name.simple("Fin")
+        mk = T.child("mk")
+        mk_decl = mk.constructor(
+            type=x.binder(type=NAT).forall(
+                body=a.binder(type=Fin.app(b0)).forall(body=T.const()),
+            ),
+        )
+        T_decl = T.inductive(type=TYPE, constructors=[mk_decl])
+        env = Environment.having([T_decl, mk_decl])
+        struct_expr = mk.app(W_LitNat.int(5), W_LitNat.int(3))
+        proj = T.proj(1, struct_expr)
+        assert proj.infer(env) == Fin.app(T.proj(0, struct_expr))
