@@ -142,11 +142,7 @@ def test_dump_expr_proj():
     ) == EnvironmentBuilder(
         exprs=[
             bvar,
-            W_Proj(
-                struct_name=Name.simple("Prod"),
-                field_index=1,
-                struct_expr=bvar,
-            ),
+            Name.simple("Prod").proj(field_index=1, struct_expr=bvar),
         ],
         names=[Prod],
     )

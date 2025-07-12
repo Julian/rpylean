@@ -281,11 +281,11 @@ class Name(_Item):
         """
         return W_Let(name=self, type=type, value=value, body=body)
 
-    def proj(self, field_index, expr):
+    def proj(self, field_index, struct_expr):
         """
         Construct a projection with this name.
         """
-        return W_Proj(self, field_index, expr)
+        return W_Proj(self, field_index, struct_expr)
 
     def level(self):
         """

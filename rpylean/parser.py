@@ -469,25 +469,23 @@ class Proj(ExprVal):
 
     @staticmethod
     def parse(tokens):
-        eidx, _, type_name, field_index, struct_expr = tokens
+        eidx, _, struct_name, field_index, struct_expr = tokens
         val = Proj(
-            type_name=type_name.uint(),
+            struct_name=struct_name.uint(),
             field_index=field_index.uint(),
             struct_expr=struct_expr.uint(),
         )
         return Expr(eidx=eidx.uint(), val=val)
 
-    def __init__(self, type_name, field_index, struct_expr):
-        self.type_name = type_name
+    def __init__(self, struct_name, field_index, struct_expr):
+        self.struct_name = struct_name
         self.field_index = field_index
         self.struct_expr = struct_expr
 
     def to_w_expr(self, builder):
-        name = builder.names[self.type_name]
-        return objects.W_Proj(
-            struct_name=name,
-            field_index=self.field_index,
-            struct_expr=builder.exprs[self.struct_expr],
+        return builder.names[self.struct_name].proj(
+            self.field_index,
+            builder.exprs[self.struct_expr],
         )
 
 
