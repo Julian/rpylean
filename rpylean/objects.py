@@ -98,7 +98,7 @@ class Name(_Item):
         """
         return Name(self.components + [part])
 
-    def eq(self, other):
+    def syntactic_eq(self, other):
         return self.components == other.components
 
     def hash(self):
@@ -403,8 +403,8 @@ class Binder(_Item):
         """
         # TODO - does syntactic equality really care about binder info/name?
         return (
-            self.name.eq(other.name)
-            and self.left == other.left
+            self.left == other.left
+            and syntactic_eq(self.name, other.name)
             and syntactic_eq(self.type, other.type)
         )
 
@@ -657,7 +657,7 @@ class W_LevelParam(W_Level):
             return False
 
         if isinstance(other, W_LevelParam):
-            return balance >= 0 and self.name.eq(other.name)
+            return balance >= 0 and syntactic_eq(self.name, other.name)
         if isinstance(other, W_LevelMax):
             return self.leq(other.lhs, balance) or self.leq(other.rhs, balance)
 
@@ -671,7 +671,7 @@ class W_LevelParam(W_Level):
         return self.name.str(), 0
 
     def syntactic_eq(self, other):
-        return self.name.eq(other.name)
+        return syntactic_eq(self.name, other.name)
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
@@ -1475,7 +1475,7 @@ class W_Let(W_Expr):
 
     def syntactic_eq(self, other):
         return (
-            self.name.eq(other.name)
+            syntactic_eq(self.name, other.name)
             and syntactic_eq(self.type, other.type)
             and syntactic_eq(self.value, other.value)
             and syntactic_eq(self.body, other.body)
@@ -1652,7 +1652,7 @@ class W_App(W_Expr):
         all_ctor_args.reverse()
         # TODO - consider storing these by recursor name
         for rec_rule in decl.w_kind.rules:
-            if rec_rule.ctor_name.eq(major_premise_ctor.name):
+            if syntactic_eq(rec_rule.ctor_name, major_premise_ctor.name):
                 #print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 # import pdb; pdb.set_trace()

@@ -190,7 +190,7 @@ class Environment(object):
         self.declarations = declarations
 
         #: Any declarations we have already type checked.
-        self._constants = r_dict(Name.eq, Name.hash)
+        self._constants = r_dict(Name.syntactic_eq, Name.hash)
 
     @not_rpython
     def __getitem__(self, value):
@@ -213,7 +213,7 @@ class Environment(object):
         """
         Construct an environment with the given declarations.
         """
-        by_name = r_dict(Name.eq, Name.hash)
+        by_name = r_dict(Name.syntactic_eq, Name.hash)
         for each in declarations:
             if each.name in by_name:
                 raise AlreadyDeclared(each, by_name)
