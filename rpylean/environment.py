@@ -21,6 +21,7 @@ from rpylean.objects import (
     W_LitNat,
     W_LitStr,
     W_Sort,
+    fun,
     name_eq,
     syntactic_eq,
 )
@@ -339,8 +340,8 @@ class Environment(object):
             if isinstance(expr2_ty, W_ForAll):
                 #print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
-                return expr2_ty.binder.fun(
-                    body=expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
+                return fun(expr2_ty.binder)(
+                    expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
                 )
         return None
 

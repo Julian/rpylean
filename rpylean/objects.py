@@ -360,12 +360,6 @@ class Binder(_Item):
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
-    def forall(self, body):
-        return W_ForAll(binder=self, body=body)
-
-    def fun(self, body):
-        return W_Lambda(binder=self, body=body)
-
     def pretty(self, constants):
         return "%s%s : %s%s" % (
             self.left,
@@ -1304,8 +1298,8 @@ class W_ForAll(W_FunBase):
     # TODO - double check this
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        return self.binder.instantiate(expr, depth).forall(
-            body=self.body.instantiate(expr, depth + 1),
+        return forall(self.binder.instantiate(expr, depth))(
+            self.body.instantiate(expr, depth + 1),
         )
 
     def syntactic_eq(self, other):
@@ -1316,13 +1310,13 @@ class W_ForAll(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
-        return self.binder.bind_fvar(fvar, depth).forall(
-            body=self.body.bind_fvar(fvar, depth + 1),
+        return forall(self.binder.bind_fvar(fvar, depth))(
+            self.body.bind_fvar(fvar, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
-        return self.binder.incr_free_bvars(count, depth).forall(
-            body=self.body.incr_free_bvars(count, depth + 1),
+        return forall(self.binder.incr_free_bvars(count, depth))(
+            self.body.incr_free_bvars(count, depth + 1),
         )
 
     def strong_reduce_step(self, env):
@@ -1334,8 +1328,8 @@ class W_ForAll(W_FunBase):
         return (progress, W_ForAll(*args))
 
     def subst_levels(self, levels):
-        return self.binder.subst_levels(levels).forall(
-            body=self.body.subst_levels(levels),
+        return forall(self.binder.subst_levels(levels))(
+            self.body.subst_levels(levels),
         )
 
 
@@ -1408,19 +1402,19 @@ class W_Lambda(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
-        return self.binder.bind_fvar(fvar, depth).fun(
-            body=self.body.bind_fvar(fvar, depth + 1),
+        return fun(self.binder.bind_fvar(fvar, depth))(
+            self.body.bind_fvar(fvar, depth + 1),
         )
 
     def instantiate(self, expr, depth):
         # Don't increment - not yet inside a binder
-        return self.binder.instantiate(expr, depth).fun(
-            body=self.body.instantiate(expr, depth + 1),
+        return fun(self.binder.instantiate(expr, depth))(
+            self.body.instantiate(expr, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
-        return self.binder.incr_free_bvars(count, depth).fun(
-            body=self.body.incr_free_bvars(count, depth + 1),
+        return fun(self.binder.incr_free_bvars(count, depth))(
+            self.body.incr_free_bvars(count, depth + 1),
         )
 
     def infer(self, env):
@@ -1431,7 +1425,7 @@ class W_Lambda(W_FunBase):
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
             raise RuntimeError("W_Lambda.infer: body_type is None: %s" % env.pretty(self))
-        return self.binder.forall(body=body_type)
+        return forall(self.binder)(body_type)
 
     def strong_reduce_step(self, env):
         if self.finished_reduce:
@@ -1442,8 +1436,8 @@ class W_Lambda(W_FunBase):
         return (progress, W_Lambda(*args))
 
     def subst_levels(self, substs):
-        return self.binder.subst_levels(substs).fun(
-            body=self.body.subst_levels(substs),
+        return fun(self.binder.subst_levels(substs))(
+            self.body.subst_levels(substs),
         )
 
 
@@ -1998,6 +1992,32 @@ def syntactic_eq(expr1, expr2):
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
+
+
+class Telescope(object):
+    def __init__(self, *binders):
+        assert len(binders) > 0
+        self._binders = list(binders)
+
+    def forall(self, body):
+        forall = W_ForAll(self._binders[-1], body)
+        for binder in reversed(self._binders[:-1]):
+            forall = W_ForAll(binder, forall)
+        return forall
+
+    def fun(self, body):
+        fun = W_Lambda(self._binders[-1], body)
+        for binder in reversed(self._binders[:-1]):
+            fun = W_Lambda(binder, fun)
+        return fun
+
+
+def forall(*binders):
+    return Telescope(*binders).forall
+
+
+def fun(*binders):
+    return Telescope(*binders).fun
 
 
 def warn(message):

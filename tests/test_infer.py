@@ -14,6 +14,8 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    forall,
+    fun,
     names,
 )
 
@@ -66,14 +68,14 @@ class TestLambda(object):
 
         env = Environment.having([T.inductive(type=TYPE), TRUE, intro])
         X = x.binder(type=T.const())
-        fun = X.fun(body=true.child("intro").const())
-        assert fun.infer(env) == X.forall(body=true.const())
+        f = fun(X)(true.child("intro").const())
+        assert f.infer(env) == forall(X)(true.const())
 
     def test_with_dependent_body(self):
         env = Environment.having([EMPTY])
         X = x.binder(type=Empty.const())
-        fun = X.fun(body=W_BVar(0))
-        assert fun.infer(env) == X.forall(body=Empty.const())
+        f = fun(X)(W_BVar(0))
+        assert f.infer(env) == forall(X)(Empty.const())
 
 
 class TestConst(object):
@@ -99,7 +101,7 @@ class TestProj(object):
     def test_returns_field_type(self):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
-        mk_decl = mk.constructor(type=a.binder(type=NAT).forall(body=Foo.const()))
+        mk_decl = mk.constructor(type=forall(a.binder(type=NAT))(Foo.const()))
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
         x_decl = x.axiom(type=Foo.const())
         env = Environment.having([Foo_decl, mk_decl, x_decl])
@@ -110,7 +112,7 @@ class TestProj(object):
     def test_out_of_bounds_1(self):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
-        ctor_type = a.binder(type=NAT).forall(body=Foo.const())
+        ctor_type = forall(a.binder(type=NAT))(Foo.const())
         mk_decl = mk.constructor(type=ctor_type)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
         env = Environment.having([Foo_decl, mk_decl])
@@ -139,7 +141,7 @@ class TestProj(object):
     def test_out_of_bounds_3(self):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
-        ctor_type = a.binder(type=NAT).forall(body=Foo.const())
+        ctor_type = forall(a.binder(type=NAT))(Foo.const())
         mk_decl = mk.constructor(type=ctor_type)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
         env = Environment.having([Foo_decl, mk_decl])
@@ -161,9 +163,10 @@ class TestProj(object):
         Fin = Name.simple("Fin")
         mk = T.child("mk")
         mk_decl = mk.constructor(
-            type=x.binder(type=NAT).forall(
-                body=a.binder(type=Fin.app(b0)).forall(body=T.const()),
-            ),
+            type=forall(
+                x.binder(type=NAT),
+                a.binder(type=Fin.app(b0)),
+            )(T.const()),
         )
         T_decl = T.inductive(type=TYPE, constructors=[mk_decl])
         env = Environment.having([T_decl, mk_decl])

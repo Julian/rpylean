@@ -14,6 +14,7 @@ from rpylean.objects import (
     W_FVar,
     W_LitNat,
     W_LitStr,
+    forall,
     names,
 )
 
@@ -59,24 +60,22 @@ class TestLitStr(object):
 
         ListFn = Name.simple("List").const(levels=[u])
         nil_ctor = Name(["List", "nil"]).constructor(
-            type=alpha.to_implicit().forall(body=ListFn.app(b0)),
+            type=forall(alpha.to_implicit())(ListFn.app(b0)),
             levels=[u.name],
             num_params=1,
         )
         cons_ctor = Name(["List", "cons"]).constructor(
-            type=alpha.to_implicit().forall(
-                body=head.binder(type=b0).forall(
-                    body=tail.binder(type=ListFn.app(b1)).forall(
-                        body=ListFn.app(b2),
-                    ),
-                ),
-            ),
+            type=forall(
+                alpha.to_implicit(),
+                head.binder(type=b0),
+                tail.binder(type=ListFn.app(b1)),
+            )(ListFn.app(b2)),
             levels=[u.name],
             num_params=1,
             num_fields=2,
         )
         List = Name.simple("List").inductive(
-            type=alpha.forall(body=u.succ().sort()),
+            type=forall(alpha)(u.succ().sort()),
             constructors=[nil_ctor, cons_ctor],
             levels=[u.name],
             num_params=1,
@@ -92,7 +91,7 @@ class TestLitStr(object):
             type=TYPE,
             constructors=[
                 String_mk.constructor(
-                    type=x.binder(type=List_Char).forall(body=STRING),
+                    type=forall(x.binder(type=List_Char))(STRING),
                 ),
             ],
         )
@@ -105,7 +104,7 @@ class TestLitStr(object):
             String.w_kind.constructors[0],
             Char.axiom(type=TYPE),
             NAT.name.axiom(type=TYPE),
-            ofNat.axiom(type=x.binder(type=NAT).forall(body=Char.const())),
+            ofNat.axiom(type=forall(x.binder(type=NAT))(Char.const())),
         ]
         env = Environment.having(decls)
 
@@ -252,27 +251,23 @@ class TestForAll(object):
         "forall1, forall2, decls",
         [
             (
-                x.binder(type=NAT).forall(body=NAT),
-                x.binder(type=NAT).forall(body=NAT),
+                forall(x.binder(type=NAT))(NAT),
+                forall(x.binder(type=NAT))(NAT),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
             (
-                x.binder(type=NAT).forall(body=NAT),
-                y.binder(type=NAT).forall(body=NAT),
+                forall(x.binder(type=NAT))(NAT),
+                forall(y.binder(type=NAT))(NAT),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
             (
-                x.binder(type=NAT).forall(body=b0),
-                y.binder(type=NAT).forall(body=b0),
+                forall(x.binder(type=NAT))(b0),
+                forall(y.binder(type=NAT))(b0),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
             (
-                x.binder(type=NAT).forall(
-                    body=y.binder(type=NAT).forall(body=b0)
-                ),
-                a.binder(type=NAT).forall(
-                    body=f.binder(type=NAT).forall(body=b0)
-                ),
+                forall(x.binder(type=NAT), y.binder(type=NAT))(b0),
+                forall(a.binder(type=NAT), f.binder(type=NAT))(b0),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
         ],
@@ -291,20 +286,18 @@ class TestForAll(object):
         "forall1, forall2, decls",
         [
             (
-                x.binder(type=NAT).forall(body=NAT),
-                x.binder(type=TYPE).forall(body=NAT),
+                forall(x.binder(type=NAT))(NAT),
+                forall(x.binder(type=TYPE))(NAT),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
             (
-                x.binder(type=NAT).forall(body=NAT),
-                x.binder(type=NAT).forall(body=TYPE),
+                forall(x.binder(type=NAT))(NAT),
+                forall(x.binder(type=NAT))(TYPE),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
             (
-                x.binder(type=NAT).forall(body=NAT),
-                x.binder(type=NAT).forall(
-                    body=y.binder(type=NAT).forall(body=NAT)
-                ),
+                forall(x.binder(type=NAT))(NAT),
+                forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
                 [x.axiom(type=TYPE), Name.simple("Nat").axiom(type=TYPE)],
             ),
         ],
@@ -328,7 +321,7 @@ class TestApp(object):
                 f.app(x.const()),
                 [
                     x.axiom(type=TYPE),
-                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                    f.axiom(type=forall(x.binder(type=TYPE))(TYPE)),
                 ],
             ),
             (
@@ -337,9 +330,11 @@ class TestApp(object):
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),
-                    f.axiom(type=x.binder(type=TYPE).forall(
-                        body=y.binder(type=TYPE).forall(body=TYPE)
-                    )),
+                    f.axiom(
+                        type=forall(x.binder(type=TYPE), y.binder(type=TYPE))(
+                            TYPE,
+                        ),
+                    ),
                 ],
             ),
             (
@@ -348,7 +343,7 @@ class TestApp(object):
                 [
                     x.axiom(type=TYPE),
                     f.axiom(
-                        type=x.binder(type=TYPE).forall(body=TYPE),
+                        type=forall(x.binder(type=TYPE))(TYPE),
                         levels=[u.name],
                     ),
                 ],
@@ -372,8 +367,8 @@ class TestApp(object):
                 g.app(x.const()),
                 [
                     x.axiom(type=TYPE),
-                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
-                    g.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                    f.axiom(type=forall(x.binder(type=TYPE))(TYPE)),
+                    g.axiom(type=forall(x.binder(type=TYPE))(TYPE)),
                 ],
             ),
             (
@@ -382,7 +377,7 @@ class TestApp(object):
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),
-                    f.axiom(type=x.binder(type=TYPE).forall(body=TYPE)),
+                    f.axiom(type=forall(x.binder(type=TYPE))(TYPE)),
                 ],
             ),
             (
@@ -391,9 +386,12 @@ class TestApp(object):
                 [
                     x.axiom(type=TYPE),
                     y.axiom(type=TYPE),
-                    f.axiom(type=x.binder(type=TYPE).forall(
-                        body=y.binder(type=TYPE).forall(body=TYPE)
-                    )),
+                    f.axiom(
+                        type=forall(
+                            x.binder(type=TYPE),
+                            y.binder(type=TYPE),
+                        )(TYPE),
+                    ),
                 ],
             ),
         ],

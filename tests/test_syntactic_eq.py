@@ -6,6 +6,8 @@ from rpylean.objects import (
     NAT,
     Name,
     W_BVar,
+    forall,
+    fun,
     names,
     syntactic_eq,
 )
@@ -42,8 +44,8 @@ def test_app_different():
 
 
 def test_forall_vs_lambda_not_equal():
-    forall_expr = x.binder(type=NAT).forall(body=b0)
-    lambda_expr = x.binder(type=NAT).fun(body=b0)
+    forall_expr = forall(x.binder(type=NAT))(b0)
+    lambda_expr = fun(x.binder(type=NAT))(b0)
     assert not syntactic_eq(forall_expr, lambda_expr)
 
 

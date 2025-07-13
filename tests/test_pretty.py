@@ -15,6 +15,8 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    forall,
+    fun,
     name_with_levels,
     names,
 )
@@ -125,52 +127,62 @@ constants = {
     i: Nat,
     p: PROP,
     q: PROP,
-    P: P.binder(type=NAT).forall(body=PROP),
-    alpha: Name.ANONYMOUS.binder(type=NAT).forall(body=TYPE),
+    P: forall(P.binder(type=NAT))(PROP),
+    alpha: forall(Name.ANONYMOUS.binder(type=NAT))(TYPE),
 }
 
 
 @pytest.mark.parametrize(
-    "forall, expected",
+    "binder, body, expected",
     [
         (
-            i.binder(type=NAT).forall(body=NAT),
+            i.binder(type=NAT),
+            NAT,
             "Nat → Nat",
         ),
         (
-            i.implicit_binder(type=NAT).forall(body=NAT),
+            i.implicit_binder(type=NAT),
+            NAT,
             "{i : Nat} → Nat",
         ),
         (
-            h.binder(type=p.const()).forall(body=q.const()),
+            h.binder(type=p.const()),
+            q.const(),
             "p → q",
         ),
         (
-            i.binder(type=NAT).forall(body=p.const()),
+            i.binder(type=NAT),
+            p.const(),
             "∀ (i : Nat), p",
         ),
         (
-            i.implicit_binder(type=NAT).forall(alpha.app(i.const())),
+            i.implicit_binder(type=NAT),
+            alpha.app(i.const()),
             "{i : Nat} → α i",
         ),
         (
-            i.binder(type=NAT).forall(alpha.app(i.const())),
+            i.binder(type=NAT),
+            alpha.app(i.const()),
             "(i : Nat) → α i",
         ),
         (
-            i.implicit_binder(type=NAT).forall(alpha.app(i.const())),
+            i.implicit_binder(type=NAT),
+            alpha.app(i.const()),
             "{i : Nat} → α i",
         ),
         (
-            i.binder(type=NAT).forall(P.app(i.const())),
+            i.binder(type=NAT),
+            P.app(i.const()),
             "∀ (i : Nat), P i",
         ),
         (
-            i.implicit_binder(type=NAT).forall(P.app(i.const())),
+            i.implicit_binder(type=NAT),
+            P.app(i.const()),
             "∀ {i : Nat}, P i",
         ),
         (
-            i.implicit_binder(type=NAT).forall(p.const()),
+            i.implicit_binder(type=NAT),
+            p.const(),
             "∀ {i : Nat}, p",
         ),
     ],
@@ -187,10 +199,10 @@ constants = {
         "{i : Nat} → p",
     ],
 )
-def test_forall(forall, expected):
+def test_forall(binder, body, expected):
     if expected in {"(i : Nat) → α i", "∀ (i : Nat), P i", "∀ {i : Nat}, P i"}:
         pytest.xfail("Dependent forall pretty-printing is broken")
-    assert forall.pretty(constants=constants) == expected
+    assert forall(binder)(body).pretty(constants=constants) == expected
 
 
 class TestConst(object):
@@ -257,13 +269,12 @@ class TestRecursor(object):
         t = Name.simple("t")
         motive = Name.simple("motive")
         rec = Empty.child("rec").recursor(
-            type=motive.binder(
-                type=t.binder(type=Empty.const()).forall(body=u.sort()),
-            ).forall(
-                body=t.binder(type=Empty.const()).forall(
-                    body=b1.app(b0)
+            type=forall(
+                motive.binder(
+                    type=forall(t.binder(type=Empty.const()))(u.sort()),
                 ),
-            ),
+                t.binder(type=Empty.const()),
+            )(b1.app(b0)),
             levels=[u.name],
         )
 
@@ -292,11 +303,11 @@ class TestProj(object):
     Foo = Name.simple("Foo")
     mk = Foo.child("mk")
     Nat = Name.simple("Nat").const()
-    ctor_type = a.binder(type=Nat).forall(
-        body=x.binder(type=Nat).forall(
-            body=y.binder(type=Nat).forall(body=Foo.const()),
-        ),
-    )
+    ctor_type = forall(
+        a.binder(type=Nat),
+        x.binder(type=Nat),
+        y.binder(type=Nat),
+    )(Foo.const())
     mk_decl = mk.constructor(type=ctor_type)
     constants = {
         Foo: Foo.inductive(type=TYPE, constructors=[mk_decl]),
@@ -342,54 +353,58 @@ class TestLambda(object):
                 "Instance binder pretty-printing doesn't yet hide unused "
                 "names when pretty printing.",
             )
-        assert binder(type=NAT).fun(body=NAT_ZERO).pretty({}) == expected
+        assert fun(binder(type=NAT))(NAT_ZERO).pretty({}) == expected
 
     def test_nested_default(self):
-        nested = x.binder(type=NAT).fun(
-            body=y.binder(type=NAT).fun(body=f.app(b1).app(b0))
-        )
+        nested = fun(
+            x.binder(type=NAT),
+            y.binder(type=NAT),
+        )(f.app(b1, b0))
         assert nested.pretty({}) == "fun x y ↦ f x y"
 
     def test_nested_implicit(self):
-        nested = x.implicit_binder(type=NAT).fun(
-            body=y.implicit_binder(type=NAT).fun(body=f.app(b1).app(b0))
-        )
+        nested = fun(
+            x.implicit_binder(type=NAT),
+            y.implicit_binder(type=NAT),
+        )(f.app(b1, b0))
         assert nested.pretty({}) == "fun {x y} ↦ f x y"
 
     def test_nested_instance(self):
-        nested = x.instance_binder(type=NAT).fun(
-            body=y.instance_binder(type=NAT).fun(body=f.app(b1).app(b0))
-        )
+        nested = fun(
+            x.instance_binder(type=NAT),
+            y.instance_binder(type=NAT),
+        )(f.app(b1, b0))
         assert nested.pretty({}) == "fun [x : Nat] [y : Nat] ↦ f x y"
 
     def test_mixed_default_implicit(self):
-        nested = x.binder(type=NAT).fun(
-            body=y.implicit_binder(type=NAT).fun(body=f.app(b1).app(b0))
-        )
+        nested = fun(
+            x.binder(type=NAT),
+            y.implicit_binder(type=NAT),
+        )(f.app(b1, b0))
         assert nested.pretty({}) == "fun x {y} ↦ f x y"
 
     def test_mixed_implicit_default(self):
-        nested = x.implicit_binder(type=NAT).fun(
-            body=y.binder(type=NAT).fun(body=f.app(b1).app(b0))
-        )
+        nested = fun(
+            x.implicit_binder(type=NAT),
+            y.binder(type=NAT),
+        )(f.app(b1, b0))
         assert nested.pretty({}) == "fun {x} y ↦ f x y"
 
     def test_more_nested(self):
-        nested = x.binder(type=NAT).fun(
-            body=y.binder(type=NAT).fun(
-                body=a.binder(type=NAT).fun(body=f.app(f.app(b2, b1), b0))
-            ),
-        )
+        nested = fun(
+            x.binder(type=NAT),
+            y.binder(type=NAT),
+            a.binder(type=NAT),
+        )(f.app(f.app(b2, b1), b0))
         assert nested.pretty({}) == "fun x y a ↦ f (f x y) a"
 
     def test_more_nested_mixed(self):
-        nested = x.binder(type=NAT).fun(
-            body=y.implicit_binder(type=NAT).fun(
-                body=a.instance_binder(type=NAT).fun(
-                    body=f.binder(type=NAT).fun(body=b0)
-                )
-            )
-        )
+        nested = fun(
+            x.binder(type=NAT),
+            y.implicit_binder(type=NAT),
+            a.instance_binder(type=NAT),
+            f.binder(type=NAT),
+        )(b0)
         pytest.xfail(
             "Instance binder pretty-printing doesn't yet hide unused "
             "names when pretty printing.",
@@ -398,13 +413,13 @@ class TestLambda(object):
 
     def test_nested_non_lambda_body(self):
         let = y.let(type=NAT, value=NAT_ZERO, body=b0)
-        nested = x.binder(type=NAT).fun(body=let)
+        nested = fun(x.binder(type=NAT))(let)
         assert nested.pretty({}) == "fun x ↦ let y : Nat := Nat.zero\ny"
 
     def test_definition(self):
         f = Name.simple("f").definition(
-            type=a.binder(type=NAT).forall(body=NAT),
-            value=a.binder(type=NAT).fun(body=b0),
+            type=forall(a.binder(type=NAT))(NAT),
+            value=fun(a.binder(type=NAT))(b0),
         )
         assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ a"
 
@@ -417,9 +432,9 @@ class TestLambda(object):
 
     def test_let_inside_lambda(self):
         f = Name.simple("f").definition(
-            type=a.binder(type=NAT).forall(body=NAT),
-            value=a.binder(type=NAT).fun(
-                body=x.let(type=NAT, value=NAT_ZERO, body=b1)
+            type=forall(a.binder(type=NAT))(NAT),
+            value=fun(a.binder(type=NAT))(
+                x.let(type=NAT, value=NAT_ZERO, body=b1)
             ),
         )
         assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
@@ -440,24 +455,24 @@ class TestApp(object):
         assert outer.pretty({}) == "f (g a)"
 
     def test_lambda_app(self):
-        id = x.binder(type=NAT).fun(body=b0)
+        id = fun(x.binder(type=NAT))(b0)
         app = id.app(a.const())
         assert app.pretty({}) == "(fun x ↦ x) a"
 
     def test_app_lambda(self):
-        id = x.binder(type=NAT).fun(body=b0)
+        id = fun(x.binder(type=NAT))(b0)
         app = f.app(id)
         assert app.pretty({}) == "f fun x ↦ x"
 
     def test_lambda_lambda_app(self):
-        fun_fn = f.binder(type=NAT).fun(body=x.binder(type=NAT).fun(body=b0))
-        fun_arg = y.binder(type=NAT).fun(body=b0)
-        app = fun_fn.app(fun_arg).app(NAT_ZERO)
+        fun_fn = fun(f.binder(type=NAT), x.binder(type=NAT))(b0)
+        fun_arg = fun(y.binder(type=NAT))(b0)
+        app = fun_fn.app(fun_arg, NAT_ZERO)
         assert app.pretty({}) == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
 
     def test_app_multiple_lambda(self):
-        fun1 = x.binder(type=NAT).fun(body=b0)
-        fun2 = y.binder(type=NAT).fun(body=b0)
-        fun3 = a.binder(type=NAT).fun(body=b0)
-        app = f.app(fun1).app(fun2).app(fun3)
+        fun1 = fun(x.binder(type=NAT))(b0)
+        fun2 = fun(y.binder(type=NAT))(b0)
+        fun3 = fun(a.binder(type=NAT))(b0)
+        app = f.app(fun1, fun2, fun3)
         assert app.pretty({}) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"

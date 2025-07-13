@@ -425,13 +425,13 @@ class Lambda(ExprVal):
         self.body = body
 
     def to_w_expr(self, builder):
-        return binder(
-            name=builder.names[self.binder_name],
-            type=builder.exprs[self.binder_type],
-            info=self.binder_info,
-        ).fun(
-            body=builder.exprs[self.body],
-        )
+        return objects.fun(
+            binder(
+                name=builder.names[self.binder_name],
+                type=builder.exprs[self.binder_type],
+                info=self.binder_info,
+            ),
+        )(builder.exprs[self.body])
 
 
 class ForAll(ExprVal):
@@ -456,11 +456,13 @@ class ForAll(ExprVal):
         self.body = body
 
     def to_w_expr(self, builder):
-        return binder(
-            name=builder.names[self.binder_name],
-            type=builder.exprs[self.binder_type],
-            info=self.binder_info,
-        ).forall(body=builder.exprs[self.body])
+        return objects.forall(
+            binder(
+                name=builder.names[self.binder_name],
+                type=builder.exprs[self.binder_type],
+                info=self.binder_info,
+            )
+        )(builder.exprs[self.body])
 
 
 class Proj(ExprVal):

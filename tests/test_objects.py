@@ -30,12 +30,14 @@ from rpylean.objects import (
     W_Recursor,
     W_Sort,
     W_Theorem,
+    forall,
+    fun,
     names,
 )
 
 
-u = Name.simple("u").level()
-v = Name.simple("v").level()
+Empty, x, y = names("Empty", "x", "y")
+u, v = Name.simple("u").level(), Name.simple("v").level()
 
 
 class TestName(object):
@@ -182,7 +184,6 @@ class TestName(object):
         )
 
     def test_inductive(self):
-        Empty = Name.simple("Empty")
         assert Empty.inductive(type=TYPE) == W_Declaration(
             name=Empty,
             type=TYPE,
@@ -209,7 +210,6 @@ class TestName(object):
         )
 
     def test_recursor(self):
-        Empty = Name.simple("Empty")
         rec = Empty.child("rec")
         assert rec.recursor(type=Empty.const()) == W_Declaration(
             name=rec,
@@ -244,7 +244,6 @@ class TestName(object):
         assert Prod.proj(0, expr) == W_Proj(Prod, 0, expr)
 
     def test_binder(self):
-        x = Name.simple("x")
         Nat = Name.simple("Nat")
         assert x.binder(type=Nat) == Binder(
             name=x,
@@ -254,7 +253,6 @@ class TestName(object):
         )
 
     def test_implicit_binder(self):
-        x = Name.simple("x")
         Nat = Name.simple("Nat")
         assert x.implicit_binder(type=Nat) == Binder(
             name=x,
@@ -264,7 +262,6 @@ class TestName(object):
         )
 
     def test_instance_implicit_binder(self):
-        x = Name.simple("x")
         NeZero = Name.simple("NeZero")
         assert x.instance_binder(type=NeZero) == Binder(
             name=x,
@@ -274,7 +271,6 @@ class TestName(object):
         )
 
     def test_strict_implicit_binder(self):
-        x = Name.simple("x")
         Nat = Name.simple("Nat")
         assert x.strict_implicit_binder(type=Nat) == Binder(
             name=x,
@@ -290,22 +286,9 @@ def test_names():
 
 class TestBinder(object):
     def test_to_implicit(self):
-        x = Name.simple("x")
         Nat = Name.simple("Nat")
         binder = Binder.default(name=x, type=Nat).to_implicit()
         assert binder == Binder.implicit(name=x, type=Nat)
-
-    def test_forall(self):
-        P = Name.simple("P").const()
-        x = Name.simple("x").binder(type=NAT)
-        forall = x.forall(body=P)
-        assert forall == W_ForAll(binder=x, body=P)
-
-    def test_lambda(self):
-        x = Name.simple("x").binder(type=NAT)
-        y = Name.simple("y").const()
-        fun = x.fun(body=y)
-        assert fun == W_Lambda(binder=x, body=y)
 
     def test_default_is_default(self):
         assert Name.simple("x").binder(type=NAT).is_default()
@@ -499,3 +482,32 @@ class TestLitNat(object):
 
     def test_int(self):
         assert W_LitNat.int(37) == W_LitNat(rbigint.fromint(37))
+
+
+class TestForAll(object):
+    def test_single(self):
+        nat = x.binder(type=NAT)
+        assert forall(nat)(y.const()) == W_ForAll(binder=nat, body=y.const())
+
+    def test_multiple(self):
+        P = Name.simple("P").const()
+        x_nat = x.binder(type=NAT)
+        y_type = y.binder(type=TYPE)
+        assert forall(x_nat, y_type)(P) == W_ForAll(
+            binder=x_nat,
+            body=W_ForAll(binder=y_type, body=P),
+        )
+
+class TestFun(object):
+    def test_single(self):
+        nat = x.binder(type=NAT)
+        assert fun(nat)(y.const()) == W_Lambda(binder=nat, body=y.const())
+
+    def test_multiple(self):
+        P = Name.simple("P").const()
+        x_nat = x.binder(type=NAT)
+        y_type = y.binder(type=TYPE)
+        assert fun(x_nat, y_type)(P) == W_Lambda(
+            binder=x_nat,
+            body=W_Lambda(binder=y_type, body=P),
+        )

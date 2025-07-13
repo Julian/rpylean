@@ -12,6 +12,8 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    forall,
+    fun,
 )
 
 
@@ -70,7 +72,7 @@ def test_dump_level():
 
 def test_dump_expr_lambda():
     bvar = W_BVar(0)
-    fun = Name.simple("a").binder(type=bvar).fun(body=bvar)
+    f = fun(Name.simple("a").binder(type=bvar))(bvar)
     assert from_source(
         #eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
         """
@@ -86,8 +88,8 @@ def test_dump_expr_lambda():
         exprs=[
             TYPE,
             bvar,
-            fun,
-            Name.simple("A").implicit_binder(type=TYPE).fun(body=fun),
+            f,
+            fun(Name.simple("A").implicit_binder(type=TYPE))(f),
         ],
         levels=[
             W_LEVEL_ZERO,
@@ -169,12 +171,14 @@ def test_dump_constant_id():
     b1 = W_BVar(1)
 
     id = Name.simple("id")
-    id_type = alpha.implicit_binder(type=u.sort()).forall(
-        body=a.binder(type=b0).forall(body=b1),
-    )
-    id_value = alpha.implicit_binder(type=u.sort()).fun(
-        body=a.binder(type=b0).fun(body=b0),
-    )
+    id_type = forall(
+        alpha.implicit_binder(type=u.sort()),
+        a.binder(type=b0),
+    )(b1)
+    id_value = fun(
+        alpha.implicit_binder(type=u.sort()),
+        a.binder(type=b0),
+    )(b0)
 
     assert from_source(
         #eval run <| dumpConstant `id
@@ -214,24 +218,22 @@ def test_dump_constant_list():
 
     ListFn = Name.simple("List").const(levels=[u])
     nil = Name(["List", "nil"]).constructor(
-        type=alpha.to_implicit().forall(body=ListFn.app(b0)),
+        type=forall(alpha.to_implicit())(ListFn.app(b0)),
         levels=[Name.simple("u")],
         num_params=1,
     )
     cons = Name(["List", "cons"]).constructor(
-        type=alpha.to_implicit().forall(
-            body=head.binder(type=b0).forall(
-                body=tail.binder(type=ListFn.app(b1)).forall(
-                    body=ListFn.app(b2),
-                ),
-            ),
-        ),
+        type=forall(
+            alpha.to_implicit(),
+            head.binder(type=b0),
+            tail.binder(type=ListFn.app(b1)),
+        )(ListFn.app(b2)),
         levels=[Name.simple("u")],
         num_params=1,
         num_fields=2,
     )
     List = Name.simple("List").inductive(
-        type=alpha.forall(body=u.succ().sort()),
+        type=forall(alpha)(u.succ().sort()),
         constructors=[nil, cons],
         levels=[Name.simple("u")],
         num_params=1,
