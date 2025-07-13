@@ -194,6 +194,13 @@ class Args(object):
         self.varargs = varargs if varargs is not None else []
         self.options = options if options is not None else {}
 
+    def __repr__(self):
+        return "<Args {} varargs={} options={}>".format(
+            self.args,
+            self.varargs,
+            self.options,
+        )
+
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented

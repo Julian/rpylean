@@ -22,6 +22,12 @@ cli = CLI(
 @cli.subcommand(
     ["EXPORT_FILE", "*DECLS"],
     help="Type check an exported Lean environment.",
+    options=[
+        (
+            "max-fail",
+            "the maximum number of type errors to report before giving up",
+        ),
+    ],
 )
 def check(self, args, stdin, stdout, stderr):
     path, = args.args
@@ -34,7 +40,7 @@ def check(self, args, stdin, stdout, stderr):
         ),
     )
 
-    succeeded = True
+    failures, max_fail = 0, int(args.options["max-fail"])
     if args.varargs:
         declarations = [
             environment.declarations[Name.from_str(each)]
@@ -46,14 +52,17 @@ def check(self, args, stdin, stdout, stderr):
 
     try:
         for w_error in errors:
-            succeeded = False
             stderr.write(w_error.str())
             stderr.write("\n")
+
+            failures += 1
+            if failures >= max_fail:
+                break
     except Exception:
         stderr.write("Unexpected error during type checking\n")
         raise
 
-    if not succeeded:
+    if failures:
         return 1
 
     stdout.write("All declarations are type-correct.\n")
