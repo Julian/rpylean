@@ -209,7 +209,6 @@ class TestName(object):
             constructors=[constructor],
         )
 
-
     def test_constructor(self):
         True_ = Name.simple("True")
         intro = True_.child("intro")
@@ -511,6 +510,7 @@ class TestForAll(object):
             binder=x_nat,
             body=W_ForAll(binder=y_type, body=P),
         )
+
 
 class TestFun(object):
     def test_single(self):

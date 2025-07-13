@@ -1,7 +1,6 @@
 from __future__ import print_function
 
 from rpython.rlib.objectmodel import not_rpython, r_dict
-import sys
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq

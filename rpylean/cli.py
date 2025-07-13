@@ -4,7 +4,6 @@ CLI for rpylean.
 from __future__ import print_function
 
 import errno
-import os
 
 from rpython.rlib.streamio import open_file_as_stream
 

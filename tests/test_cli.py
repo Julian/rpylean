@@ -13,6 +13,7 @@ def run(cli, argv, exit=0):
 
 def test_usage_error_on_no_args():
     cli = CLI()
+
     @cli.subcommand(["ARG"], help="Test command help.")
     def test(self, args, stdin, stdout, stderr):
         return 0
@@ -22,6 +23,7 @@ def test_usage_error_on_no_args():
 
 def test_known_command_runs():
     cli = CLI()
+
     @cli.subcommand(["ARG"], help="Test command help.")
     def test(self, args, stdin, stdout, stderr):
         stdout.write("ran test with %s\n" % args.args[0])
@@ -32,6 +34,7 @@ def test_known_command_runs():
 
 def test_unknown_command_falls_back_to_default():
     cli = CLI(default="foo")
+
     @cli.subcommand(["ARG"], help="Fallback here.")
     def foo(self, args, stdin, stdout, stderr):
         assert args == Args(args=["unknown"])
@@ -49,6 +52,7 @@ def test_help_no_command():
 
 def test_varargs_command():
     cli = CLI()
+
     @cli.subcommand(["A", "*REST"], help="Command with varargs.")
     def vargs(self, args, stdin, stdout, stderr):
         stdout.write("args=%r varargs=%r\n" % (args.args, args.varargs))
@@ -59,6 +63,7 @@ def test_varargs_command():
 
 def test_too_few_args():
     cli = CLI()
+
     @cli.subcommand(["A", "B"], help="Needs two args.")
     def tworeq(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
@@ -70,6 +75,7 @@ def test_too_few_args():
 
 def test_too_many_args():
     cli = CLI()
+
     @cli.subcommand(["A"], help="Only one arg.")
     def onearg(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
@@ -81,6 +87,7 @@ def test_too_many_args():
 
 def test_help_for_command():
     cli = CLI()
+
     @cli.subcommand(["A"], help="Help for foo command.")
     def foo(self, args, stdin, stdout, stderr):
         stdout.write("should not get here\n")
@@ -92,6 +99,7 @@ def test_help_for_command():
 
 def test_short_help():
     cli = CLI()
+
     @cli.subcommand(["A"], help="Help for bar command.\n\nLonger description.")
     def bar(self, args, stdin, stdout, stderr):
         return 0
@@ -102,6 +110,7 @@ def test_short_help():
 class TestOption(object):
 
     cli = CLI()
+
     @cli.subcommand(
         ["A"],
         options=[("opt", "Option with argument.")],
