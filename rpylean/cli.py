@@ -40,7 +40,7 @@ def check(self, args, stdin, stdout, stderr):
         ),
     )
 
-    failures, max_fail = 0, int(args.options["max-fail"])
+    failures, max_fail = 0, int(args.options["max-fail"] or "0")
     if args.varargs:
         declarations = [
             environment.declarations[Name.from_str(each)]
@@ -56,7 +56,7 @@ def check(self, args, stdin, stdout, stderr):
             stderr.write("\n")
 
             failures += 1
-            if failures >= max_fail:
+            if 0 < max_fail <= failures:
                 break
     except Exception:
         stderr.write("Unexpected error during type checking\n")
