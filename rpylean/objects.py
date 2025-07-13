@@ -1,7 +1,7 @@
 from rpython.rlib.objectmodel import compute_hash
 from rpython.rlib.rbigint import rbigint
 
-from rpylean._rlib import count
+from rpylean._rlib import count, warn
 from rpylean.exceptions import InvalidProjection
 
 
@@ -2038,7 +2038,3 @@ def forall(*binders):
 
 def fun(*binders):
     return Telescope(*binders).fun
-
-
-def warn(message):
-    print("WARNING: %s" % (message,))

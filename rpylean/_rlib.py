@@ -27,3 +27,7 @@ def r_dict_eq(left, right):
         len(left) == len(right)
         and all(k in right and right[k] == v for k, v in left.iteritems())
     )
+
+
+def warn(message):
+    print("WARNING: %s" % (message,))
