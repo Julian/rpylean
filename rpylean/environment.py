@@ -26,9 +26,6 @@ from rpylean.objects import (
     syntactic_eq,
 )
 
-import sys
-sys.setrecursionlimit(5000)
-
 
 class EnvironmentBuilder(object):
     """

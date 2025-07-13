@@ -50,9 +50,9 @@ def check(self, args, stdin, stdout, stderr):
             succeeded = False
             stderr.write(w_error.str())
             stderr.write("\n")
-    except Exception as e:
-        stderr.write("Unexpected error during type checking: %s\n" % (str(e),))
-        return 2
+    except Exception:
+        stderr.write("Unexpected error during type checking\n")
+        raise
 
     if not succeeded:
         return 1
