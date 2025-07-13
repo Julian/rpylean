@@ -191,9 +191,6 @@ class Environment(object):
     def __init__(self, declarations):
         self.declarations = declarations
 
-        #: Any declarations we have already type checked.
-        self._constants = r_dict(name_eq, Name.hash)
-
     @not_rpython
     def __getitem__(self, value):
         name = value if isinstance(value, Name) else Name.from_str(value)
@@ -233,7 +230,7 @@ class Environment(object):
         """
         Pretty-print the given declaration.
         """
-        return declaration.pretty(self._constants)
+        return declaration.pretty(self.declarations)
 
     def print(self, declaration, file, end="\n"):
         """
@@ -251,12 +248,7 @@ class Environment(object):
 
         for each in declarations:
             error = each.type_check(self)
-            if error is None:
-                # TODO: assert we're not already in _constants,
-                #       or at least that we're identical to what's there
-                # self._constants[each.name] = inferred
-                pass
-            else:
+            if error is not None:
                 yield error
 
     def dump_pretty(self, stdout):
