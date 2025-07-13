@@ -114,10 +114,10 @@ class Name(_Item):
         return ".".join([pretty_part(each) for each in self.components])
 
     def hash(self):
-        hash_val = 0
-        for c in self.components:
-            hash_val ^= compute_hash(c)
-        return hash_val
+        hash_val = 0x345678
+        for each in self.components:
+            hash_val = (hash_val * 1000003) ^ compute_hash(each)
+        return hash_val & 0xFFFFFFFF
 
     def syntactic_eq(self, other):
         return self.components == other.components

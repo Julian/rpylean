@@ -279,6 +279,9 @@ class TestName(object):
             right="⦄",
         )
 
+    def test_hash_is_order_sensitive(self):
+        assert Name(["foo", "bar"]).hash() != Name(["bar", "foo"]).hash()
+
 
 def test_names():
     assert names("foo", "A.b") == [Name.simple("foo"), Name(["A", "b"])]
