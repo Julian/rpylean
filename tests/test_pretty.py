@@ -306,15 +306,14 @@ class TestProj(object):
 
     Foo = Name.simple("Foo")
     mk = Foo.child("mk")
-    Nat = Name.simple("Nat").const()
     ctor_type = forall(
-        a.binder(type=Nat),
-        x.binder(type=Nat),
-        y.binder(type=Nat),
+        a.binder(type=NAT),
+        x.binder(type=NAT),
+        y.binder(type=NAT),
     )(Foo.const())
     mk_decl = mk.constructor(type=ctor_type)
     constants = {
-        Foo: Foo.inductive(type=TYPE, constructors=[mk_decl]),
+        Foo: Foo.structure(type=TYPE, constructor=mk_decl),
         mk: mk_decl,
     }
 

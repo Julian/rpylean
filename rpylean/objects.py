@@ -231,6 +231,21 @@ class Name(_Item):
         )
         return self.declaration(type=type, w_kind=inductive, levels=levels)
 
+    def structure(self, type, constructor, levels=None):
+        """
+        Make a structure declaration with this name.
+
+        Structures are inductive types that have only a single constructor and
+        no indices.
+        """
+
+        return self.inductive(
+            type=type,
+            constructors=[constructor],
+            num_indices=0,
+            levels=levels,
+        )
+
     def definition(self, type, value, hint="R", levels=None):
         """
         Make a definition of the given type and value with this name.
