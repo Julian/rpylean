@@ -18,6 +18,10 @@ USAGE
 
   %s <subcommand> [<args>]
 
+OPTIONS
+
+  --help: Show this help message
+
 COMMANDS
 
 """
@@ -26,7 +30,7 @@ COMMAND_USAGE = """\
 
 USAGE
 
-    %s %s %s%s
+  %s %s %s%s
 """
 USAGE_ERROR = """\
 %s
@@ -98,14 +102,15 @@ class Command(object):
         if executable.endswith("__main__.py"):
             executable = "pypy -m rpylean"
         options = [
-            "    --%s: %s" % (opt, desc) for opt, desc in self._options.items()
+            "  --%s: %s" % (opt, desc) for opt, desc in self._options.items()
         ]
+        options.append("  --help: Show this help message")
         message = COMMAND_USAGE % (
             self._help,
             executable,
             self.name,
             " ".join(self._metavars),
-            "\n\nOPTIONS\n\n%s" % "\n".join(options) if options else "",
+            "\n\nOPTIONS\n\n%s" % "\n".join(options),
         )
         raise UsageError(message, exit_code=0)
 
