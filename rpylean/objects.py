@@ -15,7 +15,7 @@ class W_TypeError(object):
         self.expected_type = expected_type
 
     def str(self):
-        return "%s is not of type %s" % (
+        return "%s\n  is not of type\n%s" % (
             self.environment.pretty(self.term),
             self.environment.pretty(self.expected_type),
         )

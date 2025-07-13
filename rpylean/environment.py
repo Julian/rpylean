@@ -1,6 +1,9 @@
 from __future__ import print_function
+from sys import stderr
+from traceback import print_exc
+import pdb
 
-from rpython.rlib.objectmodel import not_rpython, r_dict
+from rpython.rlib.objectmodel import not_rpython, r_dict, we_are_translated
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq
@@ -243,7 +246,15 @@ class Environment(object):
             declarations = self.declarations.values()
 
         for each in declarations:
-            error = each.type_check(self)
+            try:
+                error = each.type_check(self)
+            except Exception as e:
+                if not we_are_translated():
+                    print_exc(None, stderr)
+                    stderr.write("\nwhile checking:\n\n")
+                    self.print(each, stderr)
+                    pdb.post_mortem()
+                raise
             if error is not None:
                 yield error
 
