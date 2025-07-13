@@ -911,6 +911,9 @@ class W_Const(W_Expr):
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
 
+    def __repr__(self):
+        return "`%s" % self.str()
+
     def child(self, part):
         """
         A child constant of this one.
@@ -926,10 +929,10 @@ class W_Const(W_Expr):
         return True
 
     def pretty(self, constants):
-        return name_with_levels(self.name, self.levels)
+        return self.str()
 
     def str(self):
-        return self.name.str()
+        return name_with_levels(self.name, self.levels)
 
     def syntactic_eq(self, other):
         if self.name != other.name or len(self.levels) != len(other.levels):
