@@ -218,6 +218,10 @@ class TestConst(object):
         foo = Name.simple("foo").const()
         assert foo.pretty({}) == "foo"
 
+    def test_level_zero(self):
+        ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
+        assert ofNat.pretty({}) == "ofNat.{0}"
+
 
 class TestInductive(object):
     def test_multiple_constructors(self):

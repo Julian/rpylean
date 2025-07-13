@@ -65,10 +65,12 @@ def name_with_levels(name, levels):
     pretty = name.str()
     if not levels:
         return pretty
-    return "%s.{%s}" % (
-        pretty,
-        ", ".join([level.str() for level in levels]),
-    )
+    # FIXME: somehow LEVEL_ZERO needs to do this
+    strs = []
+    for level in levels:
+        each = level.str()
+        strs.append(each if each else "0")
+    return "%s.{%s}" % (pretty, ", ".join(strs))
 
 
 def name_eq(name, other):
