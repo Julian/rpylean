@@ -248,7 +248,7 @@ class Environment(object):
         for each in declarations:
             try:
                 error = each.type_check(self)
-            except Exception as e:
+            except Exception:
                 if not we_are_translated():
                     print_exc(None, stderr)
                     stderr.write("\nwhile checking:\n\n")
@@ -353,7 +353,3 @@ class Environment(object):
 
 #: The empty environment.
 Environment.EMPTY = Environment.having([])
-
-
-def heading(s):
-    return "%s\n%s\n\n" % (s, "-" * len(s))
