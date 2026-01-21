@@ -1499,6 +1499,9 @@ class W_Let(W_Expr):
             and syntactic_eq(self.body, other.body)
         )
 
+    def strong_reduce_step(self, env):
+        return (True, self.body.instantiate(self.value, 0))
+
 
 class W_App(W_Expr):
     def __init__(self, fn, arg):

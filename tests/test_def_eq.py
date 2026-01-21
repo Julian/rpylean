@@ -448,3 +448,16 @@ def test_beta_reduction():
     F = fun(x.binder(type=NAT))(f.app(b0, y.const()))
     assert env.def_eq(F.app(a.const()), f.app(a.const(), y.const()))
     assert env.def_eq(f.app(a.const(), y.const()), F.app(a.const()))
+
+
+def test_zeta_reduction():
+    env = Environment.having(
+        [
+            Name.simple("Nat").axiom(type=TYPE),
+            a.axiom(type=NAT),
+        ],
+    )
+
+    let_expr = x.let(type=NAT, value=a.const(), body=b0)
+    assert env.def_eq(let_expr, a.const())
+    assert env.def_eq(a.const(), let_expr)
