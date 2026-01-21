@@ -434,7 +434,6 @@ class TestProj(object):
         proj2 = Foo.proj(0, y.const())
         assert not env.def_eq(proj1, proj2)
 
-
 def test_beta_reduction():
     env = Environment.having(
         [
@@ -461,3 +460,7 @@ def test_zeta_reduction():
     let_expr = x.let(type=NAT, value=a.const(), body=b0)
     assert env.def_eq(let_expr, a.const())
     assert env.def_eq(a.const(), let_expr)
+
+
+def test_succ_max_eq_imax_succ():
+    assert (W_LEVEL_ZERO.succ().max(u)).eq(u.imax(W_LEVEL_ZERO.succ()))

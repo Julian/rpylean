@@ -529,6 +529,13 @@ class W_Level(_Item):
             return W_LEVEL_ZERO
         if isinstance(self, W_LevelZero) or self == W_LEVEL_ZERO.succ():
             return other
+        if isinstance(other, W_LevelSucc) or (
+            isinstance(other, W_LevelMax)
+            and (
+                isinstance(other.lhs, W_LevelSucc) or isinstance(other.rhs, W_LevelSucc)
+            )
+        ):
+            return self.max(other)
         return W_LevelIMax(self, other)
 
 
@@ -594,6 +601,13 @@ class W_LevelMax(W_Level):
 
     @leq
     def leq(self, other, balance):
+        if isinstance(other, W_LevelMax):
+            return (
+                self.lhs.leq(other.lhs, balance)
+                and self.rhs.leq(other.rhs, balance)
+                or self.lhs.leq(other.rhs, balance)
+                and self.rhs.leq(other.lhs, balance)
+            )
         return self.lhs.leq(other, balance) and self.rhs.leq(other, balance)
 
     def gt(self, other, balance):
