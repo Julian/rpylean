@@ -16,6 +16,7 @@ from rpylean.objects import (
     W_LitNat,
     W_LitStr,
     forall,
+    fun,
     names,
 )
 
@@ -432,3 +433,18 @@ class TestProj(object):
         proj1 = Foo.proj(0, x.const())
         proj2 = Foo.proj(0, y.const())
         assert not env.def_eq(proj1, proj2)
+
+
+def test_beta_reduction():
+    env = Environment.having(
+        [
+            Name.simple("Nat").axiom(type=TYPE),
+            f.axiom(type=forall(x.binder(type=NAT), y.binder(type=NAT))(TYPE)),
+            a.axiom(type=NAT),
+            y.axiom(type=NAT),
+        ],
+    )
+
+    F = fun(x.binder(type=NAT))(f.app(b0, y.const()))
+    assert env.def_eq(F.app(a.const()), f.app(a.const(), y.const()))
+    assert env.def_eq(f.app(a.const(), y.const()), F.app(a.const()))

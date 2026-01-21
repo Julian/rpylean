@@ -1515,6 +1515,14 @@ class W_App(W_Expr):
         return "<W_App fn={!r} args={!r}>".format(current, args)
 
     def def_eq(self, other, def_eq):
+        if isinstance(self.fn, W_FunBase):
+            body = self.fn.body.instantiate(self.arg, 0)
+            if def_eq(body, other):
+                return True
+        if isinstance(other.fn, W_FunBase):
+            body = other.fn.body.instantiate(other.arg, 0)
+            if def_eq(self, body):
+                return True
         return def_eq(self.fn, other.fn) and def_eq(self.arg, other.arg)
 
     def pretty(self, constants):
