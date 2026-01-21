@@ -12,6 +12,8 @@ target := justfile_directory() / "targetrpylean.py"
 translated := justfile_directory() / "rpylean-c"
 translated_tests := justfile_directory() / "translated-tests"
 
+export PYPY_DONT_RUN_SUBPROCESS := "1"
+
 # Run rpylean (untranslated) with any extra arguments.
 rpylean *ARGS:
     PYTHONPATH="{{ pypy_checkout }}/" "{{ pypy }}" -m rpylean {{ ARGS }}
