@@ -1,6 +1,7 @@
 """
 Tests for definitional equality of Lean objects.
 """
+
 import pytest
 
 from rpylean.environment import Environment
@@ -136,7 +137,7 @@ class TestSort(object):
             "max",
             "max_comm",
             "imax",
-        ]
+        ],
     )
     def test_eq(self, level1, level2):
         assert level1.eq(level2)
@@ -161,7 +162,7 @@ class TestSort(object):
             "max_ne",
             "not_max_comm",
             "imax_ne",
-        ]
+        ],
     )
     def test_not_eq(self, level1, level2):
         assert not level1.eq(level2)
@@ -192,7 +193,7 @@ class TestConst(object):
             "same",
             "with_level",
             "multiple_levels",
-        ]
+        ],
     )
     def test_eq(self, const1, const2, decls):
         env = Environment.having(decls)
@@ -227,7 +228,7 @@ class TestConst(object):
             "missing_level",
             "extra_level",
             "different_level_order",
-        ]
+        ],
     )
     def test_not_eq(self, const1, const2, decls):
         env = Environment.having(decls)
@@ -276,7 +277,7 @@ class TestForAll(object):
             "alpha_equivalent",
             "same_body_reference",
             "nested_same",
-        ]
+        ],
     )
     def test_eq(self, forall1, forall2, decls):
         env = Environment.having(decls)
@@ -305,7 +306,7 @@ class TestForAll(object):
             "different_binder_types",
             "different_bodies",
             "different_structure",
-        ]
+        ],
     )
     def test_not_eq(self, forall1, forall2, decls):
         env = Environment.having(decls)
@@ -353,7 +354,7 @@ class TestApp(object):
             "simple",
             "nested_app",
             "with_levels",
-        ]
+        ],
     )
     def test_eq(self, app1, app2, decls):
         env = Environment.having(decls)
@@ -399,7 +400,7 @@ class TestApp(object):
             "different_function",
             "different_argument",
             "different_app_order",
-        ]
+        ],
     )
     def test_not_eq(self, app1, app2, decls):
         env = Environment.having(decls)

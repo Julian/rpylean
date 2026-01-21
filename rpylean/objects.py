@@ -9,6 +9,7 @@ class W_TypeError(object):
     """
     A term does not type check.
     """
+
     def __init__(self, environment, term, expected_type):  # TODO: inferred_type
         self.environment = environment
         self.term = term
@@ -455,6 +456,7 @@ def leq(fn):
         if self == other:
             return balance >= 0
         return fn(self, other, balance)
+
     return leq
 
 
@@ -623,10 +625,7 @@ class W_LevelMax(W_Level):
         return new_lhs.max(new_rhs)
 
     def syntactic_eq(self, other):
-        return (
-            syntactic_eq(self.lhs, other.lhs)
-            and syntactic_eq(self.rhs, other.rhs)
-        )
+        return syntactic_eq(self.lhs, other.lhs) and syntactic_eq(self.rhs, other.rhs)
 
 
 class W_LevelIMax(W_Level):
@@ -656,10 +655,7 @@ class W_LevelIMax(W_Level):
         return new_lhs.imax(new_rhs)
 
     def syntactic_eq(self, other):
-        return (
-            syntactic_eq(self.lhs, other.lhs)
-            and syntactic_eq(self.rhs, other.rhs)
-        )
+        return syntactic_eq(self.lhs, other.lhs) and syntactic_eq(self.rhs, other.rhs)
 
 
 class W_LevelParam(W_Level):
@@ -756,7 +752,6 @@ class W_BVar(W_Expr):
 
 
 class W_FVar(W_Expr):
-
     _counter = count()
 
     def __init__(self, binder):
@@ -787,10 +782,7 @@ class W_FVar(W_Expr):
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_FVar)
-        return (
-            self.id == other.id
-            and syntactic_eq(self.binder, other.binder)
-        )
+        return self.id == other.id and syntactic_eq(self.binder, other.binder)
 
     def infer(self, env):
         """
@@ -913,7 +905,10 @@ TYPE = W_LEVEL_ZERO.succ().sort()
 def apply_const_level_params(const, target, env):
     decl = env.declarations[const.name]
     if len(decl.levels) != len(const.levels):
-        raise RuntimeError("W_Const.infer: expected %s levels, got %s" % (len(decl.levels), len(const.levels)))
+        raise RuntimeError(
+            "W_Const.infer: expected %s levels, got %s"
+            % (len(decl.levels), len(const.levels))
+        )
     params = decl.levels
     substs = {}
     for i in range(len(params)):
@@ -1110,7 +1105,7 @@ class W_Proj(W_Expr):
         # TODO: out of bounds projection, non-structure type
         assert isinstance(inductive, W_Inductive)
         assert len(inductive.constructors) == 1
-        constructor, = inductive.constructors
+        (constructor,) = inductive.constructors
         field_names = []
         constructor_type = constructor.type
         while isinstance(constructor_type, W_ForAll):
@@ -1190,9 +1185,14 @@ class W_Proj(W_Expr):
         struct_type = env.declarations[self.struct_name]
 
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
-        assert isinstance(struct_expr_type, W_Const), "Expected W_Const, got %s" % struct_expr_type
+        assert isinstance(struct_expr_type, W_Const), (
+            "Expected W_Const, got %s" % struct_expr_type
+        )
         target_const = env.declarations[struct_expr_type.name]
-        assert target_const == struct_type, "Expected %s, got %s" % (target_const, struct_type)
+        assert target_const == struct_type, "Expected %s, got %s" % (
+            target_const,
+            struct_type,
+        )
 
         assert isinstance(struct_type, W_Declaration)
         assert isinstance(struct_type.w_kind, W_Inductive)
@@ -1324,9 +1324,8 @@ class W_ForAll(W_FunBase):
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
-        return (
-            syntactic_eq(self.binder, other.binder)
-            and syntactic_eq(self.body, other.body)
+        return syntactic_eq(self.binder, other.binder) and syntactic_eq(
+            self.body, other.body
         )
 
     def bind_fvar(self, fvar, depth):
@@ -1389,7 +1388,8 @@ class W_Lambda(W_FunBase):
                     groups.append(group_to_str(current_group))
                     current_group = []
                 groups.append(
-                    "%s%s : %s%s" % (
+                    "%s%s : %s%s"
+                    % (
                         binder.left,
                         binder.name.str(),
                         binder.type.pretty(constants),
@@ -1416,9 +1416,8 @@ class W_Lambda(W_FunBase):
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Lambda)
-        return (
-            syntactic_eq(self.binder, other.binder)
-            and syntactic_eq(self.body, other.body)
+        return syntactic_eq(self.binder, other.binder) and syntactic_eq(
+            self.body, other.body
         )
 
     def bind_fvar(self, fvar, depth):
@@ -1444,7 +1443,9 @@ class W_Lambda(W_FunBase):
         body_type_fvar = self.body.instantiate(fvar, 0).infer(env)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
-            raise RuntimeError("W_Lambda.infer: body_type is None: %s" % env.pretty(self))
+            raise RuntimeError(
+                "W_Lambda.infer: body_type is None: %s" % env.pretty(self)
+            )
         return forall(self.binder)(body_type)
 
     def strong_reduce_step(self, env):
@@ -1547,15 +1548,14 @@ class W_App(W_Expr):
         fn_type_base = self.fn.infer(env)
         fn_type = fn_type_base.whnf(env)
         if not isinstance(fn_type, W_ForAll):
-            raise RuntimeError("W_App.infer: expected function type, got %s" % type(fn_type))
+            raise RuntimeError(
+                "W_App.infer: expected function type, got %s" % type(fn_type)
+            )
         body_type = fn_type.body.instantiate(self.arg, 0)
         return body_type
 
     def syntactic_eq(self, other):
-        return (
-            syntactic_eq(self.fn, other.fn)
-            and syntactic_eq(self.arg, other.arg)
-        )
+        return syntactic_eq(self.fn, other.fn) and syntactic_eq(self.arg, other.arg)
 
     def try_iota_reduce(self, env):
         args = []
@@ -1572,10 +1572,18 @@ class W_App(W_Expr):
             return False, self
 
         if decl.w_kind.num_motives != 1:
-            warn("W_App.try_iota_reduce: unimplemented case num_motives != 1 for %s" % target.name)
+            warn(
+                "W_App.try_iota_reduce: unimplemented case num_motives != 1 for %s"
+                % target.name
+            )
             return False, self
 
-        skip_count = decl.w_kind.num_params + decl.w_kind.num_indices + decl.w_kind.num_minors + decl.w_kind.num_motives
+        skip_count = (
+            decl.w_kind.num_params
+            + decl.w_kind.num_indices
+            + decl.w_kind.num_minors
+            + decl.w_kind.num_motives
+        )
         major_idx = len(args) - 1 - skip_count
 
         # for rec_rule in decl.w_kind.rules:
@@ -1620,7 +1628,7 @@ class W_App(W_Expr):
             new_ty = major_premise_ctor.infer(env)
             if not env.def_eq(old_ty, new_ty):
                 return False, self
-            #print("Built new major premise: %s" % major_premise_ctor.pretty())
+            # print("Built new major premise: %s" % major_premise_ctor.pretty())
             major_premise = major_premise_ctor
 
             # major_premise_ty = major_premise.infer(env)
@@ -1670,7 +1678,7 @@ class W_App(W_Expr):
         # TODO - consider storing these by recursor name
         for rec_rule in decl.w_kind.rules:
             if syntactic_eq(rec_rule.ctor_name, major_premise_ctor.name):
-                #print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
+                # print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
                 # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
                 # import pdb; pdb.set_trace()
                 # assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
@@ -1698,7 +1706,11 @@ class W_App(W_Expr):
                 new_args = list(args)
                 new_args.reverse()
 
-                total_args = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
+                total_args = (
+                    decl.w_kind.num_params
+                    + decl.w_kind.num_motives
+                    + decl.w_kind.num_minors
+                )
                 assert total_args >= 0
                 for arg in new_args[:total_args]:
                     new_app = new_app.app(arg)
@@ -1714,20 +1726,20 @@ class W_App(W_Expr):
 
                 i = major_idx - 1
                 while i >= 0:
-                    #print("Adding back extra arg: %s" % new_args[i].pretty())
+                    # print("Adding back extra arg: %s" % new_args[i].pretty())
                     new_app = new_app.app(args[i])
                     i -= 1
 
                 # Type check the new application, to ensure that all of our args have the right types
-                #if decl.w_kind.k == 1:
-                    #import pdb; pdb.set_trace()
+                # if decl.w_kind.k == 1:
+                # import pdb; pdb.set_trace()
                 new_app_ty = new_app.infer(env)
                 old_ty = self.infer(env)
                 # TODO - this should actually be in the k-like reduction check above
                 if not env.def_eq(new_app_ty, old_ty):
-                    #print("DefEq failed, bailing from iota")
+                    # print("DefEq failed, bailing from iota")
                     return False, self
-                #new_app = new_app.whnf(env)
+                # new_app = new_app.whnf(env)
                 return True, new_app
 
         return False, self
@@ -1875,6 +1887,7 @@ class W_Opaque(W_Definition):
     This is like a definition with hint 'opaque', but even
     stronger (we will never unfold it).
     """
+
     def __init__(self, value):
         self.value = value
         self.hint = "O"
@@ -1904,8 +1917,8 @@ class W_Axiom(W_DeclarationKind):
 class W_Inductive(W_DeclarationKind):
     def __init__(
         self,
-        names,       # ??: What is this? Inductives know their names?
-                     #     Is this for mutual inductives which have multiple?
+        names,  # ??: What is this? Inductives know their names?
+        #     Is this for mutual inductives which have multiple?
         constructors,
         num_nested,
         num_params,

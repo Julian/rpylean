@@ -57,9 +57,7 @@ class EnvironmentBuilder(object):
         return not self == other
 
     def __repr__(self):
-        return "<EnvironmentBuilder with %s declarations>" % (
-            len(self.declarations),
-        )
+        return "<EnvironmentBuilder with %s declarations>" % (len(self.declarations),)
 
     def consume(self, items):
         """
@@ -116,18 +114,12 @@ class EnvironmentBuilder(object):
         # TODO: Make these all proper exceptions.
         assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
             ", ".join(
-                [
-                    self.names[nidx].str()
-                    for nidx in self.inductive_skeletons
-                ],
+                [self.names[nidx].str() for nidx in self.inductive_skeletons],
             ),
         )
         assert not self.rec_rules, "Incomplete recursors: %s" % (
             ", ".join(
-                [
-                    rule.ctor_name.str()
-                    for rule in self.rec_rules.values()
-                ],
+                [rule.ctor_name.str() for rule in self.rec_rules.values()],
             ),
         )
 
@@ -136,11 +128,7 @@ class EnvironmentBuilder(object):
 
             for name, type in self.quotient:
                 n = len(name.components)
-                if (
-                    n == 0
-                    or n > 2
-                    or name.components[0] != "Quot"
-                ):
+                if n == 0 or n > 2 or name.components[0] != "Quot":
                     raise UnknownQuotient(name, type)
 
                 if n == 1:
@@ -282,8 +270,7 @@ class Environment(object):
             # isn't valid RPython, and the point is these are not comparable
             # until they're reduced...
             # Still would love to think of a better way.
-            cls is not W_Const
-            or expr1.name == expr2.name
+            cls is not W_Const or expr1.name == expr2.name
         ):
             return expr1.def_eq(expr2, self.def_eq)
 
@@ -337,7 +324,7 @@ class Environment(object):
         if isinstance(expr1, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_ForAll):
-                #print("Eta-expanding %s" % expr2.pretty())
+                # print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return fun(expr2_ty.binder)(
                     expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
