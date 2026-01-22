@@ -26,6 +26,7 @@ class ExportVersionError(ParseError):
     """
     The export file version doesn't match one we know how to parse.
     """
+
     def __init__(self, got):
         self.got = got
 
@@ -106,7 +107,6 @@ class Node(object):
 
 
 class NameStr(Node):
-
     kind = "NS"
 
     @staticmethod
@@ -129,7 +129,6 @@ class NameStr(Node):
 
 
 class NameId(Node):
-
     kind = "NI"
 
     @staticmethod
@@ -156,7 +155,6 @@ class Universe(Node):
 
 
 class UniverseSucc(Universe):
-
     kind = "US"
 
     @staticmethod
@@ -174,7 +172,6 @@ class UniverseSucc(Universe):
 
 
 class UniverseMax(Universe):
-
     kind = "UM"
 
     @staticmethod
@@ -197,7 +194,6 @@ class UniverseMax(Universe):
 
 
 class UniverseIMax(Universe):
-
     kind = "UIM"
 
     @staticmethod
@@ -220,7 +216,6 @@ class UniverseIMax(Universe):
 
 
 class UniverseParam(Universe):
-
     kind = "UP"
 
     @staticmethod
@@ -252,7 +247,6 @@ class ExprVal(Node):
 
 
 class BVar(ExprVal):
-
     kind = "EV"
 
     @staticmethod
@@ -269,7 +263,6 @@ class BVar(ExprVal):
 
 
 class LitStr(ExprVal):
-
     kind = "ELS"
 
     @staticmethod
@@ -287,7 +280,6 @@ class LitStr(ExprVal):
 
 
 class LitNat(ExprVal):
-
     kind = "ELN"
 
     @staticmethod
@@ -303,7 +295,6 @@ class LitNat(ExprVal):
 
 
 class Sort(ExprVal):
-
     kind = "ES"
 
     @staticmethod
@@ -320,7 +311,6 @@ class Sort(ExprVal):
 
 
 class Const(ExprVal):
-
     kind = "EC"
 
     @staticmethod
@@ -342,7 +332,6 @@ class Const(ExprVal):
 
 
 class Let(ExprVal):
-
     kind = "EZ"
 
     @staticmethod
@@ -371,7 +360,6 @@ class Let(ExprVal):
 
 
 class App(ExprVal):
-
     kind = "EA"
 
     @staticmethod
@@ -404,7 +392,6 @@ def binder(name, info, type):
 
 
 class Lambda(ExprVal):
-
     kind = "EL"
 
     @staticmethod
@@ -435,7 +422,6 @@ class Lambda(ExprVal):
 
 
 class ForAll(ExprVal):
-
     kind = "EP"
 
     @staticmethod
@@ -466,7 +452,6 @@ class ForAll(ExprVal):
 
 
 class Proj(ExprVal):
-
     kind = "EJ"
 
     @staticmethod
@@ -492,7 +477,6 @@ class Proj(ExprVal):
 
 
 class Definition(Node):
-
     kind = "DEF"
 
     @staticmethod
@@ -528,7 +512,6 @@ class Definition(Node):
 
 
 class Opaque(Node):
-
     kind = "OPAQ"
 
     @staticmethod
@@ -557,7 +540,6 @@ class Opaque(Node):
 
 
 class Theorem(Node):
-
     kind = "THM"
 
     @staticmethod
@@ -586,7 +568,6 @@ class Theorem(Node):
 
 
 class Axiom(Node):
-
     kind = "AX"
 
     @staticmethod
@@ -609,7 +590,6 @@ class Axiom(Node):
 
 
 class Quot(Node):
-
     kind = "QUOT"
 
     @staticmethod
@@ -643,15 +623,25 @@ class InductiveSkeleton(Node):
     @staticmethod
     def parse(tokens):
         pos = 9
-        _, nidx, type_idx, is_reflexive, is_recursive, num_nested, num_params, num_indices, num_name_idxs_str = tokens[:pos]
+        (
+            _,
+            nidx,
+            type_idx,
+            is_reflexive,
+            is_recursive,
+            num_nested,
+            num_params,
+            num_indices,
+            num_name_idxs_str,
+        ) = tokens[:pos]
         num_name_idxs = num_name_idxs_str.uint()
-        name_idxs = [each.uint() for each in tokens[pos:(pos + num_name_idxs)]]
+        name_idxs = [each.uint() for each in tokens[pos : (pos + num_name_idxs)]]
         pos += num_name_idxs
 
         num_ctors = tokens[pos].uint()
         pos += 1
 
-        ctor_name_idxs = [n.uint() for n in tokens[pos:(pos + num_ctors)]]
+        ctor_name_idxs = [n.uint() for n in tokens[pos : (pos + num_ctors)]]
         pos += num_ctors
         # Hack for double space in the case of 0 ctors
         if num_ctors == 0:
@@ -734,7 +724,6 @@ class InductiveSkeleton(Node):
 
 
 class Constructor(Node):
-
     kind = "CTOR"
 
     @staticmethod
@@ -784,7 +773,8 @@ class Constructor(Node):
 
         skeleton = builder.inductive_skeletons[self.inductive_nidx]
         assert skeleton.constructors[self.cidx] is None, (
-            "Constructor %s.%s already defined at index %d" % (
+            "Constructor %s.%s already defined at index %d"
+            % (
                 builder.names[self.inductive_nidx].str(),
                 builder.names[self.nidx].str(),
                 self.cidx,
@@ -800,7 +790,6 @@ class Constructor(Node):
 
 
 class Recursor(Node):
-
     kind = "REC"
 
     @staticmethod
@@ -811,17 +800,18 @@ class Recursor(Node):
 
         pos = 4
         ind_name_idxs = [
-            each.uint()
-            for each in tokens[pos:(pos + num_ind_name_idxs)]
+            each.uint() for each in tokens[pos : (pos + num_ind_name_idxs)]
         ]
         pos += num_ind_name_idxs
 
-        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[pos:pos + 5]
+        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[
+            pos : pos + 5
+        ]
 
         num_rule_idxs = num_rule_idxs_str.uint()
         pos += 5
 
-        rule_idxs = [each.uint() for each in tokens[pos:pos + num_rule_idxs]]
+        rule_idxs = [each.uint() for each in tokens[pos : pos + num_rule_idxs]]
         pos += num_rule_idxs
 
         # Hack for double space in the case of 0 rules
@@ -888,7 +878,6 @@ class Recursor(Node):
 
 
 class RecRule(Node):
-
     kind = "RR"
 
     @staticmethod
@@ -911,7 +900,7 @@ class RecRule(Node):
         w_recrule = objects.W_RecRule(
             ctor_name=builder.names[self.ctor_name_idx],
             num_fields=self.num_fields,
-            val=builder.exprs[self.val]
+            val=builder.exprs[self.val],
         )
         builder.register_rec_rule(self.rule_idx, w_recrule)
 
