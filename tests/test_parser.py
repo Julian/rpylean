@@ -1,22 +1,22 @@
+from StringIO import StringIO
 from textwrap import dedent
 
+from rpython.rlib.rbigint import rbigint
+import pytest
 from rpylean import parser
 from tests import examples
-import pytest
-
-from rpython.rlib.rbigint import rbigint
 
 
-def items(source):
-    export = dedent(source.replace("⏎", "")).lstrip("\n").splitlines()
-    return list(parser.to_items(export))
+def ndjson_items(source):
+    export = StringIO(dedent(source).strip())
+    return list(parser.from_ndjson(export))
 
 
 def test_ns():
-    assert items(
+    assert ndjson_items(
         """
-        1 #NS 0 MyTrue
-        2 #NS 1 intro
+        {"i":1,"str":{"pre":0,"str":"MyTrue"}}
+        {"i":2,"str":{"pre":1,"str":"intro"}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="MyTrue"),
@@ -25,9 +25,9 @@ def test_ns():
 
 
 def test_es():
-    assert items(
+    assert ndjson_items(
         """
-        0 #ES 0
+        {"i":0,"sort":{"u":0}}
         """
     ) == [
         parser.Expr(eidx=0, val=parser.Sort(level=0)),
@@ -35,12 +35,12 @@ def test_es():
 
 
 def test_inductive():
-    assert items(
+    assert ndjson_items(
         """
-        1 #NS 0 Empty
-        1 #US 0
-        0 #ES 1
-        #IND 1 0 0 0 0 0 0 1 1 0 ⏎
+        {"i":1,"str":{"pre":0,"str":"Empty"}}
+        {"i":1,"succ":0}
+        {"i":0,"sort":{"u":1}}
+        {"inductInfo":{"all":[1],"ctors":[],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="Empty"),
@@ -62,15 +62,15 @@ def test_inductive():
 
 
 def test_constructor():
-    assert items(
+    assert ndjson_items(
         """
-        1 #NS 0 True
-        2 #NS 1 intro
-        1 #US 0
-        0 #ES 1
-        #IND 1 0 0 0 0 0 0 1 1 1 2 ⏎
-        1 #EC 1 ⏎
-        #CTOR 2 1 1 0 0 0 ⏎
+        {"i":1,"str":{"pre":0,"str":"True"}}
+        {"i":2,"str":{"pre":1,"str":"intro"}}
+        {"i":1,"succ":0}
+        {"i":0,"sort":{"u":1}}
+        {"inductInfo":{"all":[1],"ctors":[2],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}}
+        {"const":{"declName":1,"us":[]},"i":1}
+        {"ctorInfo":{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="True"),
@@ -103,9 +103,9 @@ def test_constructor():
 
 
 def test_large_litnat():
-    assert items(
+    assert ndjson_items(
         """
-        0 #ELN 18446744073709551616
+        {"i":0,"natVal":"18446744073709551616"}
         """
     ) == [
         parser.Expr(
@@ -119,17 +119,19 @@ def test_empty():
     """
     Nothing to check, but that's fine.
     """
-    assert items("") == []
+    assert ndjson_items("") == []
 
 
 def test_wrong_version():
     with pytest.raises(parser.ExportVersionError):
-        parser.from_export("1.2.3\n")
+        parser.from_ndjson(
+            '{"meta":{"exporter":{"name":"lean4export","version":"3.0.0"},"lean":{"githash":"2fcce7258eeb6e324366bc25f9058293b04b7547","version":"4.27.0-rc1"}}}',
+        )
 
 
 def test_totally_empty():
     with pytest.raises(parser.ExportVersionError):
-        parser.from_export("")
+        parser.from_ndjson("")
 
 
 @pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
@@ -137,4 +139,4 @@ def test_valid_examples_parse_successfully(path):
     """
     We don't get parse errors from our examples.
     """
-    parser.from_export(path.readlines())
+    parser.from_ndjson(path.readlines())
