@@ -4,7 +4,7 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 import pytest
 
 from rpylean.exceptions import UnknownQuotient
-from rpylean.environment import EnvironmentBuilder, Environment, from_ndjson
+from rpylean.environment import EnvironmentBuilder, Environment, from_export
 from rpylean.objects import (
     W_LEVEL_ZERO,
     TYPE,
@@ -18,7 +18,7 @@ from rpylean.objects import (
 
 
 def test_dump_name():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpName (`foo.bla |>.num 1 |>.str "boo")
         """
         {"i":1,"str":{"pre":0,"str":"foo"}}
@@ -39,7 +39,7 @@ def test_dump_name():
 def test_dump_level():
     l1 = Name.simple("l1")
     l2 = Name.simple("l2")
-    assert from_ndjson(
+    assert from_export(
         # eval run <| dumpLevel (.imax (.max (.succ (.succ .zero)) (.param `l1)) (.param `l2))
         """
         {"i":1,"succ":0}
@@ -68,7 +68,7 @@ def test_dump_level():
 def test_dump_expr_lambda():
     bvar = W_BVar(0)
     f = fun(Name.simple("a").binder(type=bvar))(bvar)
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
         """
         {"i":1,"str":{"pre":0,"str":"A"}}
@@ -100,7 +100,7 @@ def test_dump_expr_let():
     Nat = Name.simple("Nat")
     zero = Nat.child("zero")
 
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.letE `x (.const `Nat []) (.const `Nat.zero []) (.bvar 0) false)
         """
         {"i":1,"str":{"pre":0,"str":"x"}}
@@ -125,7 +125,7 @@ def test_dump_expr_let():
 def test_dump_expr_proj():
     bvar = W_BVar(0)
     Prod = Name.simple("Prod")
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.proj `Prod 1 (.bvar 0))
         """
         {"i":1,"str":{"pre":0,"str":"Prod"}}
@@ -142,7 +142,7 @@ def test_dump_expr_proj():
 
 
 def test_dump_large_natlit():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lit (.natVal 1000000000000000))
         """
         {"i":0,"natVal":"1000000000000000"}
@@ -151,7 +151,7 @@ def test_dump_large_natlit():
 
 
 def test_dump_natlit():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lit (.natVal 123456789))
         """
         {"i":0,"natVal":"123456789"}
@@ -160,7 +160,7 @@ def test_dump_natlit():
 
 
 def test_dump_litstr():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lit (.strVal "hi"))
         """
         {"i":0,"strVal":"hi"}
@@ -169,7 +169,7 @@ def test_dump_litstr():
 
 
 def test_dump_litstr_escapes():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lit (.strVal "\r\rh
 #       i\t\t"))
         """
@@ -179,7 +179,7 @@ def test_dump_litstr_escapes():
 
 
 def test_dump_litstr_unicode():
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpExpr (.lit (.strVal "اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"))
         """
         {"i":0,"strVal":"اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"}
@@ -207,7 +207,7 @@ def test_dump_constant_id():
         a.binder(type=b0),
     )(b0)
 
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpConstant `id
         """
         {"i":1,"str":{"pre":0,"str":"id"}}
@@ -266,7 +266,7 @@ def test_dump_constant_list():
         num_params=1,
         is_recursive=True,
     )
-    assert from_ndjson(
+    assert from_export(
         #eval run <| dumpConstant `List
         """
         {"i":1,"str":{"pre":0,"str":"List"}}
@@ -305,7 +305,7 @@ def test_dump_constant_list():
 
 def test_unknown_quotient():
     with pytest.raises(UnknownQuotient) as e:
-        from_ndjson(
+        from_export(
             """
             {"i":1,"str":{"pre":0,"str":"Quot"}}
             {"i":2,"str":{"pre":1,"str":"something"}}

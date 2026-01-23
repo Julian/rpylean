@@ -124,22 +124,19 @@ def ffi(self, args, stdin, stdout, stderr):
 
 
 def environment_from(path, stdin):
-    # FIXME: lazify me!
-
     if path == "-":
-        source = stdin.read()
-        stdin.close()
-    else:
-        try:
-            file = open_file_as_stream(path)
-        except OSError as err:
-            if err.errno != errno.ENOENT:
-                raise
-            raise UsageError("`%s` does not exist." % (path,))
-        source = file.readall()
-        file.close()
+        return from_export(stdin)
 
-    return from_export(source.splitlines())
+    try:
+        file = open_file_as_stream(path)
+    except OSError as err:
+        if err.errno != errno.ENOENT:
+            raise
+        raise UsageError("`%s` does not exist." % (path,))
+    else:
+        return from_export(file)
+    finally:
+        file.close()
 
 
 if __name__ == '__main__':

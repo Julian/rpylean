@@ -153,14 +153,7 @@ def from_export(export):
     """
     Load an environment out of some lean4export-formatted export.
     """
-    return from_items(parser.from_export(export)).finish()
-
-
-def from_lines(lines):
-    """
-    Load an environment builder out of some partial lean4export lines.
-    """
-    return from_items(parser.to_items(lines))
+    return from_items(parser.from_ndjson(export)).finish()
 
 
 def from_items(items):

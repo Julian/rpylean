@@ -7,10 +7,10 @@ from __future__ import print_function
 from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
+from rpylean._rjson import loads as from_json
 
-#: The lean4export format we claim to be able to parse.
-#: Should match https://github.com/ammkrn/lean4export/blob/v2025/Main.lean#L4
-EXPORT_VERSION = "2.0.0"
+#: The exporter we claim to be able to parse.
+SUPPORTED_EXPORTER = {"name": "lean4export", "version": "3.0.0"}
 
 
 class ParseError(Exception):
@@ -107,15 +107,13 @@ class Node(object):
 
 
 class NameStr(Node):
-    kind = "NS"
-
     @staticmethod
-    def parse(tokens):
-        nidx, _ns_token, parent_nidx, name = tokens
+    def from_dict(value):
+        string = value["str"].value_object()
         return NameStr(
-            nidx=nidx.uint(),
-            parent_nidx=parent_nidx.uint(),
-            part=name.text,
+            nidx=value["i"].value_int(),
+            parent_nidx=string["pre"].value_int(),
+            part=string["str"].value_string(),
         )
 
     def __init__(self, nidx, parent_nidx, part):
@@ -158,9 +156,11 @@ class UniverseSucc(Universe):
     kind = "US"
 
     @staticmethod
-    def parse(tokens):
-        uidx, _us_token, parent = tokens
-        return UniverseSucc(uidx=uidx.uint(), parent=parent.uint())
+    def from_dict(value):
+        return UniverseSucc(
+            uidx=value["i"].value_int(),
+            parent=value["succ"].value_int(),
+        )
 
     def __init__(self, uidx, parent):
         self.uidx = uidx
@@ -295,10 +295,8 @@ class LitNat(ExprVal):
 
 
 class Sort(ExprVal):
-    kind = "ES"
-
     @staticmethod
-    def parse(tokens):
+    def from_dict(value):
         eidx, _sort_tok, level = tokens
         val = Sort(level=level.uint())
         return Expr(eidx=eidx.uint(), val=val)
@@ -905,9 +903,14 @@ class RecRule(Node):
         builder.register_rec_rule(self.rule_idx, w_recrule)
 
 
-NODES = {}
 for cls in [
     NameStr,
+    Sort,
+    UniverseSucc,
+]:
+    cls.from_dict.func_name += "_" + cls.__name__
+
+for cls in [
     NameId,
     App,
     Lambda,
@@ -915,14 +918,12 @@ for cls in [
     Const,
     LitStr,
     LitNat,
-    Sort,
     BVar,
     Proj,
     Let,
     RecRule,
     Recursor,
     UniverseParam,
-    UniverseSucc,
     UniverseMax,
     UniverseIMax,
     Definition,
@@ -934,7 +935,6 @@ for cls in [
     Quot,
 ]:
     cls.parse.func_name += "_" + cls.__name__
-    NODES["#" + cls.kind] = cls
 
 
 def tokenize(line, lineno):
@@ -969,6 +969,33 @@ def from_export(lines):
     return to_items(rest)
 
 
+def from_ndjson(stream):
+    """
+    Parse NDJSON from a stream (file-like object with readline method).
+    """
+    meta_line = stream.readline()
+    obj = from_json(meta_line)
+    assert obj.is_object, meta_line
+    meta_obj = obj.value_object()["meta"]
+    assert meta_obj.is_object, meta_line
+    exporter_obj = meta_obj.value_object()["exporter"]
+    assert exporter_obj.is_object, meta_line
+    exporter = exporter_obj.value_object()
+    assert {
+        "name": exporter["name"].value_string(),
+        "version": exporter["version"].value_string(),
+    } == SUPPORTED_EXPORTER, meta_line
+
+    while True:
+        line = stream.readline()
+        if not line:
+            return
+        value = from_json(line)
+        assert value.is_object, line
+
+        yield _to_item(value.value_object())
+
+
 def to_items(lines):
     """
     Parse a lean4export-formatted iterable of lines *without* version number.
@@ -986,12 +1013,10 @@ def to_items(lines):
             yield item
 
 
-def _to_item(tokens):
-    token = tokens[0] if tokens[0].text.startswith("#") else tokens[1]
-    try:
-        cls = NODES[token.text]
-    except KeyError as e:
-        print("Unimplemented token kind: %s" % e)
-        return None
-
-    return cls.parse(tokens)
+def _to_item(obj):
+    if "str" in obj:
+        return NameStr.from_dict(obj)
+    elif "succ" in obj:
+        return UniverseSucc.from_dict(obj)
+    else:
+        print(obj)
