@@ -297,9 +297,9 @@ class LitNat(ExprVal):
 class Sort(ExprVal):
     @staticmethod
     def from_dict(value):
-        eidx, _sort_tok, level = tokens
-        val = Sort(level=level.uint())
-        return Expr(eidx=eidx.uint(), val=val)
+        sort = value["sort"].value_object()
+        val = Sort(level=sort["u"].value_int())
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, level):
         self.level = level
@@ -475,35 +475,32 @@ class Proj(ExprVal):
 
 
 class Definition(Node):
-    kind = "DEF"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx, def_type, def_val, hint = tokens[:5]
-        start = 5
-        # TODO: actually use the argument to 'R"
-        if hint.text == "R":
-            start += 1
+    def from_dict(value):
+        info = value["defnInfo"].value_object()
         return Definition(
-            nidx=nidx.uint(),
-            def_type=def_type.uint(),
-            def_val=def_val.uint(),
-            hint=hint.text,
-            levels=[each.uint() for each in tokens[start:]],
+            nidx=info["name"].value_int(),
+            type=info["type"].value_int(),
+            value=info["value"].value_int(),  # value value value value
+            # TODO: parse / use hints
+            hint=info["hints"].value_string(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
-    def __init__(self, nidx, def_type, def_val, hint, levels):
+    def __init__(self, nidx, type, value, hint, levels):
         self.nidx = nidx
-        self.def_type = def_type
-        self.def_val = def_val
+        self.type = type
+        self.value = value
         self.hint = hint
         self.levels = levels
 
     def compile(self, builder):
         declaration = builder.names[self.nidx].definition(
             levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.def_type],
-            value=builder.exprs[self.def_val],
+            type=builder.exprs[self.type],
+            value=builder.exprs[self.value],
             hint=self.hint,
         )
         builder.register_declaration(declaration)
@@ -904,6 +901,7 @@ class RecRule(Node):
 
 
 for cls in [
+    Definition,
     NameStr,
     Sort,
     UniverseSucc,
@@ -926,7 +924,6 @@ for cls in [
     UniverseParam,
     UniverseMax,
     UniverseIMax,
-    Definition,
     Theorem,
     Constructor,
     InductiveSkeleton,
@@ -1018,5 +1015,9 @@ def _to_item(obj):
         return NameStr.from_dict(obj)
     elif "succ" in obj:
         return UniverseSucc.from_dict(obj)
+    elif "sort" in obj:
+        return Sort.from_dict(obj)
+    elif "defnInfo" in obj:
+        return Definition.from_dict(obj)
     else:
         print(obj)
