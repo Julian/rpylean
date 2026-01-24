@@ -245,13 +245,11 @@ class ExprVal(Node):
 
 
 class BVar(ExprVal):
-    kind = "EV"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _bval_tok, id = tokens
-        val = BVar(id=id.uint())
-        return Expr(eidx=eidx.uint(), val=val)
+    def from_dict(value):
+        bvar = value["bvar"].value_object()
+        val = BVar(id=bvar["deBruijnIndex"].value_int())
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, id):
         self.id = id
@@ -897,6 +895,7 @@ class RecRule(Node):
 
 
 for cls in [
+    BVar,
     Definition,
     ForAll,
     NameNum,
@@ -912,7 +911,6 @@ for cls in [
     Const,
     LitStr,
     LitNat,
-    BVar,
     Proj,
     Let,
     RecRule,
@@ -1009,6 +1007,8 @@ def to_items(lines):
 def _to_item(obj):
     if "str" in obj:
         cls = NameStr
+    elif "bvar" in obj:
+        cls = BVar
     elif "num" in obj:
         cls = NameNum
     elif "succ" in obj:
