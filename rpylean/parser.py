@@ -151,8 +151,6 @@ class Universe(Node):
 
 
 class UniverseSucc(Universe):
-    kind = "US"
-
     @staticmethod
     def from_dict(value):
         return UniverseSucc(
@@ -305,16 +303,14 @@ class Sort(ExprVal):
 
 
 class Const(ExprVal):
-    kind = "EC"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _, nidx = tokens[:3]
+    def from_dict(value):
+        info = value["const"].value_object()
         val = Const(
-            nidx=nidx.uint(),
-            levels=[level.uint() for level in tokens[3:]],
+            nidx=info["declName"].value_int(),
+            levels=[each.value_int() for each in info["us"].value_array()],
         )
-        return Expr(eidx=eidx.uint(), val=val)
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, nidx, levels):
         self.nidx = nidx
@@ -354,13 +350,14 @@ class Let(ExprVal):
 
 
 class App(ExprVal):
-    kind = "EA"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _ea_token, fn_eidx, arg_eidx = tokens
-        app = App(fn_eidx=fn_eidx.uint(), arg_eidx=arg_eidx.uint())
-        return Expr(eidx=eidx.uint(), val=app)
+    def from_dict(value):
+        info = value["app"].value_object()
+        val = App(
+            fn_eidx=info["fn"].value_int(),
+            arg_eidx=info["arg"].value_int(),
+        )
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
@@ -386,18 +383,16 @@ def binder(name, info, type):
 
 
 class Lambda(ExprVal):
-    kind = "EL"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _lambda_tok, binder_info, binder_name, binder_type, body = tokens
+    def from_dict(value):
+        lam = value["lam"].value_object()
         val = Lambda(
-            binder_name=binder_name.uint(),
-            binder_type=binder_type.uint(),
-            binder_info=binder_info.text,
-            body=body.uint(),
+            binder_name=lam["binderName"].value_int(),
+            binder_type=lam["binderType"].value_int(),
+            binder_info=lam["binderInfo"].value_string(),
+            body=lam["body"].value_int(),
         )
-        return Expr(eidx=eidx.uint(), val=val)
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -895,9 +890,12 @@ class RecRule(Node):
 
 
 for cls in [
+    App,
     BVar,
+    Const,
     Definition,
     ForAll,
+    Lambda,
     NameNum,
     NameStr,
     Sort,
@@ -906,9 +904,6 @@ for cls in [
     cls.from_dict.func_name += "_" + cls.__name__
 
 for cls in [
-    App,
-    Lambda,
-    Const,
     LitStr,
     LitNat,
     Proj,
@@ -1007,8 +1002,12 @@ def to_items(lines):
 def _to_item(obj):
     if "str" in obj:
         cls = NameStr
+    elif "app" in obj:
+        cls = App
     elif "bvar" in obj:
         cls = BVar
+    elif "const" in obj:
+        cls = Const
     elif "num" in obj:
         cls = NameNum
     elif "succ" in obj:
@@ -1019,6 +1018,8 @@ def _to_item(obj):
         cls = Definition
     elif "forallE" in obj:
         cls = ForAll
+    elif "lam" in obj:
+        cls = Lambda
     else:
         assert False, str(obj)
     return cls.from_dict(obj)
