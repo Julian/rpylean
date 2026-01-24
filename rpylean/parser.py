@@ -126,16 +126,14 @@ class NameStr(Node):
         builder.register_name(nidx=self.nidx, name=parent.child(self.part))
 
 
-class NameId(Node):
-    kind = "NI"
-
+class NameNum(Node):
     @staticmethod
-    def parse(tokens):
-        nidx, _ni_token, parent_nidx, id = tokens
-        return NameId(
-            nidx=nidx.uint(),
-            parent_nidx=parent_nidx.uint(),
-            id=id.text,  # TODO: do we care that this isn't an int?
+    def from_dict(value):
+        num = value["num"].value_object()
+        return NameNum(
+            nidx=value["i"].value_int(),
+            parent_nidx=num["pre"].value_int(),
+            id=num["i"].value_int(),
         )
 
     def __init__(self, nidx, parent_nidx, id):
@@ -377,7 +375,7 @@ class App(ExprVal):
 
 
 def binder(name, info, type):
-    if info == "#BD":
+    if info == "default":
         return name.binder(type=type)
     elif info == "#BI":
         return name.implicit_binder(type=type)
@@ -420,18 +418,16 @@ class Lambda(ExprVal):
 
 
 class ForAll(ExprVal):
-    kind = "EP"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _forall_token, binder_info, binder_name, binder_type, body = tokens
+    def from_dict(value):
+        forall = value["forallE"].value_object()
         val = ForAll(
-            binder_name=binder_name.uint(),
-            binder_type=binder_type.uint(),
-            binder_info=binder_info.text,
-            body=body.uint(),
+            binder_name=forall["binderName"].value_int(),
+            binder_type=forall["binderType"].value_int(),
+            binder_info=forall["binderInfo"].value_string(),
+            body=forall["body"].value_int(),
         )
-        return Expr(eidx=eidx.uint(), val=val)
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, binder_name, binder_type, binder_info, body):
         self.binder_name = binder_name
@@ -902,6 +898,8 @@ class RecRule(Node):
 
 for cls in [
     Definition,
+    ForAll,
+    NameNum,
     NameStr,
     Sort,
     UniverseSucc,
@@ -909,10 +907,8 @@ for cls in [
     cls.from_dict.func_name += "_" + cls.__name__
 
 for cls in [
-    NameId,
     App,
     Lambda,
-    ForAll,
     Const,
     LitStr,
     LitNat,
@@ -1012,12 +1008,17 @@ def to_items(lines):
 
 def _to_item(obj):
     if "str" in obj:
-        return NameStr.from_dict(obj)
+        cls = NameStr
+    elif "num" in obj:
+        cls = NameNum
     elif "succ" in obj:
-        return UniverseSucc.from_dict(obj)
+        cls = UniverseSucc
     elif "sort" in obj:
-        return Sort.from_dict(obj)
+        cls = Sort
     elif "defnInfo" in obj:
-        return Definition.from_dict(obj)
+        cls = Definition
+    elif "forallE" in obj:
+        cls = ForAll
     else:
-        print(obj)
+        assert False, str(obj)
+    return cls.from_dict(obj)
