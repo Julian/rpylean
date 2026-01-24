@@ -984,7 +984,7 @@ class W_Const(W_Expr):
         return self
 
     def whnf(self, env):
-        return self
+        return env.declarations[self.name].w_kind.value.whnf(env)
 
     def try_delta_reduce(self, env, only_abbrev=False):
         decl = env.declarations[self.name]
