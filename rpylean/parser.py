@@ -190,15 +190,13 @@ class UniverseMax(Universe):
 
 
 class UniverseIMax(Universe):
-    kind = "UIM"
-
     @staticmethod
-    def parse(tokens):
-        uidx, _um_token, lhs, rhs = tokens
+    def from_dict(value):
+        lhs, rhs = value["imax"].value_array()
         return UniverseIMax(
-            uidx=uidx.uint(),
-            lhs=lhs.uint(),
-            rhs=rhs.uint(),
+            uidx=value["i"].value_int(),
+            lhs=lhs.value_int(),
+            rhs=rhs.value_int(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -212,12 +210,12 @@ class UniverseIMax(Universe):
 
 
 class UniverseParam(Universe):
-    kind = "UP"
-
     @staticmethod
-    def parse(tokens):
-        uidx, _up_token, nidx = tokens
-        return UniverseParam(uidx=uidx.uint(), nidx=nidx.uint())
+    def from_dict(value):
+        return UniverseParam(
+            uidx=value["i"].value_int(),
+            nidx=value["param"].value_int(),
+        )
 
     def __init__(self, uidx, nidx):
         self.uidx = uidx
@@ -472,7 +470,7 @@ class Definition(Node):
             type=info["type"].value_int(),
             value=info["value"].value_int(),  # value value value value
             # TODO: parse / use hints
-            hint=info["hints"].value_string(),
+            hint="",
             levels=[
                 each.value_int() for each in info["levelParams"].value_array()
             ],
@@ -524,29 +522,29 @@ class Opaque(Node):
 
 
 class Theorem(Node):
-    kind = "THM"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx, def_type, def_val = tokens[:4]
+    def from_dict(value):
+        info = value["thmInfo"].value_object()
         return Theorem(
-            nidx=nidx.uint(),
-            def_type=def_type.uint(),
-            def_val=def_val.uint(),
-            levels=[each.uint() for each in tokens[4:]],
+            nidx=info["name"].value_int(),
+            type=info["type"].value_int(),
+            value=info["value"].value_int(),  # value value value value
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
-    def __init__(self, nidx, def_type, def_val, levels):
+    def __init__(self, nidx, type, value, levels):
         self.nidx = nidx
-        self.def_type = def_type
-        self.def_val = def_val
+        self.type = type
+        self.value = value
         self.levels = levels
 
     def compile(self, builder):
         declaration = builder.names[self.nidx].theorem(
             levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.def_type],
-            value=builder.exprs[self.def_val],
+            type=builder.exprs[self.type],
+            value=builder.exprs[self.value],
         )
         builder.register_declaration(declaration)
 
@@ -899,6 +897,9 @@ for cls in [
     NameNum,
     NameStr,
     Sort,
+    Theorem,
+    UniverseIMax,
+    UniverseParam,
     UniverseSucc,
 ]:
     cls.from_dict.func_name += "_" + cls.__name__
@@ -910,10 +911,7 @@ for cls in [
     Let,
     RecRule,
     Recursor,
-    UniverseParam,
     UniverseMax,
-    UniverseIMax,
-    Theorem,
     Constructor,
     InductiveSkeleton,
     Opaque,
@@ -1010,12 +1008,18 @@ def _to_item(obj):
         cls = Const
     elif "num" in obj:
         cls = NameNum
+    elif "imax" in obj:
+        cls = UniverseIMax
     elif "succ" in obj:
         cls = UniverseSucc
+    elif "param" in obj:
+        cls = UniverseParam
     elif "sort" in obj:
         cls = Sort
     elif "defnInfo" in obj:
         cls = Definition
+    elif "thmInfo" in obj:
+        cls = Theorem
     elif "forallE" in obj:
         cls = ForAll
     elif "lam" in obj:
