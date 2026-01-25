@@ -5,7 +5,7 @@ from __future__ import print_function
 
 import errno
 
-from rpython.rlib.streamio import open_file_as_stream
+from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
 from rpylean.leanffi import FFI
@@ -125,7 +125,7 @@ def ffi(self, args, stdin, stdout, stderr):
 
 def environment_from(path, stdin):
     if path == "-":
-        return from_export(stdin)
+        return from_export(fdopen_as_stream(stdin.fileno(), "r"))
 
     try:
         file = open_file_as_stream(path)
@@ -133,10 +133,10 @@ def environment_from(path, stdin):
         if err.errno != errno.ENOENT:
             raise
         raise UsageError("`%s` does not exist." % (path,))
-    else:
-        return from_export(file)
-    finally:
-        file.close()
+
+    environment = from_export(file)
+    file.close()
+    return environment
 
 
 if __name__ == '__main__':
