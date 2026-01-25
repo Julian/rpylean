@@ -3,11 +3,12 @@ See https://ammkrn.github.io/type_checking_in_lean4/export_format.html
 """
 
 from __future__ import print_function
+from pprint import pprint as pp  # noqa: F401
 
 from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
-from rpylean._rjson import loads as from_json
+from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
 
 #: The exporter we claim to be able to parse.
 SUPPORTED_EXPORTER = {"name": "lean4export", "version": "3.0.0"}
@@ -168,15 +169,13 @@ class UniverseSucc(Universe):
 
 
 class UniverseMax(Universe):
-    kind = "UM"
-
     @staticmethod
-    def parse(tokens):
-        uidx, _um_token, lhs, rhs = tokens
+    def from_dict(value):
+        lhs, rhs = value["max"].value_array()
         return UniverseMax(
-            uidx=uidx.uint(),
-            lhs=lhs.uint(),
-            rhs=rhs.uint(),
+            uidx=value["i"].value_int(),
+            lhs=lhs.value_int(),
+            rhs=rhs.value_int(),
         )
 
     def __init__(self, uidx, lhs, rhs):
@@ -255,14 +254,10 @@ class BVar(ExprVal):
 
 
 class LitStr(ExprVal):
-    kind = "ELS"
-
     @staticmethod
-    def parse(tokens):
-        eidx = tokens[0]
-        utf8 = "".join([chr(int(token.text, 16)) for token in tokens[2:]])
-        val = LitStr(val=utf8)
-        return Expr(eidx=eidx.uint(), val=val)
+    def from_dict(value):
+        val = LitStr(val=value["strVal"].value_string())
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, val):
         self.val = val
@@ -272,12 +267,11 @@ class LitStr(ExprVal):
 
 
 class LitNat(ExprVal):
-    kind = "ELN"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _eli_token, val = tokens
-        return Expr(eidx=eidx.uint(), val=LitNat(val=val.nat()))
+    def from_dict(value):
+        nat = rbigint.fromstr(value["natVal"].value_string())
+        assert nat.int_ge(0)
+        return Expr(eidx=value["i"].value_int(), val=LitNat(nat))
 
     def __init__(self, val):
         self.val = val
@@ -320,18 +314,17 @@ class Const(ExprVal):
 
 
 class Let(ExprVal):
-    kind = "EZ"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _let_token, nidx, def_type, def_val, body = tokens
+    def from_dict(value):
+        let = value["letE"].value_object()
         val = Let(
-            nidx=nidx.uint(),
-            def_type=def_type.uint(),
-            def_val=def_val.uint(),
-            body=body.uint(),
+            nidx=let["declName"].value_int(),
+            def_type=let["type"].value_int(),
+            def_val=let["value"].value_int(),
+            body=let["body"].value_int(),
+            # TODO: nondep = ...
         )
-        return Expr(eidx=eidx.uint(), val=val)
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, nidx, def_type, def_val, body):
         self.nidx = nidx
@@ -370,11 +363,11 @@ class App(ExprVal):
 def binder(name, info, type):
     if info == "default":
         return name.binder(type=type)
-    elif info == "#BI":
+    elif info == "implicit":
         return name.implicit_binder(type=type)
     elif info == "#BS":
         return name.strict_implicit_binder(type=type)
-    elif info == "#BC":
+    elif info == "instImplicit":
         return name.instance_binder(type=type)
     else:
         assert False, "Unknown binder info %s" % info
@@ -437,17 +430,15 @@ class ForAll(ExprVal):
 
 
 class Proj(ExprVal):
-    kind = "EJ"
-
     @staticmethod
-    def parse(tokens):
-        eidx, _, struct_name, field_index, struct_expr = tokens
+    def from_dict(value):
+        proj = value["proj"].value_object()
         val = Proj(
-            struct_name=struct_name.uint(),
-            field_index=field_index.uint(),
-            struct_expr=struct_expr.uint(),
+            struct_name=proj["typeName"].value_int(),
+            field_index=proj["idx"].value_int(),
+            struct_expr=proj["struct"].value_int(),
         )
-        return Expr(eidx=eidx.uint(), val=val)
+        return Expr(eidx=value["i"].value_int(), val=val)
 
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
@@ -494,29 +485,29 @@ class Definition(Node):
 
 
 class Opaque(Node):
-    kind = "OPAQ"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx, def_type, def_val = tokens[:4]
+    def from_dict(value):
+        info = value["opaqueInfo"].value_object()
         return Opaque(
-            nidx=nidx.uint(),
-            def_type=def_type.uint(),
-            def_val=def_val.uint(),
-            levels=[each.uint() for each in tokens[4:]],
+            nidx=info["name"].value_int(),
+            type=info["type"].value_int(),
+            value=info["value"].value_int(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
-    def __init__(self, nidx, def_type, def_val, levels):
+    def __init__(self, nidx, type, value, levels):
         self.nidx = nidx
-        self.def_type = def_type
-        self.def_val = def_val
+        self.type = type
+        self.value = value
         self.levels = levels
 
     def compile(self, builder):
         declaration = builder.names[self.nidx].opaque(
             levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.def_type],
-            value=builder.exprs[self.def_val],
+            type=builder.exprs[self.type],
+            value=builder.exprs[self.value],
         )
         builder.register_declaration(declaration)
 
@@ -550,13 +541,16 @@ class Theorem(Node):
 
 
 class Axiom(Node):
-    kind = "AX"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx, type = tokens[:3]
-        levels = [each.uint() for each in tokens[3:]]
-        return Axiom(nidx=nidx.uint(), type=type.uint(), levels=levels)
+    def from_dict(value):
+        info = value["axiomInfo"].value_object()
+        return Axiom(
+            nidx=info["name"].value_int(),
+            type=info["type"].value_int(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
+        )
 
     def __init__(self, nidx, type, levels):
         self.nidx = nidx
@@ -572,21 +566,24 @@ class Axiom(Node):
 
 
 class Quot(Node):
-    kind = "QUOT"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx_token, type = tokens[:3]
-        levels = [each.uint() for each in tokens[3:]]
-        return Quot(nidx_token=nidx_token, type=type.uint(), levels=levels)
+    def from_dict(value):
+        info = value["quotInfo"].value_object()
+        return Quot(
+            nidx=info["name"].value_int(),
+            type=info["type"].value_int(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
+        )
 
-    def __init__(self, nidx_token, type, levels):
-        self.nidx_token = nidx_token
+    def __init__(self, nidx, type, levels):
+        self.nidx = nidx
         self.type = type
         self.levels = levels
 
     def compile(self, builder):
-        name = builder.names[self.nidx_token.uint()]
+        name = builder.names[self.nidx]
         builder.register_quotient(name, builder.exprs[self.type])
 
 
@@ -600,54 +597,24 @@ class InductiveSkeleton(Node):
     file until we see all constructors.
     """
 
-    kind = "IND"
-
     @staticmethod
-    def parse(tokens):
-        pos = 9
-        (
-            _,
-            nidx,
-            type_idx,
-            is_reflexive,
-            is_recursive,
-            num_nested,
-            num_params,
-            num_indices,
-            num_name_idxs_str,
-        ) = tokens[:pos]
-        num_name_idxs = num_name_idxs_str.uint()
-        name_idxs = [each.uint() for each in tokens[pos : (pos + num_name_idxs)]]
-        pos += num_name_idxs
-
-        num_ctors = tokens[pos].uint()
-        pos += 1
-
-        ctor_name_idxs = [n.uint() for n in tokens[pos : (pos + num_ctors)]]
-        pos += num_ctors
-        # Hack for double space in the case of 0 ctors
-        if num_ctors == 0:
-            # If we have no level params, then we'll be at the end of the line
-            if pos < len(tokens):
-                assert tokens[pos].text == ""
-            pos += 1
-
-        if pos > len(tokens):
-            levels = []
-        else:
-            levels = [each.uint() for each in tokens[pos:]]
-
+    def from_dict(value):
+        info = value["inductInfo"].value_object()
         return InductiveSkeleton(
-            nidx=nidx.uint(),
-            type_idx=type_idx.uint(),
-            is_reflexive=is_reflexive.bool(),
-            is_recursive=is_recursive.bool(),
-            num_nested=num_nested.uint(),
-            num_params=num_params.uint(),
-            num_indices=num_indices.uint(),
-            name_idxs=name_idxs,
-            ctor_name_idxs=ctor_name_idxs,
-            levels=levels,
+            nidx=info["name"].value_int(),
+            type_idx=info["type"].value_int(),
+            is_reflexive=info["isReflexive"] is JSON_TRUE,
+            is_recursive=info["isRec"] is JSON_TRUE,
+            num_nested=info["numNested"].value_int(),
+            num_params=info["numParams"].value_int(),
+            num_indices=info["numIndices"].value_int(),
+            name_idxs=[each.value_int() for each in info["all"].value_array()],
+            ctor_name_idxs=[
+                each.value_int() for each in info["ctors"].value_array()
+            ],
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
     def __init__(
@@ -706,19 +673,19 @@ class InductiveSkeleton(Node):
 
 
 class Constructor(Node):
-    kind = "CTOR"
-
     @staticmethod
-    def parse(tokens):
-        _, nidx, type_idx, inductive_nidx, cidx, num_params, num_fields = tokens[:7]
+    def from_dict(value):
+        info = value["ctorInfo"].value_object()
         return Constructor(
-            nidx=nidx.uint(),
-            type_idx=type_idx.uint(),
-            inductive_nidx=inductive_nidx.uint(),
-            cidx=cidx.uint(),
-            num_params=num_params.uint(),
-            num_fields=num_fields.uint(),
-            levels=[each.uint() for each in tokens[7:]],
+            nidx=info["name"].value_int(),
+            type_idx=info["type"].value_int(),
+            inductive_nidx=info["induct"].value_int(),
+            cidx=info["cidx"].value_int(),
+            num_params=info["numParams"].value_int(),
+            num_fields=info["numFields"].value_int(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
     def __init__(
@@ -772,51 +739,27 @@ class Constructor(Node):
 
 
 class Recursor(Node):
-    kind = "REC"
-
     @staticmethod
-    def parse(tokens):
-        _rec_token, nidx, expr_idx, num_ind_name_idxs_str = tokens[:4]
-
-        num_ind_name_idxs = num_ind_name_idxs_str.uint()
-
-        pos = 4
-        ind_name_idxs = [
-            each.uint() for each in tokens[pos : (pos + num_ind_name_idxs)]
-        ]
-        pos += num_ind_name_idxs
-
-        num_params, num_indices, num_motives, num_minors, num_rule_idxs_str = tokens[
-            pos : pos + 5
-        ]
-
-        num_rule_idxs = num_rule_idxs_str.uint()
-        pos += 5
-
-        rule_idxs = [each.uint() for each in tokens[pos : pos + num_rule_idxs]]
-        pos += num_rule_idxs
-
-        # Hack for double space in the case of 0 rules
-        if num_rule_idxs == 0:
-            # If we have no level params, then we'll be at the end of the line
-            if pos < len(tokens):
-                assert tokens[pos].text == ""
-            pos += 1
-
-        k = tokens[pos]
-        pos += 1
-
+    def from_dict(value):
+        info = value["recInfo"].value_object()
         return Recursor(
-            nidx=nidx.uint(),
-            type_idx=expr_idx.uint(),
-            ind_name_idxs=ind_name_idxs,
-            rule_idxs=rule_idxs,
-            k=k.uint(),
-            num_params=num_params.uint(),
-            num_indices=num_indices.uint(),
-            num_motives=num_motives.uint(),
-            num_minors=num_minors.uint(),
-            levels=[param.uint() for param in tokens[pos:]],
+            nidx=info["name"].value_int(),
+            type_idx=info["type"].value_int(),
+            ind_name_idxs=[
+                each.value_int() for each in info["all"].value_array()
+            ],
+            rule_idxs=[
+                RecRule.from_dict(each.value_object())
+                for each in info["rules"].value_array()
+            ],
+            k=info["k"] is JSON_TRUE,
+            num_params=info["numParams"].value_int(),
+            num_indices=info["numIndices"].value_int(),
+            num_motives=info["numMotives"].value_int(),
+            num_minors=info["numMinors"].value_int(),
+            levels=[
+                each.value_int() for each in info["levelParams"].value_array()
+            ],
         )
 
     def __init__(
@@ -845,11 +788,12 @@ class Recursor(Node):
         self.rule_idxs = rule_idxs
 
     def compile(self, builder):
+        rules = [each.to_w(builder) for each in self.rule_idxs]
         declaration = builder.names[self.nidx].recursor(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-            rules=[builder.rec_rules.pop(idx) for idx in self.rule_idxs],
+            rules=rules,
             k=self.k,
             num_params=self.num_params,
             num_indices=self.num_indices,
@@ -860,65 +804,54 @@ class Recursor(Node):
 
 
 class RecRule(Node):
-    kind = "RR"
-
     @staticmethod
-    def parse(tokens):
-        rule_idx, _, ctor_name, num_fields, val = tokens
+    def from_dict(value):
         return RecRule(
-            rule_idx=rule_idx.uint(),
-            ctor_name_idx=ctor_name.uint(),
-            num_fields=num_fields.uint(),
-            val=val.uint(),
+            ctor_name_idx=value["ctor"].value_int(),
+            num_fields=value["nfields"].value_int(),
+            val=value["rhs"].value_int(),
         )
 
-    def __init__(self, rule_idx, ctor_name_idx, num_fields, val):
-        self.rule_idx = rule_idx
+    def __init__(self, ctor_name_idx, num_fields, val):
         self.ctor_name_idx = ctor_name_idx
         self.num_fields = num_fields
         self.val = val
 
-    def compile(self, builder):
-        w_recrule = objects.W_RecRule(
+    def to_w(self, builder):
+        return objects.W_RecRule(
             ctor_name=builder.names[self.ctor_name_idx],
             num_fields=self.num_fields,
             val=builder.exprs[self.val],
         )
-        builder.register_rec_rule(self.rule_idx, w_recrule)
 
 
 for cls in [
     App,
+    Axiom,
     BVar,
     Const,
+    Constructor,
     Definition,
     ForAll,
+    InductiveSkeleton,
     Lambda,
+    Let,
+    LitNat,
     NameNum,
     NameStr,
+    Opaque,
+    Proj,
+    Recursor,
+    RecRule,
+    Quot,
     Sort,
     Theorem,
+    UniverseMax,
     UniverseIMax,
     UniverseParam,
     UniverseSucc,
 ]:
     cls.from_dict.func_name += "_" + cls.__name__
-
-for cls in [
-    LitStr,
-    LitNat,
-    Proj,
-    Let,
-    RecRule,
-    Recursor,
-    UniverseMax,
-    Constructor,
-    InductiveSkeleton,
-    Opaque,
-    Axiom,
-    Quot,
-]:
-    cls.parse.func_name += "_" + cls.__name__
 
 
 def tokenize(line, lineno):
@@ -1008,6 +941,8 @@ def _to_item(obj):
         cls = Const
     elif "num" in obj:
         cls = NameNum
+    elif "max" in obj:
+        cls = UniverseMax
     elif "imax" in obj:
         cls = UniverseIMax
     elif "succ" in obj:
@@ -1016,14 +951,35 @@ def _to_item(obj):
         cls = UniverseParam
     elif "sort" in obj:
         cls = Sort
+    elif "axiomInfo" in obj:
+        cls = Axiom
+    elif "ctorInfo" in obj:
+        cls = Constructor
     elif "defnInfo" in obj:
         cls = Definition
+    elif "inductInfo" in obj:
+        cls = InductiveSkeleton
+    elif "opaqueInfo" in obj:
+        cls = Opaque
+    elif "quotInfo" in obj:
+        cls = Quot
+    elif "recInfo" in obj:
+        cls = Recursor
     elif "thmInfo" in obj:
         cls = Theorem
     elif "forallE" in obj:
         cls = ForAll
+    elif "letE" in obj:
+        cls = Let
     elif "lam" in obj:
         cls = Lambda
+    elif "proj" in obj:
+        cls = Proj
+    elif "natVal" in obj:
+        cls = LitNat
+    elif "strVal" in obj:
+        cls = LitStr
     else:
-        assert False, str(obj)
+        pp(obj)
+        assert False
     return cls.from_dict(obj)
