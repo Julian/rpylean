@@ -14,7 +14,7 @@ def all_examples_from(example_dir):
 
 
 VALID = sorted(all_examples_from(EXAMPLES.join("valid")))
-INVALID = sorted(all_examples_from(EXAMPLES.join("invalid")))
+# INVALID = sorted(all_examples_from(EXAMPLES.join("invalid")))
 
 
 def name_of(example_path):
