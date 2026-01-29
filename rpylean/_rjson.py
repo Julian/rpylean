@@ -46,19 +46,19 @@ class JsonBase(object):
         "NON_RPYTHON"
 
     def value_array(self):
-        raise TypeError(repr(self))
+        raise TypeError(self.tostring())
 
     def value_object(self):
-        raise TypeError(repr(self))
+        raise TypeError(self.tostring())
 
     def value_string(self):
-        raise TypeError(repr(self))
+        raise TypeError(self.tostring())
 
     def value_float(self):
-        raise TypeError(repr(self))
+        raise TypeError(self.tostring())
 
     def value_int(self):
-        raise TypeError(repr(self))
+        raise TypeError(self.tostring())
 
 
 class JsonPrimitive(JsonBase):
