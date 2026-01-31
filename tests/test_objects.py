@@ -160,7 +160,7 @@ class TestName(object):
             name=foo,
             type=Nat.const(),
             levels=[],
-            w_kind=W_Definition(value=zero.const(), hint="R"),
+            w_kind=W_Definition(value=zero.const(), hint=1),
         )
 
     def test_axiom(self):
@@ -191,6 +191,7 @@ class TestName(object):
             w_kind=W_Inductive(
                 names=[Empty],
                 constructors=[],
+                recursors=[],
                 num_nested=0,
                 num_params=0,
                 num_indices=0,

@@ -211,6 +211,7 @@ class Name(_Item):
         type,
         names=None,
         constructors=None,
+        recursors=None,
         num_nested=0,
         num_params=0,
         num_indices=0,
@@ -224,6 +225,7 @@ class Name(_Item):
         inductive = W_Inductive(
             names=[self] if names is None else names,
             constructors=[] if constructors is None else constructors,
+            recursors=[] if recursors is None else recursors,
             num_nested=num_nested,
             num_params=num_params,
             num_indices=num_indices,
@@ -247,7 +249,7 @@ class Name(_Item):
             levels=levels,
         )
 
-    def definition(self, type, value, hint="R", levels=None):
+    def definition(self, type, value, hint=1, levels=None):
         """
         Make a definition of the given type and value with this name.
         """
@@ -282,7 +284,7 @@ class Name(_Item):
         num_params=0,
         num_indices=0,
         num_minors=0,
-        k=0,
+        k=False,
         names=None,
         levels=None,
     ):
@@ -984,7 +986,7 @@ class W_Const(W_Expr):
         return self
 
     def whnf(self, env):
-        return env.declarations[self.name].w_kind.value.whnf(env)
+        return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
         decl = env.declarations[self.name]
@@ -1889,6 +1891,11 @@ class DefOrTheorem(W_DeclarationKind):
             return W_TypeError(env, type, val_type)
 
 
+#: Reducibility hints. For regular we use positive ints.
+HINT_OPAQUE = -1
+HINT_ABBREV = -1
+
+
 class W_Definition(DefOrTheorem):
     def __init__(self, value, hint):
         self.value = value
@@ -1915,7 +1922,7 @@ class W_Opaque(W_Definition):
 
     def __init__(self, value):
         self.value = value
-        self.hint = "O"
+        self.hint = HINT_OPAQUE
 
 
 class W_Theorem(DefOrTheorem):
@@ -1942,9 +1949,9 @@ class W_Axiom(W_DeclarationKind):
 class W_Inductive(W_DeclarationKind):
     def __init__(
         self,
-        names,  # ??: What is this? Inductives know their names?
-        #     Is this for mutual inductives which have multiple?
+        names,
         constructors,
+        recursors,
         num_nested,
         num_params,
         num_indices,
@@ -1953,6 +1960,7 @@ class W_Inductive(W_DeclarationKind):
     ):
         self.names = names
         self.constructors = constructors
+        self.recursors = recursors
         self.num_nested = num_nested
         self.num_params = num_params
         self.num_indices = num_indices

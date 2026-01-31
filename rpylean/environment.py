@@ -1,5 +1,8 @@
 from __future__ import print_function
+
+from StringIO import StringIO
 from sys import stderr
+from textwrap import dedent
 from traceback import print_exc
 import pdb
 
@@ -41,7 +44,6 @@ class EnvironmentBuilder(object):
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] + names
         self.rec_rules = {}
-        self.inductive_skeletons = {}
         self.quotient = []
 
         self.declarations = []
@@ -92,15 +94,6 @@ class EnvironmentBuilder(object):
         assert rule_idx not in self.rec_rules, rule_idx
         self.rec_rules[rule_idx] = w_recrule
 
-    def register_inductive_skeleton(self, skeleton):
-        """
-        Add the skeleton to our processing mapping.
-
-        It will be finished when we see all of its constructors.
-        """
-        assert skeleton.nidx not in self.inductive_skeletons
-        self.inductive_skeletons[skeleton.nidx] = skeleton
-
     def register_quotient(self, name, type):
         self.quotient.append((name, type))
 
@@ -112,11 +105,6 @@ class EnvironmentBuilder(object):
         Finish building, generating the known-valid and immutable environment.
         """
         # TODO: Make these all proper exceptions.
-        assert not self.inductive_skeletons, "Incomplete inductives: %s" % (
-            ", ".join(
-                [self.names[nidx].str() for nidx in self.inductive_skeletons],
-            ),
-        )
         assert not self.rec_rules, "Incomplete recursors: %s" % (
             ", ".join(
                 [rule.ctor_name.str() for rule in self.rec_rules.values()],
@@ -153,7 +141,7 @@ def from_export(export):
     """
     Load an environment out of some lean4export-formatted export.
     """
-    return from_items(parser.from_ndjson(export)).finish()
+    return from_items(parser.from_export(export)).finish()
 
 
 def from_items(items):
@@ -161,6 +149,13 @@ def from_items(items):
     Load an environment builder out of some parsed lean4export items.
     """
     return EnvironmentBuilder().consume(items)
+
+
+def from_str(text):
+    """
+    Load an environment out of a lean4export-formatted string.
+    """
+    return from_items(parser.from_str(text))
 
 
 class Environment(object):

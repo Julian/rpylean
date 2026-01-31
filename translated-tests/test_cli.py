@@ -19,7 +19,9 @@ def rpylean(*args, **kwargs):
 
 def test_stdin():
     process = rpylean("-")
-    stdout, stderr = process.communicate("2.0.0\n")
+    stdout, stderr = process.communicate(
+        '{"meta":{"format":{"version":"3.0.0"}}}\n',
+    )
 
     assert "All declarations are type-correct." in stdout, stdout
     assert stderr.strip() == ""
