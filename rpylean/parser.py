@@ -841,7 +841,11 @@ def from_export(stream):
         raise ExportVersionError(None)
 
     obj = from_json(meta_line)
-    info = obj.value_object()["meta"].value_object()["format"].value_object()
+    meta = obj.value_object()["meta"].value_object()
+    if "format" in meta:  # normal export file
+        info = meta["format"].value_object()
+    else:  # transition file, delete me when lean-kernel-arena updates
+        info = meta["exporter"].value_object()
     version = info["version"].value_string()
     if version != EXPORT_VERSION:
         raise ExportVersionError(version)
