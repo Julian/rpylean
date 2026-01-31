@@ -101,6 +101,8 @@ class Command(object):
     def help(self, executable):
         if executable.endswith("__main__.py"):
             executable = "pypy -m rpylean"
+        else:
+            executable = executable.split("/")[-1]
         options = [
             "  --%s: %s" % (opt, desc) for opt, desc in self._options.items()
         ]
@@ -172,7 +174,7 @@ class CLI(object):
         return 0
 
     def usage(self, executable):
-        return _USAGE % (executable,) + "\n".join(
+        return _USAGE % (executable.split("/")[-1],) + "\n".join(
             [
                 "  %s: %s" % (k, cmd.short_help)
                 for k, cmd in self._commands.items()
