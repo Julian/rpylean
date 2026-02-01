@@ -235,7 +235,7 @@ class TestConst(object):
         env = Environment.having(decls)
         assert not env.def_eq(const1, const2)
 
-    def test_defeq_different_names_via_unfolding(self):
+    def test_def_eq_via_delta(self):
         """
         If def foo := bar, the two are def eq.
         """
@@ -448,6 +448,19 @@ def test_beta_reduction():
     F = fun(x.binder(type=NAT))(f.app(b0, y.const()))
     assert env.def_eq(F.app(a.const()), f.app(a.const(), y.const()))
     assert env.def_eq(f.app(a.const(), y.const()), F.app(a.const()))
+
+
+def test_nested_beta_reduction():
+    a_decl = a.axiom(type=NAT)
+    env = Environment.having([a_decl, Name.simple("Nat").axiom(type=TYPE)])
+
+    # (fun x => (fun y => y) x)
+    inner_id = fun(y.binder(type=NAT))(b0)  # fun y => y
+    outer = fun(x.binder(type=NAT))(inner_id.app(b0))  # fun x => (fun y => y) x
+
+    # outer a reduces to a via two beta steps
+    assert env.def_eq(outer.app(a_decl.const()), a_decl.const())
+    assert env.def_eq(a_decl.const(), outer.app(a_decl.const()))
 
 
 def test_zeta_reduction():

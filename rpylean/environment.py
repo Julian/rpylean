@@ -252,6 +252,10 @@ class Environment(object):
             "unexpectedly encountered BVar in def_eq: %s" % expr2
         )
 
+        # First reduce both to WHNF to ensure heads are in canonical form
+        expr1 = expr1.whnf(self)
+        expr2 = expr2.whnf(self)
+
         cls = expr1.__class__
         if cls is expr2.__class__ and (
             # returning NotImplemented (from W_Const.def_eq)
@@ -261,15 +265,6 @@ class Environment(object):
             cls is not W_Const or expr1.name == expr2.name
         ):
             return expr1.def_eq(expr2, self.def_eq)
-
-        # Try a reduction step
-        progress1, expr1_reduced = expr1.strong_reduce_step(self)
-        progress2, expr2_reduced = expr2.strong_reduce_step(self)
-        if progress1 or progress2:
-            # If expr2 made progress, retry with the new expr2
-            return self.def_eq(expr1_reduced, expr2_reduced)
-        expr1 = expr1_reduced
-        expr2 = expr2_reduced
 
         # Proof irrelevance check: Get the types of our expressions
         expr1_ty = expr1.infer(self)
