@@ -406,9 +406,15 @@ class Definition(Node):
     @staticmethod
     def from_dict(value):
         defs = value["def"].value_array()
-        assert len(defs) == 1, "No mutual defs yet"
-        info = defs[0].value_object()
 
+        if len(defs) == 1:
+            return Definition.single(defs[0].value_object())
+
+        definitions = [Definition.single(each.value_object()) for each in defs]
+        return MutualDefinitions(definitions)
+
+    @staticmethod
+    def single(info):
         if "hints" not in info:
             return Opaque.from_dict(info)
 
@@ -426,7 +432,7 @@ class Definition(Node):
         return Definition(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
-            value=info["value"].value_int(),  # value value value value
+            value=info["value"].value_int(),
             hint=hint,
             levels=[
                 each.value_int() for each in info["levelParams"].value_array()
@@ -448,6 +454,19 @@ class Definition(Node):
             hint=self.hint,
         )
         builder.register_declaration(declaration)
+
+
+class MutualDefinitions(Node):
+    """
+    A block of mutually recursive definitions.
+    """
+
+    def __init__(self, definitions):
+        self.definitions = definitions
+
+    def compile(self, builder):
+        for each in self.definitions:
+            each.compile(builder)
 
 
 class Opaque(Node):
@@ -482,13 +501,20 @@ class Theorem(Node):
     @staticmethod
     def from_dict(value):
         theorems = value["thm"].value_array()
-        assert len(theorems) == 1, "No mutual theorems yet"
-        info = theorems[0].value_object()
 
+        if len(theorems) == 1:
+            return Theorem.single(theorems[0].value_object())
+
+        # Mutual theorems
+        parsed = [Theorem.single(each.value_object()) for each in theorems]
+        return MutualTheorems(parsed)
+
+    @staticmethod
+    def single(info):
         return Theorem(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
-            value=info["value"].value_int(),  # value value value value
+            value=info["value"].value_int(),
             levels=[
                 each.value_int() for each in info["levelParams"].value_array()
             ],
@@ -507,6 +533,19 @@ class Theorem(Node):
             value=builder.exprs[self.value],
         )
         builder.register_declaration(declaration)
+
+
+class MutualTheorems(Node):
+    """
+    A block of mutually recursive theorems.
+    """
+
+    def __init__(self, theorems):
+        self.theorems = theorems
+
+    def compile(self, builder):
+        for each in self.theorems:
+            each.compile(builder)
 
 
 class Axiom(Node):
@@ -556,7 +595,7 @@ class Quot(Node):
         builder.register_quotient(name, builder.exprs[self.type])
 
 
-class Mutual(Node):
+class MutualInductive(Node):
     """
     Mutually inductive types.
     """
@@ -573,7 +612,6 @@ class Mutual(Node):
             each.compile(builder)
         for each in self.recursors:
             each.compile(builder)
-
 
 
 class Inductive(Node):
@@ -598,9 +636,9 @@ class Inductive(Node):
         if len(inductives) == 1:
             inductive = inductives[0].value_object()
             return Inductive.single(inductive, constructors, recursors)
-        return Mutual(
+        return MutualInductive(
             inductives=[
-                Inductive.single(each.value_object(), [], []) # XXX
+                Inductive.single(each.value_object(), [], [])
                 for each in inductives
             ],
             constructors=constructors,
@@ -618,8 +656,7 @@ class Inductive(Node):
             num_params=inductive["numParams"].value_int(),
             num_indices=inductive["numIndices"].value_int(),
             name_idxs=[
-                each.value_int()
-                for each in inductive["all"].value_array()
+                each.value_int() for each in inductive["all"].value_array()
             ],
             constructors=constructors,
             recursors=recursors,
