@@ -1895,7 +1895,7 @@ class DefOrTheorem(W_DeclarationKind):
 
 
 #: Reducibility hints. For regular we use positive ints.
-HINT_OPAQUE = -1
+HINT_OPAQUE = -2
 HINT_ABBREV = -1
 
 
