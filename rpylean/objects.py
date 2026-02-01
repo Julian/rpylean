@@ -986,6 +986,9 @@ class W_Const(W_Expr):
         return self
 
     def whnf(self, env):
+        reduced = self.try_delta_reduce(env)
+        if reduced is not None:
+            return reduced.whnf(env)
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):

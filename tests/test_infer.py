@@ -23,7 +23,7 @@ from rpylean.objects import (
 Empty, T, true, a, f, x = names("Empty", "T", "True", "a", "f", "x")
 EMPTY = Empty.inductive(type=TYPE)
 u, v = Name.simple("u").level(), Name.simple("v").level()
-b0 = W_BVar(0)
+b0, b1 = W_BVar(0), W_BVar(1)
 
 
 def test_fvar():
@@ -173,3 +173,25 @@ class TestProj(object):
         struct_expr = mk.app(W_LitNat.int(5), W_LitNat.int(3))
         proj = T.proj(1, struct_expr)
         assert proj.infer(env) == Fin.app(T.proj(0, struct_expr))
+
+
+class TestApp(object):
+    def test_apply_const_definition(self):
+        # def T : Type := Nat → Nat
+        fn_type = T.definition(
+            type=TYPE,
+            value=forall(Name.simple("_").binder(type=NAT))(NAT),
+        )
+
+        # def apply : T → Nat → Nat := fun f x ↦ f x
+        apply = Name.simple("apply").definition(
+            type=forall(f.binder(type=T.const()), x.binder(type=NAT))(NAT),
+            value=fun(f.binder(type=T.const()), x.binder(type=NAT))(
+                b1.app(b0),
+            ),
+        )
+
+        env = Environment.having(
+            [NAT.name.inductive(type=TYPE), fn_type, apply],
+        )
+        assert list(env.type_check()) == []
