@@ -161,6 +161,67 @@ def test_totally_empty():
         parser.from_export(StringIO(""))
 
 
+def test_lambda_strict_implicit():
+    assert ndjson_items(
+        """
+        {"in":1,"str":{"pre":0,"str":"a"}}
+        {"bvar":0,"ie":0}
+        {"ie":1,"lam":{"binderInfo":"strictImplicit","body":0,"name":1,"type":0}}
+        """
+    ) == [
+        parser.NameStr(nidx=1, parent_nidx=0, part="a"),
+        parser.Expr(eidx=0, val=parser.BVar(id=0)),
+        parser.Expr(
+            eidx=1,
+            val=parser.Lambda(
+                binder_name=1,
+                binder_type=0,
+                binder_info="strictImplicit",
+                body=0,
+            ),
+        ),
+    ]
+
+
+def test_opaque():
+    assert ndjson_items(
+        """
+        {"in":1,"str":{"pre":0,"str":"foo"}}
+        {"ie":0,"sort":1}
+        {"il":1,"succ":0}
+        {"ie":1,"sort":0}
+        {"def":[{"all":[1],"isUnsafe":false,"levelParams":[1],"name":1,"type":0,"value":1}]}
+        """
+    ) == [
+        parser.NameStr(nidx=1, parent_nidx=0, part="foo"),
+        parser.Expr(eidx=0, val=parser.Sort(level=1)),
+        parser.UniverseSucc(uidx=1, parent=0),
+        parser.Expr(eidx=1, val=parser.Sort(level=0)),
+        parser.Opaque(
+            nidx=1,
+            type=0,
+            value=1,
+            levels=[1],
+        ),
+    ]
+
+
+def test_axiom():
+    assert ndjson_items(
+        """
+        {"in":1,"str":{"pre":0,"str":"ax"}}
+        {"ie":0,"sort":1}
+        {"il":1,"succ":0}
+        {"axiomInfo":{"levelParams":[1],"name":1,"type":0}}
+        """
+    ) == [
+        parser.NameStr(nidx=1, parent_nidx=0, part="ax"),
+        parser.Expr(eidx=0, val=parser.Sort(level=1)),
+        parser.UniverseSucc(uidx=1, parent=0),
+        parser.Axiom(nidx=1, type=0, levels=[1]),
+    ]
+
+
 @pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
 def test_valid_examples_parse_successfully(path):
     """

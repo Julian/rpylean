@@ -315,7 +315,7 @@ def binder(name, info, type):
         return name.binder(type=type)
     elif info == "implicit":
         return name.implicit_binder(type=type)
-    elif info == "#BS":
+    elif info == "strictImplicit":
         return name.strict_implicit_binder(type=type)
     elif info == "instImplicit":
         return name.instance_binder(type=type)
@@ -409,6 +409,9 @@ class Definition(Node):
         assert len(defs) == 1, "No mutual defs yet"
         info = defs[0].value_object()
 
+        if "hints" not in info:
+            return Opaque.from_dict(info)
+
         hints = info["hints"]
         if hints.is_object:
             hint = hints.value_object()["regular"].value_int()
@@ -449,12 +452,12 @@ class Definition(Node):
 
 class Opaque(Node):
     @staticmethod
-    def from_dict(value):
-        info = value["opaque"].value_object()
+    def from_dict(info):
         return Opaque(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
             value=info["value"].value_int(),
+            # TODO: isUnsafe and name_idxs
             levels=[
                 each.value_int() for each in info["levelParams"].value_array()
             ],
@@ -509,7 +512,7 @@ class Theorem(Node):
 class Axiom(Node):
     @staticmethod
     def from_dict(value):
-        info = value["axiom"].value_object()
+        info = value["axiomInfo"].value_object()
         return Axiom(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
@@ -895,14 +898,12 @@ def _to_item(obj):
         cls = UniverseParam
     elif "sort" in obj:
         cls = Sort
-    elif "axiom" in obj:
+    elif "axiomInfo" in obj:
         cls = Axiom
     elif "def" in obj:
         cls = Definition
     elif "inductive" in obj:
         cls = Inductive
-    elif "opaque" in obj:
-        cls = Opaque
     elif "quotInfo" in obj:
         cls = Quot
     elif "rec" in obj:
