@@ -1194,8 +1194,25 @@ class W_Proj(W_Expr):
         return (True, target_arg)
 
     def whnf(self, env):
-        # TODO - do we need to try reducing the projection?
-        return self.with_expr(self.struct_expr.whnf(env))
+        # First reduce the struct expression to WHNF
+        reduced_struct = self.struct_expr.whnf(env)
+
+        # Try to reduce the projection if struct is a constructor application
+        args = []
+        struct_expr = reduced_struct
+        while isinstance(struct_expr, W_App):
+            args.append(struct_expr.arg)
+            struct_expr = struct_expr.fn
+
+        if isinstance(struct_expr, W_Const):
+            ctor_decl = get_decl(env.declarations, struct_expr.name)
+            if isinstance(ctor_decl.w_kind, W_Constructor):
+                num_params = ctor_decl.w_kind.num_params
+                args.reverse()
+                target_arg = args[num_params + self.field_index]
+                return target_arg.whnf(env)
+
+        return self.with_expr(reduced_struct)
 
     def incr_free_bvars(self, count, depth):
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
@@ -1742,6 +1759,8 @@ class W_App(W_Expr):
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
         # However, we need an actual constructor and application for iota reduction.
         # Hopefully we won't reach this spot with any especially large literals.
+        # First reduce to WHNF to expose any literals or constructors.
+        major_premise = major_premise.whnf(env)
         if isinstance(major_premise, W_LitNat):
             major_premise = major_premise.build_nat_expr()
 
@@ -1855,9 +1874,11 @@ class W_App(W_Expr):
                 return reduced.app(self.arg).whnf(env)
             else:
                 # We must have a constructor (or a recusor that we failed to iota-reduce earlier),
-                # so there's nothing we can do to reduce further in whnf
-                return self
-        return self
+                # so there's nothing we can do to reduce further in whnf.
+                # But we still need to return the expression with the reduced fn.
+                return fn.app(self.arg)
+        # fn reduced but is not a constant - return with reduced fn
+        return fn.app(self.arg)
 
     def strong_reduce_step(self, env):
         # First, try beta reduction
