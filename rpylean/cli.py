@@ -2,6 +2,7 @@
 CLI for rpylean.
 """
 from __future__ import print_function
+from rpylean.parser import ExportVersionError
 
 import errno
 
@@ -20,7 +21,7 @@ cli = CLI(
 
 
 @cli.subcommand(
-    ["EXPORT_FILE", "*DECLS"],
+    ["*EXPORT_FILES"],
     help="Type check an exported Lean environment.",
     options=[
         (
@@ -30,40 +31,34 @@ cli = CLI(
     ],
 )
 def check(self, args, stdin, stdout, stderr):
-    path, = args.args
-    environment = environment_from(path=path, stdin=stdin)
-    ncheck = len(args.varargs) or len(environment.declarations)
-    stdout.write(
-        "Checking %s declaration%s...\n" % (
-            ncheck,
-            "s" if ncheck != 1 else "",
-        ),
-    )
+    for path in args.varargs:
+        environment = environment_from(path=path, stdin=stdin)
+        ncheck = len(environment.declarations)
+        suffix = "" if len(args.varargs) == 1 else " from %s" % (path,)
+        stdout.write(
+            "Checking %s declaration%s%s…\n" % (
+                ncheck,
+                "s" if ncheck != 1 else "",
+                suffix,
+            ),
+        )
 
-    failures, max_fail = 0, int(args.options["max-fail"] or "0")
-    if args.varargs:
-        declarations = [
-            environment.declarations[Name.from_str(each)]
-            for each in args.varargs
-        ]
-        errors = environment.type_check(declarations)
-    else:
-        errors = environment.type_check()
+        failures, max_fail = 0, int(args.options["max-fail"] or "0")
 
-    try:
-        for w_error in errors:
-            stderr.write(w_error.str())
-            stderr.write("\n")
+        try:
+            for w_error in environment.type_check():
+                stderr.write(w_error.str())
+                stderr.write("\n")
 
-            failures += 1
-            if 0 < max_fail <= failures:
-                break
-    except Exception:
-        stderr.write("Unexpected error during type checking\n")
-        raise
+                failures += 1
+                if 0 < max_fail <= failures:
+                    break
+        except Exception:
+            stderr.write("Unexpected error during type checking\n")
+            raise
 
-    if failures:
-        return 1
+        if failures:
+            return 1
 
     stdout.write("All declarations are type-correct.\n")
     return 0
