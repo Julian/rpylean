@@ -6,6 +6,7 @@ from textwrap import dedent
 from traceback import print_exc
 import pdb
 
+from rpython.rlib.jit import promote
 from rpython.rlib.objectmodel import not_rpython, r_dict, we_are_translated
 
 from rpylean import parser
@@ -256,13 +257,18 @@ class Environment(object):
         expr1 = expr1.whnf(self)
         expr2 = expr2.whnf(self)
 
-        cls = expr1.__class__
-        if cls is expr2.__class__ and (
+        # Promote the classes so the JIT can specialize on expression types.
+        # This is critical for the type dispatch below - it allows the JIT
+        # to compile specialized traces for common type combinations.
+        cls1 = promote(expr1.__class__)
+        cls2 = promote(expr2.__class__)
+
+        if cls1 is cls2 and (
             # returning NotImplemented (from W_Const.def_eq)
             # isn't valid RPython, and the point is these are not comparable
             # until they're reduced...
             # Still would love to think of a better way.
-            cls is not W_Const or expr1.name == expr2.name
+            cls1 is not W_Const or expr1.name == expr2.name
         ):
             return expr1.def_eq(expr2, self.def_eq)
 
@@ -291,12 +297,12 @@ class Environment(object):
         # we need to try everything else before actually calling 'build_nat_expr'
         # (so that checks like syntactic equality can succeed and prevent us from
         # building up ~4 billion `Nat` expressions)
-        if cls is W_LitNat:
+        if cls1 is W_LitNat:
             return self.def_eq(expr1.build_nat_expr(), expr2)
         elif isinstance(expr2, W_LitNat):
             return self.def_eq(expr1, expr2.build_nat_expr())
 
-        if cls is W_LitStr:
+        if cls1 is W_LitStr:
             return self.def_eq(expr1.build_str_expr(self), expr2)
         elif isinstance(expr2, W_LitStr):
             return self.def_eq(expr1, expr2.build_str_expr(self))

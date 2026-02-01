@@ -1,8 +1,31 @@
+from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
 from rpython.rlib.objectmodel import compute_hash
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count, warn
 from rpylean.exceptions import InvalidProjection
+
+
+# JIT driver for the WHNF reduction loop - the core hot path of type checking.
+# greens: fn_class determines which reduction rule applies (beta, delta, iota)
+# reds: the mutable state during reduction
+whnf_jitdriver = JitDriver(
+    greens=["fn_class"],
+    reds=["self_expr", "env", "fn"],
+    name="whnf",
+)
+
+
+def get_decl(declarations, name):
+    """
+    Look up a declaration by name.
+
+    This is a hot path during type checking - called for every constant.
+    The declarations dict is immutable after environment construction,
+    so this lookup is pure and can be elided by the JIT when the name
+    is known at trace time.
+    """
+    return declarations[name]
 
 
 class W_TypeError(object):
@@ -116,6 +139,7 @@ class Name(_Item):
             return "[anonymous]"
         return ".".join([pretty_part(each) for each in self.components])
 
+    @elidable
     def hash(self):
         hash_val = 0x345678
         for each in self.components:
@@ -921,8 +945,9 @@ TYPE = W_LEVEL_ZERO.succ().sort()
 
 
 # Takes the level params from 'const', and substitutes them into 'target'
+@unroll_safe
 def apply_const_level_params(const, target, env):
-    decl = env.declarations[const.name]
+    decl = get_decl(env.declarations, const.name)
     if len(decl.levels) != len(const.levels):
         raise RuntimeError(
             "W_Const.infer: expected %s levels, got %s"
@@ -995,7 +1020,7 @@ class W_Const(W_Expr):
         return self
 
     def try_delta_reduce(self, env, only_abbrev=False):
-        decl = env.declarations[self.name]
+        decl = get_decl(env.declarations, self.name)
         if decl is None:
             print("Missing decl: %s" % self.name.components)
             raise RuntimeError("Missing decl: %s" % self.str())
@@ -1010,7 +1035,7 @@ class W_Const(W_Expr):
         return apply_const_level_params(self, val, env)
 
     def infer(self, env):
-        decl = env.declarations[self.name]
+        decl = get_decl(env.declarations, self.name)
         params = decl.levels
 
         if not params:
@@ -1018,6 +1043,7 @@ class W_Const(W_Expr):
 
         return apply_const_level_params(self, decl.type, env)
 
+    @unroll_safe
     def subst_levels(self, substs):
         new_levels = []
         for level in self.levels:
@@ -1157,7 +1183,7 @@ class W_Proj(W_Expr):
         if not isinstance(struct_expr, W_Const):
             return (False, self)
 
-        ctor_decl = env.declarations[struct_expr.name]
+        ctor_decl = get_decl(env.declarations, struct_expr.name)
         if not isinstance(ctor_decl.w_kind, W_Constructor):
             return (False, self)
 
@@ -1204,13 +1230,13 @@ class W_Proj(W_Expr):
             apps.append(struct_expr_type)
             struct_expr_type = struct_expr_type.fn
 
-        struct_type = env.declarations[self.struct_name]
+        struct_type = get_decl(env.declarations, self.struct_name)
 
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
         assert isinstance(struct_expr_type, W_Const), (
             "Expected W_Const, got %s" % struct_expr_type
         )
-        target_const = env.declarations[struct_expr_type.name]
+        target_const = get_decl(env.declarations, struct_expr_type.name)
         assert target_const == struct_type, "Expected %s, got %s" % (
             target_const,
             struct_type,
@@ -1603,7 +1629,7 @@ class W_App(W_Expr):
         if not isinstance(target, W_Const):
             return False, self
 
-        decl = env.declarations[target.name]
+        decl = get_decl(env.declarations, target.name)
         if not isinstance(decl.w_kind, W_Recursor):
             return False, self
 
@@ -1645,7 +1671,7 @@ class W_App(W_Expr):
             assert isinstance(old_ty_base, W_Const)
 
             assert len(decl.w_kind.names) == 1
-            inductive_decl = env.declarations[decl.w_kind.names[0]]
+            inductive_decl = get_decl(env.declarations, decl.w_kind.names[0])
             assert isinstance(inductive_decl.w_kind, W_Inductive)
 
             assert len(inductive_decl.w_kind.constructors) == 1
@@ -1783,6 +1809,13 @@ class W_App(W_Expr):
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def whnf(self, env):
         fn = self.fn.whnf(env)
+        fn_class = fn.__class__
+
+        # JIT merge point: the class of fn determines which reduction applies
+        whnf_jitdriver.jit_merge_point(
+            fn_class=fn_class, self_expr=self, env=env, fn=fn
+        )
+
         # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
             body = fn.body.instantiate(self.arg, 0)
@@ -1794,6 +1827,8 @@ class W_App(W_Expr):
             return reduced.whnf(env)
 
         if isinstance(fn, W_Const):
+            # Promote fn so JIT can specialize on specific constants
+            fn = promote(fn)
             reduced = fn.try_delta_reduce(env)
             if reduced is not None:
                 return reduced.app(self.arg).whnf(env)

@@ -42,9 +42,13 @@ export-simple path:
     rm "$olean_output_dir/JustfileTemporary.olean"; \
     rmdir "$olean_output_dir"
 
-# Translate (compile) rpylean into an rpylean-c binary.
+# Translate (compile) rpylean into an rpylean-c binary (no JIT).
 translate *ARGS:
-    "{{ pypy }}" "{{ rpython }}" {{ ARGS }} "{{ target }}"
+    "{{ pypy }}" "{{ rpython }}" --output="{{ translated }}-nojit" {{ ARGS }} "{{ target }}"
+
+# Translate with JIT enabled.
+jit *ARGS:
+    "{{ pypy }}" "{{ rpython }}" --opt=jit --output="{{ translated }}" {{ ARGS }} "{{ target }}"
 
 # Run rpylean's (untranslated) tests.
 test *ARGS=tests:
