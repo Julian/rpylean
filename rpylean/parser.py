@@ -592,7 +592,8 @@ class Quot(Node):
 
     def compile(self, builder):
         name = builder.names[self.nidx]
-        builder.register_quotient(name, builder.exprs[self.type])
+        levels = [builder.names[nidx] for nidx in self.levels]
+        builder.register_quotient(name, builder.exprs[self.type], levels)
 
 
 class MutualInductive(Node):

@@ -1539,6 +1539,20 @@ class W_Let(W_Expr):
             body=self.body.instantiate(expr, depth + 1),
         )
 
+    def incr_free_bvars(self, count, depth):
+        return self.name.let(
+            type=self.type.incr_free_bvars(count, depth),
+            value=self.value.incr_free_bvars(count, depth),
+            body=self.body.incr_free_bvars(count, depth + 1),
+        )
+
+    def bind_fvar(self, fvar, depth):
+        return self.name.let(
+            type=self.type.bind_fvar(fvar, depth),
+            value=self.value.bind_fvar(fvar, depth),
+            body=self.body.bind_fvar(fvar, depth + 1),
+        )
+
     def syntactic_eq(self, other):
         return (
             syntactic_eq(self.name, other.name)
@@ -1552,6 +1566,13 @@ class W_Let(W_Expr):
 
     def whnf(self, env):
         return self.body.instantiate(self.value, 0).whnf(env)
+
+    def subst_levels(self, substs):
+        return self.name.let(
+            type=self.type.subst_levels(substs),
+            value=self.value.subst_levels(substs),
+            body=self.body.subst_levels(substs),
+        )
 
 
 class W_App(W_Expr):

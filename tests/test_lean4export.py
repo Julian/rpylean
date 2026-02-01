@@ -423,6 +423,43 @@ def test_dump_constant_list():
 # ------------------------
 
 
+def test_quotient():
+    env = from_str(
+        """
+        {"in":1,"str":{"pre":0,"str":"Quot"}}
+        {"in":2,"str":{"pre":1,"str":"mk"}}
+        {"in":3,"str":{"pre":1,"str":"lift"}}
+        {"in":4,"str":{"pre":1,"str":"ind"}}
+        {"in":5,"str":{"pre":0,"str":"u"}}
+        {"in":6,"str":{"pre":0,"str":"v"}}
+        {"in":7,"str":{"pre":0,"str":"α"}}
+        {"in":8,"str":{"pre":0,"str":"r"}}
+        {"il":1,"param":5}
+        {"il":2,"param":6}
+        {"ie":0,"sort":1}
+        {"ie":1,"sort":2}
+        {"ie":2,"bvar":0}
+        {"ie":3,"bvar":1}
+        {"ie":4,"app":{"fn":3,"arg":2}}
+        {"ie":5,"const":{"name":0,"us":[]}}
+        {"ie":6,"sort":0}
+        {"ie":7,"forallE":{"binderInfo":"default","body":6,"name":7,"type":0}}
+        {"ie":8,"sort":1}
+        {"ie":9,"forallE":{"binderInfo":"default","body":8,"name":8,"type":4}}
+        {"quotInfo":{"kind":"type","levelParams":[1],"name":1,"type":7}}
+        {"quotInfo":{"kind":"ctor","levelParams":[1],"name":2,"type":9}}
+        {"quotInfo":{"kind":"lift","levelParams":[1,2],"name":3,"type":5}}
+        {"quotInfo":{"kind":"ind","levelParams":[1],"name":4,"type":5}}
+        """
+    ).finish()
+
+    # TODO: assert they have the right types
+    assert Name.from_str("Quot") in env.declarations
+    assert Name.from_str("Quot.mk") in env.declarations
+    assert Name.from_str("Quot.lift") in env.declarations
+    assert Name.from_str("Quot.ind") in env.declarations
+
+
 def test_unknown_quotient():
     with pytest.raises(UnknownQuotient) as e:
         from_str(

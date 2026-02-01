@@ -95,8 +95,8 @@ class EnvironmentBuilder(object):
         assert rule_idx not in self.rec_rules, rule_idx
         self.rec_rules[rule_idx] = w_recrule
 
-    def register_quotient(self, name, type):
-        self.quotient.append((name, type))
+    def register_quotient(self, name, type, levels):
+        self.quotient.append((name, type, levels))
 
     def register_declaration(self, decl):
         self.declarations.append(decl)
@@ -115,7 +115,7 @@ class EnvironmentBuilder(object):
         if self.quotient:
             from rpylean.quot import QUOT, QUOT_MK, QUOT_IND, QUOT_LIFT
 
-            for name, type in self.quotient:
+            for name, type, levels in self.quotient:
                 n = len(name.components)
                 if n == 0 or n > 2 or name.components[0] != "Quot":
                     raise UnknownQuotient(name, type)
@@ -131,9 +131,7 @@ class EnvironmentBuilder(object):
                 else:
                     raise UnknownQuotient(name, type)
 
-                print(name.str())
-                print(type)
-                print(expected)
+                self.register_declaration(name.axiom(type=type, levels=levels))
 
         return Environment.having(self.declarations)
 
