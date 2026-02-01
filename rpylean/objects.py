@@ -836,14 +836,17 @@ class W_Expr(_Item):
             return expr
         return expr.app(*more)
 
-    def whnf(self, env):
+    def whnf_with_progress(self, env):
         """
         Reduce this expression to weak head normal form.
+        This is the same as W_Expr.whnf, but returns (expr, progress)
+        where progress is True if we reduced the expression at all, and False otherwise
 
         Uses an iterative loop with the JIT driver to avoid deep
         recursion and allow the tracing JIT to compile efficient loops.
         """
         expr = self
+        progress = False
         while True:
             expr_class = expr.__class__
             whnf_jitdriver.jit_merge_point(
@@ -853,8 +856,20 @@ class W_Expr(_Item):
             )
             next = expr._whnf_core(env)
             if next is None:
-                return expr
+                return (expr, progress)
             expr = next
+            progress = True
+
+    def whnf(self, env):
+        """
+        Reduce this expression to weak head normal form.
+
+        Uses an iterative loop with the JIT driver to avoid deep
+        recursion and allow the tracing JIT to compile efficient loops.
+        """
+        (expr, _progress) = self.whnf_with_progress(env)
+        return expr
+
 
     def _whnf_core(self, env):
         """
@@ -2240,16 +2255,18 @@ class W_App(W_Expr):
         if reduced is not None:
             return reduced
 
-        fn = self.fn.whnf(env)
+        fn, progress = self.fn.whnf_with_progress(env)
 
         # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg, 0)
 
         # Handle recursor in head position
-        progress, reduced = self.try_iota_reduce(env)
-        if progress:
+        iota_progress, reduced = self.try_iota_reduce(env)
+        if iota_progress:
             return reduced
+
+
 
         if isinstance(fn, W_Const):
             # Promote fn so JIT can specialize on specific constants
@@ -2257,11 +2274,9 @@ class W_App(W_Expr):
             reduced = fn.try_delta_reduce(env)
             if reduced is not None:
                 return reduced.app(self.arg)
-            else:
-                # We must have a constructor (or a recursor that we
-                # failed to iota-reduce earlier), so there's nothing
-                # we can do to reduce further in whnf
-                return None
+        # fn reduced but is not a constant - return with reduced fn
+        if progress:
+            return fn.app(self.arg)
         return None
 
     def bind_fvar(self, fvar, depth):
