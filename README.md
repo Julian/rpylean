@@ -20,6 +20,8 @@ Any RPython interpreter (program) can be run "untranslated" -- meaning as if it 
 The former is great because it allows use of any Python tool to work on the interpreter, and critically, any Python *error handling* is propagated as normal.
 And translated binaries are of course great because they're fast and self-contained, not depending on Python at all.
 So, the former is what you often use while developing, and the latter is what we build for actual use.
+Furthermore, one can translate the program either *with* or *without* inserting a JIT.
+Translated binaries with the JIT inserted should be (much?) faster, but in exchange translation is ~3x slower.
 
 To run `rpylean` untranslated (i.e. on top of a Python interpreter) run:
 
@@ -40,7 +42,7 @@ You can find some examples in the `tests/examples` directory if you just want to
 
 ### Translating
 
-To translate `rpylean` and build a binary run:
+To translate `rpylean` *without* a JIT and build a binary run:
 
 ```sh
 pypy <pypy-checkout>/rpython/bin/rpython targetrpylean.py
@@ -52,7 +54,9 @@ or
 just translate
 ```
 
-which will output a standalone `rpylean-c` binary usable with the same CLI as above.
+which will output a standalone `rpylean-c-nojit` binary usable with the same CLI as above.
+
+You can enable the JIT by instead using `just jit`, or by passing `--opt=jit` to RPython.
 
 ### Testing
 
