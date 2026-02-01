@@ -434,6 +434,7 @@ class TestProj(object):
         proj2 = Foo.proj(0, y.const())
         assert not env.def_eq(proj1, proj2)
 
+
 def test_beta_reduction():
     env = Environment.having(
         [

@@ -853,6 +853,9 @@ class W_LitStr(W_Expr):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
 
+    def whnf(self, env):
+        return self
+
 
 class W_Sort(W_Expr):
     def __init__(self, level):
@@ -1520,6 +1523,9 @@ class W_Let(W_Expr):
 
     def strong_reduce_step(self, env):
         return (True, self.body.instantiate(self.value, 0))
+
+    def whnf(self, env):
+        return self.body.instantiate(self.value, 0).whnf(env)
 
 
 class W_App(W_Expr):
