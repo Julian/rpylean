@@ -35,9 +35,9 @@ class ExportVersionError(ParseError):
         self.got = got
 
     def __str__(self):
-        return "Expected export format version {} but got {}".format(
+        return "Expected export format version %s but got %s" % (
             EXPORT_VERSION,
-            self.got,
+            "no export metadata" if self.got is None else self.got,
         )
 
 

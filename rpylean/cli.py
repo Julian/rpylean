@@ -32,7 +32,13 @@ cli = CLI(
 )
 def check(self, args, stdin, stdout, stderr):
     for path in args.varargs:
-        environment = environment_from(path=path, stdin=stdin)
+        try:
+            environment = environment_from(path=path, stdin=stdin)
+        except ExportVersionError as err:
+            stderr.write(err.__str__())
+            stderr.write("\n")
+            return 1
+
         ncheck = len(environment.declarations)
         suffix = "" if len(args.varargs) == 1 else " from %s" % (path,)
         stdout.write(
