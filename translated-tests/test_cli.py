@@ -6,6 +6,8 @@ from __future__ import print_function
 import os
 import subprocess
 
+from rpylean.parser import EXPORT_VERSION
+
 
 def rpylean(*args, **kwargs):
     return subprocess.Popen(
@@ -20,7 +22,7 @@ def rpylean(*args, **kwargs):
 def test_stdin():
     process = rpylean("-")
     stdout, stderr = process.communicate(
-        '{"meta":{"format":{"version":"3.0.0"}}}\n',
+        '{"meta":{"format":{"version":"%s"}}}\n' % (EXPORT_VERSION,),
     )
 
     assert "All declarations are type-correct." in stdout, stdout

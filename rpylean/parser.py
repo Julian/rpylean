@@ -14,7 +14,7 @@ from rpylean import objects
 from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
 
 
-EXPORT_VERSION = "3.0.0"
+EXPORT_VERSION = "3.1.0"
 
 
 class ParseError(Exception):
@@ -38,7 +38,7 @@ class ExportVersionError(ParseError):
         return "Expected export format version %s but got %s" % (
             EXPORT_VERSION,
             "no export metadata" if self.got is None else self.got,
-        )
+         )
 
 
 class Node(object):
@@ -405,19 +405,7 @@ class Proj(ExprVal):
 class Definition(Node):
     @staticmethod
     def from_dict(value):
-        defs = value["def"].value_array()
-
-        if len(defs) == 1:
-            return Definition.single(defs[0].value_object())
-
-        definitions = [Definition.single(each.value_object()) for each in defs]
-        return MutualDefinitions(definitions)
-
-    @staticmethod
-    def single(info):
-        if "hints" not in info:
-            return Opaque.from_dict(info)
-
+        info = value["def"].value_object()
         hints = info["hints"]
         if hints.is_object:
             hint = hints.value_object()["regular"].value_int()
@@ -456,22 +444,10 @@ class Definition(Node):
         builder.register_declaration(declaration)
 
 
-class MutualDefinitions(Node):
-    """
-    A block of mutually recursive definitions.
-    """
-
-    def __init__(self, definitions):
-        self.definitions = definitions
-
-    def compile(self, builder):
-        for each in self.definitions:
-            each.compile(builder)
-
-
 class Opaque(Node):
     @staticmethod
-    def from_dict(info):
+    def from_dict(value):
+        info = value["opaque"].value_object()
         return Opaque(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
@@ -500,17 +476,7 @@ class Opaque(Node):
 class Theorem(Node):
     @staticmethod
     def from_dict(value):
-        theorems = value["thm"].value_array()
-
-        if len(theorems) == 1:
-            return Theorem.single(theorems[0].value_object())
-
-        # Mutual theorems
-        parsed = [Theorem.single(each.value_object()) for each in theorems]
-        return MutualTheorems(parsed)
-
-    @staticmethod
-    def single(info):
+        info = value["thm"].value_object()
         return Theorem(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
@@ -551,7 +517,7 @@ class MutualTheorems(Node):
 class Axiom(Node):
     @staticmethod
     def from_dict(value):
-        info = value["axiomInfo"].value_object()
+        info = value["axiom"].value_object()
         return Axiom(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
@@ -576,7 +542,7 @@ class Axiom(Node):
 class Quot(Node):
     @staticmethod
     def from_dict(value):
-        info = value["quotInfo"].value_object()
+        info = value["quot"].value_object()
         return Quot(
             nidx=info["name"].value_int(),
             type=info["type"].value_int(),
@@ -624,14 +590,14 @@ class Inductive(Node):
     def from_dict(value):
         info = value["inductive"].value_object()
 
-        inductives = info["inductiveVals"].value_array()
+        inductives = info["types"].value_array()
         constructors = [
             Constructor.from_dict(each.value_object())
-            for each in info["constructorVals"].value_array()
+            for each in info["ctors"].value_array()
         ]
         recursors = [
             Recursor.from_dict(each.value_object())
-            for each in info["recursorVals"].value_array()
+            for each in info["recs"].value_array()
         ]
 
         if len(inductives) == 1:
@@ -904,8 +870,61 @@ def from_ndjson(stream):
             return
         value = from_json(line)
         assert value.is_object, line
+        obj = value.value_object()
 
-        yield _to_item(value.value_object())
+        if "str" in obj:
+            cls = NameStr
+        elif "app" in obj:
+            cls = App
+        elif "bvar" in obj:
+            cls = BVar
+        elif "const" in obj:
+            cls = Const
+        elif "num" in obj:
+            cls = NameNum
+        elif "max" in obj:
+            cls = UniverseMax
+        elif "imax" in obj:
+            cls = UniverseIMax
+        elif "succ" in obj:
+            cls = UniverseSucc
+        elif "param" in obj:
+            cls = UniverseParam
+        elif "sort" in obj:
+            cls = Sort
+        elif "axiom" in obj:
+            cls = Axiom
+        elif "def" in obj:
+            cls = Definition
+        elif "opaque" in obj:
+            cls = Opaque
+        elif "inductive" in obj:
+            cls = Inductive
+        elif "quot" in obj:
+            cls = Quot
+        elif "rec" in obj:
+            cls = Recursor
+        elif "thm" in obj:
+            cls = Theorem
+        elif "forallE" in obj:
+            cls = ForAll
+        elif "letE" in obj:
+            cls = Let
+        elif "lam" in obj:
+            cls = Lambda
+        elif "proj" in obj:
+            cls = Proj
+        elif "natVal" in obj:
+            cls = LitNat
+        elif "strVal" in obj:
+            cls = LitStr
+        else:
+            assert False, "unknown export object: %s" % (line,)
+        try:
+            yield cls.from_dict(obj)
+        except Exception:
+            print(line)
+            raise
 
 
 def from_str(text):
@@ -913,53 +932,3 @@ def from_str(text):
     Parse NDJSON out of a lean4export-formatted string.
     """
     return from_ndjson(StringIO(dedent(text).strip()))
-
-
-def _to_item(obj):
-    if "str" in obj:
-        cls = NameStr
-    elif "app" in obj:
-        cls = App
-    elif "bvar" in obj:
-        cls = BVar
-    elif "const" in obj:
-        cls = Const
-    elif "num" in obj:
-        cls = NameNum
-    elif "max" in obj:
-        cls = UniverseMax
-    elif "imax" in obj:
-        cls = UniverseIMax
-    elif "succ" in obj:
-        cls = UniverseSucc
-    elif "param" in obj:
-        cls = UniverseParam
-    elif "sort" in obj:
-        cls = Sort
-    elif "axiomInfo" in obj:
-        cls = Axiom
-    elif "def" in obj:
-        cls = Definition
-    elif "inductive" in obj:
-        cls = Inductive
-    elif "quotInfo" in obj:
-        cls = Quot
-    elif "rec" in obj:
-        cls = Recursor
-    elif "thm" in obj:
-        cls = Theorem
-    elif "forallE" in obj:
-        cls = ForAll
-    elif "letE" in obj:
-        cls = Let
-    elif "lam" in obj:
-        cls = Lambda
-    elif "proj" in obj:
-        cls = Proj
-    elif "natVal" in obj:
-        cls = LitNat
-    elif "strVal" in obj:
-        cls = LitStr
-    else:
-        assert False, "unknown"
-    return cls.from_dict(obj)

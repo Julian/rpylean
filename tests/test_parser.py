@@ -39,7 +39,7 @@ def test_inductive():
         {"in":1,"str":{"pre":0,"str":"Empty"}}
         {"il":1,"succ":0}
         {"ie":0,"sort":1}
-        {"inductive":{"constructorVals":[],"inductiveVals":[{"all":[1],"ctors":[],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}],"recursorVals":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[3],"name":2,"numIndices":0,"numMinors":0,"numMotives":1,"numParams":0,"rules":[],"type":8}]}}
+        {"inductive":{"ctors":[],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[3],"name":2,"numIndices":0,"numMinors":0,"numMotives":1,"numParams":0,"rules":[],"type":8}],"types":[{"all":[1],"ctors":[],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="Empty"),
@@ -81,7 +81,7 @@ def test_constructor():
         {"in":2,"str":{"pre":1,"str":"intro"}}
         {"il":1,"succ":0}
         {"ie":0,"sort":1}
-        {"inductive":{"constructorVals":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1}],"inductiveVals":[{"all":[1],"ctors":[2],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}],"recursorVals":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[4],"name":3,"numIndices":0,"numMinors":1,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":13}],"type":11}]}}
+        {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[4],"name":3,"numIndices":0,"numMinors":1,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":13}],"type":11}],"types":[{"all":[1],"ctors":[2],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="True"),
@@ -190,7 +190,7 @@ def test_opaque():
         {"ie":0,"sort":1}
         {"il":1,"succ":0}
         {"ie":1,"sort":0}
-        {"def":[{"all":[1],"isUnsafe":false,"levelParams":[1],"name":1,"type":0,"value":1}]}
+        {"opaque":{"all":[1],"isUnsafe":false,"levelParams":[1],"name":1,"type":0,"value":1}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="foo"),
@@ -212,7 +212,7 @@ def test_axiom():
         {"in":1,"str":{"pre":0,"str":"ax"}}
         {"ie":0,"sort":1}
         {"il":1,"succ":0}
-        {"axiomInfo":{"levelParams":[1],"name":1,"type":0}}
+        {"axiom":{"levelParams":[1],"name":1,"type":0}}
         """
     ) == [
         parser.NameStr(nidx=1, parent_nidx=0, part="ax"),

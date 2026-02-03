@@ -214,7 +214,7 @@ def test_dump_large_natlit():
         {"ie":33,"lam":{"binderInfo":"default","body":32,"name":10,"type":16}}
         {"ie":34,"lam":{"binderInfo":"default","body":33,"name":9,"type":7}}
         {"ie":35,"lam":{"binderInfo":"default","body":34,"name":7,"type":4}}
-        {"inductive":{"constructorVals":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[],"name":3,"numFields":1,"numParams":0,"type":2}],"inductiveVals":[{"all":[1],"ctors":[2,3],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}],"recursorVals":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[6],"name":5,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":24},{"ctor":3,"nfields":1,"rhs":35}],"type":21}]}}
+        {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[],"name":3,"numFields":1,"numParams":0,"type":2}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[6],"name":5,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":24},{"ctor":3,"nfields":1,"rhs":35}],"type":21}],"types":[{"all":[1],"ctors":[2,3],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
         {"ie":36,"natVal":"100000000000000023456789"}
         """,
     ) == EnvironmentBuilder(exprs=[W_LitNat.long(100000000000000023456789)])
@@ -283,7 +283,7 @@ def test_dump_constant_id():
         {"forallE":{"binderInfo":"implicit","body":3,"name":3,"type":0},"ie":4}
         {"ie":5,"lam":{"binderInfo":"default","body":1,"name":4,"type":1}}
         {"ie":6,"lam":{"binderInfo":"implicit","body":5,"name":3,"type":0}}
-        {"def":[{"all":[1],"hints":{"regular":1},"levelParams":[2],"name":1,"safety":"safe","type":4,"value":6}]}
+        {"def":{"all":[1],"hints":{"regular":1},"levelParams":[2],"name":1,"safety":"safe","type":4,"value":6}}
         """,
     ).finish() == Environment.having(
         [
@@ -395,7 +395,7 @@ def test_dump_constant_list():
         {"ie":53,"lam":{"binderInfo":"default","body":52,"name":12,"type":17}}
         {"ie":54,"lam":{"binderInfo":"default","body":53,"name":10,"type":14}}
         {"ie":55,"lam":{"binderInfo":"default","body":54,"name":3,"type":0}}
-        {"inductive":{"constructorVals":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":4,"numFields":0,"numParams":1,"type":5},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[2],"name":5,"numFields":2,"numParams":1,"type":12}],"inductiveVals":[{"all":[1],"ctors":[4,5],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":0,"numNested":0,"numParams":1,"type":1}],"recursorVals":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[9,2],"name":8,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":1,"rules":[{"ctor":4,"nfields":0,"rhs":39},{"ctor":5,"nfields":2,"rhs":55}],"type":35}]}}
+        {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":4,"numFields":0,"numParams":1,"type":5},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[2],"name":5,"numFields":2,"numParams":1,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[9,2],"name":8,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":1,"rules":[{"ctor":4,"nfields":0,"rhs":39},{"ctor":5,"nfields":2,"rhs":55}],"type":35}],"types":[{"all":[1],"ctors":[4,5],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":0,"numNested":0,"numParams":1,"type":1}]}}
         """,
     ).finish()
     rec = Name(["List", "rec"]).recursor(  # FIXME
@@ -416,6 +416,51 @@ def test_dump_constant_list():
         is_recursive=True,
     )
     assert env == Environment.having([List, nil, cons, rec])
+
+
+def test_dump_opaque():
+    a, alpha = Name.simple("a"), Name.simple("α")
+    u = Name.simple("u").level()
+    b0 = W_BVar(0)
+    b1 = W_BVar(1)
+
+    id = Name.simple("id")
+    id_type = forall(
+        alpha.implicit_binder(type=u.sort()),
+        a.binder(type=b0),
+    )(b1)
+    id_value = fun(
+        alpha.implicit_binder(type=u.sort()),
+        a.binder(type=b0),
+    )(b0)
+
+    assert from_str(
+        #eval run <| dumpConstant ``opaqueId
+        """
+        {"in":1,"str":{"pre":0,"str":"id"}}
+        {"in":2,"str":{"pre":0,"str":"u"}}
+        {"il":1,"param":2}
+        {"in":3,"str":{"pre":0,"str":"α"}}
+        {"ie":0,"sort":1}
+        {"in":4,"str":{"pre":0,"str":"a"}}
+        {"bvar":0,"ie":1}
+        {"bvar":1,"ie":2}
+        {"forallE":{"binderInfo":"default","body":2,"name":4,"type":1},"ie":3}
+        {"forallE":{"binderInfo":"implicit","body":3,"name":3,"type":0},"ie":4}
+        {"ie":5,"lam":{"binderInfo":"default","body":1,"name":4,"type":1}}
+        {"ie":6,"lam":{"binderInfo":"implicit","body":5,"name":3,"type":0}}
+        {"def":{"all":[1],"hints":{"regular":1},"levelParams":[2],"name":1,"safety":"safe","type":4,"value":6}}
+        """,
+    ).finish() == Environment.having(
+        [
+            id.definition(
+                type=id_type,
+                value=id_value,
+                levels=[Name.simple("u")],
+            )
+        ],
+    )
+
 
 
 # ------------------------
@@ -446,10 +491,10 @@ def test_quotient():
         {"ie":7,"forallE":{"binderInfo":"default","body":6,"name":7,"type":0}}
         {"ie":8,"sort":1}
         {"ie":9,"forallE":{"binderInfo":"default","body":8,"name":8,"type":4}}
-        {"quotInfo":{"kind":"type","levelParams":[1],"name":1,"type":7}}
-        {"quotInfo":{"kind":"ctor","levelParams":[1],"name":2,"type":9}}
-        {"quotInfo":{"kind":"lift","levelParams":[1,2],"name":3,"type":5}}
-        {"quotInfo":{"kind":"ind","levelParams":[1],"name":4,"type":5}}
+        {"quot":{"kind":"type","levelParams":[1],"name":1,"type":7}}
+        {"quot":{"kind":"ctor","levelParams":[1],"name":2,"type":9}}
+        {"quot":{"kind":"lift","levelParams":[1,2],"name":3,"type":5}}
+        {"quot":{"kind":"ind","levelParams":[1],"name":4,"type":5}}
         """
     ).finish()
 
@@ -468,7 +513,7 @@ def test_unknown_quotient():
             {"in":2,"str":{"pre":1,"str":"something"}}
             {"il":1,"succ":0}
             {"ie":0,"sort":1}
-            {"quotInfo":{"kind":"type","levelParams":[],"name":2,"type":0}}
+            {"quot":{"kind":"type","levelParams":[],"name":2,"type":0}}
             """
         ).finish()
 
