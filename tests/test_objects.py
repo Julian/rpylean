@@ -106,16 +106,16 @@ class TestName(object):
         assert name.in_namespace(base) == expected
 
     def test_is_private_via_prefix(self):
-        assert Name(["_private", "foo"]).is_private()
+        assert Name(["_private", "foo"]).is_private
 
     def test_is_private_via_nested(self):
-        assert Name.from_str("foo._private.bar.0.baz").is_private()
+        assert Name.from_str("foo._private.bar.0.baz").is_private
 
     def test_not_private(self):
-        assert not Name(["foo"]).is_private()
+        assert not Name(["foo"]).is_private
 
     def test_not_private_nested(self):
-        assert not Name(["foo", "bar"]).is_private()
+        assert not Name(["foo", "bar"]).is_private
 
     def test_app(self):
         bar = Name(["foo", "bar"])

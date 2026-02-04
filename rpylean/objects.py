@@ -149,6 +149,7 @@ class Name(_Item):
     def syntactic_eq(self, other):
         return self.components == other.components
 
+    @property
     def is_private(self):
         """
         Is this a private name?
@@ -1926,6 +1927,13 @@ class W_Declaration(_Item):
         for each in levels:
             assert isinstance(each, Name), "%s is not a level name" % (each,)
         self.levels = levels
+
+    @property
+    def is_private(self):
+        """
+        Is this a private declaration?
+        """
+        return self.name.is_private
 
     def const(self, **kwargs):
         """

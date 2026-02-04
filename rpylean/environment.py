@@ -238,7 +238,8 @@ class Environment(object):
         Dump the contents of this environment to the given stream.
         """
         for decl in self.declarations.values():
-            self.print(decl, stdout)
+            if not decl.is_private:
+                self.print(decl, stdout)
 
     def def_eq(self, expr1, expr2):
         """
