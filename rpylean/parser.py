@@ -269,23 +269,23 @@ class Let(ExprVal):
         let = value["letE"].value_object()
         val = Let(
             nidx=let["name"].value_int(),
-            def_type=let["type"].value_int(),
-            def_val=let["value"].value_int(),
+            type=let["type"].value_int(),
+            value=let["value"].value_int(),
             body=let["body"].value_int(),
             # TODO: nondep = ...
         )
         return Expr(eidx=value["ie"].value_int(), val=val)
 
-    def __init__(self, nidx, def_type, def_val, body):
+    def __init__(self, nidx, type, value, body):
         self.nidx = nidx
-        self.def_type = def_type
-        self.def_val = def_val
+        self.type = type
+        self.value = value
         self.body = body
 
     def to_w_expr(self, builder):
         return builder.names[self.nidx].let(
-            type=builder.exprs[self.def_type],
-            value=builder.exprs[self.def_val],
+            type=builder.exprs[self.type],
+            value=builder.exprs[self.value],
             body=builder.exprs[self.body],
         )
 
@@ -328,24 +328,24 @@ class Lambda(ExprVal):
     def from_dict(value):
         lam = value["lam"].value_object()
         val = Lambda(
-            binder_name=lam["name"].value_int(),
-            binder_type=lam["type"].value_int(),
+            name=lam["name"].value_int(),
+            type=lam["type"].value_int(),
             binder_info=lam["binderInfo"].value_string(),
             body=lam["body"].value_int(),
         )
         return Expr(eidx=value["ie"].value_int(), val=val)
 
-    def __init__(self, binder_name, binder_type, binder_info, body):
-        self.binder_name = binder_name
-        self.binder_type = binder_type
+    def __init__(self, name, type, binder_info, body):
+        self.name = name
+        self.type = type
         self.binder_info = binder_info
         self.body = body
 
     def to_w_expr(self, builder):
         return objects.fun(
             binder(
-                name=builder.names[self.binder_name],
-                type=builder.exprs[self.binder_type],
+                name=builder.names[self.name],
+                type=builder.exprs[self.type],
                 info=self.binder_info,
             ),
         )(builder.exprs[self.body])
@@ -356,24 +356,24 @@ class ForAll(ExprVal):
     def from_dict(value):
         forall = value["forallE"].value_object()
         val = ForAll(
-            binder_name=forall["name"].value_int(),
-            binder_type=forall["type"].value_int(),
+            name=forall["name"].value_int(),
+            type=forall["type"].value_int(),
             binder_info=forall["binderInfo"].value_string(),
             body=forall["body"].value_int(),
         )
         return Expr(eidx=value["ie"].value_int(), val=val)
 
-    def __init__(self, binder_name, binder_type, binder_info, body):
-        self.binder_name = binder_name
-        self.binder_type = binder_type
+    def __init__(self, name, type, binder_info, body):
+        self.name = name
+        self.type = type
         self.binder_info = binder_info
         self.body = body
 
     def to_w_expr(self, builder):
         return objects.forall(
             binder(
-                name=builder.names[self.binder_name],
-                type=builder.exprs[self.binder_type],
+                name=builder.names[self.name],
+                type=builder.exprs[self.type],
                 info=self.binder_info,
             )
         )(builder.exprs[self.body])
@@ -384,22 +384,20 @@ class Proj(ExprVal):
     def from_dict(value):
         proj = value["proj"].value_object()
         val = Proj(
-            struct_name=proj["typeName"].value_int(),
-            field_index=proj["idx"].value_int(),
-            struct_expr=proj["struct"].value_int(),
+            type_name=proj["typeName"].value_int(),
+            index=proj["idx"].value_int(),
+            struct=proj["struct"].value_int(),
         )
         return Expr(eidx=value["ie"].value_int(), val=val)
 
-    def __init__(self, struct_name, field_index, struct_expr):
-        self.struct_name = struct_name
-        self.field_index = field_index
-        self.struct_expr = struct_expr
+    def __init__(self, type_name, index, struct):
+        self.type_name = type_name
+        self.index = index
+        self.struct = struct
 
     def to_w_expr(self, builder):
-        return builder.names[self.struct_name].proj(
-            self.field_index,
-            builder.exprs[self.struct_expr],
-        )
+        struct = builder.exprs[self.struct]
+        return builder.names[self.type_name].proj(self.index, struct)
 
 
 class Definition(Node):

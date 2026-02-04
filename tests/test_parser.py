@@ -174,8 +174,8 @@ def test_lambda_strict_implicit():
         parser.Expr(
             eidx=1,
             val=parser.Lambda(
-                binder_name=1,
-                binder_type=0,
+                name=1,
+                type=0,
                 binder_info="strictImplicit",
                 body=0,
             ),
