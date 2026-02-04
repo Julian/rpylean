@@ -742,16 +742,6 @@ class W_Expr(_Item):
             return expr
         return expr.app(*more)
 
-    # Tries to perform a single step of strong reduction.
-    # Currently implemented reduction steps:
-    # * Delta reduction (definition unfolding)
-    # * Beta reduction (function application)
-    # * Iota reduction: simplification of ('InductiveType.recursor arg0 .. argN InductiveType.ctorName') using matching RecursorRule
-    #
-    # Return (progress, new_expr), where `progress` indicates whether any reduction was performed
-    def strong_reduce_step(self, env):
-        return (False, self)
-
 
 class W_BVar(W_Expr):
     def __init__(self, id):
@@ -999,12 +989,6 @@ class W_Const(W_Expr):
                 return False
         return True
 
-    def strong_reduce_step(self, env):
-        reduced = self.try_delta_reduce(env)
-        if reduced is not None:
-            return (True, reduced)
-        return (False, self)
-
     def bind_fvar(self, fvar, depth):
         return self
 
@@ -1112,15 +1096,6 @@ class W_LitNat(W_Expr):
             i = i.add(rbigint.fromint(1))
         return expr
 
-    def strong_reduce_step(self, env):
-        return (False, self)
-        if self.val == rbigint.fromint(0):
-            return (True, NAT_ZERO)
-
-        # Add a single 'Succ'
-        sub = self.val.sub(rbigint.fromint(1))
-        return (True, NAT_SUCC.app(W_LitNat(sub)))
-
     def bind_fvar(self, fvar, depth):
         return self
 
@@ -1165,34 +1140,6 @@ class W_Proj(W_Expr):
             self.struct_expr.pretty(constants),
             field_name,
         )
-
-    def strong_reduce_step(self, env):
-        progress, new_struct_expr = self.struct_expr.strong_reduce_step(env)
-        if progress:
-            return True, self.with_expr(new_struct_expr)
-
-        # Look for a projection of a constructor, which allows us to just pick
-        # out the argument corresponding to 'field_idx'
-
-        args = []
-        struct_expr = new_struct_expr
-        while isinstance(struct_expr, W_App):
-            # Collect arguments until we reach the base type
-            args.append(struct_expr.arg)
-            struct_expr = struct_expr.fn
-
-        if not isinstance(struct_expr, W_Const):
-            return (False, self)
-
-        ctor_decl = get_decl(env.declarations, struct_expr.name)
-        if not isinstance(ctor_decl.w_kind, W_Constructor):
-            return (False, self)
-
-        num_params = ctor_decl.w_kind.num_params
-        args.reverse()
-        target_arg = args[num_params + self.field_index]
-
-        return (True, target_arg)
 
     def whnf(self, env):
         # TODO - do we need to try reducing the projection?
@@ -1298,21 +1245,6 @@ class W_FunBase(W_Expr):
     def whnf(self, env):
         return self
 
-    def strong_reduction_helper(self, env):
-        progress, binder_type = self.binder.type.strong_reduce_step(env)
-        if progress:
-            return (True, (self.binder.with_type(binder_type), self.body))
-
-        fvar = self.binder.fvar()
-        open_body = self.body.instantiate(fvar, 0)
-        progress, open_body = open_body.strong_reduce_step(env)
-        new_body = open_body.bind_fvar(fvar, 0)
-        if progress:
-            return (True, (self.binder.with_type(binder_type), new_body))
-
-        self.finished_reduce = True
-        return (False, (self.binder, self.body))
-
 
 class W_ForAll(W_FunBase):
     def def_eq(self, other, def_eq):
@@ -1387,13 +1319,6 @@ class W_ForAll(W_FunBase):
             self.body.incr_free_bvars(count, depth + 1),
         )
 
-    def strong_reduce_step(self, env):
-        if self.finished_reduce:
-            return False, self
-        progress, args = self.strong_reduction_helper(env)
-        if not progress:
-            return (False, self)
-        return (progress, W_ForAll(*args))
 
     def subst_levels(self, levels):
         return forall(self.binder.subst_levels(levels))(
@@ -1497,14 +1422,6 @@ class W_Lambda(W_FunBase):
             )
         return forall(self.binder)(body_type)
 
-    def strong_reduce_step(self, env):
-        if self.finished_reduce:
-            return False, self
-        progress, args = self.strong_reduction_helper(env)
-        if not progress:
-            return (False, self)
-        return (progress, W_Lambda(*args))
-
     def subst_levels(self, substs):
         return fun(self.binder.subst_levels(substs))(
             self.body.subst_levels(substs),
@@ -1562,8 +1479,6 @@ class W_Let(W_Expr):
             and syntactic_eq(self.body, other.body)
         )
 
-    def strong_reduce_step(self, env):
-        return (True, self.body.instantiate(self.value, 0))
 
     def whnf(self, env):
         return self.body.instantiate(self.value, 0).whnf(env)
@@ -1859,32 +1774,6 @@ class W_App(W_Expr):
                 # so there's nothing we can do to reduce further in whnf
                 return self
         return self
-
-    def strong_reduce_step(self, env):
-        # First, try beta reduction
-        if isinstance(self.fn, W_FunBase):
-            body = self.fn.body.instantiate(self.arg, 0)
-            return (True, body)
-
-        # Next, try strong reduction with the fn and body
-        # After this, it might become possible to do beta
-        # reduction (if the fn gets reduced to a W_FunBase)
-        # We don't check for this case here - it will get checked when
-        # `strong_reduce_step` is called on the new `W_App`, if the top-level
-        # code decides to perform another strong reduction step.
-        progress, new_fn = self.fn.strong_reduce_step(env)
-        if progress:
-            return (True, new_fn.app(self.arg))
-
-        progress, new_arg = self.arg.strong_reduce_step(env)
-        if progress:
-            return (True, new_fn.app(new_arg))
-
-        # Finally, try iota reduction after we've reduced everthing else as much as possible
-        # This allows us to find a recursor constant and constructor constant
-        # (both can be produced by earlier reduction steps, but neither can be further reduced
-        # without iota reduction)
-        return self.try_iota_reduce(env)
 
     def bind_fvar(self, fvar, depth):
         return self.fn.bind_fvar(fvar, depth).app(
