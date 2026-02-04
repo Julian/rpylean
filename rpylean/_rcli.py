@@ -69,12 +69,18 @@ class Command(object):
                 opt = arg[2:]
                 if opt == "help":
                     raise self.help(executable)
-                if opt not in self._options:
-                    self.usage_error("Unknown option: --%s" % opt)
-                if i + 1 >= len(args) or args[i + 1].startswith("--"):
-                    self.usage_error("Option --%s requires an argument" % opt)
-                options[opt] = args[i + 1]
-                i += 2
+
+                if "=" in opt:
+                    opt, arg = opt.split("=", 1)
+                    options[opt] = arg
+                    i += 1
+                else:
+                    if opt not in self._options:
+                        self.usage_error("Unknown option: --%s" % opt)
+                    if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                        self.usage_error("Option --%s requires an argument" % opt)
+                    options[opt] = args[i + 1]
+                    i += 2
             else:
                 positional.append(arg)
                 i += 1

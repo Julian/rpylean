@@ -132,6 +132,12 @@ class TestOption(object):
         assert "options={'opt': 'val'}" in out
         assert err == ""
 
+    def test_option_equal(self):
+        out, err = run(self.cli, ["prog", "foo", "--opt=val", "arg"])
+        assert "args=['arg']" in out
+        assert "options={'opt': 'val'}" in out
+        assert err == ""
+
     def test_missing_argument(self):
         out, err = run(self.cli, ["prog", "foo", "--opt"], exit=1)
         assert "Option --opt requires an argument" in err
