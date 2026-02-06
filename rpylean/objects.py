@@ -1479,7 +1479,6 @@ class W_Let(W_Expr):
             and syntactic_eq(self.body, other.body)
         )
 
-
     def whnf(self, env):
         return self.body.instantiate(self.value, 0).whnf(env)
 
