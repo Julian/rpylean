@@ -1152,8 +1152,28 @@ class W_Proj(W_Expr):
         )
 
     def whnf(self, env):
-        # TODO - do we need to try reducing the projection?
-        return self.with_expr(self.struct_expr.whnf(env))
+        reduced_struct = self.struct_expr.whnf(env)
+
+        # Try to perform projection reduction (structural iota reduction).
+        # If the struct expression reduces to a constructor application,
+        # extract the field at the appropriate index.
+        head = reduced_struct
+        ctor_args = []
+        while isinstance(head, W_App):
+            ctor_args.append(head.arg)
+            head = head.fn
+
+        if isinstance(head, W_Const):
+            decl = get_decl(env.declarations, head.name)
+            if isinstance(decl.w_kind, W_Constructor):
+                ctor_args.reverse()
+                # Constructor args = params ++ fields
+                # The field we want is at index num_params + field_index
+                idx = decl.w_kind.num_params + self.field_index
+                if idx < len(ctor_args):
+                    return ctor_args[idx].whnf(env)
+
+        return self.with_expr(reduced_struct)
 
     def incr_free_bvars(self, count, depth):
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))

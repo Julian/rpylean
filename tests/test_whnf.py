@@ -19,7 +19,7 @@ from rpylean.objects import (
 
 
 S, a, b, f, x, y, z = names("S", "a", "b", "f", "x", "y", "z")
-b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
+b0, b1, b2, b3 = W_BVar(0), W_BVar(1), W_BVar(2), W_BVar(3)
 u = Name.simple("u").level()
 
 
@@ -201,3 +201,144 @@ class TestProj:
 
         expected = S.proj(field_index=0, struct_expr=a_decl.const())
         assert syntactic_eq(proj.whnf(env), expected)
+
+    def test_extracts_field_from_constructor(self):
+        """
+        Projection reduction (structural iota) extracts a field from a
+        constructor application.
+
+        Model a structure with one type parameter and one field:
+
+            structure Foo (α : Type) where
+              val : α
+
+        Then verify that proj(Foo, 0, Foo.mk Nat myVal) reduces to myVal.
+        """
+        Foo = Name.simple("Foo")
+        Foo_mk = Foo.child("mk")
+
+        # Foo.mk has 1 type parameter (α : Type) and 1 field (val : α)
+        mk_decl = Foo_mk.constructor(
+            type=forall(
+                a.binder(type=TYPE).to_implicit(),  # (α : Type)
+                x.binder(type=b0),  # (val : α)
+            )(Foo.const().app(b1)),  # Foo α
+            num_params=1,
+            num_fields=1,
+        )
+
+        foo_type = Foo.inductive(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            constructors=[mk_decl],
+            num_params=1,
+        )
+
+        myVal = Name.simple("myVal")
+        myVal_decl = myVal.axiom(type=NAT)
+
+        env = Environment.having([foo_type, mk_decl, myVal_decl])
+
+        # proj(Foo, 0, Foo.mk Nat myVal) should reduce to myVal
+        ctor_app = Foo_mk.const().app(NAT, myVal_decl.const())
+        proj = Foo.proj(field_index=0, struct_expr=ctor_app)
+
+        result = proj.whnf(env)
+        assert syntactic_eq(result, myVal_decl.const())
+
+    def test_extracts_second_field_from_constructor(self):
+        """
+        Verify that projection of field index 1 extracts the second field.
+
+            structure Pair (α β : Type) where
+              fst : α
+              snd : β
+
+        Then proj(Pair, 1, Pair.mk Nat Nat a b) reduces to b.
+        """
+        Pair = Name.simple("Pair")
+        Pair_mk = Pair.child("mk")
+        alpha = Name.simple("alpha")
+        beta = Name.simple("beta")
+
+        mk_decl = Pair_mk.constructor(
+            type=forall(
+                alpha.binder(type=TYPE).to_implicit(),  # (α : Type)
+                beta.binder(type=TYPE).to_implicit(),  # (β : Type)
+                x.binder(type=b1),  # (fst : α)
+                y.binder(type=b1),  # (snd : β)
+            )(Pair.const().app(b3, b2)),  # Pair α β
+            num_params=2,
+            num_fields=2,
+        )
+
+        pair_type = Pair.inductive(
+            type=forall(
+                alpha.binder(type=TYPE),
+                beta.binder(type=TYPE),
+            )(TYPE),
+            constructors=[mk_decl],
+            num_params=2,
+        )
+
+        a_decl = a.axiom(type=NAT)
+        b_axiom = b.axiom(type=NAT)
+        env = Environment.having([pair_type, mk_decl, a_decl, b_axiom])
+
+        # Pair.mk Nat Nat a b
+        ctor_app = Pair_mk.const().app(NAT, NAT, a_decl.const(), b_axiom.const())
+
+        # proj(Pair, 1, Pair.mk Nat Nat a b) should reduce to b
+        proj = Pair.proj(field_index=1, struct_expr=ctor_app)
+        result = proj.whnf(env)
+        assert syntactic_eq(result, b_axiom.const())
+
+        # proj(Pair, 0, Pair.mk Nat Nat a b) should reduce to a
+        proj0 = Pair.proj(field_index=0, struct_expr=ctor_app)
+        result0 = proj0.whnf(env)
+        assert syntactic_eq(result0, a_decl.const())
+
+    def test_projection_through_definition(self):
+        """
+        Projection reduces through a definition to extract a field.
+
+        This models the real-world pattern where a typeclass instance
+        (like instLTNat) is a definition whose value is a constructor
+        application.
+
+            structure Foo where
+              val : Nat
+
+            def myInst : Foo := Foo.mk myVal
+
+            proj(Foo, 0, myInst) should reduce to myVal
+        """
+        Foo = Name.simple("Foo")
+        Foo_mk = Foo.child("mk")
+
+        mk_decl = Foo_mk.constructor(
+            type=forall(x.binder(type=NAT))(Foo.const()),
+            num_params=0,
+            num_fields=1,
+        )
+
+        foo_type = Foo.structure(
+            type=TYPE,
+            constructor=mk_decl,
+        )
+
+        myVal = Name.simple("myVal")
+        myVal_decl = myVal.axiom(type=NAT)
+
+        myInst = Name.simple("myInst")
+        myInst_decl = myInst.definition(
+            type=Foo.const(),
+            value=Foo_mk.const().app(myVal_decl.const()),
+        )
+
+        env = Environment.having([foo_type, mk_decl, myVal_decl, myInst_decl])
+
+        # proj(Foo, 0, myInst) where myInst := Foo.mk myVal
+        proj = Foo.proj(field_index=0, struct_expr=myInst_decl.const())
+
+        result = proj.whnf(env)
+        assert syntactic_eq(result, myVal_decl.const())
