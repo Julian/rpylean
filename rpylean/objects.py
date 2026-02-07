@@ -529,14 +529,7 @@ class W_Level(_Item):
         if self is other:
             return self
 
-        if isinstance(self, W_LevelSucc):
-            if isinstance(other, W_LevelSucc):
-                return self.parent.max(other.parent).succ()
-            if self.parent == other:
-                return self
         if isinstance(other, W_LevelSucc) and other.parent == self:
-            return other
-        if isinstance(self, W_LevelZero):
             return other
         if isinstance(other, W_LevelZero):
             return self
@@ -554,7 +547,7 @@ class W_Level(_Item):
 
         if isinstance(other, W_LevelZero):
             return W_LEVEL_ZERO
-        if isinstance(self, W_LevelZero) or self == W_LEVEL_ZERO.succ():
+        if self == W_LEVEL_ZERO.succ():
             return other
         if isinstance(other, W_LevelSucc) or (
             isinstance(other, W_LevelMax)
@@ -587,6 +580,12 @@ class W_LevelZero(W_Level):
     def syntactic_eq(self, other):
         return True
 
+    def max(self, other):
+        return other
+
+    def imax(self, other):
+        return other
+
 
 W_LEVEL_ZERO = W_LevelZero()
 
@@ -616,6 +615,15 @@ class W_LevelSucc(W_Level):
 
     def syntactic_eq(self, other):
         return syntactic_eq(self.parent, other.parent)
+
+    def max(self, other):
+        if self is other:
+            return self
+        if isinstance(other, W_LevelSucc):
+            return self.parent.max(other.parent).succ()
+        if self.parent == other:
+            return self
+        return W_Level.max(self, other)
 
 
 class W_LevelMax(W_Level):
