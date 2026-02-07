@@ -1,6 +1,7 @@
 """
 Pretty printing of Lean objects.
 """
+
 from textwrap import dedent
 
 import pytest
@@ -45,7 +46,7 @@ class TestName(object):
             "with_atomic_part",
             "with_number",
             "anonymous",
-        ]
+        ],
     )
     def test_str(self, parts, expected):
         name = Name(parts)
@@ -104,7 +105,7 @@ class TestNameWithLevels(object):
         "imax",
         "imax_0",
         "imax_1_u",
-    ]
+    ],
 )
 def test_sort(level, expected):
     assert level.sort().pretty({}) == expected
@@ -319,9 +320,7 @@ class TestProj(object):
 
     def test_fst(self):
         proj = self.Foo.proj(0, self.mk.app(NAT_ZERO, NAT_ZERO))
-        assert proj.pretty(self.constants) == (
-            "(Foo.mk Nat.zero Nat.zero).a"
-        )
+        assert proj.pretty(self.constants) == "(Foo.mk Nat.zero Nat.zero).a"
 
     def test_third(self):
         proj = self.Foo.proj(2, self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO))
@@ -479,3 +478,8 @@ class TestApp(object):
         fun3 = fun(a.binder(type=NAT))(b0)
         app = f.app(fun1, fun2, fun3)
         assert app.pretty({}) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"
+
+    def test_app_forall(self):
+        arrow = forall(x.binder(type=NAT))(NAT)  # Nat → Nat
+        app = f.app(arrow)
+        assert app.pretty({}) == "f (Nat → Nat)"
