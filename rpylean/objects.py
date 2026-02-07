@@ -1285,9 +1285,14 @@ class W_ForAll(W_FunBase):
                 rhs.pretty(constants),
             )
         else:
-            lhs = self.binder.type if self.binder.is_default() else self.binder
+            if self.binder.is_default():
+                lhs = self.binder.type.pretty(constants)
+                if isinstance(self.binder.type, W_ForAll):
+                    lhs = "(%s)" % lhs
+            else:
+                lhs = self.binder.pretty(constants)
             return "%s → %s" % (
-                lhs.pretty(constants),
+                lhs,
                 rhs.pretty(constants),
             )
 
@@ -1529,13 +1534,13 @@ class W_App(W_Expr):
         for i in range(len(args) - 1, 0, -1):
             arg = args[i]
             arg_pretty = arg.pretty(constants)
-            if isinstance(arg, (W_Lambda, W_App, W_ForAll)):
+            if isinstance(arg, W_FunBase) or isinstance(arg, W_App):
                 arg_pretty = "(%s)" % arg_pretty
             arg_parts.append(arg_pretty)
 
         last_arg = args[0]
         last_arg_pretty = last_arg.pretty(constants)
-        if isinstance(last_arg, (W_App, W_ForAll)):
+        if isinstance(last_arg, W_App) or isinstance(last_arg, W_ForAll):
             last_arg_pretty = "(%s)" % last_arg_pretty
         arg_parts.append(last_arg_pretty)
 

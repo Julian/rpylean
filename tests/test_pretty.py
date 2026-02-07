@@ -186,6 +186,11 @@ constants = {
             p.const(),
             "∀ {i : Nat}, p",
         ),
+        (
+            i.binder(type=forall(h.binder(type=NAT))(NAT)),
+            NAT,
+            "(Nat → Nat) → Nat",
+        ),
     ],
     ids=[
         "(i : Nat) → Nat",
@@ -198,6 +203,7 @@ constants = {
         "(i : Nat) → P i",
         "{i : Nat} → P i",
         "{i : Nat} → p",
+        "(Nat → Nat) → Nat",
     ],
 )
 def test_forall(binder, body, expected):
@@ -286,7 +292,7 @@ class TestRecursor(object):
         assert rec.pretty({}) == (
             "recursor Empty.rec.{u} : "
             # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
-            "Empty → Sort u → Empty → motive t"
+            "(Empty → Sort u) → Empty → motive t"
         )
 
 
