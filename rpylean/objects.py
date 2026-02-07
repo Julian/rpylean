@@ -33,13 +33,18 @@ class W_TypeError(object):
     A term does not type check.
     """
 
-    def __init__(self, environment, term, expected_type):  # TODO: inferred_type
+    def __init__(self, environment, term, expected_type, name=None):
         self.environment = environment
         self.term = term
         self.expected_type = expected_type
+        self.name = name
 
     def str(self):
-        return "%s\n  does not have expected type\n%s" % (
+        header = ""
+        if self.name is not None:
+            header = "in %s:\n" % self.name.str()
+        return "%s%s\n  does not have expected type\n%s" % (
+            header,
             self.environment.pretty(self.term),
             self.environment.pretty(self.expected_type),
         )
@@ -1869,7 +1874,10 @@ class W_Declaration(_Item):
         return self.w_kind.delaborate(pretty, self.type, constants)
 
     def type_check(self, env):
-        return self.w_kind.type_check(self.type, env)
+        error = self.w_kind.type_check(self.type, env)
+        if error is not None:
+            error.name = self.name
+        return error
 
 
 class W_DeclarationKind(_Item):

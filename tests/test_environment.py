@@ -26,6 +26,14 @@ def test_invalid_def_does_not_type_check():
     assert error.expected_type == TYPE_1
 
 
+def test_type_error_includes_declaration_name():
+    """Type errors include the declaration name."""
+    invalid = Name.simple("MyBadDef").definition(type=PROP, value=TYPE)
+
+    error = invalid.type_check(Environment.EMPTY)
+    assert error.str().startswith("in MyBadDef:\n")
+
+
 class TestNotRPython:
     """
     Environment behavior which isn't RPython, it's just for dev convenience.
