@@ -22,9 +22,13 @@ rpylean *ARGS:
 example name:
     @just rpylean repl $(find "{{ examples }}" -iname "{{ name }}")/export
 
+# Run pypy with rpylean on the PYTHONPATH.
+pypy *ARGS:
+    PYTHONPATH="{{ pypy_checkout }}:{{ justfile_directory() }}" "{{ pypy }}" {{ ARGS }}
+
 # Run a PyPy REPL with rpylean imported.
-pypy $RPYLEAN_EXAMPLE='' *ARGS:
-    PYTHONPATH="{{ pypy_checkout }}:{{ justfile_directory() }}" "{{ pypy }}" {{ ARGS }} -i "{{ package }}/_pypy_repl.py"
+i $RPYLEAN_EXAMPLE='' *ARGS:
+    @just pypy -i "{{ package }}/_pypy_repl.py"
 
 # Run the translated rpylean REPL under rlwrap.
 repl *ARGS:
