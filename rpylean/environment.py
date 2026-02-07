@@ -218,26 +218,40 @@ class Environment(object):
         Type check each declaration in the environment.
         """
         if declarations is None:
-            declarations = self.declarations.values()
+            for each in self.declarations.itervalues():
+                error = self._check_one(each)
+                if error is not None:
+                    yield error
+        else:
+            for each in declarations:
+                error = self._check_one(each)
+                if error is not None:
+                    yield error
 
-        for each in declarations:
-            try:
-                error = each.type_check(self)
-            except Exception:
-                if not we_are_translated():
-                    print_exc(None, stderr)
-                    stderr.write("\nwhile checking:\n\n")
-                    self.print(each, stderr)
-                    pdb.post_mortem()
-                raise
-            if error is not None:
-                yield error
+    def _check_one(self, each):
+        try:
+            return each.type_check(self)
+        except Exception:
+            if not we_are_translated():
+                print_exc(None, stderr)
+                stderr.write("\nwhile checking:\n\n")
+                self.print(each, stderr)
+                pdb.post_mortem()
+            raise
+
+    def filter_declarations(self, substring):
+        """
+        Yield declarations whose name contains the given substring.
+        """
+        for decl in self.declarations.itervalues():
+            if substring in decl.name.str():
+                yield decl
 
     def dump_pretty(self, stdout):
         """
         Dump the contents of this environment to the given stream.
         """
-        for decl in self.declarations.values():
+        for decl in self.declarations.itervalues():
             if not decl.is_private:
                 self.print(decl, stdout)
 

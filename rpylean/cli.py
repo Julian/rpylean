@@ -1,6 +1,7 @@
 """
 CLI for rpylean.
 """
+
 from __future__ import print_function
 from rpylean.parser import ExportVersionError
 
@@ -28,6 +29,10 @@ cli = CLI(
             "max-fail",
             "the maximum number of type errors to report before giving up",
         ),
+        (
+            "filter",
+            "only check declarations whose name contains this substring",
+        ),
     ],
 )
 def check(self, args, stdin, stdout, stderr):
@@ -39,20 +44,27 @@ def check(self, args, stdin, stdout, stderr):
             stderr.write("\n")
             return 1
 
-        ncheck = len(environment.declarations)
+        name_filter = args.options["filter"]
+        if name_filter is not None:
+            declarations = environment.filter_declarations(name_filter)
+        else:
+            declarations = None
+
         suffix = "" if len(args.varargs) == 1 else " from %s" % (path,)
-        stdout.write(
-            "Checking %s declaration%s%s…\n" % (
-                ncheck,
-                "s" if ncheck != 1 else "",
-                suffix,
-            ),
-        )
+        if declarations is None:
+            n = len(environment.declarations)
+            stdout.write(
+                "Checking %s declaration%s%s…\n" % (n, "s" if n != 1 else "", suffix),
+            )
+        else:
+            stdout.write(
+                "Checking declarations matching '%s'%s…\n" % (name_filter, suffix),
+            )
 
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
 
         try:
-            for w_error in environment.type_check():
+            for w_error in environment.type_check(declarations):
                 stderr.write(w_error.str())
                 stderr.write("\n")
 
@@ -75,7 +87,7 @@ def check(self, args, stdin, stdout, stderr):
     help="Dump an exported Lean environment or specific declarations from it.",
 )
 def dump(self, args, stdin, stdout, stderr):
-    path, = args.args
+    (path,) = args.args
     environment = environment_from(path=path, stdin=stdin)
     if args.varargs:
         for each in args.varargs:
@@ -91,9 +103,10 @@ def dump(self, args, stdin, stdout, stderr):
     help="Open a REPL with the given export's environment loaded into it.",
 )
 def repl(self, args, stdin, stdout, stderr):
-    path, = args.args
+    (path,) = args.args
     environment = environment_from(path=path, stdin=stdin)
     from rpylean import repl
+
     repl.interact(environment)
     return 0
 
@@ -104,7 +117,7 @@ def repl(self, args, stdin, stdout, stderr):
     options=[
         (
             "prefix",
-            "path to the Lean prefix to link against "
+            "path to the Lean prefix to link against ",
             # TODO: "[default: `lean --print-prefix`]",
         ),
     ],
@@ -140,6 +153,7 @@ def environment_from(path, stdin):
     return environment
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
+
     sys.exit(cli.main(sys.argv))
