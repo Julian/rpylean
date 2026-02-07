@@ -4,7 +4,9 @@ Tests for definitional equality of Lean objects.
 
 import pytest
 
-from rpylean.environment import Environment
+from io import BytesIO
+
+from rpylean.environment import Environment, StreamTracer
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
@@ -486,3 +488,14 @@ def test_zeta_reduction():
 
 def test_succ_max_eq_imax_succ():
     assert (W_LEVEL_ZERO.succ().max(u)).eq(u.imax(W_LEVEL_ZERO.succ()))
+
+
+def test_trace_def_eq():
+    """Tracing def_eq writes each comparison to the trace stream."""
+    trace = BytesIO()
+    traced_env = Environment.having(
+        [Name.simple("Nat").axiom(type=TYPE)],
+    )
+    traced_env.tracer = StreamTracer(trace)
+    traced_env.def_eq(NAT, NAT)
+    assert "def_eq" in trace.getvalue()

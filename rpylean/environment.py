@@ -157,13 +157,52 @@ def from_str(text):
     return from_items(parser.from_str(text))
 
 
+class Tracer(object):
+    """
+    No-op tracer.
+    """
+
+    def enter(self, expr1, expr2, declarations):
+        """Called when entering a def_eq comparison."""
+
+    def result(self, value):
+        """Called when leaving a def_eq comparison. Returns the value."""
+        return value
+
+
+class StreamTracer(Tracer):
+    """
+    Tracer that writes indented def_eq comparisons to a stream.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._depth = 0
+
+    def enter(self, expr1, expr2, declarations):
+        pretty1 = expr1.pretty(declarations)
+        pretty2 = expr2.pretty(declarations)
+        indent = "  " * self._depth
+        self._stream.write(
+            "%sdef_eq %s =?= %s\n" % (indent, pretty1, pretty2),
+        )
+        self._depth += 1
+
+    def result(self, value):
+        self._depth -= 1
+        indent = "  " * self._depth
+        self._stream.write("%s=> %s\n" % (indent, value))
+        return value
+
+
 class Environment(object):
     """
     A Lean environment with its declarations.
     """
 
-    def __init__(self, declarations):
+    def __init__(self, declarations, tracer=Tracer()):
         self.declarations = declarations
+        self.tracer = tracer
 
     @not_rpython
     def __getitem__(self, value):
@@ -266,6 +305,9 @@ class Environment(object):
             "unexpectedly encountered BVar in def_eq: %s" % expr2
         )
 
+        tracer = self.tracer
+        tracer.enter(expr1, expr2, self.declarations)
+
         # First reduce both to WHNF to ensure heads are in canonical form
         expr1 = expr1.whnf(self)
         expr2 = expr2.whnf(self)
@@ -283,7 +325,8 @@ class Environment(object):
             # Still would love to think of a better way.
             cls1 is not W_Const or expr1.name == expr2.name
         ):
-            return expr1.def_eq(expr2, self.def_eq)
+            result = expr1.def_eq(expr2, self.def_eq)
+            return tracer.result(result)
 
         # Proof irrelevance check: Get the types of our expressions
         expr1_ty = expr1.infer(self)
@@ -293,17 +336,19 @@ class Environment(object):
         expr2_ty_kind = expr2_ty.infer(self)
         if syntactic_eq(expr1_ty_kind, PROP) and syntactic_eq(expr2_ty_kind, PROP):
             if self.def_eq(expr1_ty, expr2_ty):
-                return True
+                return tracer.result(True)
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
 
         expr2_eta = self.try_eta_expand(expr1, expr2)
         if expr2_eta is not None:
-            return self.def_eq(expr1, expr2_eta)
+            result = self.def_eq(expr1, expr2_eta)
+            return tracer.result(result)
         expr1_eta = self.try_eta_expand(expr2, expr1)
         if expr1_eta is not None:
-            return self.def_eq(expr1_eta, expr2)
+            result = self.def_eq(expr1_eta, expr2)
+            return tracer.result(result)
 
         # As the *very* last step, try converting NatLit exprs
         # In order to be able to type check things like 'UInt32.size',
@@ -311,16 +356,20 @@ class Environment(object):
         # (so that checks like syntactic equality can succeed and prevent us from
         # building up ~4 billion `Nat` expressions)
         if cls1 is W_LitNat:
-            return self.def_eq(expr1.build_nat_expr(), expr2)
+            result = self.def_eq(expr1.build_nat_expr(), expr2)
+            return tracer.result(result)
         elif isinstance(expr2, W_LitNat):
-            return self.def_eq(expr1, expr2.build_nat_expr())
+            result = self.def_eq(expr1, expr2.build_nat_expr())
+            return tracer.result(result)
 
         if cls1 is W_LitStr:
-            return self.def_eq(expr1.build_str_expr(self), expr2)
+            result = self.def_eq(expr1.build_str_expr(self), expr2)
+            return tracer.result(result)
         elif isinstance(expr2, W_LitStr):
-            return self.def_eq(expr1, expr2.build_str_expr(self))
+            result = self.def_eq(expr1, expr2.build_str_expr(self))
+            return tracer.result(result)
 
-        return False
+        return tracer.result(False)
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):

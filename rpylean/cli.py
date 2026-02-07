@@ -11,7 +11,7 @@ from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
 from rpylean.leanffi import FFI
-from rpylean.environment import from_export
+from rpylean.environment import StreamTracer, from_export
 from rpylean.objects import Name
 
 
@@ -33,6 +33,10 @@ cli = CLI(
             "filter",
             "only check declarations whose name contains this substring",
         ),
+        (
+            "trace",
+            "trace def_eq and whnf steps to stderr (pass any value to enable)",
+        ),
     ],
 )
 def check(self, args, stdin, stdout, stderr):
@@ -43,6 +47,9 @@ def check(self, args, stdin, stdout, stderr):
             stderr.write(err.__str__())
             stderr.write("\n")
             return 1
+
+        if args.options["trace"] is not None:
+            environment.tracer = StreamTracer(stderr)
 
         name_filter = args.options["filter"]
         if name_filter is not None:
