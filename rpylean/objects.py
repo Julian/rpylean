@@ -480,7 +480,7 @@ def pretty_part(part):
 
 def leq(fn):
     def leq(self, other, balance=0):
-        if self == other:
+        if self is other or syntactic_eq(self, other):
             return balance >= 0
         return fn(self, other, balance)
 
@@ -638,8 +638,7 @@ class W_LevelMax(W_Level):
         return self.lhs.leq(other, balance) and self.rhs.leq(other, balance)
 
     def gt(self, other, balance):
-        # XXX
-        return False
+        return other.leq(self.lhs, balance) or other.leq(self.rhs, balance)
 
     def pretty_parts(self):
         left, balance = self.lhs.pretty_parts()
@@ -719,7 +718,10 @@ class W_LevelParam(W_Level):
         return other.gt(self, -balance)
 
     def gt(self, other, balance):
-        # XXX
+        if isinstance(other, W_LevelZero):
+            return balance >= 0
+        if isinstance(other, W_LevelParam):
+            return balance >= 0 and syntactic_eq(self.name, other.name)
         return False
 
     def pretty_parts(self):

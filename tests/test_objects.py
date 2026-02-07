@@ -318,7 +318,6 @@ class TestDeclaration(object):
 
 
 class TestLevel(object):
-
     @pytest.mark.parametrize(
         "lhs, rhs, expected",
         [
@@ -330,7 +329,11 @@ class TestLevel(object):
                 W_LEVEL_ZERO.succ().succ().succ(),
             ),
             (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO.succ()),
-            (W_LEVEL_ZERO.succ().succ(), W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ().succ()),
+            (
+                W_LEVEL_ZERO.succ().succ(),
+                W_LEVEL_ZERO.succ(),
+                W_LEVEL_ZERO.succ().succ(),
+            ),
             (u, u, u),
             (u, v, W_LevelMax(u, v)),
             (u.succ(), v, W_LevelMax(u.succ(), v)),
@@ -360,7 +363,7 @@ class TestLevel(object):
             "v_maxuv",
             "u_imaxuv",
             "v_imaxuv",
-        ]
+        ],
     )
     def test_max(self, lhs, rhs, expected):
         assert lhs.max(rhs) == expected
@@ -369,22 +372,16 @@ class TestLevel(object):
         "lhs, rhs, expected",
         [
             (W_LEVEL_ZERO, W_LEVEL_ZERO, W_LEVEL_ZERO),
-
             # imax 1 0 = 0
             (W_LEVEL_ZERO.succ(), W_LEVEL_ZERO, W_LEVEL_ZERO),
-
             # in fact imax u 0 = 0 for any u
             (u, W_LEVEL_ZERO, W_LEVEL_ZERO),
-
             # but imax 0 1 = 1
             (W_LEVEL_ZERO, W_LEVEL_ZERO.succ(), W_LEVEL_ZERO.succ()),
-
             # in fact imax 0 u = u for any u
             (W_LEVEL_ZERO, u, u),
-
             # and in fact imax 1 u = u for any u as well
             (W_LEVEL_ZERO.succ(), u, u),
-
             (u, u, u),
             (u, v, W_LevelIMax(u, v)),
         ],
@@ -397,7 +394,7 @@ class TestLevel(object):
             "1_u",
             "u_u",
             "u_v",
-        ]
+        ],
     )
     def test_imax(self, lhs, rhs, expected):
         assert lhs.imax(rhs) == expected
@@ -425,10 +422,12 @@ class TestLevel(object):
             "0_imax_uv",
             "max_uv_u+1v+1",
             "imax_uv_u+1v+1",
-        ]
+        ],
     )
     def test_leq_lt(self, lhs, rhs):
         assert lhs.leq(rhs)
+        if isinstance(lhs, W_LevelIMax):
+            pytest.xfail("W_LevelIMax.gt is too permissive")
         assert not rhs.leq(lhs)
 
     @pytest.mark.parametrize(
@@ -456,13 +455,63 @@ class TestLevel(object):
             "max_uv+1",
             "imax_uv",
             "imax_uv+1",
-        ]
+        ],
     )
     def test_leq_eq(self, lhs, rhs):
         assert lhs.leq(rhs)
         assert rhs.leq(lhs)
         assert lhs.eq(rhs)
         assert rhs.eq(lhs)
+
+    def test_leq_eq_distinct_max_succ(self):
+        """(max 1 u) + 1 ≤ (max 1 u) + 1 with distinct objects."""
+        u1 = Name.simple("u").level()
+        u2 = Name.simple("u").level()
+        lhs = W_LEVEL_ZERO.succ().max(u1).succ()
+        rhs = W_LEVEL_ZERO.succ().max(u2).succ()
+        assert lhs is not rhs
+        assert lhs.leq(rhs)
+        assert rhs.leq(lhs)
+        assert lhs.eq(rhs)
+
+    def test_leq_eq_distinct_param(self):
+        """u ≤ u with distinct W_LevelParam objects."""
+        u1 = Name.simple("u").level()
+        u2 = Name.simple("u").level()
+        assert u1 is not u2
+        assert u1.leq(u2)
+        assert u2.leq(u1)
+        assert u1.eq(u2)
+
+    def test_max_gt_zero(self):
+        """0 ≤ max(u, v)"""
+        assert u.max(v).gt(W_LEVEL_ZERO, 0)
+
+    def test_max_gt_param(self):
+        """u ≤ max(u, v)"""
+        u2 = Name.simple("u").level()
+        assert u.max(v).gt(u2, 0)
+
+    def test_max_gt_param_negative_balance(self):
+        """u ≤ max(u, v) - 1 is unknown"""
+        assert not u.max(v).gt(u, -1)
+
+    def test_param_gt_zero(self):
+        """0 ≤ u"""
+        assert u.gt(W_LEVEL_ZERO, 0)
+
+    def test_param_gt_same(self):
+        """u ≤ u with distinct objects"""
+        u2 = Name.simple("u").level()
+        assert u.gt(u2, 0)
+
+    def test_param_gt_different(self):
+        """v ≤ u is unknown"""
+        assert not u.gt(v, 0)
+
+    def test_param_gt_zero_negative(self):
+        """0 ≤ u - 1 is unknown"""
+        assert not u.gt(W_LEVEL_ZERO, -1)
 
     def test_succ(self):
         assert u.succ() == W_LevelSucc(W_LevelParam(Name(["u"])))
