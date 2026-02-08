@@ -257,6 +257,18 @@ class TestConst(object):
         env = Environment.having(decls)
         assert env.def_eq(foo.const(), bar.const())
 
+    def test_eq_different_name_identity(self):
+        """
+        Constants with structurally equal but non-identical Name objects
+        are definitionally equal.
+        """
+        x1 = Name.simple("x")
+        x2 = Name.simple("x")
+        assert x1 is not x2
+        decls = [x1.axiom(type=TYPE)]
+        env = Environment.having(decls)
+        assert env.def_eq(x1.const(), x2.const())
+
 
 class TestForAll(object):
     @pytest.mark.parametrize(

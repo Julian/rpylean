@@ -117,6 +117,20 @@ class TestName(object):
     def test_not_private_nested(self):
         assert not Name(["foo", "bar"]).is_private
 
+    def test_eq_different_identity(self):
+        """Names with equal components but different identity are equal."""
+        n1 = Name.simple("Nat")
+        n2 = Name.simple("Nat")
+        assert n1 is not n2
+        assert n1 == n2
+
+    def test_ne_different_identity(self):
+        """Names with equal components but different identity are not unequal."""
+        n1 = Name.simple("Nat")
+        n2 = Name.simple("Nat")
+        assert n1 is not n2
+        assert not (n1 != n2)
+
     def test_app(self):
         bar = Name(["foo", "bar"])
         bvar = W_BVar(0)

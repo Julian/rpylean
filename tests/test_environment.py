@@ -38,7 +38,7 @@ class TestTypeError(object):
             in foo:
             Prop
               has type
-            Type 1
+            Type
               but is declared to have type
             Type 1
             """,
@@ -52,7 +52,7 @@ class TestTypeError(object):
             """\
             Prop
               has type
-            Type 1
+            Type
               but is declared to have type
             Type 1
             """,

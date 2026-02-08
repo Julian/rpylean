@@ -1,5 +1,5 @@
 from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
-from rpython.rlib.objectmodel import compute_hash
+from rpython.rlib.objectmodel import compute_hash, not_rpython
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count, warn
@@ -38,14 +38,16 @@ class W_TypeError(object):
         self.term = term
         self.declared_type = declared_type
         self.name = Name.ANONYMOUS if name is None else name
+        self.inferred_type = term.infer(environment)
 
     def str(self):
         header = ""
         if self.name is not Name.ANONYMOUS:
             header = "in %s:\n" % self.name.str()
-        return "%s%s\n  does not have declared type\n%s" % (
+        return "%s%s\n  has type\n%s\n  but is declared to have type\n%s" % (
             header,
             self.environment.pretty(self.term),
+            self.environment.pretty(self.inferred_type),
             self.environment.pretty(self.declared_type),
         )
 
@@ -62,11 +64,13 @@ class _Item(object):
     objects some sane default Python behavior for tests.
     """
 
+    @not_rpython
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
         return vars(self) == vars(other)
 
+    @not_rpython
     def __ne__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
@@ -534,7 +538,7 @@ class W_Level(_Item):
         if self is other:
             return self
 
-        if isinstance(other, W_LevelSucc) and other.parent == self:
+        if isinstance(other, W_LevelSucc) and syntactic_eq(other.parent, self):
             return other
         if isinstance(other, W_LevelZero):
             return self
@@ -552,7 +556,7 @@ class W_Level(_Item):
 
         if isinstance(other, W_LevelZero):
             return W_LEVEL_ZERO
-        if self == W_LEVEL_ZERO.succ():
+        if syntactic_eq(self, W_LEVEL_ZERO.succ()):
             return other
         if isinstance(other, W_LevelSucc) or (
             isinstance(other, W_LevelMax)
@@ -626,7 +630,7 @@ class W_LevelSucc(W_Level):
             return self
         if isinstance(other, W_LevelSucc):
             return self.parent.max(other.parent).succ()
-        if self.parent == other:
+        if syntactic_eq(self.parent, other):
             return self
         return W_Level.max(self, other)
 
@@ -997,7 +1001,9 @@ class W_Const(W_Expr):
         return name_with_levels(self.name, self.levels)
 
     def syntactic_eq(self, other):
-        if self.name != other.name or len(self.levels) != len(other.levels):
+        if not self.name.syntactic_eq(other.name) or len(self.levels) != len(
+            other.levels
+        ):
             return False
         for i, level in enumerate(self.levels):
             if not syntactic_eq(level, other.levels[i]):
@@ -1132,7 +1138,7 @@ class W_Proj(W_Expr):
 
     def def_eq(self, other, def_eq):
         return (
-            self.struct_name == other.struct_name
+            self.struct_name.syntactic_eq(other.struct_name)
             and self.field_index == other.field_index
             and def_eq(self.struct_expr, other.struct_expr)
         )
@@ -1196,10 +1202,8 @@ class W_Proj(W_Expr):
         return self.struct_name.proj(self.field_index, expr)
 
     def syntactic_eq(self, other):
-        # Our 'struct_type' is a '_Item' (which is only constructed once, during parsing),
-        # so we can compare by object identity with '=='
         return (
-            self.struct_name == other.struct_name
+            self.struct_name.syntactic_eq(other.struct_name)
             and self.field_index == other.field_index
             and syntactic_eq(self.struct_expr, other.struct_expr)
         )
@@ -1220,7 +1224,7 @@ class W_Proj(W_Expr):
             "Expected W_Const, got %s" % struct_expr_type
         )
         target_const = get_decl(env.declarations, struct_expr_type.name)
-        assert target_const == struct_type, "Expected %s, got %s" % (
+        assert target_const is struct_type, "Expected %s, got %s" % (
             target_const,
             struct_type,
         )

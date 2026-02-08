@@ -321,7 +321,7 @@ class Environment(object):
             # isn't valid RPython, and the point is these are not comparable
             # until they're reduced...
             # Still would love to think of a better way.
-            cls1 is not W_Const or expr1.name == expr2.name
+            cls1 is not W_Const or expr1.name.syntactic_eq(expr2.name)
         ):
             result = expr1.def_eq(expr2, self.def_eq)
             return tracer.result(result)
