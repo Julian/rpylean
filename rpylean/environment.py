@@ -162,6 +162,10 @@ class Tracer(object):
     No-op tracer.
     """
 
+    def __init__(self, stream):
+        self._stream = stream
+        self._depth = 0
+
     def enter(self, expr1, expr2, declarations):
         """Called when entering a def_eq comparison."""
 
@@ -174,10 +178,6 @@ class StreamTracer(Tracer):
     """
     Tracer that writes indented def_eq comparisons to a stream.
     """
-
-    def __init__(self, stream):
-        self._stream = stream
-        self._depth = 0
 
     def enter(self, expr1, expr2, declarations):
         pretty1 = expr1.pretty(declarations)
@@ -200,7 +200,7 @@ class Environment(object):
     A Lean environment with its declarations.
     """
 
-    def __init__(self, declarations, tracer=Tracer()):
+    def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
         self.tracer = tracer
 

@@ -33,9 +33,13 @@ cli = CLI(
             "filter",
             "only check declarations whose name contains this substring",
         ),
+    ],
+    flags=[
         (
             "trace",
-            "trace def_eq and whnf steps to stderr (pass any value to enable)",
+            "enable tracing some def eq and reduction steps",
+            "yes",  # we can't use StreamTracer here, thanks static typing
+            "",
         ),
     ],
 )
@@ -48,7 +52,7 @@ def check(self, args, stdin, stdout, stderr):
             stderr.write("\n")
             return 1
 
-        if args.options["trace"] is not None:
+        if args.options["trace"]:
             environment.tracer = StreamTracer(stderr)
 
         name_filter = args.options["filter"]

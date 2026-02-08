@@ -44,7 +44,16 @@ USAGE
 
 
 class Command(object):
-    def __init__(self, name, help, metavars, options, run, short_help=None):
+    def __init__(
+        self,
+        name,
+        help,
+        metavars,
+        options,
+        flags,
+        run,
+        short_help=None,
+    ):
         if short_help is None:
             short_help = help.strip().split("\n", 1)[0]
 
@@ -55,11 +64,18 @@ class Command(object):
         self._options = dict(options)
         self._run = run
 
+        self._flags = {}
+        for flag_name, flag_help, if_false, if_true in flags:
+            self._flags[flag_name] = flag_help, if_false, if_true
+
     def run(self, executable, args, stdin, stdout, stderr):
         expected, parsed_args, varargs = len(self._metavars), [], []
+
         options = {}
         for k in self._options:
             options[k] = None
+        for f, (_, if_false, _) in self._flags.iteritems():
+            options[f] = if_false
 
         positional = []
         i = 0
@@ -72,15 +88,20 @@ class Command(object):
 
                 if "=" in opt:
                     opt, arg = opt.split("=", 1)
+                    if opt not in options:
+                        self.usage_error("Unknown option: --%s" % opt)
                     options[opt] = arg
                     i += 1
-                else:
-                    if opt not in self._options:
-                        self.usage_error("Unknown option: --%s" % opt)
+                elif opt in self._flags:
+                    options[opt] = self._flags[opt][2]
+                    i += 1
+                elif opt in options:
                     if i + 1 >= len(args) or args[i + 1].startswith("--"):
                         self.usage_error("Option --%s requires an argument" % opt)
                     options[opt] = args[i + 1]
                     i += 2
+                else:
+                    self.usage_error("Unknown option: --%s" % opt)
             else:
                 positional.append(arg)
                 i += 1
@@ -112,6 +133,13 @@ class Command(object):
         options = [
             "  --%s: %s" % (opt, desc) for opt, desc in self._options.items()
         ]
+
+        if self._flags:
+            options.append("")
+            for flag, (desc, _, _) in self._flags.iteritems():
+                options.append("  --%s: %s" % (flag, desc))
+            options.append("")
+
         options.append("  --help: Show this help message")
         message = COMMAND_USAGE % (
             self._help,
@@ -139,7 +167,7 @@ class CLI(object):
         self._default = default
         self._commands = {}
 
-    def subcommand(self, metavars, help, options=None):
+    def subcommand(self, metavars, help, options=None, flags=None):
         def _subcommand(fn):
             name = fn.__name__
             assert name not in self._commands, name
@@ -148,9 +176,11 @@ class CLI(object):
                 help=help.strip("\n"),
                 metavars=metavars,
                 options=options or [],
+                flags=flags or [],
                 run=fn,
             )
             return command
+
         return _subcommand
 
     def parse(self, argv):
