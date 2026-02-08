@@ -131,7 +131,8 @@ class Command(object):
         else:
             executable = executable.split("/")[-1]
         options = [
-            "  --%s: %s" % (opt, desc) for opt, desc in self._options.items()
+            "  --%s: %s" % (opt, desc)
+            for opt, desc in self._options.iteritems()
         ]
 
         if self._flags:
@@ -213,7 +214,7 @@ class CLI(object):
         return _USAGE % (executable.split("/")[-1],) + "\n".join(
             [
                 "  %s: %s" % (k, cmd.short_help)
-                for k, cmd in self._commands.items()
+                for k, cmd in self._commands.iteritems()
             ],
         )
 
