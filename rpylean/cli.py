@@ -38,8 +38,8 @@ cli = CLI(
         (
             "trace",
             "enable tracing some def eq and reduction steps",
-            "yes",  # we can't use StreamTracer here, thanks static typing
             "",
+            "yes",  # we can't use StreamTracer here, thanks static typing
         ),
     ],
 )
