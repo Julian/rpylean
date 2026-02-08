@@ -11,6 +11,7 @@ from rpylean.objects import (
     W_BVar,
     W_LitNat,
     W_LitStr,
+    W_RecRule,
     forall,
     fun,
     names,
@@ -342,3 +343,194 @@ class TestProj:
 
         result = proj.whnf(env)
         assert syntactic_eq(result, myVal_decl.const())
+
+
+class TestIotaReduction:
+    """Iota reduction: recursor applied to a constructor."""
+
+    def _make_mybool_env(self, extra_decls=None):
+        """
+        Build a minimal environment with a Bool-like inductive type.
+
+            inductive MyBool : Type where
+              | false : MyBool
+              | true : MyBool
+
+        Plus MyBool.rec with rules for each constructor.
+        Returns (env, declarations dict).
+        """
+        MyBool = Name.simple("MyBool")
+        MyBool_false = MyBool.child("false")
+        MyBool_true = MyBool.child("true")
+        MyBool_rec = MyBool.child("rec")
+
+        u_name = Name.simple("u")
+        u_level = u_name.level()
+
+        false_decl = MyBool_false.constructor(
+            type=MyBool.const(),
+            num_params=0,
+            num_fields=0,
+        )
+        true_decl = MyBool_true.constructor(
+            type=MyBool.const(),
+            num_params=0,
+            num_fields=0,
+        )
+        mybool_decl = MyBool.inductive(
+            type=TYPE,
+            constructors=[false_decl, true_decl],
+        )
+
+        # MyBool.rec.{u} :
+        #   (motive : MyBool → Sort u) →
+        #   motive MyBool.false →
+        #   motive MyBool.true →
+        #   (t : MyBool) → motive t
+        motive = Name.simple("motive")
+        t = Name.simple("t")
+        motive_type = forall(t.binder(type=MyBool.const()))(u_level.sort())
+
+        rec_type = forall(
+            motive.binder(type=motive_type),
+            Name.simple("hf").binder(
+                type=W_BVar(0).app(MyBool_false.const()),
+            ),
+            Name.simple("ht").binder(
+                type=W_BVar(1).app(MyBool_true.const()),
+            ),
+            t.binder(type=MyBool.const()),
+        )(W_BVar(3).app(W_BVar(0)))
+
+        # Rec rule for false:
+        #   fun (motive) (hf) (ht) => hf
+        false_rule_val = fun(
+            motive.binder(type=motive_type),
+            Name.simple("hf").binder(
+                type=W_BVar(0).app(MyBool_false.const()),
+            ),
+            Name.simple("ht").binder(
+                type=W_BVar(1).app(MyBool_true.const()),
+            ),
+        )(W_BVar(1))
+
+        # Rec rule for true:
+        #   fun (motive) (hf) (ht) => ht
+        true_rule_val = fun(
+            motive.binder(type=motive_type),
+            Name.simple("hf").binder(
+                type=W_BVar(0).app(MyBool_false.const()),
+            ),
+            Name.simple("ht").binder(
+                type=W_BVar(1).app(MyBool_true.const()),
+            ),
+        )(W_BVar(0))
+
+        rec_decl = MyBool_rec.recursor(
+            type=rec_type,
+            rules=[
+                W_RecRule(
+                    ctor_name=MyBool_false,
+                    num_fields=0,
+                    val=false_rule_val,
+                ),
+                W_RecRule(
+                    ctor_name=MyBool_true,
+                    num_fields=0,
+                    val=true_rule_val,
+                ),
+            ],
+            num_motives=1,
+            num_params=0,
+            num_indices=0,
+            num_minors=2,
+            levels=[u_name],
+        )
+
+        # Nat is needed when the motive returns Nat
+        Nat_decl = Name.simple("Nat").inductive(type=TYPE)
+
+        decls = [mybool_decl, false_decl, true_decl, rec_decl, Nat_decl]
+        if extra_decls:
+            for d in extra_decls:
+                decls.append(d)
+        env = Environment.having(decls)
+
+        return env, {
+            "MyBool": MyBool,
+            "false": MyBool_false,
+            "true": MyBool_true,
+            "rec": MyBool_rec,
+            "false_decl": false_decl,
+            "true_decl": true_decl,
+            "rec_decl": rec_decl,
+            "u_name": u_name,
+        }
+
+    def test_iota_direct_constructor(self):
+        """Recursor applied to a direct constructor reduces."""
+        env, d = self._make_mybool_env()
+
+        # MyBool.rec.{1} (fun _ => Nat) z_val t_val MyBool.true
+        # should reduce to t_val
+        z_val = Name.simple("z_val").axiom(type=NAT)
+        t_val = Name.simple("t_val").axiom(type=NAT)
+        env = Environment.having(
+            list(env.declarations.itervalues()) + [z_val, t_val],
+        )
+
+        one = u.succ()  # Sort 1 = Type
+        motive = fun(Name.simple("_").binder(type=d["MyBool"].const()))(NAT)
+
+        app = (
+            d["rec"]
+            .const(levels=[one])
+            .app(motive)
+            .app(z_val.const())
+            .app(t_val.const())
+            .app(d["true"].const())
+        )
+
+        result = app.whnf(env)
+        assert syntactic_eq(result, t_val.const())
+
+    def test_iota_major_premise_behind_definition(self):
+        """
+        Iota reduction succeeds when the major premise is a definition
+        that WHNF-reduces to a constructor.
+
+        This is the bug scenario: without WHNF-reducing the major premise,
+        the recursor sees a W_Const (the definition name) instead of the
+        constructor, and fails to match any rec rule.
+        """
+        myTrue = Name.simple("myTrue")
+        z_val = Name.simple("z_val").axiom(type=NAT)
+        t_val = Name.simple("t_val").axiom(type=NAT)
+
+        env, d = self._make_mybool_env()
+
+        myTrue_decl = myTrue.definition(
+            type=d["MyBool"].const(),
+            value=d["true"].const(),
+        )
+
+        env = Environment.having(
+            list(env.declarations.itervalues()) + [z_val, t_val, myTrue_decl],
+        )
+
+        one = u.succ()  # Sort 1 = Type
+        motive = fun(Name.simple("_").binder(type=d["MyBool"].const()))(NAT)
+
+        # MyBool.rec.{1} (fun _ => Nat) z_val t_val myTrue
+        # myTrue := MyBool.true, so this should reduce to t_val
+        app = (
+            d["rec"]
+            .const(levels=[one])
+            .app(motive)
+            .app(z_val.const())
+            .app(t_val.const())
+            .app(myTrue_decl.const())
+        )
+
+        result = app.whnf(env)
+        assert syntactic_eq(result, t_val.const())

@@ -1630,7 +1630,7 @@ class W_App(W_Expr):
         # to pick the recursor rule to apply
         if major_idx < 0:
             return False, self
-        major_premise = args[major_idx]
+        major_premise = args[major_idx].whnf(env)
 
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
