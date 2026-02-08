@@ -1,3 +1,5 @@
+from textwrap import dedent
+
 import pytest
 
 from rpylean.environment import Environment
@@ -23,15 +25,38 @@ def test_invalid_def_does_not_type_check():
     assert error is not None
 
     TYPE_1 = W_LEVEL_ZERO.succ().succ().sort()
-    assert error.expected_type == TYPE_1
+    assert error.declared_type == TYPE_1
 
 
-def test_type_error_includes_declaration_name():
-    """Type errors include the declaration name."""
-    invalid = Name.simple("MyBadDef").definition(type=PROP, value=TYPE)
+class TestTypeError(object):
+    def test_with_name(self):
+        invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
 
-    error = invalid.type_check(Environment.EMPTY)
-    assert error.str().startswith("in MyBadDef:\n")
+        error = invalid.type_check(Environment.EMPTY)
+        assert error.str() == dedent(
+            """\
+            in foo:
+            Prop
+              has type
+            Type 1
+              but is declared to have type
+            Type 1
+            """,
+        ).strip("\n")
+
+    def test_anonymous(self):
+        invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
+
+        error = invalid.type_check(Environment.EMPTY)
+        assert error.str() == dedent(
+            """\
+            Prop
+              has type
+            Type 1
+              but is declared to have type
+            Type 1
+            """,
+        ).strip("\n")
 
 
 def test_filter_declarations_by_substring():

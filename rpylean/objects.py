@@ -33,20 +33,20 @@ class W_TypeError(object):
     A term does not type check.
     """
 
-    def __init__(self, environment, term, expected_type, name=None):
+    def __init__(self, environment, term, declared_type, name=None):
         self.environment = environment
         self.term = term
-        self.expected_type = expected_type
-        self.name = name
+        self.declared_type = declared_type
+        self.name = Name.ANONYMOUS if name is None else name
 
     def str(self):
         header = ""
-        if self.name is not None:
+        if self.name is not Name.ANONYMOUS:
             header = "in %s:\n" % self.name.str()
-        return "%s%s\n  does not have expected type\n%s" % (
+        return "%s%s\n  does not have declared type\n%s" % (
             header,
             self.environment.pretty(self.term),
-            self.environment.pretty(self.expected_type),
+            self.environment.pretty(self.declared_type),
         )
 
 
