@@ -459,10 +459,10 @@ class TestProj(object):
 
 
 class TestStructEta(object):
-    """Structure eta: b =?= Wrap.mk (Wrap.proj 0 b) for b : Wrap."""
+    """Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≡ x."""
 
-    def test_struct_eta_ctor_vs_fvar(self):
-        """Wrap.mk (Wrap.val b) is def-eq to b for b : Wrap."""
+    def test_struct_eta_single_field(self):
+        """Wrap.mk (Wrap.proj 0 b) is def-eq to b for b : Wrap."""
         Wrap = Name.simple("Wrap")
         mk = Wrap.child("mk")
         mk_decl = mk.constructor(
@@ -482,6 +482,111 @@ class TestStructEta(object):
         env = Environment.having([wrap_type, mk_decl, Nat_decl])
         assert env.def_eq(b_fvar, ctor_app)
         assert env.def_eq(ctor_app, b_fvar)
+
+    def test_struct_eta_multiple_fields(self):
+        """Pair.mk (Pair.proj 0 p) (Pair.proj 1 p) is def-eq to p."""
+        Pair = Name.simple("Pair")
+        Pair_mk = Pair.child("mk")
+        mk_decl = Pair_mk.constructor(
+            type=forall(
+                x.binder(type=NAT),
+                y.binder(type=NAT),
+            )(Pair.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        pair_type = Pair.structure(type=TYPE, constructor=mk_decl)
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+
+        p_binder = Name.simple("p").binder(type=Pair.const())
+        p_fvar = W_FVar(p_binder)
+
+        # Pair.mk (Pair.proj 0 p) (Pair.proj 1 p)
+        ctor_app = Pair_mk.app(
+            W_Proj(Pair, 0, p_fvar),
+            W_Proj(Pair, 1, p_fvar),
+        )
+
+        env = Environment.having([pair_type, mk_decl, Nat_decl])
+        assert env.def_eq(p_fvar, ctor_app)
+        assert env.def_eq(ctor_app, p_fvar)
+
+    def test_struct_eta_parametric(self):
+        """Struct eta skips type parameters, comparing only fields."""
+        alpha = Name.simple("alpha")
+        Box = Name.simple("Box")
+        Box_mk = Box.child("mk")
+        mk_decl = Box_mk.constructor(
+            type=forall(
+                alpha.binder(type=TYPE).to_implicit(),  # (α : Type)
+                x.binder(type=W_BVar(0)),  # (val : α)
+            )(Box.const().app(W_BVar(1))),  # Box α
+            num_params=1,
+            num_fields=1,
+        )
+        box_type = Box.inductive(
+            type=forall(alpha.binder(type=TYPE))(TYPE),
+            constructors=[mk_decl],
+            num_params=1,
+        )
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+
+        b_binder = Name.simple("b").binder(type=Box.const().app(NAT))
+        b_fvar = W_FVar(b_binder)
+
+        # Box.mk Nat (Box.proj 0 b)
+        ctor_app = Box_mk.const().app(NAT, W_Proj(Box, 0, b_fvar))
+
+        env = Environment.having([box_type, mk_decl, Nat_decl])
+        assert env.def_eq(b_fvar, ctor_app)
+        assert env.def_eq(ctor_app, b_fvar)
+
+    def test_struct_eta_rejects_recursive_type(self):
+        """Struct eta does not apply to recursive inductive types."""
+        MyNat = Name.simple("MyNat")
+        mk = MyNat.child("mk")
+        mk_decl = mk.constructor(
+            type=forall(x.binder(type=MyNat.const()))(MyNat.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        mynat_type = MyNat.inductive(
+            type=TYPE,
+            constructors=[mk_decl],
+            num_indices=0,
+            is_recursive=True,
+        )
+
+        b_binder = Name.simple("b").binder(type=MyNat.const())
+        b_fvar = W_FVar(b_binder)
+
+        ctor_app = mk.app(W_Proj(MyNat, 0, b_fvar))
+
+        env = Environment.having([mynat_type, mk_decl])
+        assert not env.def_eq(b_fvar, ctor_app)
+
+    def test_struct_eta_rejects_wrong_field(self):
+        """Struct eta fails when a field does not match the projection."""
+        Wrap = Name.simple("Wrap")
+        mk = Wrap.child("mk")
+        mk_decl = mk.constructor(
+            type=forall(x.binder(type=NAT))(Wrap.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        wrap_type = Wrap.structure(type=TYPE, constructor=mk_decl)
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+        c = Name.simple("c")
+        c_decl = c.axiom(type=NAT)
+
+        b_binder = Name.simple("b").binder(type=Wrap.const())
+        b_fvar = W_FVar(b_binder)
+
+        # Wrap.mk c -- c is not Wrap.proj 0 b
+        ctor_app = mk.app(c_decl.const())
+
+        env = Environment.having([wrap_type, mk_decl, Nat_decl, c_decl])
+        assert not env.def_eq(b_fvar, ctor_app)
 
 
 def test_beta_reduction():
