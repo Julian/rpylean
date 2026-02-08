@@ -18,6 +18,7 @@ from rpylean.objects import (
     W_LevelIMax,
     W_LitNat,
     W_LitStr,
+    W_Proj,
     forall,
     fun,
     names,
@@ -455,6 +456,32 @@ class TestProj(object):
         proj1 = Foo.proj(0, x.const())
         proj2 = Foo.proj(0, y.const())
         assert not env.def_eq(proj1, proj2)
+
+
+class TestStructEta(object):
+    """Structure eta: b =?= Wrap.mk (Wrap.proj 0 b) for b : Wrap."""
+
+    def test_struct_eta_ctor_vs_fvar(self):
+        """Wrap.mk (Wrap.val b) is def-eq to b for b : Wrap."""
+        Wrap = Name.simple("Wrap")
+        mk = Wrap.child("mk")
+        mk_decl = mk.constructor(
+            type=forall(x.binder(type=NAT))(Wrap.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        wrap_type = Wrap.structure(type=TYPE, constructor=mk_decl)
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+
+        b_binder = Name.simple("b").binder(type=Wrap.const())
+        b_fvar = W_FVar(b_binder)
+
+        # Wrap.mk (Wrap.proj 0 b)
+        ctor_app = mk.app(W_Proj(Wrap, 0, b_fvar))
+
+        env = Environment.having([wrap_type, mk_decl, Nat_decl])
+        assert env.def_eq(b_fvar, ctor_app)
+        assert env.def_eq(ctor_app, b_fvar)
 
 
 def test_beta_reduction():

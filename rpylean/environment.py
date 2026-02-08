@@ -18,14 +18,19 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     PROP,
     Name,
+    W_App,
     W_BVar,
     W_Const,
+    W_Constructor,
     W_ForAll,
+    W_Inductive,
     W_Lambda,
     W_LitNat,
     W_LitStr,
+    W_Proj,
     W_Sort,
     fun,
+    get_decl,
     name_eq,
     syntactic_eq,
 )
@@ -348,6 +353,12 @@ class Environment(object):
             result = self.def_eq(expr1_eta, expr2)
             return tracer.result(result)
 
+        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) =?= x
+        if self.try_struct_eta(expr1, expr2):
+            return tracer.result(True)
+        if self.try_struct_eta(expr2, expr1):
+            return tracer.result(True)
+
         # As the *very* last step, try converting NatLit exprs
         # In order to be able to type check things like 'UInt32.size',
         # we need to try everything else before actually calling 'build_nat_expr'
@@ -379,6 +390,82 @@ class Environment(object):
                     expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
                 )
         return None
+
+    def try_struct_eta(self, ctor_side, other_side):
+        """
+        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) =?= x
+
+        If ctor_side is a fully applied constructor of a structure type,
+        and the types match, compare each field of the constructor
+        application with the corresponding projection of other_side.
+        """
+        # Decompose ctor_side into head + args
+        head = ctor_side
+        args = []
+        while isinstance(head, W_App):
+            args.append(head.arg)
+            head = head.fn
+
+        if not isinstance(head, W_Const):
+            return False
+
+        # Check if head is a constructor
+        ctor_decl = get_decl(self.declarations, head.name)
+        if not isinstance(ctor_decl.w_kind, W_Constructor):
+            return False
+
+        num_params = ctor_decl.w_kind.num_params
+        num_fields = ctor_decl.w_kind.num_fields
+
+        # Must be fully applied
+        if len(args) != num_params + num_fields:
+            return False
+
+        # Look up the inductive type to check it qualifies as a struct
+        # The constructor's type should end in an application of the
+        # inductive type, and the inductive must have exactly 1 constructor
+        # and no indices.
+        ctor_type = ctor_decl.type
+        while isinstance(ctor_type, W_ForAll):
+            ctor_type = ctor_type.body
+        # ctor_type should now be the result type, e.g. "Wrap" or "ULift α"
+        result_head = ctor_type
+        while isinstance(result_head, W_App):
+            result_head = result_head.fn
+        if not isinstance(result_head, W_Const):
+            return False
+
+        struct_name = result_head.name
+        inductive_decl = get_decl(self.declarations, struct_name)
+        if not isinstance(inductive_decl.w_kind, W_Inductive):
+            return False
+
+        ind = inductive_decl.w_kind
+        # Must be a struct: exactly 1 constructor, no indices,
+        # and not recursive (matching Lean's is_structure_like).
+        if len(ind.constructors) != 1:
+            return False
+        if ind.num_indices != 0:
+            return False
+        if ind.is_recursive:
+            return False
+
+        # Check that inferred types are def-eq
+        ctor_ty = ctor_side.infer(self)
+        other_ty = other_side.infer(self)
+        if not self.def_eq(ctor_ty, other_ty):
+            return False
+
+        # Compare each field: Proj(i, other_side) =?= args[num_params + i]
+        args.reverse()
+        i = 0
+        while i < num_fields:
+            proj = W_Proj(struct_name, i, other_side)
+            if not self.def_eq(proj, args[num_params + i]):
+                return False
+            i += 1
+
+        return True
 
     def infer_sort_of(self, expr):
         expr_type = expr.infer(self).whnf(self)
