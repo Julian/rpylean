@@ -5,7 +5,12 @@ from traceback import print_exc
 import pdb
 
 from rpython.rlib.jit import promote
-from rpython.rlib.objectmodel import not_rpython, r_dict, we_are_translated
+from rpython.rlib.objectmodel import (
+    compute_identity_hash,
+    not_rpython,
+    r_dict,
+    we_are_translated,
+)
 
 from rpylean import parser
 from rpylean._rlib import r_dict_eq
@@ -200,6 +205,17 @@ class StreamTracer(Tracer):
         return value
 
 
+class _DefEqCacheEntry(object):
+    """
+    An entry in the def_eq cache, keyed by object identity.
+    """
+
+    def __init__(self, expr1, expr2, result):
+        self.expr1 = expr1
+        self.expr2 = expr2
+        self.result = result
+
+
 class Environment(object):
     """
     A Lean environment with its declarations.
@@ -211,6 +227,7 @@ class Environment(object):
         self.heartbeat = 0
         self.max_heartbeat = 0
         self._current_decl = None
+        self._def_eq_cache = {}
 
     @not_rpython
     def __getitem__(self, value):
@@ -282,6 +299,7 @@ class Environment(object):
     def _check_one(self, each):
         self.heartbeat = 0
         self._current_decl = each
+        self._def_eq_cache = {}
         try:
             return each.type_check(self)
         except HeartbeatExceeded as err:
@@ -342,6 +360,34 @@ class Environment(object):
         expr1 = expr1.whnf(self)
         expr2 = expr2.whnf(self)
 
+        # Check the def_eq cache (keyed by object identity after WHNF)
+        cache_key = compute_identity_hash(expr1) * 1000003 ^ compute_identity_hash(
+            expr2
+        )
+        entries = self._def_eq_cache.get(cache_key, None)
+        if entries is not None:
+            i = 0
+            while i < len(entries):
+                entry = entries[i]
+                if entry.expr1 is expr1 and entry.expr2 is expr2:
+                    return tracer.result(entry.result)
+                i += 1
+
+        result = self._def_eq_core(expr1, expr2)
+
+        # Store the result in the cache
+        entry = _DefEqCacheEntry(expr1, expr2, result)
+        if entries is not None:
+            entries.append(entry)
+        else:
+            self._def_eq_cache[cache_key] = [entry]
+
+        return tracer.result(result)
+
+    def _def_eq_core(self, expr1, expr2):
+        """
+        Core definitional equality logic, called after WHNF reduction.
+        """
         # Promote the classes so the JIT can specialize on expression types.
         # This is critical for the type dispatch below - it allows the JIT
         # to compile specialized traces for common type combinations.
@@ -355,8 +401,7 @@ class Environment(object):
             # Still would love to think of a better way.
             cls1 is not W_Const or expr1.name.syntactic_eq(expr2.name)
         ):
-            result = expr1.def_eq(expr2, self.def_eq)
-            return tracer.result(result)
+            return expr1.def_eq(expr2, self.def_eq)
 
         # Proof irrelevance check: Get the types of our expressions
         expr1_ty = expr1.infer(self)
@@ -366,25 +411,23 @@ class Environment(object):
         expr2_ty_kind = expr2_ty.infer(self)
         if syntactic_eq(expr1_ty_kind, PROP) and syntactic_eq(expr2_ty_kind, PROP):
             if self.def_eq(expr1_ty, expr2_ty):
-                return tracer.result(True)
+                return True
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
 
         expr2_eta = self.try_eta_expand(expr1, expr2)
         if expr2_eta is not None:
-            result = self.def_eq(expr1, expr2_eta)
-            return tracer.result(result)
+            return self.def_eq(expr1, expr2_eta)
         expr1_eta = self.try_eta_expand(expr2, expr1)
         if expr1_eta is not None:
-            result = self.def_eq(expr1_eta, expr2)
-            return tracer.result(result)
+            return self.def_eq(expr1_eta, expr2)
 
         # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) =?= x
         if self.try_struct_eta(expr1, expr2):
-            return tracer.result(True)
+            return True
         if self.try_struct_eta(expr2, expr1):
-            return tracer.result(True)
+            return True
 
         # As the *very* last step, try converting NatLit exprs
         # In order to be able to type check things like 'UInt32.size',
@@ -392,20 +435,16 @@ class Environment(object):
         # (so that checks like syntactic equality can succeed and prevent us from
         # building up ~4 billion `Nat` expressions)
         if cls1 is W_LitNat:
-            result = self.def_eq(expr1.build_nat_expr(), expr2)
-            return tracer.result(result)
+            return self.def_eq(expr1.build_nat_expr(), expr2)
         elif isinstance(expr2, W_LitNat):
-            result = self.def_eq(expr1, expr2.build_nat_expr())
-            return tracer.result(result)
+            return self.def_eq(expr1, expr2.build_nat_expr())
 
         if cls1 is W_LitStr:
-            result = self.def_eq(expr1.build_str_expr(self), expr2)
-            return tracer.result(result)
+            return self.def_eq(expr1.build_str_expr(self), expr2)
         elif isinstance(expr2, W_LitStr):
-            result = self.def_eq(expr1, expr2.build_str_expr(self))
-            return tracer.result(result)
+            return self.def_eq(expr1, expr2.build_str_expr(self))
 
-        return tracer.result(False)
+        return False
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):

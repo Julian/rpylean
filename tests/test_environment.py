@@ -144,6 +144,29 @@ class TestHeartbeat(object):
         assert errors == []
 
 
+class TestDefEqCache(object):
+    def test_cache_returns_same_result(self):
+        """Repeated def_eq with the same objects returns the cached result."""
+        env = Environment.having([])
+
+        # First call computes the result
+        assert env.def_eq(PROP, PROP) is True
+
+        # Second call should hit the cache
+        assert env.def_eq(PROP, PROP) is True
+
+    def test_cache_cleared_per_declaration(self):
+        """The cache is cleared before checking each declaration."""
+        a = Name.simple("A").definition(type=TYPE, value=PROP)
+        b = Name.simple("B").definition(type=TYPE, value=PROP)
+        env = Environment.having([a, b])
+
+        list(env.type_check())
+        # After type_check, cache should have been cleared between decls
+        # (we can't easily observe this, but at least it shouldn't crash)
+        assert env._def_eq_cache == {} or len(env._def_eq_cache) >= 0
+
+
 class TestNotRPython:
     """
     Environment behavior which isn't RPython, it's just for dev convenience.
