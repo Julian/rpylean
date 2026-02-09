@@ -534,3 +534,230 @@ class TestIotaReduction:
 
         result = app.whnf(env)
         assert syntactic_eq(result, t_val.const())
+
+
+class TestNativeNatReduction:
+    """Native nat kernel operations reduce in WHNF without unfolding definitions."""
+
+    def test_nat_succ_not_natively_reduced(self):
+        """Nat.succ is not natively reduced; it stays as a constructor app."""
+        from rpylean.objects import _try_reduce_nat
+
+        app = Name.simple("Nat").child("succ").const().app(W_LitNat.int(5))
+        result = _try_reduce_nat(app, Environment.EMPTY)
+        assert result is None
+
+    def test_nat_add(self):
+        app = (
+            Name.simple("Nat")
+            .child("add")
+            .const()
+            .app(W_LitNat.int(3))
+            .app(W_LitNat.int(7))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "10"
+
+    def test_nat_sub(self):
+        app = (
+            Name.simple("Nat")
+            .child("sub")
+            .const()
+            .app(W_LitNat.int(10))
+            .app(W_LitNat.int(3))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "7"
+
+    def test_nat_sub_underflow_is_zero(self):
+        app = (
+            Name.simple("Nat")
+            .child("sub")
+            .const()
+            .app(W_LitNat.int(3))
+            .app(W_LitNat.int(10))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "0"
+
+    def test_nat_mul(self):
+        app = (
+            Name.simple("Nat")
+            .child("mul")
+            .const()
+            .app(W_LitNat.int(6))
+            .app(W_LitNat.int(7))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "42"
+
+    def test_nat_pow(self):
+        app = (
+            Name.simple("Nat")
+            .child("pow")
+            .const()
+            .app(W_LitNat.int(2))
+            .app(W_LitNat.int(32))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "4294967296"
+
+    def test_nat_div(self):
+        app = (
+            Name.simple("Nat")
+            .child("div")
+            .const()
+            .app(W_LitNat.int(10))
+            .app(W_LitNat.int(3))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "3"
+
+    def test_nat_div_by_zero(self):
+        app = (
+            Name.simple("Nat")
+            .child("div")
+            .const()
+            .app(W_LitNat.int(10))
+            .app(W_LitNat.int(0))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "0"
+
+    def test_nat_mod(self):
+        app = (
+            Name.simple("Nat")
+            .child("mod")
+            .const()
+            .app(W_LitNat.int(10))
+            .app(W_LitNat.int(3))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "1"
+
+    def test_nat_mod_by_zero(self):
+        app = (
+            Name.simple("Nat")
+            .child("mod")
+            .const()
+            .app(W_LitNat.int(10))
+            .app(W_LitNat.int(0))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "10"
+
+    def test_nat_beq_true(self):
+        from rpylean.objects import _BOOL_TRUE
+
+        app = (
+            Name.simple("Nat")
+            .child("beq")
+            .const()
+            .app(W_LitNat.int(5))
+            .app(W_LitNat.int(5))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert syntactic_eq(result, _BOOL_TRUE)
+
+    def test_nat_beq_false(self):
+        from rpylean.objects import _BOOL_FALSE
+
+        app = (
+            Name.simple("Nat")
+            .child("beq")
+            .const()
+            .app(W_LitNat.int(5))
+            .app(W_LitNat.int(3))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert syntactic_eq(result, _BOOL_FALSE)
+
+    def test_nat_ble_true(self):
+        from rpylean.objects import _BOOL_TRUE
+
+        app = (
+            Name.simple("Nat")
+            .child("ble")
+            .const()
+            .app(W_LitNat.int(3))
+            .app(W_LitNat.int(5))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert syntactic_eq(result, _BOOL_TRUE)
+
+    def test_nat_ble_equal(self):
+        from rpylean.objects import _BOOL_TRUE
+
+        app = (
+            Name.simple("Nat")
+            .child("ble")
+            .const()
+            .app(W_LitNat.int(5))
+            .app(W_LitNat.int(5))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert syntactic_eq(result, _BOOL_TRUE)
+
+    def test_nat_ble_false(self):
+        from rpylean.objects import _BOOL_FALSE
+
+        app = (
+            Name.simple("Nat")
+            .child("ble")
+            .const()
+            .app(W_LitNat.int(5))
+            .app(W_LitNat.int(3))
+        )
+        result = app.whnf(Environment.EMPTY)
+        assert syntactic_eq(result, _BOOL_FALSE)
+
+    def test_non_literal_arg_falls_through(self):
+        """Native reduction returns None when args are not nat literals."""
+        from rpylean.objects import _try_reduce_nat
+
+        a_decl = a.axiom(type=NAT)
+        env = Environment.having([a_decl])
+        app = (
+            Name.simple("Nat")
+            .child("add")
+            .const()
+            .app(a_decl.const())
+            .app(W_LitNat.int(3))
+        )
+        # _try_reduce_nat returns None when an arg isn't a nat literal
+        result = _try_reduce_nat(app, env)
+        assert result is None
+
+    def test_to_nat_val_succ_of_zero(self):
+        """_to_nat_val extracts 1 from Nat.succ(Nat.zero)."""
+        from rpylean.objects import _to_nat_val
+
+        Nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        Nat_zero_decl = (
+            Name.simple("Nat")
+            .child("zero")
+            .constructor(
+                type=NAT,
+                num_params=0,
+                num_fields=0,
+            )
+        )
+        env = Environment.having([Nat_decl, Nat_zero_decl])
+        app = (
+            Name.simple("Nat")
+            .child("succ")
+            .const()
+            .app(Name.simple("Nat").child("zero").const())
+        )
+        result = _to_nat_val(app, env)
+        assert result is not None
+        assert result.str() == "1"

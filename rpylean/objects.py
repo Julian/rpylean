@@ -1093,6 +1093,50 @@ NAT_SUCC = NAT.child("succ")
 CHAR = Name.simple("Char").const()
 STRING = Name.simple("String").const()
 
+# Names for native nat kernel operations (matching Lean's kernel)
+_NAT_NAME = Name.simple("Nat")
+_NAT_ADD = _NAT_NAME.child("add")
+_NAT_SUB = _NAT_NAME.child("sub")
+_NAT_MUL = _NAT_NAME.child("mul")
+_NAT_POW = _NAT_NAME.child("pow")
+_NAT_GCD = _NAT_NAME.child("gcd")
+_NAT_MOD = _NAT_NAME.child("mod")
+_NAT_DIV = _NAT_NAME.child("div")
+_NAT_BEQ = _NAT_NAME.child("beq")
+_NAT_BLE = _NAT_NAME.child("ble")
+_NAT_LAND = _NAT_NAME.child("land")
+_NAT_LOR = _NAT_NAME.child("lor")
+_NAT_XOR = _NAT_NAME.child("xor")
+_NAT_SHIFT_LEFT = _NAT_NAME.child("shiftLeft")
+_NAT_SHIFT_RIGHT = _NAT_NAME.child("shiftRight")
+_NAT_SUCC_NAME = _NAT_NAME.child("succ")
+
+_BOOL_TRUE = Name.simple("Bool").child("true").const()
+_BOOL_FALSE = Name.simple("Bool").child("false").const()
+
+# Max exponent for Nat.pow to prevent excessive computation
+_REDUCE_POW_MAX_EXP = rbigint.fromint(1 << 24)
+
+
+def _to_nat_val(expr, env):
+    """
+    If expr (already WHNF'd) is a nat literal, Nat.zero, or a chain of
+    Nat.succ applications on a nat value, return its rbigint value.
+    Otherwise return None.
+    """
+    if isinstance(expr, W_LitNat):
+        return expr.val
+    if isinstance(expr, W_Const):
+        if expr.name.syntactic_eq(NAT_ZERO.name):
+            return rbigint.fromint(0)
+    if isinstance(expr, W_App):
+        head = expr.fn
+        if isinstance(head, W_Const) and head.name.syntactic_eq(_NAT_SUCC_NAME):
+            inner = _to_nat_val(expr.arg.whnf(env), env)
+            if inner is not None:
+                return inner.add(rbigint.fromint(1))
+    return None
+
 
 class W_LitNat(W_Expr):
     def __init__(self, val):
@@ -1157,6 +1201,209 @@ class W_LitNat(W_Expr):
         Nat literals infer as the constant named Nat.
         """
         return NAT
+
+
+def _try_reduce_nat(expr, env):
+    """
+    Try to natively reduce a nat kernel operation.
+
+    Matches the Lean kernel's ``reduce_nat`` function: given an application
+    expression, extract the head constant and arguments *without* first
+    WHNF-reducing them, then WHNF the arguments to see if they are nat
+    literals.  If so, compute the result natively using rbigint.
+
+    Returns a W_LitNat (or Bool constant) on success, None on failure.
+    """
+    # Collect the application spine (unreduced) to find the head constant
+    # and count args.  args are collected in reverse (innermost first).
+    args = []
+    target = expr
+    while isinstance(target, W_App):
+        args.append(target.arg)
+        target = target.fn
+
+    if not isinstance(target, W_Const):
+        return None
+
+    name = target.name
+    nargs = len(args)
+
+    if nargs == 1:
+        # Nat.succ is handled via _to_nat_val instead of here,
+        # to avoid converting constructor applications to W_LitNat
+        # which would then need build_nat_expr in iota reduction.
+        return None
+
+    if nargs != 2:
+        return None
+
+    # For binary ops, args[1] is the first argument, args[0] is the second
+    # (because we collected them innermost-first).
+
+    if name.syntactic_eq(_NAT_ADD):
+        return _reduce_bin_nat_op_add(args, env)
+    if name.syntactic_eq(_NAT_SUB):
+        return _reduce_bin_nat_op_sub(args, env)
+    if name.syntactic_eq(_NAT_MUL):
+        return _reduce_bin_nat_op_mul(args, env)
+    if name.syntactic_eq(_NAT_POW):
+        return _reduce_nat_pow(args, env)
+    if name.syntactic_eq(_NAT_GCD):
+        return _reduce_bin_nat_op_gcd(args, env)
+    if name.syntactic_eq(_NAT_MOD):
+        return _reduce_bin_nat_op_mod(args, env)
+    if name.syntactic_eq(_NAT_DIV):
+        return _reduce_bin_nat_op_div(args, env)
+    if name.syntactic_eq(_NAT_BEQ):
+        return _reduce_bin_nat_pred_beq(args, env)
+    if name.syntactic_eq(_NAT_BLE):
+        return _reduce_bin_nat_pred_ble(args, env)
+    if name.syntactic_eq(_NAT_LAND):
+        return _reduce_bin_nat_op_land(args, env)
+    if name.syntactic_eq(_NAT_LOR):
+        return _reduce_bin_nat_op_lor(args, env)
+    if name.syntactic_eq(_NAT_XOR):
+        return _reduce_bin_nat_op_xor(args, env)
+    if name.syntactic_eq(_NAT_SHIFT_LEFT):
+        return _reduce_bin_nat_op_shiftleft(args, env)
+    if name.syntactic_eq(_NAT_SHIFT_RIGHT):
+        return _reduce_bin_nat_op_shiftright(args, env)
+
+    return None
+
+
+def _get_bin_nat_args(args, env):
+    """
+    WHNF both arguments and extract their nat values.
+
+    Returns (v1, v2) as rbigint pair, or (None, None) if either
+    argument is not a nat literal.
+    """
+    arg1 = args[1].whnf(env)
+    v1 = _to_nat_val(arg1, env)
+    if v1 is None:
+        return None, None
+    arg2 = args[0].whnf(env)
+    v2 = _to_nat_val(arg2, env)
+    if v2 is None:
+        return None, None
+    return v1, v2
+
+
+def _reduce_bin_nat_op_add(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.add(v2))
+
+
+def _reduce_bin_nat_op_sub(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v1.lt(v2):
+        return W_LitNat(rbigint.fromint(0))
+    return W_LitNat(v1.sub(v2))
+
+
+def _reduce_bin_nat_op_mul(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.mul(v2))
+
+
+def _reduce_nat_pow(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v2.gt(_REDUCE_POW_MAX_EXP):
+        return None
+    return W_LitNat(v1.pow(v2))
+
+
+def _reduce_bin_nat_op_gcd(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    # Euclidean algorithm
+    a = v1
+    b = v2
+    zero = rbigint.fromint(0)
+    while b.gt(zero):
+        a, b = b, a.mod(b)
+    return W_LitNat(a)
+
+
+def _reduce_bin_nat_op_mod(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v2.eq(rbigint.fromint(0)):
+        return W_LitNat(v1)
+    return W_LitNat(v1.mod(v2))
+
+
+def _reduce_bin_nat_op_div(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v2.eq(rbigint.fromint(0)):
+        return W_LitNat(rbigint.fromint(0))
+    return W_LitNat(v1.div(v2))
+
+
+def _reduce_bin_nat_pred_beq(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v1.eq(v2):
+        return _BOOL_TRUE
+    return _BOOL_FALSE
+
+
+def _reduce_bin_nat_pred_ble(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    if v1.le(v2):
+        return _BOOL_TRUE
+    return _BOOL_FALSE
+
+
+def _reduce_bin_nat_op_land(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.and_(v2))
+
+
+def _reduce_bin_nat_op_lor(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.or_(v2))
+
+
+def _reduce_bin_nat_op_xor(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.xor(v2))
+
+
+def _reduce_bin_nat_op_shiftleft(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.lshift(v2.toint()))
+
+
+def _reduce_bin_nat_op_shiftright(args, env):
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return W_LitNat(v1.rshift(v2.toint()))
 
 
 class W_Proj(W_Expr):
@@ -1806,6 +2053,13 @@ class W_App(W_Expr):
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def whnf(self, env):
+        # Try native nat reduction before any WHNF on subexpressions.
+        # This must happen first because WHNF'ing fn would delta-reduce
+        # Nat.add etc. into their recursive definitions.
+        reduced = _try_reduce_nat(self, env)
+        if reduced is not None:
+            return reduced
+
         fn = self.fn.whnf(env)
         fn_class = fn.__class__
 
