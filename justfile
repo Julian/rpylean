@@ -61,3 +61,12 @@ test *ARGS=tests:
 # Run rpylean's translated tests.
 test-translated *ARGS=translated_tests:
     "{{ pypy }}" "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
+
+# Benchmark rpylean against a given export file.
+bench file:
+    @echo "=== untranslated ==="
+    @just rpylean check "{{ file }}"
+    @echo "=== translated (no JIT) ==="
+    @"{{ translated }}-nojit" check "{{ file }}"
+    @echo "=== translated (JIT) ==="
+    @"{{ translated }}" check "{{ file }}"
