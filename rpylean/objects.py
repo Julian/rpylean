@@ -26,6 +26,7 @@ whnf_jitdriver = JitDriver(
 )
 
 
+@elidable
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
