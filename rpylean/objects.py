@@ -6,6 +6,15 @@ from rpylean._rlib import count, warn
 from rpylean.exceptions import InvalidProjection
 
 
+def _whnf_printable_location(fn_class):
+    """
+    Return a human-readable description of the current WHNF trace.
+
+    Called by the JIT to label traces in PYPYLOG output.
+    """
+    return "whnf: fn=%s" % fn_class.__name__
+
+
 # JIT driver for the WHNF reduction loop - the core hot path of type checking.
 # greens: fn_class determines which reduction rule applies (beta, delta, iota)
 # reds: the mutable state during reduction
@@ -13,6 +22,7 @@ whnf_jitdriver = JitDriver(
     greens=["fn_class"],
     reds=["self_expr", "env", "fn"],
     name="whnf",
+    get_printable_location=_whnf_printable_location,
 )
 
 
