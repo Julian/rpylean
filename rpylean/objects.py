@@ -44,10 +44,10 @@ class W_TypeError(W_CheckError):
     A term does not type check.
     """
 
-    def __init__(self, environment, term, declared_type, name=None):
+    def __init__(self, environment, term, expected_type, name=None):
         self.environment = environment
         self.term = term
-        self.declared_type = declared_type
+        self.expected_type = expected_type
         self.name = Name.ANONYMOUS if name is None else name
         self.inferred_type = term.infer(environment)
 
@@ -55,11 +55,11 @@ class W_TypeError(W_CheckError):
         header = ""
         if self.name is not Name.ANONYMOUS:
             header = "in %s:\n" % self.name.str()
-        return "%s%s\n  has type\n%s\n  but is declared to have type\n%s" % (
+        return "%s%s\n  has type\n%s\n  but is expected to have type\n%s" % (
             header,
             self.environment.pretty(self.term),
             self.environment.pretty(self.inferred_type),
-            self.environment.pretty(self.declared_type),
+            self.environment.pretty(self.expected_type),
         )
 
 

@@ -24,7 +24,7 @@ def test_invalid_def_does_not_type_check():
     error = invalid.type_check(Environment.EMPTY)
     assert error is not None
 
-    assert error.declared_type == PROP
+    assert error.expected_type == PROP
 
 
 class TestTypeError(object):
@@ -38,7 +38,7 @@ class TestTypeError(object):
             Type
               has type
             Type 1
-              but is declared to have type
+              but is expected to have type
             Prop
             """,
         ).strip("\n")
@@ -52,7 +52,7 @@ class TestTypeError(object):
             Type
               has type
             Type 1
-              but is declared to have type
+              but is expected to have type
             Prop
             """,
         ).strip("\n")
