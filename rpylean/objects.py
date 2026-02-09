@@ -1115,7 +1115,7 @@ class W_LitNat(W_Expr):
 
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitNat)
-        return self.val == other.val
+        return self.val.eq(other.val)
 
     def pretty(self, constants):
         return self.str()
@@ -1134,7 +1134,7 @@ class W_LitNat(W_Expr):
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_LitNat)
-        return self.val == other.val
+        return self.val.eq(other.val)
 
     def build_nat_expr(self):
         if rbigint.fromint(100).lt(self.val):

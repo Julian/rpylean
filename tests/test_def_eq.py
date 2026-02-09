@@ -48,6 +48,13 @@ class TestLitNat(object):
     def test_not_eq(self):
         assert not env.def_eq(W_LitNat.int(37), W_LitNat.int(73))
 
+    def test_large_eq(self):
+        """Large nat literals (> machine word) compare equal via rbigint.eq."""
+        assert env.def_eq(W_LitNat.long(4294967296), W_LitNat.long(4294967296))
+
+    def test_large_not_eq(self):
+        assert not env.def_eq(W_LitNat.long(4294967296), W_LitNat.long(4294967297))
+
 
 class TestLitStr(object):
     def test_eq(self):
