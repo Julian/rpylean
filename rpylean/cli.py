@@ -33,6 +33,10 @@ cli = CLI(
             "filter",
             "only check declarations whose name contains this substring",
         ),
+        (
+            "max-heartbeat",
+            "maximum number of def_eq calls per declaration before giving up",
+        ),
     ],
     flags=[
         (
@@ -60,6 +64,10 @@ def check(self, args, stdin, stdout, stderr):
 
         if args.options["trace"]:
             environment.tracer = StreamTracer(stderr)
+
+        max_heartbeat = int(args.options["max-heartbeat"] or "0")
+        if max_heartbeat > 0:
+            environment.max_heartbeat = max_heartbeat
 
         name_filter = args.options["filter"]
         if name_filter is not None:

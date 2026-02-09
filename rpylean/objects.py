@@ -28,7 +28,18 @@ def get_decl(declarations, name):
     return declarations[name]
 
 
-class W_TypeError(object):
+class W_CheckError(object):
+    """
+    Base class for type-checking errors returned by type_check.
+    """
+
+    name = None
+
+    def str(self):
+        return "Unexpected check error!"
+
+
+class W_TypeError(W_CheckError):
     """
     A term does not type check.
     """
@@ -49,6 +60,24 @@ class W_TypeError(object):
             self.environment.pretty(self.term),
             self.environment.pretty(self.inferred_type),
             self.environment.pretty(self.declared_type),
+        )
+
+
+class W_HeartbeatError(W_CheckError):
+    """
+    The heartbeat limit was exceeded while checking a declaration.
+    """
+
+    def __init__(self, name, heartbeats, max_heartbeat):
+        self.name = name
+        self.heartbeats = heartbeats
+        self.max_heartbeat = max_heartbeat
+
+    def str(self):
+        return "in %s:\nheartbeat limit exceeded (%s def_eq calls, limit %s)" % (
+            self.name.str(),
+            self.heartbeats,
+            self.max_heartbeat,
         )
 
 

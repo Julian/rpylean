@@ -12,6 +12,7 @@ from rpylean._rlib import r_dict_eq
 from rpylean.exceptions import (
     AlreadyDeclared,
     DuplicateLevels,
+    HeartbeatExceeded,
     UnknownQuotient,
 )
 from rpylean.objects import (
@@ -23,6 +24,7 @@ from rpylean.objects import (
     W_Const,
     W_Constructor,
     W_ForAll,
+    W_HeartbeatError,
     W_Inductive,
     W_Lambda,
     W_LitNat,
@@ -206,6 +208,9 @@ class Environment(object):
     def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
         self.tracer = tracer
+        self.heartbeat = 0
+        self.max_heartbeat = 0
+        self._current_decl = None
 
     @not_rpython
     def __getitem__(self, value):
@@ -275,8 +280,16 @@ class Environment(object):
                     yield error
 
     def _check_one(self, each):
+        self.heartbeat = 0
+        self._current_decl = each
         try:
             return each.type_check(self)
+        except HeartbeatExceeded as err:
+            return W_HeartbeatError(
+                each.name,
+                err.heartbeats,
+                err.max_heartbeat,
+            )
         except Exception:
             if not we_are_translated():
                 print_exc(None, stderr)
@@ -311,6 +324,16 @@ class Environment(object):
         assert not isinstance(expr2, W_BVar), (
             "unexpectedly encountered BVar in def_eq: %s" % expr2
         )
+
+        max_heartbeat = self.max_heartbeat
+        if max_heartbeat > 0:
+            self.heartbeat += 1
+            if self.heartbeat > max_heartbeat:
+                raise HeartbeatExceeded(
+                    self._current_decl,
+                    self.heartbeat,
+                    max_heartbeat,
+                )
 
         tracer = self.tracer
         tracer.enter(expr1, expr2, self.declarations)

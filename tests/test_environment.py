@@ -91,6 +91,59 @@ def test_verbose_prints_declaration_names():
     assert "GoodDef" in progress.getvalue()
 
 
+class TestHeartbeat(object):
+    def test_heartbeat_resets_per_declaration(self):
+        """Heartbeat counter resets before each declaration."""
+        a = Name.simple("A").definition(type=TYPE, value=PROP)
+        b = Name.simple("B").definition(type=TYPE, value=PROP)
+        env = Environment.having([a, b])
+        env.max_heartbeat = 100000
+
+        errors = list(env.type_check())
+        assert errors == []
+
+    def test_heartbeat_exceeded_is_an_error(self):
+        """Exceeding the heartbeat limit raises HeartbeatExceeded."""
+        from rpylean.exceptions import HeartbeatExceeded
+
+        env = Environment.having([])
+        env.max_heartbeat = 3
+        env._current_decl = Name.simple("Test").definition(type=TYPE, value=PROP)
+
+        # First 3 calls succeed
+        env.def_eq(PROP, PROP)
+        env.def_eq(PROP, PROP)
+        env.def_eq(PROP, PROP)
+        assert env.heartbeat == 3
+
+        # 4th call exceeds the limit
+        try:
+            env.def_eq(PROP, PROP)
+            assert False, "should have raised HeartbeatExceeded"
+        except HeartbeatExceeded as err:
+            assert "Test" in err.str()
+            assert "heartbeat limit exceeded" in err.str()
+
+    def test_check_one_resets_heartbeat(self):
+        """_check_one resets the heartbeat counter before each declaration."""
+        decl = Name.simple("OK").definition(type=TYPE, value=PROP)
+        env = Environment.having([decl])
+        env.max_heartbeat = 100
+        env.heartbeat = 99  # would overflow on next def_eq
+
+        errors = list(env.type_check())
+        assert errors == []  # heartbeat was reset, so no overflow
+
+    def test_heartbeat_zero_means_unlimited(self):
+        """A max_heartbeat of 0 (default) means no limit."""
+        good = Name.simple("Good").definition(type=TYPE, value=PROP)
+        env = Environment.having([good])
+        assert env.max_heartbeat == 0
+
+        errors = list(env.type_check())
+        assert errors == []
+
+
 class TestNotRPython:
     """
     Environment behavior which isn't RPython, it's just for dev convenience.
