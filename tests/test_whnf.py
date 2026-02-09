@@ -761,3 +761,36 @@ class TestNativeNatReduction:
         result = _to_nat_val(app, env)
         assert result is not None
         assert result.str() == "1"
+
+    def test_to_nat_val_deep_succ_chain(self):
+        """_to_nat_val handles deep Nat.succ chains without stack overflow."""
+        from rpylean.objects import _to_nat_val
+
+        Nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        Nat_zero_decl = (
+            Name.simple("Nat")
+            .child("zero")
+            .constructor(
+                type=NAT,
+                num_params=0,
+                num_fields=0,
+            )
+        )
+        Nat_succ_decl = (
+            Name.simple("Nat")
+            .child("succ")
+            .constructor(
+                type=forall(x.binder(type=NAT))(NAT),
+                num_params=0,
+                num_fields=1,
+            )
+        )
+        env = Environment.having([Nat_decl, Nat_zero_decl, Nat_succ_decl])
+        succ = Name.simple("Nat").child("succ").const()
+        expr = Name.simple("Nat").child("zero").const()
+        depth = 2000
+        for _ in range(depth):
+            expr = succ.app(expr)
+        result = _to_nat_val(expr, env)
+        assert result is not None
+        assert result.str() == str(depth)

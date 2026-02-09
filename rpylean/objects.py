@@ -1153,19 +1153,25 @@ def _to_nat_val(expr, env):
     If expr (already WHNF'd) is a nat literal, Nat.zero, or a chain of
     Nat.succ applications on a nat value, return its rbigint value.
     Otherwise return None.
+
+    Iterative to avoid stack overflow on large Nat.succ chains.
     """
-    if isinstance(expr, W_LitNat):
-        return expr.val
-    if isinstance(expr, W_Const):
-        if expr.name.syntactic_eq(NAT_ZERO.name):
-            return rbigint.fromint(0)
-    if isinstance(expr, W_App):
-        head = expr.fn
-        if isinstance(head, W_Const) and head.name.syntactic_eq(_NAT_SUCC_NAME):
-            inner = _to_nat_val(expr.arg.whnf(env), env)
-            if inner is not None:
-                return inner.add(rbigint.fromint(1))
-    return None
+    succs = 0
+    while True:
+        if isinstance(expr, W_LitNat):
+            return expr.val.add(rbigint.fromint(succs))
+        if isinstance(expr, W_Const):
+            if expr.name.syntactic_eq(NAT_ZERO.name):
+                return rbigint.fromint(succs)
+        if isinstance(expr, W_App):
+            head = expr.fn
+            if isinstance(head, W_Const) and head.name.syntactic_eq(
+                _NAT_SUCC_NAME,
+            ):
+                succs += 1
+                expr = expr.arg.whnf(env)
+                continue
+        return None
 
 
 class W_LitNat(W_Expr):
