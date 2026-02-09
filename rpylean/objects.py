@@ -484,9 +484,13 @@ class Binder(_Item):
         return self.with_type(type=self.type.bind_fvar(fvar, depth))
 
     def incr_free_bvars(self, expr, depth):
+        if self.type.loose_bvar_range <= depth:
+            return self
         return self.with_type(type=self.type.incr_free_bvars(expr, depth))
 
     def instantiate(self, expr, depth):
+        if self.type.loose_bvar_range <= depth:
+            return self
         return self.with_type(type=self.type.instantiate(expr, depth))
 
     def subst_levels(self, subts):
@@ -834,6 +838,7 @@ class W_Expr(_Item):
 class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = id
+        self.loose_bvar_range = id + 1
 
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
@@ -871,12 +876,15 @@ class W_BVar(W_Expr):
 
 
 class W_FVar(W_Expr):
+    """An FVar which refers to its binder by identity."""
+
     _counter = count()
 
     def __init__(self, binder):
         self.id = next(self._counter)
         assert isinstance(binder, Binder)
         self.binder = binder
+        self.loose_bvar_range = 0
 
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
@@ -916,6 +924,7 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         assert isinstance(val, str)
         self.val = val
+        self.loose_bvar_range = 0
 
     def __repr__(self):
         return repr(self.val)
@@ -957,6 +966,7 @@ class W_LitStr(W_Expr):
 class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
+        self.loose_bvar_range = 0
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
@@ -1036,6 +1046,7 @@ class W_Const(W_Expr):
         for each in levels:
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
+        self.loose_bvar_range = 0
 
     def __repr__(self):
         return "`%s" % self.str()
@@ -1177,6 +1188,7 @@ def _to_nat_val(expr, env):
 class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
+        self.loose_bvar_range = 0
 
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
@@ -1444,6 +1456,7 @@ class W_Proj(W_Expr):
         self.struct_name = struct_name
         self.field_index = field_index
         self.struct_expr = struct_expr
+        self.loose_bvar_range = struct_expr.loose_bvar_range
 
     def def_eq(self, other, def_eq):
         return (
@@ -1505,12 +1518,16 @@ class W_Proj(W_Expr):
         return None
 
     def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
         return self.with_expr(self.struct_expr.bind_fvar(fvar, depth))
 
     def instantiate(self, expr, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.with_expr(self.struct_expr.instantiate(expr, depth))
 
     def subst_levels(self, substs):
@@ -1597,6 +1614,14 @@ class W_FunBase(W_Expr):
         self.binder = binder
         self.body = body
         self.finished_reduce = False
+        body_range = body.loose_bvar_range - 1
+        if body_range < 0:
+            body_range = 0
+        binder_range = binder.type.loose_bvar_range
+        if binder_range > body_range:
+            self.loose_bvar_range = binder_range
+        else:
+            self.loose_bvar_range = body_range
 
 
 class W_ForAll(W_FunBase):
@@ -1656,6 +1681,8 @@ class W_ForAll(W_FunBase):
 
     # TODO - double check this
     def instantiate(self, expr, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         # Don't increment - not yet inside a binder
         return forall(self.binder.instantiate(expr, depth))(
             self.body.instantiate(expr, depth + 1),
@@ -1673,6 +1700,8 @@ class W_ForAll(W_FunBase):
         )
 
     def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return forall(self.binder.incr_free_bvars(count, depth))(
             self.body.incr_free_bvars(count, depth + 1),
         )
@@ -1757,12 +1786,16 @@ class W_Lambda(W_FunBase):
         )
 
     def instantiate(self, expr, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         # Don't increment - not yet inside a binder
         return fun(self.binder.instantiate(expr, depth))(
             self.body.instantiate(expr, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return fun(self.binder.incr_free_bvars(count, depth))(
             self.body.incr_free_bvars(count, depth + 1),
         )
@@ -1791,6 +1824,16 @@ class W_Let(W_Expr):
         self.type = type
         self.value = value
         self.body = body
+        body_range = body.loose_bvar_range - 1
+        if body_range < 0:
+            body_range = 0
+        r = type.loose_bvar_range
+        vr = value.loose_bvar_range
+        if vr > r:
+            r = vr
+        if body_range > r:
+            r = body_range
+        self.loose_bvar_range = r
 
     def pretty(self, constants):
         fvar = self.name.binder(type=self.type).fvar()
@@ -1808,6 +1851,8 @@ class W_Let(W_Expr):
         return body_type.infer(env)
 
     def instantiate(self, expr, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.name.let(
             type=self.type.instantiate(expr, depth),
             value=self.value.instantiate(expr, depth),
@@ -1815,6 +1860,8 @@ class W_Let(W_Expr):
         )
 
     def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.name.let(
             type=self.type.incr_free_bvars(count, depth),
             value=self.value.incr_free_bvars(count, depth),
@@ -1851,6 +1898,12 @@ class W_App(W_Expr):
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
+        fn_range = fn.loose_bvar_range
+        arg_range = arg.loose_bvar_range
+        if fn_range > arg_range:
+            self.loose_bvar_range = fn_range
+        else:
+            self.loose_bvar_range = arg_range
 
     def __repr__(self):
         args = []
@@ -2128,11 +2181,15 @@ class W_App(W_Expr):
         )
 
     def instantiate(self, expr, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.fn.instantiate(expr, depth).app(
             self.arg.instantiate(expr, depth),
         )
 
     def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range <= depth:
+            return self
         return self.fn.incr_free_bvars(count, depth).app(
             self.arg.incr_free_bvars(count, depth),
         )
