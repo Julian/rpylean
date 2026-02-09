@@ -6,6 +6,7 @@ from __future__ import print_function
 from rpylean.parser import ExportVersionError
 
 import errno
+import time
 
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
@@ -55,12 +56,14 @@ cli = CLI(
 )
 def check(self, args, stdin, stdout, stderr):
     for path in args.varargs:
+        parse_start = time.time()
         try:
             environment = environment_from(path=path, stdin=stdin)
         except ExportVersionError as err:
             stderr.write(err.__str__())
             stderr.write("\n")
             return 1
+        parse_elapsed = time.time() - parse_start
 
         if args.options["trace"]:
             environment.tracer = StreamTracer(stderr)
@@ -89,6 +92,7 @@ def check(self, args, stdin, stdout, stderr):
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
         verbose = args.options["verbose"]
 
+        check_start = time.time()
         try:
             for w_error in environment.type_check(
                 declarations,
@@ -104,6 +108,11 @@ def check(self, args, stdin, stdout, stderr):
         except Exception:
             stderr.write("Unexpected error during type checking\n")
             raise
+        check_elapsed = time.time() - check_start
+
+        stderr.write(
+            "parsed in %.2fs, checked in %.2fs\n" % (parse_elapsed, check_elapsed),
+        )
 
         if failures:
             return 1
