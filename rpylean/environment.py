@@ -255,17 +255,21 @@ class Environment(object):
         file.write(self.pretty(declaration))
         file.write(end)
 
-    def type_check(self, declarations=None):
+    def type_check(self, declarations=None, verbose="", progress=None):
         """
         Type check each declaration in the environment.
         """
         if declarations is None:
             for each in self.declarations.itervalues():
+                if verbose:
+                    progress.write("  %s\n" % each.name.str())
                 error = self._check_one(each)
                 if error is not None:
                     yield error
         else:
             for each in declarations:
+                if verbose:
+                    progress.write("  %s\n" % each.name.str())
                 error = self._check_one(each)
                 if error is not None:
                     yield error

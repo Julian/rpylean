@@ -79,6 +79,18 @@ def test_filter_declarations_matches_bad():
     assert len(errors) == 1
 
 
+def test_verbose_prints_declaration_names():
+    """Verbose mode prints each declaration name to the progress stream."""
+    from io import BytesIO
+
+    good = Name.simple("GoodDef").definition(type=TYPE, value=PROP)
+    env = Environment.having([good])
+
+    progress = BytesIO()
+    list(env.type_check(verbose="yes", progress=progress))
+    assert "GoodDef" in progress.getvalue()
+
+
 class TestNotRPython:
     """
     Environment behavior which isn't RPython, it's just for dev convenience.

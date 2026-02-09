@@ -41,6 +41,12 @@ cli = CLI(
             "",
             "yes",  # we can't use StreamTracer here, thanks static typing
         ),
+        (
+            "verbose",
+            "print each declaration name to stderr as it is checked",
+            "",
+            "yes",
+        ),
     ],
 )
 def check(self, args, stdin, stdout, stderr):
@@ -73,9 +79,14 @@ def check(self, args, stdin, stdout, stderr):
             )
 
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
+        verbose = args.options["verbose"]
 
         try:
-            for w_error in environment.type_check(declarations):
+            for w_error in environment.type_check(
+                declarations,
+                verbose=verbose,
+                progress=stderr,
+            ):
                 stderr.write(w_error.str())
                 stderr.write("\n")
 
