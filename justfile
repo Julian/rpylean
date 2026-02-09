@@ -60,7 +60,7 @@ test *ARGS=tests:
 
 # Run rpylean's translated tests.
 test-translated *ARGS=translated_tests:
-    "{{ pypy }}" "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
+    @just pypy "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
 
 # Benchmark rpylean against a given export file.
 bench file:
