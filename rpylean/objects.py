@@ -1800,16 +1800,6 @@ class W_App(W_Expr):
                     new_app = new_app.app(args[i])
                     i -= 1
 
-                # Type check the new application, to ensure that all of our args have the right types
-                # if decl.w_kind.k == 1:
-                # import pdb; pdb.set_trace()
-                new_app_ty = new_app.infer(env)
-                old_ty = self.infer(env)
-                # TODO - this should actually be in the k-like reduction check above
-                if not env.def_eq(new_app_ty, old_ty):
-                    # print("DefEq failed, bailing from iota")
-                    return False, self
-                # new_app = new_app.whnf(env)
                 return True, new_app
 
         return False, self
