@@ -6,21 +6,21 @@ from rpylean._rlib import count, warn
 from rpylean.exceptions import InvalidProjection
 
 
-def _whnf_printable_location(fn_class):
+def _whnf_printable_location(expr_class):
     """
     Return a human-readable description of the current WHNF trace.
 
     Called by the JIT to label traces in PYPYLOG output.
     """
-    return "whnf: fn=%s" % fn_class.__name__
+    return "whnf: %s" % expr_class.__name__
 
 
 # JIT driver for the WHNF reduction loop - the core hot path of type checking.
-# greens: fn_class determines which reduction rule applies (beta, delta, iota)
+# greens: expr_class determines which reduction rule applies
 # reds: the mutable state during reduction
 whnf_jitdriver = JitDriver(
-    greens=["fn_class"],
-    reds=["self_expr", "env", "fn"],
+    greens=["expr_class"],
+    reds=["expr", "env"],
     name="whnf",
     get_printable_location=_whnf_printable_location,
 )
@@ -800,6 +800,35 @@ class W_Expr(_Item):
             return expr
         return expr.app(*more)
 
+    def whnf(self, env):
+        """
+        Reduce this expression to weak head normal form.
+
+        Uses an iterative loop with the JIT driver to avoid deep
+        recursion and allow the tracing JIT to compile efficient loops.
+        """
+        expr = self
+        while True:
+            expr_class = expr.__class__
+            whnf_jitdriver.jit_merge_point(
+                expr_class=expr_class,
+                expr=expr,
+                env=env,
+            )
+            next = expr._whnf_core(env)
+            if next is None:
+                return expr
+            expr = next
+
+    def _whnf_core(self, env):
+        """
+        Perform one WHNF reduction step.
+
+        Returns the reduced expression to keep reducing, or None if
+        this expression is already in WHNF.
+        """
+        return None
+
 
 class W_BVar(W_Expr):
     def __init__(self, id):
@@ -866,9 +895,6 @@ class W_FVar(W_Expr):
     def instantiate(self, expr, depth):
         return self
 
-    def whnf(self, env):
-        return self
-
     def syntactic_eq(self, other):
         assert isinstance(other, W_FVar)
         return self.id == other.id and syntactic_eq(self.binder, other.binder)
@@ -926,9 +952,6 @@ class W_LitStr(W_Expr):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
 
-    def whnf(self, env):
-        return self
-
 
 class W_Sort(W_Expr):
     def __init__(self, level):
@@ -965,9 +988,6 @@ class W_Sort(W_Expr):
         if balance == 0:
             return "%s %s" % (prefix, text)
         return "%s (%s + %s)" % (prefix, text, balance)
-
-    def whnf(self, env):
-        return self
 
     def incr_free_bvars(self, count, depth):
         return self
@@ -1058,11 +1078,10 @@ class W_Const(W_Expr):
     def incr_free_bvars(self, count, depth):
         return self
 
-    def whnf(self, env):
-        reduced = self.try_delta_reduce(env)
-        if reduced is not None:
-            return reduced.whnf(env)
-        return self
+    def _whnf_core(self, env):
+        if self.name not in env.declarations:
+            return None
+        return self.try_delta_reduce(env)
 
     def try_delta_reduce(self, env, only_abbrev=False):
         decl = get_decl(env.declarations, self.name)
@@ -1181,9 +1200,6 @@ class W_LitNat(W_Expr):
         return self
 
     def subst_levels(self, substs):
-        return self
-
-    def whnf(self, env):
         return self
 
     def syntactic_eq(self, other):
@@ -1448,7 +1464,7 @@ class W_Proj(W_Expr):
             field_name,
         )
 
-    def whnf(self, env):
+    def _whnf_core(self, env):
         reduced_struct = self.struct_expr.whnf(env)
 
         # Try to perform projection reduction (structural iota reduction).
@@ -1468,9 +1484,18 @@ class W_Proj(W_Expr):
                 # The field we want is at index num_params + field_index
                 idx = decl.w_kind.num_params + self.field_index
                 if idx < len(ctor_args):
-                    return ctor_args[idx].whnf(env)
+                    return ctor_args[idx]
 
-        return self.with_expr(reduced_struct)
+        # Projection is stuck but we may have reduced the struct expr.
+        if reduced_struct is not self.struct_expr:
+            # Replace self with a projection over the reduced struct
+            # so that we don't redo the struct reduction if whnf is
+            # called again (e.g. from def_eq).  Returning None here
+            # tells the loop we are done (self.with_expr returns a
+            # new W_Proj which has _whnf_core returning None because
+            # the struct_expr is already in WHNF).
+            self.struct_expr = reduced_struct
+        return None
 
     def incr_free_bvars(self, count, depth):
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
@@ -1565,10 +1590,6 @@ class W_FunBase(W_Expr):
         self.binder = binder
         self.body = body
         self.finished_reduce = False
-
-    # Weak head normal form stops at forall/lambda
-    def whnf(self, env):
-        return self
 
 
 class W_ForAll(W_FunBase):
@@ -1808,8 +1829,8 @@ class W_Let(W_Expr):
             and syntactic_eq(self.body, other.body)
         )
 
-    def whnf(self, env):
-        return self.body.instantiate(self.value, 0).whnf(env)
+    def _whnf_core(self, env):
+        return self.body.instantiate(self.value, 0)
 
     def subst_levels(self, substs):
         return self.name.let(
@@ -2062,7 +2083,7 @@ class W_App(W_Expr):
         return False, self
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
-    def whnf(self, env):
+    def _whnf_core(self, env):
         # Try native nat reduction before any WHNF on subexpressions.
         # This must happen first because WHNF'ing fn would delta-reduce
         # Nat.add etc. into their recursive definitions.
@@ -2071,34 +2092,28 @@ class W_App(W_Expr):
             return reduced
 
         fn = self.fn.whnf(env)
-        fn_class = fn.__class__
-
-        # JIT merge point: the class of fn determines which reduction applies
-        whnf_jitdriver.jit_merge_point(
-            fn_class=fn_class, self_expr=self, env=env, fn=fn
-        )
 
         # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
-            body = fn.body.instantiate(self.arg, 0)
-            return body.whnf(env)
+            return fn.body.instantiate(self.arg, 0)
 
         # Handle recursor in head position
         progress, reduced = self.try_iota_reduce(env)
         if progress:
-            return reduced.whnf(env)
+            return reduced
 
         if isinstance(fn, W_Const):
             # Promote fn so JIT can specialize on specific constants
             fn = promote(fn)
             reduced = fn.try_delta_reduce(env)
             if reduced is not None:
-                return reduced.app(self.arg).whnf(env)
+                return reduced.app(self.arg)
             else:
-                # We must have a constructor (or a recusor that we failed to iota-reduce earlier),
-                # so there's nothing we can do to reduce further in whnf
-                return self
-        return self
+                # We must have a constructor (or a recursor that we
+                # failed to iota-reduce earlier), so there's nothing
+                # we can do to reduce further in whnf
+                return None
+        return None
 
     def bind_fvar(self, fvar, depth):
         return self.fn.bind_fvar(fvar, depth).app(
