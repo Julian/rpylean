@@ -2168,7 +2168,7 @@ class DefOrTheorem(W_DeclarationKind):
     def type_check(self, type, env):
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
-            return W_TypeError(env, type, val_type)
+            return W_TypeError(env, self.value, type)
 
 
 #: Reducibility hints. For regular we use positive ints.

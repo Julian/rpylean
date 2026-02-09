@@ -3,7 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.objects import PROP, TYPE, W_LEVEL_ZERO, Name
+from rpylean.objects import PROP, TYPE, Name
 
 
 def test_valid_def_type_checks():
@@ -24,8 +24,7 @@ def test_invalid_def_does_not_type_check():
     error = invalid.type_check(Environment.EMPTY)
     assert error is not None
 
-    TYPE_1 = W_LEVEL_ZERO.succ().succ().sort()
-    assert error.declared_type == TYPE_1
+    assert error.declared_type == PROP
 
 
 class TestTypeError(object):
@@ -36,11 +35,11 @@ class TestTypeError(object):
         assert error.str() == dedent(
             """\
             in foo:
-            Prop
-              has type
             Type
-              but is declared to have type
+              has type
             Type 1
+              but is declared to have type
+            Prop
             """,
         ).strip("\n")
 
@@ -50,11 +49,11 @@ class TestTypeError(object):
         error = invalid.type_check(Environment.EMPTY)
         assert error.str() == dedent(
             """\
-            Prop
-              has type
             Type
-              but is declared to have type
+              has type
             Type 1
+              but is declared to have type
+            Prop
             """,
         ).strip("\n")
 
