@@ -1923,7 +1923,28 @@ class W_App(W_Expr):
             body = other.fn.body.instantiate(other.arg, 0)
             if def_eq(self, body):
                 return True
-        return def_eq(self.fn, other.fn) and def_eq(self.arg, other.arg)
+        # Iterative spine walk to avoid stack overflow on deep W_App trees.
+        # Collect args from both sides while both fns are W_App, then
+        # compare heads and args pairwise via def_eq.
+        self_args = []
+        other_args = []
+        lhs = self
+        rhs = other
+        while isinstance(lhs, W_App) and isinstance(rhs, W_App):
+            self_args.append(lhs.arg)
+            other_args.append(rhs.arg)
+            lhs = lhs.fn
+            rhs = rhs.fn
+        if not def_eq(lhs, rhs):
+            return False
+        if len(self_args) != len(other_args):
+            return False
+        i = len(self_args) - 1
+        while i >= 0:
+            if not def_eq(self_args[i], other_args[i]):
+                return False
+            i -= 1
+        return True
 
     def pretty(self, constants):
         args = []
@@ -1963,7 +1984,15 @@ class W_App(W_Expr):
         return body_type
 
     def syntactic_eq(self, other):
-        return syntactic_eq(self.fn, other.fn) and syntactic_eq(self.arg, other.arg)
+        # Iterative spine walk to avoid stack overflow on deep W_App trees
+        lhs = self
+        rhs = other
+        while isinstance(lhs, W_App) and isinstance(rhs, W_App):
+            if not syntactic_eq(lhs.arg, rhs.arg):
+                return False
+            lhs = lhs.fn
+            rhs = rhs.fn
+        return syntactic_eq(lhs, rhs)
 
     def try_iota_reduce(self, env):
         args = []

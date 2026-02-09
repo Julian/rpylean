@@ -111,7 +111,10 @@ def check(self, args, stdin, stdout, stderr):
         check_elapsed = time.time() - check_start
 
         stderr.write(
-            "parsed in %.2fs, checked in %.2fs\n" % (parse_elapsed, check_elapsed),
+            "parsed in %fs, checked in %fs\n" % (
+                parse_elapsed,
+                check_elapsed,
+            ),
         )
 
         if failures:
