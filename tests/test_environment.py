@@ -3,7 +3,15 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.objects import PROP, TYPE, Name, W_InvalidInductiveType
+from rpylean.objects import (
+    PROP,
+    TYPE,
+    Name,
+    W_NotASort,
+    forall,
+    fun,
+    W_BVar,
+)
 
 
 def test_valid_def_type_checks():
@@ -25,6 +33,36 @@ def test_invalid_def_does_not_type_check():
     assert error is not None
 
     assert error.expected_type == PROP
+
+
+def test_definition_type_must_be_sort():
+    """
+    A definition's type must be a Sort (Type or Prop), not a function type.
+    """
+    a = Name.simple("a")
+    x = Name.simple("x")
+    b0 = W_BVar(0)
+    constType = Name.simple("constType")
+    constType_decl = constType.definition(
+        type=forall(a.binder(type=TYPE))(TYPE),
+        value=fun(x.binder(type=TYPE))(b0),
+    )
+    env = Environment.having([constType_decl])
+
+    nonTypeType = Name.simple("nonTypeType").definition(
+        type=constType.const(), value=PROP
+    )
+
+    error = nonTypeType.type_check(env)
+    assert error.str() == dedent(
+        """\
+        in nonTypeType:
+        constType
+          has type
+        Type → Type
+          but is expected to be a Sort (Type or Prop)
+        """,
+    ).strip("\n")
 
 
 class TestTypeError(object):
@@ -58,18 +96,23 @@ class TestTypeError(object):
         ).strip("\n")
 
     def test_inductive_type_must_be_sort(self):
-        MyType = Name.simple("MyType").axiom(type=TYPE)
-        bad_inductive = Name.simple("BadInd").inductive(type=MyType.const())
+        a, x = Name.simple("a"), Name.simple("x")
+        b0 = W_BVar(0)
+        fnType = Name.simple("fnType").definition(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            value=fun(x.binder(type=TYPE))(b0),
+        )
+        bad_inductive = Name.simple("BadInd").inductive(type=fnType.const())
 
-        env = Environment.having([MyType, bad_inductive])
+        env = Environment.having([fnType, bad_inductive])
         errors = list(env.type_check())
         assert len(errors) == 1
         assert errors[0].str() == dedent(
             """\
             in BadInd:
-            MyType
+            fnType
               has type
-            Type
+            Type → Type
               but is expected to be a Sort (Type or Prop)
             """,
         ).strip("\n")

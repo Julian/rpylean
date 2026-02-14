@@ -74,28 +74,25 @@ class W_TypeError(W_CheckError):
         )
 
 
-class W_InvalidInductiveType(W_CheckError):
+class W_NotASort(W_CheckError):
     """
-    An inductive type does not have a Sort as its result type.
+    An expression does not have a Sort (Type or Prop) as its type.
     """
 
-    def __init__(self, environment, inductive_type, name=None):
+    def __init__(self, environment, expr, inferred_type, name=None):
         self.environment = environment
-        self.inductive_type = inductive_type
+        self.expr = expr
         self.name = Name.ANONYMOUS if name is None else name
-        self.inferred_type = inductive_type.infer(environment)
+        self.inferred_type = inferred_type
 
     def str(self):
         header = ""
         if self.name is not Name.ANONYMOUS:
             header = "in %s:\n" % self.name.str()
-        return (
-            "%s%s\n  has type\n%s\n  but is expected to be a Sort (Type or Prop)"
-            % (
-                header,
-                self.environment.pretty(self.inductive_type),
-                self.environment.pretty(self.inferred_type),
-            )
+        return "%s%s\n  has type\n%s\n  but is expected to be a Sort (Type or Prop)" % (
+            header,
+            self.environment.pretty(self.expr),
+            self.environment.pretty(self.inferred_type),
         )
 
 
@@ -2345,6 +2342,9 @@ class W_DeclarationKind(_Item):
 
 class DefOrTheorem(W_DeclarationKind):
     def type_check(self, type, env):
+        type_type = type.infer(env)
+        if not isinstance(type_type.whnf(env), W_Sort):
+            return W_NotASort(env, type, inferred_type=type_type, name=None)
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
@@ -2433,8 +2433,9 @@ class W_Inductive(W_DeclarationKind):
                 target = target.body
             else:
                 break
-        if not isinstance(target.whnf(env), W_Sort):
-            return W_InvalidInductiveType(env, type, name=None)
+        inferred_type = target.infer(env)
+        if not isinstance(inferred_type.whnf(env), W_Sort):
+            return W_NotASort(env, type, inferred_type=inferred_type, name=None)
 
     def delaborate(self, name_with_levels, type, constants):
         ctors = [
