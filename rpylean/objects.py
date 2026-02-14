@@ -937,7 +937,22 @@ class W_LitStr(W_Expr):
         return self.str()
 
     def str(self):
-        return '"%s"' % (self.val,)
+        result = ['"']
+        for c in self.val:
+            if c == '"':
+                result.append('\\"')
+            elif c == "\\":
+                result.append("\\\\")
+            elif c == "\n":
+                result.append("\\n")
+            elif c == "\t":
+                result.append("\\t")
+            elif c == "\r":
+                result.append("\\r")
+            else:
+                result.append(c)
+        result.append('"')
+        return "".join(result)
 
     def build_str_expr(self, env):
         if len(self.val) > 5:

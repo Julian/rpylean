@@ -352,6 +352,23 @@ def test_litstr():
     assert hi.pretty({}) == '"hi"'
 
 
+@pytest.mark.parametrize(
+    "input_str,expected",
+    [
+        ('with"quotes"', '"with\\"quotes\\""'),
+        ("with\nnewlines", '"with\\nnewlines"'),
+        ("with\ttabs", '"with\\ttabs"'),
+    ],
+    ids=[
+        "escapes_quotes",
+        "escapes_newlines",
+        "escapes_tabs",
+    ],
+)
+def test_litstr_escapes(input_str, expected):
+    assert W_LitStr(input_str).pretty({}) == expected
+
+
 class TestLambda(object):
     @pytest.mark.parametrize(
         "binder, expected",
