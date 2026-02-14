@@ -310,7 +310,6 @@ class TestAxiom(object):
 
 
 class TestProj(object):
-
     Foo = Name.simple("Foo")
     mk = Foo.child("mk")
     ctor_type = forall(
@@ -330,9 +329,17 @@ class TestProj(object):
 
     def test_third(self):
         proj = self.Foo.proj(2, self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO))
-        assert proj.pretty(self.constants) == (
-            "(Foo.mk Nat.zero Nat.zero Nat.zero).y"
+        assert proj.pretty(self.constants) == "(Foo.mk Nat.zero Nat.zero Nat.zero).y"
+
+    def test_simple_const_no_parens(self):
+        origin = Name.simple("origin").const()
+        constants = dict(self.constants)
+        constants[Name.simple("origin")] = Name.simple("origin").definition(
+            type=self.Foo.const(),
+            value=self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO),
         )
+        proj = self.Foo.proj(0, origin)
+        assert proj.pretty(constants) == "origin.a"
 
 
 def test_litnat():
@@ -441,9 +448,7 @@ class TestLambda(object):
     def test_let_inside_lambda(self):
         f = Name.simple("f").definition(
             type=forall(a.binder(type=NAT))(NAT),
-            value=fun(a.binder(type=NAT))(
-                x.let(type=NAT, value=NAT_ZERO, body=b1)
-            ),
+            value=fun(a.binder(type=NAT))(x.let(type=NAT, value=NAT_ZERO, body=b1)),
         )
         assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
 

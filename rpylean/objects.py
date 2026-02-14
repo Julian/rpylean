@@ -1479,10 +1479,10 @@ class W_Proj(W_Expr):
             field_names.append(constructor_type.binder.name.str())
             constructor_type = constructor_type.body
         field_name = field_names[self.field_index]
-        return "(%s).%s" % (
-            self.struct_expr.pretty(constants),
-            field_name,
-        )
+        struct_expr_pretty = self.struct_expr.pretty(constants)
+        if isinstance(self.struct_expr, W_App):
+            struct_expr_pretty = "(%s)" % struct_expr_pretty
+        return "%s.%s" % (struct_expr_pretty, field_name)
 
     def _whnf_core(self, env):
         reduced_struct = self.struct_expr.whnf(env)
