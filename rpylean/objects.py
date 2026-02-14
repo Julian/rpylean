@@ -2428,11 +2428,10 @@ class W_Inductive(W_DeclarationKind):
 
     def type_check(self, type, env):
         target = type
-        for _ in range(self.num_params):
-            if isinstance(target, W_ForAll):
-                target = target.body
-            else:
+        for depth in range(self.num_params):
+            if not isinstance(target, W_ForAll):
                 break
+            target = target.body.instantiate(target.binder.fvar(), depth)
         inferred_type = target.infer(env)
         if not isinstance(inferred_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=inferred_type, name=None)

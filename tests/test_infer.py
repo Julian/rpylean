@@ -7,6 +7,7 @@ from rpylean.environment import Environment
 from rpylean.exceptions import InvalidProjection
 from rpylean.objects import (
     NAT,
+    PROP,
     STRING,
     TYPE,
     W_LEVEL_ZERO,
@@ -194,4 +195,40 @@ class TestApp(object):
         env = Environment.having(
             [NAT.name.inductive(type=TYPE), fn_type, apply],
         )
+        assert list(env.type_check()) == []
+
+
+class TestInductive(object):
+    def test_with_param(self):
+        alpha = Name.simple("α")
+        a = Name.simple("a")
+        Eq = Name.simple("Eq")
+        refl = Eq.child("refl")
+
+        body_type = forall(
+            a.binder(type=W_BVar(0)),
+        )(PROP)
+
+        inductive_type = forall(
+            alpha.binder(type=TYPE),
+        )(body_type)
+
+        refl_body = forall(
+            a.binder(type=W_BVar(0)),
+        )(W_BVar(1).app(W_BVar(0)).app(W_BVar(1)).app(W_BVar(0)))
+
+        refl_ctor_type = forall(
+            alpha.binder(type=TYPE),
+        )(refl_body)
+
+        refl_ctor = refl.constructor(
+            type=refl_ctor_type,
+        )
+        Eq_decl = Eq.inductive(
+            type=inductive_type,
+            constructors=[refl_ctor],
+            num_params=1,
+        )
+
+        env = Environment.having([Eq_decl, refl_ctor])
         assert list(env.type_check()) == []
