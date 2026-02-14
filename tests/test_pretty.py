@@ -168,27 +168,27 @@ constants = {
         ),
         (
             i.implicit_binder(type=NAT),
-            alpha.app(i.const()),
+            alpha.app(b0),
             "{i : Nat} → α i",
         ),
         (
             i.binder(type=NAT),
-            alpha.app(i.const()),
+            alpha.app(b0),
             "(i : Nat) → α i",
         ),
         (
             i.implicit_binder(type=NAT),
-            alpha.app(i.const()),
+            alpha.app(b0),
             "{i : Nat} → α i",
         ),
         (
             i.binder(type=NAT),
-            P.app(i.const()),
+            P.app(b0),
             "∀ (i : Nat), P i",
         ),
         (
             i.implicit_binder(type=NAT),
-            P.app(i.const()),
+            P.app(b0),
             "∀ {i : Nat}, P i",
         ),
         (
