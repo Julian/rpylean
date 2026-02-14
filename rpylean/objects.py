@@ -527,7 +527,7 @@ def pretty_part(part):
         return str(part)
 
     for c in part:
-        if ord(c) > 127 or c.isalnum() or c == "_":
+        if ord(c) > 127 or c.isalnum() or c in "'_":
             continue
         return "«%s»" % (part,)
     return part
