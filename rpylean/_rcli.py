@@ -1,6 +1,7 @@
 """
 A mini-framework for CLIs in RPython.
 """
+
 from rpython.rlib.rfile import create_stdio
 
 
@@ -21,6 +22,7 @@ USAGE
 OPTIONS
 
   --help: Show this help message
+  --version: Show version information
 
 COMMANDS
 
@@ -188,6 +190,9 @@ class CLI(object):
         if len(argv) == 1 or argv[1] == "--help":
             raise self.with_tagline(argv[0])
 
+        if argv[1] == "--version":
+            raise self.version(argv[0])
+
         command = self._commands.get(argv[1])
         if command is None:
             command, args = self._commands[self._default], argv[1:]
@@ -217,6 +222,13 @@ class CLI(object):
                 for k, cmd in self._commands.iteritems()
             ],
         )
+
+    def version(self, executable):
+        try:
+            from rpylean._version import __version__
+        except ImportError:
+            __version__ = "unknown"
+        return UsageError("rpylean %s" % (__version__,), exit_code=0)
 
     def with_tagline(self, executable):
         if executable.endswith("__main__.py"):
