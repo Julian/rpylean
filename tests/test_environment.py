@@ -3,7 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.objects import PROP, TYPE, Name
+from rpylean.objects import PROP, TYPE, Name, W_InvalidInductiveType
 
 
 def test_valid_def_type_checks():
@@ -54,6 +54,23 @@ class TestTypeError(object):
             Type 1
               but is expected to have type
             Prop
+            """,
+        ).strip("\n")
+
+    def test_inductive_type_must_be_sort(self):
+        MyType = Name.simple("MyType").axiom(type=TYPE)
+        bad_inductive = Name.simple("BadInd").inductive(type=MyType.const())
+
+        env = Environment.having([MyType, bad_inductive])
+        errors = list(env.type_check())
+        assert len(errors) == 1
+        assert errors[0].str() == dedent(
+            """\
+            in BadInd:
+            MyType
+              has type
+            Type
+              but is expected to be a Sort (Type or Prop)
             """,
         ).strip("\n")
 

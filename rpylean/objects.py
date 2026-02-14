@@ -74,6 +74,31 @@ class W_TypeError(W_CheckError):
         )
 
 
+class W_InvalidInductiveType(W_CheckError):
+    """
+    An inductive type does not have a Sort as its result type.
+    """
+
+    def __init__(self, environment, inductive_type, name=None):
+        self.environment = environment
+        self.inductive_type = inductive_type
+        self.name = Name.ANONYMOUS if name is None else name
+        self.inferred_type = inductive_type.infer(environment)
+
+    def str(self):
+        header = ""
+        if self.name is not Name.ANONYMOUS:
+            header = "in %s:\n" % self.name.str()
+        return (
+            "%s%s\n  has type\n%s\n  but is expected to be a Sort (Type or Prop)"
+            % (
+                header,
+                self.environment.pretty(self.inductive_type),
+                self.environment.pretty(self.inferred_type),
+            )
+        )
+
+
 class W_HeartbeatError(W_CheckError):
     """
     The heartbeat limit was exceeded while checking a declaration.
@@ -2402,8 +2427,14 @@ class W_Inductive(W_DeclarationKind):
         self.is_recursive = is_recursive
 
     def type_check(self, type, env):
-        # TODO - implement type checking
-        pass
+        target = type
+        for _ in range(self.num_params):
+            if isinstance(target, W_ForAll):
+                target = target.body
+            else:
+                break
+        if not isinstance(target.whnf(env), W_Sort):
+            return W_InvalidInductiveType(env, type, name=None)
 
     def delaborate(self, name_with_levels, type, constants):
         ctors = [
