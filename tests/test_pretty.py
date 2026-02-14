@@ -39,6 +39,11 @@ class TestName(object):
             (["Foo", "bar.baz"], "Foo.«bar.baz»"),
             (["_uniq", 231], "_uniq.231"),
             ([], "[anonymous]"),
+            (["foo bar"], "«foo bar»"),
+            (["foo-bar"], "«foo-bar»"),
+            (["foo@bar"], "«foo@bar»"),
+            (["foo#bar"], "«foo#bar»"),
+            (["foo bar", "baz"], "«foo bar».baz"),
         ],
         ids=[
             "simple",
@@ -46,6 +51,11 @@ class TestName(object):
             "with_atomic_part",
             "with_number",
             "anonymous",
+            "with_space",
+            "with_dash",
+            "with_at",
+            "with_hash",
+            "multipart_with_space",
         ],
     )
     def test_str(self, parts, expected):

@@ -523,10 +523,12 @@ def pretty_part(part):
     """
     Pretty print a single component of a Name.
     """
-
     if isinstance(part, int):
         return str(part)
-    if "." in part:
+
+    for c in part:
+        if ord(c) > 127 or c.isalnum() or c == "_":
+            continue
         return "«%s»" % (part,)
     return part
 
