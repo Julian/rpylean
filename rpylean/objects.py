@@ -1623,6 +1623,28 @@ class W_Proj(W_Expr):
         return ctor_type.binder.type
 
 
+def _is_prop_type(expr, constants):
+    stack = [expr]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, W_Sort):
+            if current.level.eq(W_LEVEL_ZERO):
+                return True
+        elif isinstance(current, W_Const) and current.name in constants:
+            stack.append(constants[current.name])
+        elif isinstance(current, W_App):
+            # For P i, check if P returns Prop
+            head = current
+            while isinstance(head, W_App):
+                head = head.fn
+            if isinstance(head, W_Const):
+                decl = constants.get(head.name, None)
+                if isinstance(decl, W_ForAll):
+                    body = decl.body.instantiate(decl.binder.fvar(), 0)
+                    stack.append(body)
+    return False
+
+
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
     def __init__(self, binder, body):
@@ -1671,16 +1693,13 @@ class W_ForAll(W_FunBase):
             lhs_type = constants.get(self.binder.type.name, None)
 
         rhs = self.body.instantiate(self.binder.fvar(), 0)
-        rhs_type = None
-        if isinstance(rhs, W_Const):
-            rhs_type = constants.get(rhs.name, None)
-        if lhs_type is not PROP and rhs_type is PROP:
+        if lhs_type is not PROP and _is_prop_type(rhs, constants):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
                 rhs.pretty(constants),
             )
         else:
-            if self.binder.is_default():
+            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
                 lhs = self.binder.type.pretty(constants)
                 if isinstance(self.binder.type, W_ForAll):
                     lhs = "(%s)" % lhs

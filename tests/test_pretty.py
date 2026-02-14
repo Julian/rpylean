@@ -217,8 +217,6 @@ constants = {
     ],
 )
 def test_forall(binder, body, expected):
-    if expected in {"(i : Nat) → α i", "∀ (i : Nat), P i", "∀ {i : Nat}, P i"}:
-        pytest.xfail("Dependent forall pretty-printing is broken")
     assert forall(binder)(body).pretty(constants=constants) == expected
 
 
@@ -301,8 +299,7 @@ class TestRecursor(object):
 
         assert rec.pretty({}) == (
             "recursor Empty.rec.{u} : "
-            # FIXME "(motive : Empty → Sort u) → (t : Empty) → motive t"
-            "(Empty → Sort u) → Empty → motive t"
+            "(motive : Empty → Sort u) → (t : Empty) → motive t"
         )
 
 
