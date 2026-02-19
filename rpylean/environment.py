@@ -253,12 +253,12 @@ class Environment(object):
         by_name = r_dict(name_eq, Name.hash)
         for each in declarations:
             if each.name in by_name:
-                raise AlreadyDeclared(each, by_name)
+                raise AlreadyDeclared(each.name, by_name)
 
             levels = {}
             for level in each.levels:
                 if level in levels:
-                    raise DuplicateLevels(each, level)
+                    raise DuplicateLevels(each.name, level)
                 levels[level] = True
 
             by_name[each.name] = each

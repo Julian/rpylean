@@ -7,7 +7,6 @@ from rpylean.objects import (
     PROP,
     TYPE,
     Name,
-    W_NotASort,
     forall,
     fun,
     W_BVar,

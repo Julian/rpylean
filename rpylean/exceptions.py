@@ -21,13 +21,13 @@ class InvalidDeclaration(W_Error):
     A declaration is invalid.
     """
 
-    def __init__(self, declaration, reason):
-        self.declaration = declaration
+    def __init__(self, name, reason):
+        self.name = name
         self.reason = reason
 
     def str(self):
         return "Invalid declaration %s: %s" % (
-            self.declaration.name.str(),
+            self.name.str(),
             self.reason,
         )
 
@@ -37,12 +37,12 @@ class AlreadyDeclared(InvalidDeclaration):
     A declaration already exists in the environment.
     """
 
-    def __init__(self, declaration, constants):
+    def __init__(self, name, constants):
         reason = "%s is already declared as %s" % (
-            declaration.name.str(),
-            constants[declaration.name].pretty(constants),
+            name.str(),
+            constants[name].pretty(constants),
         )
-        InvalidDeclaration.__init__(self, declaration, reason)
+        InvalidDeclaration.__init__(self, name, reason)
         self.constants = constants
 
 
@@ -51,13 +51,30 @@ class DuplicateLevels(InvalidDeclaration):
     A declaration has duplicate level parameters.
     """
 
-    def __init__(self, declaration, duplicate):
+    def __init__(self, name, duplicate):
         reason = "%s has duplicate level parameter %s" % (
-            declaration.name.str(),
+            name.str(),
             duplicate,
         )
-        InvalidDeclaration.__init__(self, declaration, reason)
+        InvalidDeclaration.__init__(self, name, reason)
         self.duplicate = duplicate
+
+
+class ReflexiveKError(InvalidDeclaration):
+    """
+    A reflexive inductive type has a bad recursor.
+
+    Reflexive inductive types cannot support K-like reduction, which
+    requires a single constructor with 0 arguments.
+    """
+
+    def __init__(self, name, rec_name):
+        reason = (
+            "%s is reflexive "
+            "but recursor %s claims to support k-like reduction"
+        ) % (name.str(), rec_name.str())
+        InvalidDeclaration.__init__(self, name, reason)
+        self.rec_name = rec_name
 
 
 class InvalidProjection(W_Error):

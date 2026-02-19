@@ -12,6 +12,7 @@ from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
 from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
+from rpylean.exceptions import ReflexiveKError
 
 
 EXPORT_VERSION = "3.1.0"
@@ -38,7 +39,7 @@ class ExportVersionError(ParseError):
         return "Expected export format version %s but got %s" % (
             EXPORT_VERSION,
             "no export metadata" if self.got is None else self.got,
-         )
+        )
 
 
 class Node(object):
@@ -658,7 +659,12 @@ class Inductive(Node):
         self.levels = levels
 
     def compile(self, builder):
-        declaration = builder.names[self.nidx].inductive(
+        name = builder.names[self.nidx]
+        if self.is_reflexive:
+            for rec in self.recursors:
+                if rec.k:
+                    raise ReflexiveKError(name, builder.names[rec.nidx])
+        declaration = name.inductive(
             levels=[builder.names[nidx] for nidx in self.levels],
             type=builder.exprs[self.type_idx],
             names=[builder.names[nidx] for nidx in self.name_idxs],

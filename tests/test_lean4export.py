@@ -3,7 +3,7 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
 import pytest
 
-from rpylean.exceptions import UnknownQuotient
+from rpylean.exceptions import ReflexiveKError, UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_str
 from rpylean.objects import (
     W_LEVEL_ZERO,
@@ -518,3 +518,20 @@ def test_unknown_quotient():
         ).finish()
 
     assert e.value.str() == "Unknown quotient declaration: Quot.something"
+
+
+def test_reflexive_inductive_cannot_have_k_like_recursor():
+    with pytest.raises(ReflexiveKError) as e:
+        from_str(
+            """
+            {"in":1,"str":{"pre":0,"str":"Bad"}}
+            {"in":2,"str":{"pre":1,"str":"rec"}}
+            {"il":1,"succ":0}
+            {"ie":0,"sort":1}
+            {"inductive":{"ctors":[],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[],"name":2,"numIndices":0,"numMinors":0,"numMotives":1,"numParams":0,"rules":[],"type":8}],"types":[{"all":[1],"ctors":[],"isRec":false,"isReflexive":true,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
+            """
+        ).finish()
+    assert e.value.str() == (
+        "Invalid declaration Bad: Bad is reflexive but "
+        "recursor Bad.rec claims to support k-like reduction"
+    )
