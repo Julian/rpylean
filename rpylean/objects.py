@@ -1684,9 +1684,12 @@ class W_FunBase(W_Expr):
         else:
             self.loose_bvar_range = body_range
 
-
-class W_ForAll(W_FunBase):
     def def_eq(self, other, def_eq):
+        """
+        Compare binders and bodies without regard for bound variable names.
+
+        (This is alpha equivalence.)
+        """
         if not def_eq(self.binder.type, other.binder.type):
             return False
 
@@ -1696,6 +1699,8 @@ class W_ForAll(W_FunBase):
 
         return def_eq(body, other_body)
 
+
+class W_ForAll(W_FunBase):
     def pretty(self, constants):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
@@ -1781,16 +1786,6 @@ def group_to_str(group):
 
 
 class W_Lambda(W_FunBase):
-    def def_eq(self, other, def_eq):
-        if not def_eq(self.binder.type, other.binder.type):
-            return False
-
-        fvar = self.binder.fvar()
-        body = self.body.instantiate(fvar, 0)
-        other_body = other.body.instantiate(fvar, 0)
-
-        return def_eq(body, other_body)
-
     def pretty(self, constants):
         binders = []
         current = self
