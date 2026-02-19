@@ -105,7 +105,7 @@ def check(self, args, stdin, stdout, stderr):
                 failures += 1
                 if 0 < max_fail <= failures:
                     break
-        except Exception:
+        except:
             stderr.write("Unexpected error during type checking\n")
             raise
         check_elapsed = time.time() - check_start
