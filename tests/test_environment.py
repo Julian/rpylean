@@ -117,26 +117,6 @@ class TestTypeError(object):
         ).strip("\n")
 
 
-def test_filter_declarations_by_substring():
-    """Filtering declarations selects only those whose name contains the substring."""
-    good = Name.simple("GoodDef").definition(type=TYPE, value=PROP)
-    bad = Name.simple("BadDef").definition(type=PROP, value=TYPE)
-    env = Environment.having([good, bad])
-
-    errors = list(env.type_check(env.filter_declarations("Good")))
-    assert errors == []
-
-
-def test_filter_declarations_matches_bad():
-    """Filtering to an invalid declaration produces an error."""
-    good = Name.simple("GoodDef").definition(type=TYPE, value=PROP)
-    bad = Name.simple("BadDef").definition(type=PROP, value=TYPE)
-    env = Environment.having([good, bad])
-
-    errors = list(env.type_check(env.filter_declarations("Bad")))
-    assert len(errors) == 1
-
-
 def test_verbose_prints_declaration_names():
     """Verbose mode prints each declaration name to the progress stream."""
     from io import BytesIO

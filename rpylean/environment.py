@@ -282,19 +282,13 @@ class Environment(object):
         Type check each declaration in the environment.
         """
         if declarations is None:
-            for each in self.declarations.itervalues():
-                if verbose:
-                    progress.write("  %s\n" % each.name.str())
-                error = self._check_one(each)
-                if error is not None:
-                    yield error
-        else:
-            for each in declarations:
-                if verbose:
-                    progress.write("  %s\n" % each.name.str())
-                error = self._check_one(each)
-                if error is not None:
-                    yield error
+            declarations = self.all_declarations()
+        for each in declarations:
+            if verbose:
+                progress.write("  %s\n" % each.name.str())
+            error = self._check_one(each)
+            if error is not None:
+                yield error
 
     def _check_one(self, each):
         self.heartbeat = 0
@@ -316,13 +310,23 @@ class Environment(object):
                 pdb.post_mortem()
             raise
 
-    def filter_declarations(self, substring):
+    def all_declarations(self):
+        """
+        All declarations in the environment.
+        """
+        return _AllDeclarations(self.declarations)
+
+    def declarations_matching(self, substring):
         """
         Yield declarations whose name contains the given substring.
         """
-        for decl in self.declarations.itervalues():
-            if substring in decl.name.str():
-                yield decl
+        return _MatchingDeclarations(self.declarations, substring)
+
+    def declarations_named(self, names):
+        """
+        Yield declarations whose name is in the given collection.
+        """
+        return _NamedDeclarations(self.declarations, names)
 
     def dump_pretty(self, stdout):
         """
@@ -542,3 +546,41 @@ class Environment(object):
 
 #: The empty environment.
 Environment.EMPTY = Environment.having([])
+
+
+class _Declarations(object):
+    def __iter__(self):
+        return self
+
+
+class _AllDeclarations(_Declarations):
+    def __init__(self, declarations):
+        self.declarations = declarations
+        self.iter = iter(self.declarations.itervalues())
+
+    def next(self):
+        return next(self.iter)
+
+
+class _MatchingDeclarations(_Declarations):
+    def __init__(self, declarations, substring):
+        self.declarations = declarations
+        self.substring = substring
+        self.iter = iter(self.declarations.itervalues())
+
+    def next(self):
+        for decl in self.iter:
+            if self.substring in decl.name.str():
+                return decl
+
+
+class _NamedDeclarations(_Declarations):
+    def __init__(self, declarations, names):
+        self.declarations = declarations
+        self.names = names
+        self.iter = iter(self.names)
+
+    def next(self):
+        name = next(self.iter)
+        assert name in self.declarations, name.str()
+        return self.declarations[name]

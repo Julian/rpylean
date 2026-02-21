@@ -32,6 +32,10 @@ cli = CLI(
         ),
         (
             "filter",
+            "only check the given declaration(s), separated by commas",
+        ),
+        (
+            "filter-match",
             "only check declarations whose name contains this substring",
         ),
         (
@@ -58,7 +62,7 @@ def check(self, args, stdin, stdout, stderr):
     for path in args.varargs:
         parse_start = time.time()
         try:
-            environment = environment_from(path=path, stdin=stdin)
+            env = environment_from(path=path, stdin=stdin)
         except ExportVersionError as err:
             stderr.write(err.__str__())
             stderr.write("\n")
@@ -66,35 +70,38 @@ def check(self, args, stdin, stdout, stderr):
         parse_elapsed = time.time() - parse_start
 
         if args.options["trace"]:
-            environment.tracer = StreamTracer(stderr)
+            env.tracer = StreamTracer(stderr)
 
         max_heartbeat = int(args.options["max-heartbeat"] or "0")
         if max_heartbeat > 0:
-            environment.max_heartbeat = max_heartbeat
+            env.max_heartbeat = max_heartbeat
 
-        name_filter = args.options["filter"]
-        if name_filter is not None:
-            declarations = environment.filter_declarations(name_filter)
+        if args.options["filter-match"] is not None:
+            match = args.options["filter-match"]
+            suffix = "declarations matching %s" % (match,)
+            declarations = env.declarations_matching(match)
+        elif args.options["filter"] is not None:
+            names = [
+                Name.from_str(each.strip())
+                for each in args.options["filter"].split(",")
+            ]
+            s = "s" if len(names) != 1 else ""
+            suffix = "%s declaration%s" % (len(names), s)
+            declarations = env.declarations_named(names)
         else:
-            declarations = None
+            declarations, n = None, len(env.declarations)
+            ns = "s" if n != 1 else ""
+            suffix = "%s declaration%s" % (n, ns)
 
-        suffix = "" if len(args.varargs) == 1 else " from %s" % (path,)
-        if declarations is None:
-            n = len(environment.declarations)
-            stdout.write(
-                "Checking %s declaration%s%s…\n" % (n, "s" if n != 1 else "", suffix),
-            )
-        else:
-            stdout.write(
-                "Checking declarations matching '%s'%s…\n" % (name_filter, suffix),
-            )
+        s = "" if len(args.varargs) == 1 else " from %s" % (path,)
+        stdout.write("Checking %s%s…\n" % (suffix, s))
 
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
         verbose = args.options["verbose"]
 
         check_start = time.time()
         try:
-            for w_error in environment.type_check(
+            for w_error in env.type_check(
                 declarations,
                 verbose=verbose,
                 progress=stderr,
