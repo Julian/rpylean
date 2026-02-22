@@ -282,7 +282,7 @@ class Environment(object):
         Type check each declaration in the environment.
         """
         if declarations is None:
-            declarations = self.all_declarations()
+            declarations = self.all()
         for each in declarations:
             if verbose:
                 progress.write("  %s\n" % each.name.str())
@@ -311,23 +311,23 @@ class Environment(object):
                     yield error
 
 
-    def all_declarations(self):
+    def all(self):
         """
         All declarations in the environment.
         """
         return _AllDeclarations(self.declarations)
 
-    def declarations_matching(self, substring):
-        """
-        Yield declarations whose name contains the given substring.
-        """
-        return _MatchingDeclarations(self.declarations, substring)
-
-    def declarations_named(self, names):
+    def only(self, names):
         """
         Yield declarations whose name is in the given collection.
         """
         return _NamedDeclarations(self.declarations, names)
+
+    def match(self, substring):
+        """
+        Yield declarations whose name contains the given substring.
+        """
+        return _MatchingDeclarations(self.declarations, substring)
 
     def dump_pretty(self, stdout):
         """

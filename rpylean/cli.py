@@ -79,7 +79,7 @@ def check(self, args, stdin, stdout, stderr):
         if args.options["filter-match"] is not None:
             match = args.options["filter-match"]
             suffix = "declarations matching %s" % (match,)
-            declarations = env.declarations_matching(match)
+            declarations = env.match(match)
         elif args.options["filter"] is not None:
             names = [
                 Name.from_str(each.strip())
@@ -87,7 +87,7 @@ def check(self, args, stdin, stdout, stderr):
             ]
             s = "s" if len(names) != 1 else ""
             suffix = "%s declaration%s" % (len(names), s)
-            declarations = env.declarations_named(names)
+            declarations = env.only(names)
         else:
             declarations, n = None, len(env.declarations)
             ns = "s" if n != 1 else ""
