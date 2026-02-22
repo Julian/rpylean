@@ -286,29 +286,30 @@ class Environment(object):
         for each in declarations:
             if verbose:
                 progress.write("  %s\n" % each.name.str())
-            error = self._check_one(each)
-            if error is not None:
-                yield error
 
-    def _check_one(self, each):
-        self.heartbeat = 0
-        self._current_decl = each
-        self._def_eq_cache = {}
-        try:
-            return each.type_check(self)
-        except HeartbeatExceeded as err:
-            return W_HeartbeatError(
-                each.name,
-                err.heartbeats,
-                err.max_heartbeat,
-            )
-        except Exception:
-            if not we_are_translated():
-                print_exc(None, stderr)
-                stderr.write("\nwhile checking:\n\n")
-                self.print(each, stderr)
-                pdb.post_mortem()
-            raise
+            # FIXME: Better state encapsulation for heartbeats...
+            self.heartbeat = 0
+            self._current_decl = each
+            self._def_eq_cache = {}
+            try:
+                error = each.type_check(self)
+            except HeartbeatExceeded as err:
+                yield W_HeartbeatError(
+                    each.name,
+                    err.heartbeats,
+                    err.max_heartbeat,
+                )
+            except Exception:
+                if not we_are_translated():
+                    print_exc(None, stderr)
+                    stderr.write("\nwhile checking:\n\n")
+                    self.print(each, stderr)
+                    pdb.post_mortem()
+                raise
+            else:
+                if error is not None:
+                    yield error
+
 
     def all_declarations(self):
         """
