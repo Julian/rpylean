@@ -277,15 +277,16 @@ class Environment(object):
         file.write(self.pretty(declaration))
         file.write(end)
 
-    def type_check(self, declarations=None, verbose="", progress=None):
+    def type_check(self, declarations=None, pp=None):
         """
         Type check each declaration in the environment.
         """
         if declarations is None:
             declarations = self.all()
+
         for each in declarations:
-            if verbose:
-                progress.write("  %s\n" % each.name.str())
+            if pp is not None:
+                pp(self, each)
 
             # FIXME: Better state encapsulation for heartbeats...
             self.heartbeat = 0

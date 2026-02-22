@@ -42,6 +42,12 @@ cli = CLI(
             "max-heartbeat",
             "maximum number of def_eq calls per declaration before giving up",
         ),
+        (
+            "print", (
+                "print something for each declaration (valid values are "
+                "name|dots|decls|declarations|all)"
+            ),
+        ),
     ],
     flags=[
         (
@@ -49,12 +55,6 @@ cli = CLI(
             "enable tracing some def eq and reduction steps",
             "",
             "yes",  # we can't use StreamTracer here, thanks static typing
-        ),
-        (
-            "verbose",
-            "print each declaration name to stderr as it is checked",
-            "",
-            "yes",
         ),
     ],
 )
@@ -97,15 +97,11 @@ def check(self, args, stdin, stdout, stderr):
         stdout.write("Checking %s%s…\n" % (suffix, s))
 
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
-        verbose = args.options["verbose"]
+        pp = Printer.from_str(args.options["print"], stderr)
 
         check_start = time.time()
         try:
-            for w_error in env.type_check(
-                declarations,
-                verbose=verbose,
-                progress=stderr,
-            ):
+            for w_error in env.type_check(declarations, pp=pp):
                 stderr.write(w_error.str())
                 stderr.write("\n")
 
@@ -127,7 +123,8 @@ def check(self, args, stdin, stdout, stderr):
         if failures:
             return 1
 
-    stdout.write("All declarations are type-correct.\n")
+    if args.varargs:
+        stdout.write("All declarations are type-correct.\n")
     return 0
 
 
@@ -200,6 +197,34 @@ def environment_from(path, stdin):
     environment = from_export(file)
     file.close()
     return environment
+
+
+class Printer(object):
+    def __init__(self, format, stream):
+        self.format = format
+        self.stream = stream
+
+    def print(self, env, decl):
+        output = self.format(env, decl)
+        if output:
+            self.stream.write(output)
+
+    @staticmethod
+    def from_str(pp_str, stream):
+        if pp_str == "all" or pp_str == "decls" or pp_str == "declarations":
+            def pp(env, decl):
+                return "%s\n" % (env.pretty(decl),)
+        elif pp_str == "name" or pp_str == "names":
+            def pp(env, decl):
+                return "%s\n" % (env.pretty(decl.name),)
+        elif pp_str == "dots":
+            def pp(env, decl):
+                return "." # FIXME: if error is None else "E"
+        elif pp_str is None or pp_str == "none":
+            return None
+        else:
+            raise UsageError("Unknown pretty print choice: %s" % (pp_str,))
+        return Printer(format=pp, stream=stream).print
 
 
 if __name__ == "__main__":

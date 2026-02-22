@@ -118,16 +118,16 @@ class TestTypeError(object):
         ).strip("\n")
 
 
-def test_verbose_prints_declaration_names():
-    """Verbose mode prints each declaration name to the progress stream."""
-    from io import BytesIO
-
+def test_pp():
     good = Name.simple("GoodDef").definition(type=TYPE, value=PROP)
     env = Environment.having([good])
 
-    progress = BytesIO()
-    list(env.type_check(verbose="yes", progress=progress))
-    assert "GoodDef" in progress.getvalue()
+    printed = []
+    def pp(env, decl):
+        printed.append((env, decl))
+
+    list(env.type_check(pp=pp))
+    assert printed == [(env, good)]
 
 
 class TestHeartbeat(object):
