@@ -2261,8 +2261,10 @@ class W_App(W_Expr):
                 # We must have a constructor (or a recursor that we
                 # failed to iota-reduce earlier), so there's nothing
                 # we can do to reduce further in whnf
-                return None
-        return None
+                # But we still need to return the expression with the reduced fn.
+                return fn.app(self.arg)
+        # fn reduced but is not a constant - return with reduced fn
+        return fn.app(self.arg)
 
     def bind_fvar(self, fvar, depth):
         return self.fn.bind_fvar(fvar, depth).app(
