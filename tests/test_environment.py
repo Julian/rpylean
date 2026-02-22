@@ -71,12 +71,12 @@ class TestTypeError(object):
         error = invalid.type_check(Environment.EMPTY)
         assert error.str() == dedent(
             """\
-            in foo:
-            Type
-              has type
-            Type 1
-              but is expected to have type
-            Prop
+            Type mismatch in foo:
+              Type
+            has type
+              Type 1
+            but is expected to have type
+              Prop
             """,
         ).strip("\n")
 
@@ -86,11 +86,12 @@ class TestTypeError(object):
         error = invalid.type_check(Environment.EMPTY)
         assert error.str() == dedent(
             """\
-            Type
-              has type
-            Type 1
-              but is expected to have type
-            Prop
+            Type mismatch in [anonymous]:
+              Type
+            has type
+              Type 1
+            but is expected to have type
+              Prop
             """,
         ).strip("\n")
 

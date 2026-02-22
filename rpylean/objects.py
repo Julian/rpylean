@@ -50,6 +50,16 @@ class W_CheckError(object):
         return "Unexpected check error!"
 
 
+TYPE_MISMATCH = """\
+Type mismatch in %s:
+  %s
+has type
+  %s
+but is expected to have type
+  %s
+""".rstrip("\n")
+
+
 class W_TypeError(W_CheckError):
     """
     A term does not type check.
@@ -63,11 +73,8 @@ class W_TypeError(W_CheckError):
         self.inferred_type = term.infer(environment)
 
     def str(self):
-        header = ""
-        if self.name is not Name.ANONYMOUS:
-            header = "in %s:\n" % self.name.str()
-        return "%s%s\n  has type\n%s\n  but is expected to have type\n%s" % (
-            header,
+        return TYPE_MISMATCH % (
+            self.environment.pretty(self.name),
             self.environment.pretty(self.term),
             self.environment.pretty(self.inferred_type),
             self.environment.pretty(self.expected_type),
