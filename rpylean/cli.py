@@ -3,10 +3,9 @@ CLI for rpylean.
 """
 
 from __future__ import print_function
-from rpylean.parser import ExportVersionError
 
+from time import time
 import errno
-import time
 
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
@@ -14,6 +13,7 @@ from rpylean._rcli import CLI, UsageError
 from rpylean.leanffi import FFI
 from rpylean.environment import StreamTracer, from_export
 from rpylean.objects import Name
+from rpylean.parser import ExportVersionError
 
 
 cli = CLI(
@@ -60,14 +60,14 @@ cli = CLI(
 )
 def check(self, args, stdin, stdout, stderr):
     for path in args.varargs:
-        parse_start = time.time()
+        parse_start = time()
         try:
             env = environment_from(path=path, stdin=stdin)
         except ExportVersionError as err:
             stderr.write(err.__str__())
             stderr.write("\n")
             return 1
-        parse_elapsed = time.time() - parse_start
+        parse_elapsed = time() - parse_start
 
         if args.options["trace"]:
             env.tracer = StreamTracer(stderr)
@@ -99,7 +99,7 @@ def check(self, args, stdin, stdout, stderr):
         failures, max_fail = 0, int(args.options["max-fail"] or "0")
         pp = Printer.from_str(args.options["print"], stderr)
 
-        check_start = time.time()
+        check_start = time()
         try:
             for w_error in env.type_check(declarations, pp=pp):
                 stderr.write(w_error.str())
@@ -111,7 +111,7 @@ def check(self, args, stdin, stdout, stderr):
         except:
             stderr.write("Unexpected error during type checking\n")
             raise
-        check_elapsed = time.time() - check_start
+        check_elapsed = time() - check_start
 
         stderr.write(
             "parsed in %fs, checked in %fs\n" % (
