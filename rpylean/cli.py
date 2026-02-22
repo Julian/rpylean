@@ -59,6 +59,7 @@ cli = CLI(
     ],
 )
 def check(self, args, stdin, stdout, stderr):
+    failures = 0
     for path in args.varargs:
         parse_start = time()
         try:
@@ -96,7 +97,7 @@ def check(self, args, stdin, stdout, stderr):
         s = "" if len(args.varargs) == 1 else " from %s" % (path,)
         stdout.write("Checking %s%s…\n" % (suffix, s))
 
-        failures, max_fail = 0, int(args.options["max-fail"] or "0")
+        max_fail = int(args.options["max-fail"] or "0")
         pp = Printer.from_str(args.options["print"], stderr)
 
         check_start = time()
@@ -120,12 +121,9 @@ def check(self, args, stdin, stdout, stderr):
             ),
         )
 
-        if failures:
-            return 1
-
     if args.varargs:
         stdout.write("All declarations are type-correct.\n")
-    return 0
+    return 1 if failures else 0
 
 
 @cli.subcommand(
