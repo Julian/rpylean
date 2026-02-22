@@ -118,13 +118,14 @@ def check(self, args, stdin, stdout, stderr):
         check_elapsed = time() - check_start
 
         stderr.write(
-            "parsed in %fs, checked in %fs\n" % (
+            "parsed in %fs, checked in %fs\n"
+            % (
                 parse_elapsed,
                 check_elapsed,
             ),
         )
 
-    if args.varargs:
+    if args.varargs and failures == 0:
         stdout.write("All declarations are type-correct.\n")
     return 1 if failures else 0
 
@@ -213,14 +214,17 @@ class Printer(object):
     @staticmethod
     def from_str(pp_str, stream):
         if pp_str == "all" or pp_str == "decls" or pp_str == "declarations":
+
             def pp(env, decl):
                 return "%s\n" % (env.pretty(decl),)
         elif pp_str == "name" or pp_str == "names":
+
             def pp(env, decl):
                 return "%s\n" % (env.pretty(decl.name),)
         elif pp_str == "dots":
+
             def pp(env, decl):
-                return "." # FIXME: if error is None else "E"
+                return "."  # FIXME: if error is None else "E"
         elif pp_str is None or pp_str == "none":
             return None
         else:
