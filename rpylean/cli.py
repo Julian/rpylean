@@ -7,6 +7,7 @@ from __future__ import print_function
 from time import time
 import errno
 
+from rpython.rlib.objectmodel import specialize
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
@@ -61,14 +62,14 @@ cli = CLI(
 def check(self, args, stdin, stdout, stderr):
     failures = 0
     for path in args.varargs:
-        parse_start = time()
+        start = time()
         try:
             env = environment_from(path=path, stdin=stdin)
         except ExportVersionError as err:
             stderr.write(err.__str__())
             stderr.write("\n")
             return 1
-        parse_elapsed = time() - parse_start
+        parse_elapsed = time() - start
 
         if args.options["trace"]:
             env.tracer = StreamTracer(stderr)
@@ -83,19 +84,21 @@ def check(self, args, stdin, stdout, stderr):
             declarations = env.match(match)
         elif args.options["filter"] is not None:
             names = [
-                Name.from_str(each.strip())
+                Name.from_str(each)
                 for each in args.options["filter"].split(",")
             ]
-            s = "s" if len(names) != 1 else ""
-            suffix = "%s declaration%s" % (len(names), s)
+            suffix = "%s declaration%s" % s(names)
             declarations = env.only(names)
         else:
-            declarations, n = None, len(env.declarations)
-            ns = "s" if n != 1 else ""
-            suffix = "%s declaration%s" % (n, ns)
+            suffix = "%s declaration%s" % s(env.declarations)
+            declarations = None
 
-        s = "" if len(args.varargs) == 1 else " from %s" % (path,)
-        stdout.write("Checking %s%s…\n" % (suffix, s))
+        stdout.write(
+            "Checking %s%s…\n" % (
+                suffix,
+                "" if len(args.varargs) == 1 else " from %s" % (path,),
+            ),
+        )
 
         max_fail = int(args.options["max-fail"] or "0")
         pp = Printer.from_str(args.options["print"], stderr)
@@ -223,6 +226,15 @@ class Printer(object):
         else:
             raise UsageError("Unknown pretty print choice: %s" % (pp_str,))
         return Printer(format=pp, stream=stream).print
+
+
+@specialize.call_location()
+def s(collection):
+    """
+    Dumb pluralization based on the length of the collection.
+    """
+    length = len(collection)
+    return (length, "s" if length != 1 else "")
 
 
 if __name__ == "__main__":
