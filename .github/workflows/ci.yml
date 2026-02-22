@@ -9,8 +9,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   ci:
@@ -22,36 +21,52 @@ jobs:
         arch: [x64, arm64]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: Julian/setup-lean@c93774d9180849a5b6c4034c3c63d4544bdd943c
 
       - name: Set up PyPy 2.7
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "pypy-2.7"
 
       - name: Checkout PyPy
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: pypy/pypy
           path: pypy
-
+          persist-credentials: false
       - run: pypy --version
 
-      - name: Install py.test
-        run: pypy -m pip install pytest
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b #v3.1.0
+
+      - name: Create .env file
+        run: |
+          cat << EOF > .env
+          PYPY_CHECKOUT=./pypy
+          EOF
 
       - name: Run Tests
-        run: PYTHONPATH=pypy pypy -m pytest tests
+        run: just test
 
-      - name: Translate
-        run: pypy pypy/rpython/bin/rpython targetrpylean.py
+      - name: Translate nojit
+        run: just translate
+
+      - name: Translate jit
+        run: just jit
 
       - name: Run Post-Translation Tests
-        run: PYTHONPATH=pypy pypy -m pytest translated-tests
+        run: just test-translated
 
       - name: Upload Translated Binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: rpylean-${{ runner.os }}-${{ matrix.arch }}
           path: ./rpylean-c
+
+      - name: Upload Translated nojit Binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: rpylean-nojit-${{ runner.os }}-${{ matrix.arch }}
+          path: ./rpylean-c-nojit
