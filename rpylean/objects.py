@@ -20,7 +20,7 @@ def _whnf_printable_location(expr_class):
 # reds: the mutable state during reduction
 whnf_jitdriver = JitDriver(
     greens=["expr_class"],
-    reds=["expr", "env"],
+    reds=["made_progress", "expr", "env"],
     name="whnf",
     get_printable_location=_whnf_printable_location,
 )
@@ -839,26 +839,27 @@ class W_Expr(_Item):
     def whnf_with_progress(self, env):
         """
         Reduce this expression to weak head normal form.
-        This is the same as W_Expr.whnf, but returns (expr, progress)
+        This is the same as W_Expr.whnf, but returns (expr, made_progress)
         where progress is True if we reduced the expression at all, and False otherwise
 
         Uses an iterative loop with the JIT driver to avoid deep
         recursion and allow the tracing JIT to compile efficient loops.
         """
         expr = self
-        progress = False
+        made_progress = False
         while True:
             expr_class = expr.__class__
             whnf_jitdriver.jit_merge_point(
                 expr_class=expr_class,
                 expr=expr,
                 env=env,
+                made_progress=made_progress,
             )
             next = expr._whnf_core(env)
             if next is None:
-                return (expr, progress)
+                return (expr, made_progress)
             expr = next
-            progress = True
+            made_progress = True
 
     def whnf(self, env):
         """
