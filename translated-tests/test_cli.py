@@ -21,11 +21,12 @@ def rpylean(*args, **kwargs):
 
 def test_stdin():
     process = rpylean("-")
-    stdout, _ = process.communicate(
+    stdout, stderr = process.communicate(
         '{"meta":{"format":{"version":"%s"}}}\n' % (EXPORT_VERSION,),
     )
 
-    assert "All declarations are type-correct." in stdout, stdout
+    assert stdout == "", (stdout, stderr)
+    assert "All declarations are type-correct." in stderr,  (stdout, stderr)
 
 
 def test_no_such_file():
