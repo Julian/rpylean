@@ -203,6 +203,11 @@ constants = {
             NAT,
             "(Nat → Nat) → Nat",
         ),
+        (
+            Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=PROP),
+            PROP,
+            "∀ (a : Prop), Prop",
+        ),
     ],
     ids=[
         "(i : Nat) → Nat",
@@ -216,6 +221,7 @@ constants = {
         "{i : Nat} → P i",
         "{i : Nat} → p",
         "(Nat → Nat) → Nat",
+        "hygienic",
     ],
 )
 def test_forall(binder, body, expected):
@@ -467,7 +473,6 @@ class TestLambda(object):
             def f : Nat → Nat :=
               fun a ↦ a
             """,
-
         ).rstrip("\n")
 
     def test_let(self):
@@ -481,7 +486,6 @@ class TestLambda(object):
               let a : Nat := Nat.zero
               Nat.zero
             """,
-
         ).rstrip("\n")
 
     def test_let_inside_lambda(self):

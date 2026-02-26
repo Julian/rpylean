@@ -210,7 +210,30 @@ class Name(_Item):
         return Name(self.components + [part])
 
     def pretty(self, constants):
-        return self.str()
+        return self.erase_macro_scopes().str()
+
+    def erase_macro_scopes(self):
+        """
+        Erase macro scopes from this name.
+
+        See Lean.PrettyPrinter.Delaborator.Basic.sanitizeName and
+        Lean.Name.eraseMacroScopes.
+        """
+        if not self.components:
+            return self
+        parts = []
+        in_hygiene = False
+        for part in self.components:
+            if part in ("_@", "_internal", "_hyg"):
+                in_hygiene = True
+                continue
+            if in_hygiene and part.isdigit():
+                continue
+            in_hygiene = False
+            parts.append(part)
+        if not parts:
+            return Name.ANONYMOUS
+        return Name(parts)
 
     def str(self):
         if not self.components:
@@ -486,7 +509,7 @@ class Binder(_Item):
     def pretty(self, constants):
         return "%s%s : %s%s" % (
             self.left,
-            self.name.str(),
+            self.name.pretty(constants),
             self.type.pretty(constants),
             self.right,
         )
@@ -870,7 +893,6 @@ class W_Expr(_Item):
         """
         (expr, _progress) = self.whnf_with_progress(env)
         return expr
-
 
     def _whnf_core(self, env):
         """
@@ -2266,8 +2288,6 @@ class W_App(W_Expr):
         iota_progress, reduced = self.try_iota_reduce(env)
         if iota_progress:
             return reduced
-
-
 
         if isinstance(fn, W_Const):
             # Promote fn so JIT can specialize on specific constants
