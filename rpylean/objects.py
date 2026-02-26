@@ -2,7 +2,7 @@ from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
 from rpython.rlib.objectmodel import compute_hash, not_rpython
 from rpython.rlib.rbigint import rbigint
 
-from rpylean._rlib import count, warn
+from rpylean._rlib import count, indent, warn
 from rpylean.exceptions import InvalidProjection
 
 
@@ -2379,10 +2379,10 @@ class W_Definition(DefOrTheorem):
         self.hint = hint
 
     def delaborate(self, name_with_levels, type, constants):
-        return "def %s : %s := %s" % (
+        return "def %s : %s :=\n%s" % (
             name_with_levels,
             type.pretty(constants),
-            self.value.pretty(constants),
+            indent(self.value.pretty(constants), "  "),
         )
 
     def get_delta_reduce_target(self):

@@ -21,6 +21,14 @@ class count(object):
         return count
 
 
+def indent(text, prefix):
+    """
+    Indent lines in the text with the given prefix.
+    """
+    sep = "\n" + prefix
+    return prefix + sep.join(text.splitlines())
+
+
 def r_dict_eq(left, right):
     # r_dict doesn't define sane __eq__
     return (

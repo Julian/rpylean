@@ -462,21 +462,40 @@ class TestLambda(object):
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(b0),
         )
-        assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ a"
+        assert f.pretty({}) == dedent(
+            """\
+            def f : Nat → Nat :=
+              fun a ↦ a
+            """,
+
+        ).rstrip("\n")
 
     def test_let(self):
         f = Name.simple("f").definition(
             type=NAT,
             value=a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO),
         )
-        assert f.pretty({}) == "def f : Nat := let a : Nat := Nat.zero\nNat.zero"
+        assert f.pretty({}) == dedent(
+            """\
+            def f : Nat :=
+              let a : Nat := Nat.zero
+              Nat.zero
+            """,
+
+        ).rstrip("\n")
 
     def test_let_inside_lambda(self):
         f = Name.simple("f").definition(
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(x.let(type=NAT, value=NAT_ZERO, body=b1)),
         )
-        assert f.pretty({}) == "def f : Nat → Nat := fun a ↦ let x : Nat := Nat.zero\na"
+        assert f.pretty({}) == dedent(
+            """\
+            def f : Nat → Nat :=
+              fun a ↦ let x : Nat := Nat.zero
+              a
+            """,
+        ).rstrip("\n")
 
 
 class TestApp(object):
