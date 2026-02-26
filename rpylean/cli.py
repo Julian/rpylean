@@ -93,7 +93,7 @@ def check(self, args, stdin, stdout, stderr):
             suffix = "%s declaration%s" % s(env.declarations)
             declarations = None
 
-        stdout.write(
+        stderr.write(
             "Checking %s%s…\n" % (
                 suffix,
                 "" if len(args.varargs) == 1 else " from %s" % (path,),
@@ -101,7 +101,7 @@ def check(self, args, stdin, stdout, stderr):
         )
 
         max_fail = int(args.options["max-fail"] or "0")
-        pp = Printer.from_str(args.options["print"], stderr)
+        pp = Printer.from_str(args.options["print"], stdout)
 
         check_start = time()
         try:
@@ -126,7 +126,7 @@ def check(self, args, stdin, stdout, stderr):
         )
 
     if args.varargs and failures == 0:
-        stdout.write("All declarations are type-correct.\n")
+        stderr.write("All declarations are type-correct.\n")
     return 1 if failures else 0
 
 
