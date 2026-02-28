@@ -540,7 +540,7 @@ class Binder(_Item):
             return self
         return self.with_type(type=self.type.incr_free_bvars(expr, depth))
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.type.loose_bvar_range <= depth:
             return self
         return self.with_type(type=self.type.instantiate(expr, depth))
@@ -924,7 +924,7 @@ class W_BVar(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.id == depth:
             incr = expr.incr_free_bvars(depth, 0)
             return incr
@@ -970,7 +970,7 @@ class W_FVar(W_Expr):
     def incr_free_bvars(self, count, depth):
         return self
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         return self
 
     def syntactic_eq(self, other):
@@ -1039,7 +1039,7 @@ class W_LitStr(W_Expr):
         """
         return STRING
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         return self
 
     def syntactic_eq(self, other):
@@ -1090,7 +1090,7 @@ class W_Sort(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         return self
 
     def infer(self, env):
@@ -1168,7 +1168,7 @@ class W_Const(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         return self
 
     def incr_free_bvars(self, count, depth):
@@ -1299,7 +1299,7 @@ class W_LitNat(W_Expr):
     def str(self):
         return self.val.str()
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         return self
 
     def subst_levels(self, substs):
@@ -1609,7 +1609,7 @@ class W_Proj(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self.with_expr(self.struct_expr.bind_fvar(fvar, depth))
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         return self.with_expr(self.struct_expr.instantiate(expr, depth))
@@ -1668,7 +1668,7 @@ class W_Proj(W_Expr):
         for app in reversed(apps):
             ctor_type = ctor_type.whnf(env)
             assert isinstance(ctor_type, W_ForAll)
-            new_type = ctor_type.body.instantiate(app.arg, 0)
+            new_type = ctor_type.body.instantiate(app.arg)
             ctor_type = new_type
 
         # Fields can depend on earlier fields, so the constructor takes in 'proj'
@@ -1682,7 +1682,7 @@ class W_Proj(W_Expr):
                 raise InvalidProjection(struct_type, self.field_index, i + 1)
             proj = self.struct_name.proj(i, self.struct_expr)
             # proj = W_Proj(struct_type, i, self.struct_expr)
-            ctor_type = ctor_type.body.instantiate(proj, 0)
+            ctor_type = ctor_type.body.instantiate(proj)
 
         ctor_type = ctor_type.whnf(env)
         if not isinstance(ctor_type, W_ForAll):
@@ -1707,7 +1707,7 @@ def _is_prop_type(expr, constants):
             if isinstance(head, W_Const):
                 decl = constants.get(head.name, None)
                 if isinstance(decl, W_ForAll):
-                    body = decl.body.instantiate(decl.binder.fvar(), 0)
+                    body = decl.body.instantiate(decl.binder.fvar())
                     stack.append(body)
     return False
 
@@ -1739,8 +1739,8 @@ class W_FunBase(W_Expr):
             return False
 
         fvar = self.binder.fvar()
-        body = self.body.instantiate(fvar, 0)
-        other_body = other.body.instantiate(fvar, 0)
+        body = self.body.instantiate(fvar)
+        other_body = other.body.instantiate(fvar)
 
         return def_eq(body, other_body)
 
@@ -1764,7 +1764,7 @@ class W_ForAll(W_FunBase):
         if isinstance(self.binder.type, W_Const):
             lhs_type = constants.get(self.binder.type.name, None)
 
-        rhs = self.body.instantiate(self.binder.fvar(), 0)
+        rhs = self.body.instantiate(self.binder.fvar())
         if lhs_type is not PROP and _is_prop_type(rhs, constants):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
@@ -1784,11 +1784,11 @@ class W_ForAll(W_FunBase):
 
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)
-        body_sort = env.infer_sort_of(self.body.instantiate(self.binder.fvar(), 0))
+        body_sort = env.infer_sort_of(self.body.instantiate(self.binder.fvar()))
         return binder_sort.imax(body_sort).sort()
 
     # TODO - double check this
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         # Don't increment - not yet inside a binder
@@ -1865,7 +1865,7 @@ class W_Lambda(W_FunBase):
 
         body = current
         for binder in reversed(binders):
-            body = body.instantiate(binder.fvar(), 0)
+            body = body.instantiate(binder.fvar())
 
         return "fun %s ↦ %s" % (
             " ".join(groups),
@@ -1883,7 +1883,7 @@ class W_Lambda(W_FunBase):
             self.body.bind_fvar(fvar, depth + 1),
         )
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         # Don't increment - not yet inside a binder
@@ -1902,7 +1902,7 @@ class W_Lambda(W_FunBase):
         # Run this for the side effect - throwing an exception if not a Sort
         env.infer_sort_of(self.binder.type)
         fvar = self.binder.fvar()
-        body_type_fvar = self.body.instantiate(fvar, 0).infer(env)
+        body_type_fvar = self.body.instantiate(fvar).infer(env)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
             raise RuntimeError(
@@ -1939,16 +1939,16 @@ class W_Let(W_Expr):
             self.name.str(),
             self.type.pretty(constants),
             self.value.pretty(constants),
-            self.body.instantiate(fvar, 0).pretty(constants),
+            self.body.instantiate(fvar).pretty(constants),
         )
 
     def infer(self, env):
         assert env.infer_sort_of(self.type) is not None
         assert env.def_eq(self.value.infer(env), self.type)
-        body_type = self.body.instantiate(self.value, 0)
+        body_type = self.body.instantiate(self.value)
         return body_type.infer(env)
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         return self.name.let(
@@ -1982,7 +1982,7 @@ class W_Let(W_Expr):
         )
 
     def _whnf_core(self, env):
-        return self.body.instantiate(self.value, 0)
+        return self.body.instantiate(self.value)
 
     def subst_levels(self, substs):
         return self.name.let(
@@ -2014,11 +2014,11 @@ class W_App(W_Expr):
 
     def def_eq(self, other, def_eq):
         if isinstance(self.fn, W_FunBase):
-            body = self.fn.body.instantiate(self.arg, 0)
+            body = self.fn.body.instantiate(self.arg)
             if def_eq(body, other):
                 return True
         if isinstance(other.fn, W_FunBase):
-            body = other.fn.body.instantiate(other.arg, 0)
+            body = other.fn.body.instantiate(other.arg)
             if def_eq(self, body):
                 return True
         # Iterative spine walk to avoid stack overflow on deep W_App trees.
@@ -2078,7 +2078,7 @@ class W_App(W_Expr):
             raise RuntimeError(
                 "W_App.infer: expected function type, got %s" % type(fn_type)
             )
-        body_type = fn_type.body.instantiate(self.arg, 0)
+        body_type = fn_type.body.instantiate(self.arg)
         return body_type
 
     def syntactic_eq(self, other):
@@ -2282,7 +2282,7 @@ class W_App(W_Expr):
 
         # Simple case - beta reduction
         if isinstance(fn, W_FunBase):
-            return fn.body.instantiate(self.arg, 0)
+            return fn.body.instantiate(self.arg)
 
         # Handle recursor in head position
         iota_progress, reduced = self.try_iota_reduce(env)
@@ -2305,7 +2305,7 @@ class W_App(W_Expr):
             self.arg.bind_fvar(fvar, depth),
         )
 
-    def instantiate(self, expr, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         return self.fn.instantiate(expr, depth).app(

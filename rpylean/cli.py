@@ -91,7 +91,7 @@ def check(self, args, stdin, stdout, stderr):
             declarations = env.only(names)
         else:
             suffix = "%s declaration%s" % s(env.declarations)
-            declarations = None
+            declarations = env.all()
 
         stderr.write(
             "Checking %s%s…\n" % (
