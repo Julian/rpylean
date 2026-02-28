@@ -105,7 +105,7 @@ class TestTypeError(object):
         bad_inductive = Name.simple("BadInd").inductive(type=fnType.const())
 
         env = Environment.having([fnType, bad_inductive])
-        errors = list(env.type_check())
+        errors = list(env.type_check(env.all()))
         assert len(errors) == 1
         assert errors[0].str() == dedent(
             """\
@@ -127,7 +127,7 @@ def test_pp():
     def pp(env, decl):
         printed.append((env, decl))
 
-    list(env.type_check(pp=pp))
+    list(env.type_check(env.all(), pp=pp))
     assert printed == [(env, good)]
 
 
@@ -139,7 +139,7 @@ class TestHeartbeat(object):
         env = Environment.having([a, b])
         env.max_heartbeat = 100000
 
-        errors = list(env.type_check())
+        errors = list(env.type_check(env.all()))
         assert errors == []
 
     def test_heartbeat_exceeded_is_an_error(self):
@@ -171,7 +171,7 @@ class TestHeartbeat(object):
         env.max_heartbeat = 100
         env.heartbeat = 99  # would overflow on next def_eq
 
-        errors = list(env.type_check())
+        errors = list(env.type_check(env.all()))
         assert errors == []  # heartbeat was reset, so no overflow
 
     def test_heartbeat_zero_means_unlimited(self):
@@ -180,7 +180,7 @@ class TestHeartbeat(object):
         env = Environment.having([good])
         assert env.max_heartbeat == 0
 
-        errors = list(env.type_check())
+        errors = list(env.type_check(env.all()))
         assert errors == []
 
 
@@ -201,7 +201,7 @@ class TestDefEqCache(object):
         b = Name.simple("B").definition(type=TYPE, value=PROP)
         env = Environment.having([a, b])
 
-        list(env.type_check())
+        list(env.type_check(env.all()))
         # After type_check, cache should have been cleared between decls
         # (we can't easily observe this, but at least it shouldn't crash)
         assert env._def_eq_cache == {} or len(env._def_eq_cache) >= 0

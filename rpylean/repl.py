@@ -68,8 +68,8 @@ def dump(env, _, __, stdout, ___):
     ),
 )
 def check(env, args, _, stdout, stderr):
-    if not args:  # ok, all of them!
-        succeeded, result = True, env.type_check()
+    if not args:
+        succeeded, result = True, env.type_check(env.all())
         for w_error in result:
             succeeded = False
             stderr.write(w_error.str())

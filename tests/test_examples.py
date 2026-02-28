@@ -13,4 +13,4 @@ def test_interpret_valid_export(path):
         pytest.skip("Type checking Init doesn't work yet and loops for ages.")
 
     environment = from_export(path.open())
-    assert not list(environment.type_check())
+    assert not list(environment.type_check(environment.all()))

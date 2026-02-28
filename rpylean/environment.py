@@ -259,13 +259,10 @@ class Environment(object):
         file.write(self.pretty(declaration))
         file.write(end)
 
-    def type_check(self, declarations=None, pp=None):
+    def type_check(self, declarations, pp=None):
         """
         Type check each declaration in the environment.
         """
-        if declarations is None:
-            declarations = self.all()
-
         for each in declarations:
             if pp is not None:
                 pp(self, each)

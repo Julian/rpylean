@@ -195,7 +195,7 @@ class TestApp(object):
         env = Environment.having(
             [NAT.name.inductive(type=TYPE), fn_type, apply],
         )
-        assert list(env.type_check()) == []
+        assert list(env.type_check(env.all())) == []
 
 
 class TestInductive(object):
@@ -231,4 +231,4 @@ class TestInductive(object):
         )
 
         env = Environment.having([Eq_decl, refl_ctor])
-        assert list(env.type_check()) == []
+        assert list(env.type_check(env.all())) == []
