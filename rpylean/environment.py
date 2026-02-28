@@ -54,9 +54,7 @@ class EnvironmentBuilder(object):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] + names
-        self.rec_rules = {}
         self.quotient = []
-
         self.declarations = []
 
     def __eq__(self, other):
@@ -98,13 +96,6 @@ class EnvironmentBuilder(object):
         assert uidx == len(self.levels), uidx
         self.levels.append(level)
 
-    def register_rec_rule(self, rule_idx, w_recrule):
-        """
-        Store a rule until its recursor comes to grab it with its siblings.
-        """
-        assert rule_idx not in self.rec_rules, rule_idx
-        self.rec_rules[rule_idx] = w_recrule
-
     def register_quotient(self, name, type, levels):
         self.quotient.append((name, type, levels))
 
@@ -115,13 +106,6 @@ class EnvironmentBuilder(object):
         """
         Finish building, generating the known-valid and immutable environment.
         """
-        # TODO: Make these all proper exceptions.
-        assert not self.rec_rules, "Incomplete recursors: %s" % (
-            ", ".join(
-                [rule.ctor_name.str() for rule in self.rec_rules.values()],
-            ),
-        )
-
         if self.quotient:
             from rpylean.quot import QUOT, QUOT_MK, QUOT_IND, QUOT_LIFT
 
