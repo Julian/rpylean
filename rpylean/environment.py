@@ -193,9 +193,7 @@ class StreamTracer(Tracer):
         pretty1 = expr1.pretty(declarations)
         pretty2 = expr2.pretty(declarations)
         indent = "  " * self._depth
-        self._stream.write(
-            "%sdef_eq %s =?= %s\n" % (indent, pretty1, pretty2),
-        )
+        self._stream.write("%sdef_eq %s ≟ %s\n" % (indent, pretty1, pretty2))
         self._depth += 1
 
     def result(self, value):
@@ -429,7 +427,7 @@ class Environment(object):
         if expr1_eta is not None:
             return self.def_eq(expr1_eta, expr2)
 
-        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) =?= x
+        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
         if self.try_struct_eta(expr1, expr2):
             return True
         if self.try_struct_eta(expr2, expr1):
@@ -465,7 +463,7 @@ class Environment(object):
 
     def try_struct_eta(self, ctor_side, other_side):
         """
-        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) =?= x
+        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
 
         If ctor_side is a fully applied constructor of a structure type,
         and the types match, compare each field of the constructor
@@ -528,7 +526,7 @@ class Environment(object):
         if not self.def_eq(ctor_ty, other_ty):
             return False
 
-        # Compare each field: Proj(i, other_side) =?= args[num_params + i]
+        # Compare each field: Proj(i, other_side) ≟ args[num_params + i]
         args.reverse()
         i = 0
         while i < num_fields:
