@@ -123,6 +123,7 @@ def test_pp():
     env = Environment.having([good])
 
     printed = []
+
     def pp(env, decl):
         printed.append((env, decl))
 
@@ -232,3 +233,28 @@ class TestNotRPython:
     def test_getitem_no_such_declaration(self):
         with pytest.raises(KeyError):
             Environment.EMPTY["DoesNotExist"]
+
+
+class TestPretty(object):
+    def test_definition(self):
+        Foo = Name.simple("Foo").definition(type=TYPE, value=PROP)
+        env = Environment.having([Foo])
+        assert env.pretty(Foo) == "def Foo : Type :=\n  Prop"
+
+
+    def test_theorem(self):
+        foo = Name.simple("foo").theorem(type=PROP, value=PROP)
+        env = Environment.having([foo])
+        assert env.pretty(foo) == "theorem foo : Prop := Prop"
+
+
+    def test_inductive(self):
+        Nat = Name.simple("Nat").inductive(type=TYPE)
+        env = Environment.having([Nat])
+        assert env.pretty(Nat) == "inductive Nat : Type"
+
+
+    def test_axiom(self):
+        ax = Name.simple("ax").axiom(type=PROP)
+        env = Environment.having([ax])
+        assert env.pretty(ax) == "axiom ax : Prop"
