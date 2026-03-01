@@ -121,6 +121,42 @@ class W_HeartbeatError(W_CheckError):
         )
 
 
+class W_UniverseTooHigh(W_CheckError):
+    """
+    A constructor field's type lives in a universe too high for the inductive.
+    """
+
+    def __init__(
+        self,
+        environment,
+        inductive_name,
+        constructor_name,
+        field_type,
+        field_level,
+        inductive_level,
+    ):
+        self.environment = environment
+        self.name = inductive_name
+        self.constructor_name = constructor_name
+        self.field_type = field_type
+        self.field_level = field_level
+        self.inductive_level = inductive_level
+
+    def str(self):
+        return (
+            "in %s:\n"
+            "constructor %s has field of type\n"
+            "  %s\n"
+            "which lives in universe %s, but the inductive is in universe %s"
+        ) % (
+            self.name.str(),
+            self.constructor_name.str(),
+            self.environment.pretty(self.field_type),
+            self.field_level.str(),
+            self.inductive_level.str(),
+        )
+
+
 class _Item(object):
     """
     A common type for all Lean items.
@@ -2465,14 +2501,43 @@ class W_Inductive(W_DeclarationKind):
         self.is_recursive = is_recursive
 
     def type_check(self, type, env):
+        # Strip all ForAlls (parameters and indices) to get the final Sort
         target = type
-        for depth in range(self.num_params):
-            if not isinstance(target, W_ForAll):
-                break
+        depth = 0
+        while isinstance(target, W_ForAll):
             target = target.body.instantiate(target.binder.fvar(), depth)
-        inferred_type = target.infer(env)
-        if not isinstance(inferred_type.whnf(env), W_Sort):
+            depth += 1
+        target_whnf = target.whnf(env)
+        if not isinstance(target_whnf, W_Sort):
+            inferred_type = type.infer(env).whnf(env)
             return W_NotASort(env, type, inferred_type=inferred_type, name=None)
+
+        inductive_level = target_whnf.level
+
+        # Check each constructor's field types for universe constraints
+        for ctor in self.constructors:
+            ctor_type = ctor.type
+            # Skip parameters
+            for _ in range(ctor.w_kind.num_params):
+                if isinstance(ctor_type, W_ForAll):
+                    ctor_type = ctor_type.body.instantiate(ctor_type.binder.fvar())
+
+            # Check each field (only num_fields ForAlls, not indices)
+            for _ in range(ctor.w_kind.num_fields):
+                if not isinstance(ctor_type, W_ForAll):
+                    break
+                field_type = ctor_type.binder.type
+                field_level = env.infer_sort_of(field_type)
+                if not field_level.leq(inductive_level):
+                    return W_UniverseTooHigh(
+                        environment=env,
+                        inductive_name=self.names[0],
+                        constructor_name=ctor.name,
+                        field_type=field_type,
+                        field_level=field_level,
+                        inductive_level=inductive_level,
+                    )
+                ctor_type = ctor_type.body.instantiate(ctor_type.binder.fvar())
 
     def delaborate(self, name_with_levels, type, constants):
         ctors = [
