@@ -1697,10 +1697,11 @@ def _is_prop_type(expr, constants):
         if isinstance(current, W_Sort):
             if current.level.eq(W_LEVEL_ZERO):
                 return True
+        elif isinstance(current, W_FVar):
+            stack.append(current.binder.type)
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name])
         elif isinstance(current, W_App):
-            # For P i, check if P returns Prop
             head = current
             while isinstance(head, W_App):
                 head = head.fn
@@ -1765,7 +1766,13 @@ class W_ForAll(W_FunBase):
             lhs_type = constants.get(self.binder.type.name, None)
 
         rhs = self.body.instantiate(self.binder.fvar())
-        if not syntactic_eq(lhs_type, PROP) and _is_prop_type(rhs, constants):
+        if (
+            not syntactic_eq(lhs_type, PROP)
+            and _is_prop_type(rhs, constants)
+        ) or (
+            self.body.loose_bvar_range > 0
+            and _is_prop_type(rhs, constants)
+        ):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
                 rhs.pretty(constants),

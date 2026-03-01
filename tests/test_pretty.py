@@ -213,6 +213,11 @@ constants = {
             PROP,
             "Prop → Prop",
         ),
+        (
+            p.binder(type=PROP),
+            b0,
+            "∀ (p : Prop), p",
+        ),
     ],
     ids=[
         "(i : Nat) → Nat",
@@ -228,6 +233,7 @@ constants = {
         "(Nat → Nat) → Nat",
         "Prop_via_syntactic_eq",
         "hygienic",
+        "∀ (p : Prop), p",
     ],
 )
 def test_forall(binder, body, expected):
