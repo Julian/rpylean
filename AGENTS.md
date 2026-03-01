@@ -159,3 +159,9 @@ Or one-liners:
 ```bash
 echo '#check Nat.add 1 2' | lean --stdin
 ```
+
+## Resources
+
+- [Type Checking in Lean 4](https://ammkrn.github.io/type_checking_in_lean4/) - Reference for how Lean's type checking works
+- [Lean Language Reference: The Kernel](https://lean-lang.org/doc/reference/latest/Elaboration-and-Compilation/#The-Lean-Language-Reference--Elaboration-and-Compilation--The-Kernel) - Official Lean documentation on elaboration and the kernel
+- [Lean Kernel Arena](https://arena.lean-lang.org/) - Test suite for alternative Lean kernel implementations
