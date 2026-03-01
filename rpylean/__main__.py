@@ -3,4 +3,4 @@ import sys
 from rpylean.cli import cli
 
 
-cli.main(sys.argv)
+sys.exit(cli.main(sys.argv))
