@@ -321,13 +321,6 @@ class Environment(object):
         """
         Check if two expressions are definitionally equal.
         """
-        assert not isinstance(expr1, W_BVar), (
-            "unexpectedly encountered BVar in def_eq: %s" % expr1
-        )
-        assert not isinstance(expr2, W_BVar), (
-            "unexpectedly encountered BVar in def_eq: %s" % expr2
-        )
-
         max_heartbeat = self.max_heartbeat
         if max_heartbeat > 0:
             self.heartbeat += 1
