@@ -204,9 +204,14 @@ constants = {
             "(Nat → Nat) → Nat",
         ),
         (
+            Name(["x"]).binder(type=W_LEVEL_ZERO.sort()),
+            W_LEVEL_ZERO.sort(),
+            "Prop → Prop",
+        ),
+        (
             Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=PROP),
             PROP,
-            "∀ (a : Prop), Prop",
+            "Prop → Prop",
         ),
     ],
     ids=[
@@ -221,6 +226,7 @@ constants = {
         "{i : Nat} → P i",
         "{i : Nat} → p",
         "(Nat → Nat) → Nat",
+        "Prop_via_syntactic_eq",
         "hygienic",
     ],
 )

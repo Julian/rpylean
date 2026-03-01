@@ -1760,12 +1760,12 @@ class W_ForAll(W_FunBase):
         We try to follow Lean's real pretty printer for deciding when to
         render which.
         """
-        lhs_type = None
-        if isinstance(self.binder.type, W_Const):
+        lhs_type = self.binder.type
+        if isinstance(lhs_type, W_Const):
             lhs_type = constants.get(self.binder.type.name, None)
 
         rhs = self.body.instantiate(self.binder.fvar())
-        if lhs_type is not PROP and _is_prop_type(rhs, constants):
+        if not syntactic_eq(lhs_type, PROP) and _is_prop_type(rhs, constants):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
                 rhs.pretty(constants),
