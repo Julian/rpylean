@@ -4,64 +4,133 @@ import pytest
 
 from rpylean.environment import Environment
 from rpylean.objects import (
+    NAT,
     PROP,
     TYPE,
     Name,
+    W_BVar,
     forall,
     fun,
-    W_BVar,
+    names,
 )
 
 
-def test_valid_def_type_checks():
+def type_check(declarations=(), env=Environment.EMPTY):
     """
-    Prop : Type
+    Non-lazy type checking.
     """
-    valid = Name.ANONYMOUS.definition(type=TYPE, value=PROP)
-    valid.type_check(Environment.EMPTY)
+    if not declarations:
+        declarations = env.all()
+    return list(env.type_check(declarations))
 
 
-def test_invalid_def_does_not_type_check():
-    """
-    Type is not a Prop.
-    """
+class TestTypeCheck(object):
+    def test_valid_def(self):
+        """
+        Prop : Type
+        """
+        valid = Name.ANONYMOUS.definition(type=TYPE, value=PROP)
+        assert type_check([valid]) == []
 
-    invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
+    def test_invalid_def(self):
+        """
+        Type is not a Prop.
+        """
 
-    error = invalid.type_check(Environment.EMPTY)
-    assert error is not None
+        invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
 
-    assert error.expected_type == PROP
+        error = invalid.type_check(Environment.EMPTY)
+        assert error is not None
+
+        assert error.expected_type == PROP
+
+    def test_definition_type_must_be_sort(self):
+        """
+        A definition's type must be a Sort (Type or Prop), not a function type.
+        """
+        a, x = names("a", "x")
+        b0 = W_BVar(0)
+        constType = Name.simple("constType")
+        constType_decl = constType.definition(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            value=fun(x.binder(type=TYPE))(b0),
+        )
+        env = Environment.having([constType_decl])
+
+        nonTypeType = Name.simple("nonTypeType").definition(
+            type=constType.const(), value=PROP
+        )
+
+        error = nonTypeType.type_check(env)
+        assert error.str() == dedent(
+            """\
+            in nonTypeType:
+            constType
+              has type
+            Type → Type
+              but is expected to be a Sort (Type or Prop)
+            """,
+        ).strip("\n")
 
 
-def test_definition_type_must_be_sort():
-    """
-    A definition's type must be a Sort (Type or Prop), not a function type.
-    """
-    a = Name.simple("a")
-    x = Name.simple("x")
-    b0 = W_BVar(0)
-    constType = Name.simple("constType")
-    constType_decl = constType.definition(
-        type=forall(a.binder(type=TYPE))(TYPE),
-        value=fun(x.binder(type=TYPE))(b0),
-    )
-    env = Environment.having([constType_decl])
+class TestApp(object):
+    def test_apply_const_definition(self):
+        f, x, T = names("f", "x", "T")
+        b0, b1 = W_BVar(0), W_BVar(1)
+        # def T : Type := Nat → Nat
+        fn_type = T.definition(
+            type=TYPE,
+            value=forall(Name.simple("_").binder(type=NAT))(NAT),
+        )
 
-    nonTypeType = Name.simple("nonTypeType").definition(
-        type=constType.const(), value=PROP
-    )
+        # def apply : T → Nat → Nat := fun f x ↦ f x
+        apply = Name.simple("apply").definition(
+            type=forall(f.binder(type=T.const()), x.binder(type=NAT))(NAT),
+            value=fun(f.binder(type=T.const()), x.binder(type=NAT))(
+                b1.app(b0),
+            ),
+        )
 
-    error = nonTypeType.type_check(env)
-    assert error.str() == dedent(
-        """\
-        in nonTypeType:
-        constType
-          has type
-        Type → Type
-          but is expected to be a Sort (Type or Prop)
-        """,
-    ).strip("\n")
+        env = Environment.having(
+            [NAT.name.inductive(type=TYPE), fn_type, apply],
+        )
+        assert type_check(env=env) == []
+
+
+class TestInductive(object):
+    def test_with_param(self):
+        alpha = Name.simple("α")
+        a = Name.simple("a")
+        Eq = Name.simple("Eq")
+        refl = Eq.child("refl")
+
+        body_type = forall(
+            a.binder(type=W_BVar(0)),
+        )(PROP)
+
+        inductive_type = forall(
+            alpha.binder(type=TYPE),
+        )(body_type)
+
+        refl_body = forall(
+            a.binder(type=W_BVar(0)),
+        )(W_BVar(1).app(W_BVar(0)).app(W_BVar(1)).app(W_BVar(0)))
+
+        refl_ctor_type = forall(
+            alpha.binder(type=TYPE),
+        )(refl_body)
+
+        refl_ctor = refl.constructor(
+            type=refl_ctor_type,
+        )
+        Eq_decl = Eq.inductive(
+            type=inductive_type,
+            constructors=[refl_ctor],
+            num_params=1,
+        )
+
+        env = Environment.having([Eq_decl, refl_ctor])
+        assert type_check(env=env) == []
 
 
 class TestTypeError(object):
@@ -105,7 +174,7 @@ class TestTypeError(object):
         bad_inductive = Name.simple("BadInd").inductive(type=fnType.const())
 
         env = Environment.having([fnType, bad_inductive])
-        errors = list(env.type_check(env.all()))
+        errors = type_check(env=env)
         assert len(errors) == 1
         assert errors[0].str() == dedent(
             """\
@@ -139,8 +208,7 @@ class TestHeartbeat(object):
         env = Environment.having([a, b])
         env.max_heartbeat = 100000
 
-        errors = list(env.type_check(env.all()))
-        assert errors == []
+        assert type_check(env=env) == []
 
     def test_heartbeat_exceeded_is_an_error(self):
         """Exceeding the heartbeat limit raises HeartbeatExceeded."""
@@ -171,8 +239,7 @@ class TestHeartbeat(object):
         env.max_heartbeat = 100
         env.heartbeat = 99  # would overflow on next def_eq
 
-        errors = list(env.type_check(env.all()))
-        assert errors == []  # heartbeat was reset, so no overflow
+        assert type_check(env=env) == []
 
     def test_heartbeat_zero_means_unlimited(self):
         """A max_heartbeat of 0 (default) means no limit."""
@@ -180,8 +247,7 @@ class TestHeartbeat(object):
         env = Environment.having([good])
         assert env.max_heartbeat == 0
 
-        errors = list(env.type_check(env.all()))
-        assert errors == []
+        assert type_check(env=env) == []
 
 
 class TestDefEqCache(object):

@@ -827,8 +827,6 @@ class TestNativeNatReduction:
         Given:  structure S where mk :: (fld : Nat)
         Then:   (S.mk a).fld should reduce to a
         """
-        from rpylean.objects import W_Constructor
-
         # Create structure S with one field
         S_name = Name.simple("S")
         mk_name = S_name.child("mk")

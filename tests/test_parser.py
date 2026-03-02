@@ -1,5 +1,4 @@
 from StringIO import StringIO
-from textwrap import dedent
 
 from rpython.rlib.rbigint import rbigint
 import pytest
