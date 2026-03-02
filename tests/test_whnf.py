@@ -24,25 +24,25 @@ b0, b1, b2, b3 = W_BVar(0), W_BVar(1), W_BVar(2), W_BVar(3)
 u = Name.simple("u").level()
 
 
-class TestFVar:
+class TestFVar(object):
     def test_already_whnf(self):
         fvar = x.binder(type=NAT).fvar()
         assert fvar.whnf(Environment.EMPTY) is fvar
 
 
-class TestLitStr:
+class TestLitStr(object):
     def test_already_whnf(self):
         lit = W_LitStr("hello")
         assert lit.whnf(Environment.EMPTY) is lit
 
 
-class TestLitNat:
+class TestLitNat(object):
     def test_already_whnf(self):
         lit = W_LitNat.int(42)
         assert lit.whnf(Environment.EMPTY) is lit
 
 
-class TestSort:
+class TestSort(object):
     def test_already_whnf(self):
         assert TYPE.whnf(Environment.EMPTY) is TYPE
         assert PROP.whnf(Environment.EMPTY) is PROP
@@ -51,7 +51,7 @@ class TestSort:
         assert sort_u.whnf(Environment.EMPTY) is sort_u
 
 
-class TestLambda:
+class TestLambda(object):
     def test_already_whnf(self):
         lam = fun(x.binder(type=NAT))(b0)
         assert lam.whnf(Environment.EMPTY) is lam
@@ -69,13 +69,13 @@ class TestLambda:
         assert lam.whnf(env) is lam
 
 
-class TestForAll:
+class TestForAll(object):
     def test_already_whnf(self):
         fa = forall(x.binder(type=NAT))(NAT)
         assert fa.whnf(Environment.EMPTY) is fa
 
 
-class TestConst:
+class TestConst(object):
     def test_axiom_already_whnf(self):
         a_decl = a.axiom(type=NAT)
         env = Environment.having([a_decl])
@@ -103,7 +103,7 @@ class TestConst:
         assert syntactic_eq(a_decl.const().whnf(env), c_decl.const())
 
 
-class TestApp:
+class TestApp(object):
     """W_App.whnf performs beta reduction when head is a lambda."""
 
     def test_app_of_axiom_is_whnf(self):
@@ -189,7 +189,7 @@ class TestApp:
         assert syntactic_eq(reduced, expected)
 
 
-class TestLet:
+class TestLet(object):
     def test_zeta(self):
         """
         let x := a in x reduces to a.
@@ -214,7 +214,7 @@ class TestLet:
         assert syntactic_eq(outer_let.whnf(env), a_decl.const())
 
 
-class TestProj:
+class TestProj(object):
     def test_reduces_struct(self):
         a_decl = a.axiom(type=NAT)
         f_decl = f.definition(type=NAT, value=a_decl.const())
@@ -369,7 +369,7 @@ class TestProj:
         assert syntactic_eq(result, myVal_decl.const())
 
 
-class TestIotaReduction:
+class TestIotaReduction(object):
     """Iota reduction: recursor applied to a constructor."""
 
     def _make_mybool_env(self, extra_decls=None):
@@ -560,7 +560,7 @@ class TestIotaReduction:
         assert syntactic_eq(result, t_val.const())
 
 
-class TestNativeNatReduction:
+class TestNativeNatReduction(object):
     """Native nat kernel operations reduce in WHNF without unfolding definitions."""
 
     def test_nat_succ_not_natively_reduced(self):
@@ -853,102 +853,3 @@ class TestNativeNatReduction:
         # Should reduce to a
         reduced = proj.whnf(env)
         assert syntactic_eq(reduced, a_decl.const())
-
-
-class TestIotaReduction:
-    """Tests for iota reduction (recursor application)."""
-
-    def test_major_premise_reduced_before_matching(self):
-        """
-        The major premise should be reduced to WHNF before iota reduction
-        tries to match it against constructors.
-
-        Regression test: when the major premise was a definition wrapping a
-        constructor (like `myTrue := true`), iota reduction would fail because
-        it didn't reduce the major premise before trying to match it.
-        """
-        from rpylean.objects import W_RecRule, W_LEVEL_ZERO
-
-        # Create Bool with false/true
-        Bool = Name.simple("Bool")
-        false_ = Bool.child("false")
-        true_ = Bool.child("true")
-
-        false_ctor = false_.constructor(type=Bool.const(), num_params=0, num_fields=0)
-        true_ctor = true_.constructor(type=Bool.const(), num_params=0, num_fields=0)
-        Bool_ind = Bool.inductive(type=TYPE, constructors=[false_ctor, true_ctor])
-
-        # Bool.rec : (motive : Bool → Sort u) → motive false → motive true → (t : Bool) → motive t
-        motive_type = forall(x.binder(type=Bool.const()))(u.sort())
-        rec_type = forall(
-            Name.simple("motive").binder(type=motive_type),
-            Name.simple("hf").binder(type=b0.app(false_.const())),
-            Name.simple("ht").binder(type=b1.app(true_.const())),
-            Name.simple("t").binder(type=Bool.const()),
-        )(W_BVar(3).app(b0))
-
-        # Rule values are lambdas that receive (motive, hf, ht) and return the appropriate case
-        # false_rule: fun motive hf ht => hf
-        # true_rule: fun motive hf ht => ht
-        false_rule_val = fun(
-            Name.simple("motive").binder(type=motive_type),
-            Name.simple("hf").binder(type=b0.app(false_.const())),
-            Name.simple("ht").binder(type=b1.app(true_.const())),
-        )(b1)  # return hf
-        true_rule_val = fun(
-            Name.simple("motive").binder(type=motive_type),
-            Name.simple("hf").binder(type=b0.app(false_.const())),
-            Name.simple("ht").binder(type=b1.app(true_.const())),
-        )(b0)  # return ht
-
-        false_rule = W_RecRule(ctor_name=false_, num_fields=0, val=false_rule_val)
-        true_rule = W_RecRule(ctor_name=true_, num_fields=0, val=true_rule_val)
-
-        rec = Bool.child("rec").recursor(
-            type=rec_type,
-            levels=[u.name],
-            num_params=0,
-            num_indices=0,
-            num_motives=1,
-            num_minors=2,
-            rules=[false_rule, true_rule],
-            k=0,
-            names=[Bool],
-        )
-
-        # myTrue := true (a definition wrapping the constructor)
-        myTrue = Name.simple("myTrue").definition(type=Bool.const(), value=true_.const())
-
-        # Result values
-        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
-        val_f = a.axiom(type=NAT)
-        val_t = b.axiom(type=NAT)
-
-        env = Environment.having([Nat_decl, Bool_ind, false_ctor, true_ctor, rec, myTrue, val_f, val_t])
-
-        # Build: Bool.rec (fun _ => Nat) val_f val_t myTrue
-        # Should reduce to val_t - but only if myTrue is first reduced to true
-        motive = fun(x.binder(type=Bool.const()))(NAT)
-        rec_app = Bool.child("rec").const([W_LEVEL_ZERO.succ()]).app(
-            motive, val_f.const(), val_t.const(), myTrue.const()
-        )
-
-        reduced = rec_app.whnf(env)
-
-        # Should reduce to val_t (the true case)
-        # This requires:
-        # 1. myTrue to be delta-reduced to true (major premise reduction)
-        # 2. iota reduction to select true_rule
-        # 3. beta reduction to apply the rule (fun motive hf ht => ht) to args
-        assert syntactic_eq(reduced, val_t.const()), (
-            "Expected %s but got %s" % (val_t.const(), reduced)
-        )
-
-        # Also verify with the constructor directly (no delta reduction needed)
-        rec_app_direct = Bool.child("rec").const([W_LEVEL_ZERO.succ()]).app(
-            motive, val_f.const(), val_t.const(), true_.const()
-        )
-        reduced_direct = rec_app_direct.whnf(env)
-        assert syntactic_eq(reduced_direct, val_t.const()), (
-            "Direct case: expected %s but got %s" % (val_t.const(), reduced_direct)
-        )
