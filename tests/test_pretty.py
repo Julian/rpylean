@@ -129,19 +129,15 @@ class TestLet(object):
         assert let.pretty({}) == "let a : Nat := Nat.zero\nNat.zero"
 
 
-# TODO: something like the `variable` command?
-Nat = Name.simple("Nat").inductive(
-    type=TYPE,
-    constructors=[],  # FIXME: zero, succ obviously
-)
+Nat = Name.simple("Nat").axiom(type=TYPE)
 i, h, p, q, P, alpha = names("i", "h", "p", "q", "P", "α")
 constants = {
     Name.simple("Nat"): Nat,
-    i: Nat,
-    p: PROP,
-    q: PROP,
-    P: forall(P.binder(type=NAT))(PROP),
-    alpha: forall(Name.ANONYMOUS.binder(type=NAT))(TYPE),
+    i: i.axiom(type=NAT),
+    p: p.axiom(type=PROP),
+    q: q.axiom(type=PROP),
+    P: P.axiom(type=forall(P.binder(type=NAT))(PROP)),
+    alpha: alpha.axiom(type=forall(Name.ANONYMOUS.binder(type=NAT))(TYPE)),
 }
 
 
@@ -317,7 +313,9 @@ class TestRecursor(object):
             levels=[u.name],
         )
 
-        assert rec.pretty({}) == (
+        assert rec.pretty(
+            {Name.simple("Empty"): Name.simple("Empty").axiom(type=TYPE)}
+        ) == (
             "recursor Empty.rec.{u} : "
             "(motive : Empty → Sort u) → (t : Empty) → motive t"
         )
@@ -480,7 +478,7 @@ class TestLambda(object):
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(b0),
         )
-        assert f.pretty({}) == dedent(
+        assert f.pretty({Name.simple("Nat"): Nat}) == dedent(
             """\
             def f : Nat → Nat :=
               fun a ↦ a
@@ -505,7 +503,7 @@ class TestLambda(object):
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(x.let(type=NAT, value=NAT_ZERO, body=b1)),
         )
-        assert f.pretty({}) == dedent(
+        assert f.pretty({Name.simple("Nat"): Nat}) == dedent(
             """\
             def f : Nat → Nat :=
               fun a ↦ let x : Nat := Nat.zero
@@ -554,4 +552,4 @@ class TestApp(object):
     def test_app_forall(self):
         arrow = forall(x.binder(type=NAT))(NAT)  # Nat → Nat
         app = f.app(arrow)
-        assert app.pretty({}) == "f (Nat → Nat)"
+        assert app.pretty({Name.simple("Nat"): Nat}) == "f (Nat → Nat)"

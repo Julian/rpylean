@@ -247,6 +247,10 @@ class Name(_Item):
             hash_val = (hash_val * 1000003) ^ compute_hash(each)
         return hash_val & 0xFFFFFFFF
 
+    @not_rpython
+    def __hash__(self):
+        return self.hash()
+
     def syntactic_eq(self, other):
         return self.components == other.components
 
@@ -1700,16 +1704,18 @@ def _is_prop_type(expr, constants):
         elif isinstance(current, W_FVar):
             stack.append(current.binder.type)
         elif isinstance(current, W_Const) and current.name in constants:
-            stack.append(constants[current.name])
+            stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
             head = current
             while isinstance(head, W_App):
                 head = head.fn
             if isinstance(head, W_Const):
                 decl = constants.get(head.name, None)
-                if isinstance(decl, W_ForAll):
-                    body = decl.body.instantiate(decl.binder.fvar())
-                    stack.append(body)
+                if decl is not None:
+                    decl_type = decl.type
+                    if isinstance(decl_type, W_ForAll):
+                        body = decl_type.body.instantiate(decl_type.binder.fvar())
+                        stack.append(body)
     return False
 
 
@@ -1763,15 +1769,11 @@ class W_ForAll(W_FunBase):
         """
         lhs_type = self.binder.type
         if isinstance(lhs_type, W_Const):
-            lhs_type = constants.get(self.binder.type.name, None)
+            lhs_type = constants[lhs_type.name].type
 
         rhs = self.body.instantiate(self.binder.fvar())
-        if (
-            not syntactic_eq(lhs_type, PROP)
-            and _is_prop_type(rhs, constants)
-        ) or (
-            self.body.loose_bvar_range > 0
-            and _is_prop_type(rhs, constants)
+        if (not syntactic_eq(lhs_type, PROP) and _is_prop_type(rhs, constants)) or (
+            self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)
         ):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
