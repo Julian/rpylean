@@ -2091,23 +2091,67 @@ class W_App(W_Expr):
             args.append(current.arg)
             current = current.fn
 
-        fn_pretty = current.pretty(constants)
+        # args[0] = last arg applied, args[-1] = first arg applied.
+        # Determine which args are explicit (non-implicit) by walking the
+        # head's type declaration, if available.
+        explicit_mask = None  # None means "show all args"
+        fn_pretty = None
+        if isinstance(current, W_Const):
+            decl = constants.get(current.name, None)
+            if decl is not None:
+                # Build a mask: True = show this arg, False = suppress.
+                n = len(args)
+                mask = []
+                decl_type = decl.type
+                # Apply universe-level substitution for the const's levels.
+                if decl.levels and current.levels:
+                    substs = {}
+                    for k in range(len(decl.levels)):
+                        substs[decl.levels[k]] = current.levels[k]
+                    decl_type = decl_type.subst_levels(substs)
+                # Walk in arg order: first arg = args[n-1], ..., last = args[0].
+                for j in range(n - 1, -1, -1):
+                    if isinstance(decl_type, W_ForAll):
+                        mask.append(decl_type.binder.is_default())
+                        decl_type = decl_type.body.instantiate(args[j])
+                    else:
+                        mask.append(True)
+                # mask[0] corresponds to args[n-1] (first applied arg),
+                # mask[n-1] corresponds to args[0] (last applied arg).
+                has_implicit = False
+                for m in mask:
+                    if not m:
+                        has_implicit = True
+                        break
+                if has_implicit:
+                    explicit_mask = mask
+                    # Suppress universe levels when implicit args are hidden.
+                    fn_pretty = current.name.str()
+
+        if fn_pretty is None:
+            fn_pretty = current.pretty(constants)
         if isinstance(current, W_Lambda):
             fn_pretty = "(%s)" % fn_pretty
 
         arg_parts = []
-        for i in range(len(args) - 1, 0, -1):
-            arg = args[i]
+        # Iterate first arg ... last arg (args[n-1] ... args[0]).
+        n = len(args)
+        for idx in range(n - 1, -1, -1):
+            arg = args[idx]
+            # mask index: n-1 - idx (0 = first applied, n-1 = last applied).
+            if explicit_mask is not None:
+                mask_idx = n - 1 - idx
+                if not explicit_mask[mask_idx]:
+                    continue  # suppress implicit arg
             arg_pretty = arg.pretty(constants)
-            if isinstance(arg, W_FunBase) or isinstance(arg, W_App):
-                arg_pretty = "(%s)" % arg_pretty
+            is_last = idx == 0
+            if is_last:
+                if isinstance(arg, W_App) or isinstance(arg, W_ForAll):
+                    arg_pretty = "(%s)" % arg_pretty
+            else:
+                if isinstance(arg, W_FunBase) or isinstance(arg, W_App):
+                    arg_pretty = "(%s)" % arg_pretty
             arg_parts.append(arg_pretty)
-
-        last_arg = args[0]
-        last_arg_pretty = last_arg.pretty(constants)
-        if isinstance(last_arg, W_App) or isinstance(last_arg, W_ForAll):
-            last_arg_pretty = "(%s)" % last_arg_pretty
-        arg_parts.append(last_arg_pretty)
 
         return "%s %s" % (fn_pretty, " ".join(arg_parts))
 

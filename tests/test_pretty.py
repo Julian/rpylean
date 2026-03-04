@@ -332,6 +332,28 @@ def test_forall_prop_body_with_universe_polymorphic_id():
     assert expr.pretty(local_constants) == "∀ (p : id Prop), p → p"
 
 
+class TestAppImplicitSuppression(object):
+    def test_implicit_arg_suppressed(self):
+        """
+        Application suppresses implicit arguments.
+
+        `id.{2} Type Prop` pretty-prints as `id Prop` because `Type` is the
+        implicit `α` argument and is hidden by default.
+        """
+        id_name = Name.simple("id")
+        u_name = Name.simple("u")
+        sort_u = u_name.level().sort()
+        id_type = forall(a.implicit_binder(type=sort_u))(forall(h.binder(type=b0))(b1))
+        id_decl = id_name.definition(
+            type=id_type,
+            value=fun(a.implicit_binder(type=sort_u))(fun(h.binder(type=b0))(b0)),
+            levels=[u_name],
+        )
+        level_2 = W_LevelSucc(W_LevelSucc(W_LEVEL_ZERO))
+        expr = id_name.const(levels=[level_2]).app(TYPE, PROP)
+        assert expr.pretty({id_name: id_decl}) == "id Prop"
+
+
 class TestConst(object):
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
