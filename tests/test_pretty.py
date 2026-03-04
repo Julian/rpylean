@@ -14,6 +14,7 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
+    W_LevelSucc,
     W_LitNat,
     W_LitStr,
     forall,
@@ -234,6 +235,101 @@ constants = {
 )
 def test_forall(binder, body, expected):
     assert forall(binder)(body).pretty(constants=constants) == expected
+
+
+def test_forall_binder_type_reduces_to_prop():
+    """
+    Forall with binder type that reduces to Prop uses ∀ notation.
+
+    When the binder type is an application like `id_prop Prop` (which reduces
+    to Prop), the forall is printed with ∀ rather than →.
+    """
+    id_prop_name = Name.simple("id_prop")
+    id_prop_decl = id_prop_name.definition(
+        type=forall(p.binder(type=PROP))(PROP),
+        value=fun(p.binder(type=PROP))(b0),
+    )
+    local_constants = {id_prop_name: id_prop_decl}
+    # ∀ (p : id_prop Prop), p
+    expr = forall(p.binder(type=id_prop_name.app(PROP)))(b0)
+    assert expr.pretty(local_constants) == "∀ (p : id_prop Prop), p"
+
+
+def test_forall_binder_type_multi_arg_reduces_to_prop():
+    """
+    Forall with binder type that is a multi-arg application reducing to Prop uses ∀.
+
+    When the binder type is `id Type Prop` (two explicit args, reduces to Prop),
+    the forall is still printed with ∀ rather than →.
+    """
+    # id2 : (α : Type) → α → α  (simplified non-polymorphic id with two binders)
+    id2_name = Name.simple("id2")
+    id2_decl = id2_name.definition(
+        type=forall(alpha.binder(type=TYPE), p.binder(type=b0))(b0),
+        value=fun(alpha.binder(type=TYPE), p.binder(type=b0))(b0),
+    )
+    local_constants = {id2_name: id2_decl}
+    # ∀ (p : id2 Type Prop), p  -- binder type = id2 applied to two args
+    binder_type = id2_name.app(TYPE, PROP)
+    expr = forall(p.binder(type=binder_type))(b0)
+    assert expr.pretty(local_constants) == "∀ (p : id2 Type Prop), p"
+
+
+def test_forall_fvar_binder_type_prop():
+    """
+    Forall with a Prop-typed FVar binder uses → not ∀.
+
+    `∀ (p : Prop), p → p` — the inner `p → p` must use → not ∀,
+    because the binder type is `p` which is a Prop (not a type-level thing).
+    """
+    # ∀ (p : Prop), p → p
+    # inner: forall(h : BVar(0))(BVar(1)) -- h : p, body is outer p
+    expr = forall(p.binder(type=PROP))(forall(h.binder(type=b0))(b1))
+    assert expr.pretty({}) == "∀ (p : Prop), p → p"
+
+
+def test_forall_prop_body_is_prop():
+    """
+    Forall whose body is itself a forall over a Prop-typed variable uses ∀.
+
+    `∀ (p : id_prop Prop), p → p` — the outer forall must use ∀ notation
+    because the body `p → p` is a Prop (a proposition).
+    """
+    id_prop_name = Name.simple("id_prop")
+    id_prop_decl = id_prop_name.definition(
+        type=forall(p.binder(type=PROP))(PROP),
+        value=fun(p.binder(type=PROP))(b0),
+    )
+    local_constants = {id_prop_name: id_prop_decl}
+    # ∀ (p : id_prop Prop), p → p
+    # inner forall: (h : p) → p, i.e. forall(h : BVar(0))(BVar(1))
+    inner = forall(h.binder(type=b0))(b1)
+    expr = forall(p.binder(type=id_prop_name.app(PROP)))(inner)
+    assert expr.pretty(local_constants) == "∀ (p : id_prop Prop), p → p"
+
+
+def test_forall_prop_body_with_universe_polymorphic_id():
+    """
+    Forall over a universe-polymorphic id application reducing to Prop uses ∀.
+
+    Mirrors `forallSortWhnf` in Lean where the binder type is `id.{2} Type Prop`
+    which delta-reduces to `Prop`. The outer forall must use ∀ notation, not →.
+    """
+    u_name = Name.simple("u")
+    u_level = u_name.level()
+    u_succ = W_LevelSucc(u_level)
+    # id : {α : Sort u} → α → α  (with universe param u)
+    id_name = Name.simple("id")
+    sort_u = u_level.sort()
+    id_type = forall(a.implicit_binder(type=sort_u))(forall(h.binder(type=b0))(b1))
+    id_value = fun(a.implicit_binder(type=sort_u))(fun(h.binder(type=b0))(b0))
+    id_decl = id_name.definition(type=id_type, value=id_value, levels=[u_name])
+    local_constants = {id_name: id_decl}
+    # id.{u+1} (Sort u) Prop  delta-reduces to Prop
+    binder_type = id_name.const(levels=[u_succ]).app(sort_u, PROP)
+    inner = forall(h.binder(type=b0))(b1)
+    expr = forall(p.binder(type=binder_type))(inner)
+    assert expr.pretty(local_constants) == "∀ (p : id Prop), p → p"
 
 
 class TestConst(object):

@@ -1703,19 +1703,48 @@ def _is_prop_type(expr, constants):
                 return True
         elif isinstance(current, W_FVar):
             stack.append(current.binder.type)
+        elif isinstance(current, W_ForAll):
+            # imax(sort_of(A), sort_of(B)) = 0 whenever sort_of(B) = 0,
+            # so \u2200 (x : A), B is Prop iff B is Prop.
+            stack.append(current.body.instantiate(current.binder.fvar()))
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
             head = current
+            args = []
             while isinstance(head, W_App):
+                args.append(head.arg)
                 head = head.fn
+            args.reverse()
             if isinstance(head, W_Const):
                 decl = constants.get(head.name, None)
                 if decl is not None:
-                    decl_type = decl.type
-                    if isinstance(decl_type, W_ForAll):
-                        body = decl_type.body.instantiate(decl_type.binder.fvar())
-                        stack.append(body)
+                    val = decl.w_kind.get_delta_reduce_target()
+                    if val is not None:
+                        # Definition: delta-reduce by applying args to the value.
+                        # Apply universe-level substitution from the const's levels.
+                        if decl.levels:
+                            substs = {}
+                            for i in range(len(decl.levels)):
+                                substs[decl.levels[i]] = head.levels[i]
+                            val = val.subst_levels(substs)
+                        # Beta-reduce by applying each arg to the lambda body.
+                        for arg in args:
+                            if isinstance(val, W_Lambda):
+                                val = val.body.instantiate(arg)
+                            else:
+                                break
+                        stack.append(val)
+                    else:
+                        # Axiom or other non-definition: use type-level reasoning.
+                        # The return type after applying all args tells us the sort.
+                        decl_type = decl.type
+                        for arg in args:
+                            if isinstance(decl_type, W_ForAll):
+                                decl_type = decl_type.body.instantiate(arg)
+                            else:
+                                break
+                        stack.append(decl_type)
     return False
 
 
@@ -1770,11 +1799,13 @@ class W_ForAll(W_FunBase):
         lhs_type = self.binder.type
         if isinstance(lhs_type, W_Const):
             lhs_type = constants[lhs_type.name].type
+        elif isinstance(lhs_type, W_FVar):
+            lhs_type = lhs_type.binder.type
 
         rhs = self.body.instantiate(self.binder.fvar())
-        if (not syntactic_eq(lhs_type, PROP) and _is_prop_type(rhs, constants)) or (
-            self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)
-        ):
+        if (
+            not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
+        ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
             return "∀ %s, %s" % (
                 self.binder.pretty(constants),
                 rhs.pretty(constants),
