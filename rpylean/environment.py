@@ -250,14 +250,16 @@ class Environment(object):
         """
         Pretty-print the given declaration.
         """
-        return declaration.pretty(self.declarations)
+        from rpylean._tokens import FORMAT_PLAIN
+        return FORMAT_PLAIN.format(declaration.tokens(self.declarations))
 
-    def print(self, declaration, file, end="\n"):
+    def dump_pretty(self, writer):
         """
-        Pretty-print the declaration to the given file.
+        Dump the contents of this environment to the given token writer.
         """
-        file.write(self.pretty(declaration))
-        file.write(end)
+        for decl in self.declarations.itervalues():
+            if not decl.is_private:
+                writer.writeline(decl.tokens(self.declarations))
 
     def type_check(self, declarations, pp=None):
         """
@@ -283,13 +285,12 @@ class Environment(object):
                 if not we_are_translated():
                     print_exc(None, stderr)
                     stderr.write("\nwhile checking:\n\n")
-                    self.print(each, stderr)
+                    stderr.write(each)
                     pdb.post_mortem()
                 raise
             else:
                 if error is not None:
                     yield error
-
 
     def all(self):
         """
@@ -308,14 +309,6 @@ class Environment(object):
         Yield declarations whose name contains the given substring.
         """
         return _MatchingDeclarations(self.declarations, substring)
-
-    def dump_pretty(self, stdout):
-        """
-        Dump the contents of this environment to the given stream.
-        """
-        for decl in self.declarations.itervalues():
-            if not decl.is_private:
-                self.print(decl, stdout)
 
     def def_eq(self, expr1, expr2):
         """

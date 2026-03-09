@@ -1,3 +1,8 @@
+from __future__ import print_function
+
+from rpylean._tokens import DECL_NAME, ERROR, FORMAT_PLAIN, PLAIN
+
+
 class W_Error(Exception):
     """
     An exception which might happen at (rpylean) runtime.
@@ -7,60 +12,58 @@ class W_Error(Exception):
         """
         Show our runtime message when we're raised in Python-land.
         """
-        return self.str()
+        return FORMAT_PLAIN(self.tokens())
 
-    def str(self):
+    def tokens(self):
         """
-        Override me in actual exceptions.
+        Return a token list describing this error.  Must be overridden.
         """
-        return "Unexpected error!"
+        raise NotImplementedError
 
 
-class InvalidDeclaration(W_Error):
+class _InvalidDeclaration(W_Error):
     """
     A declaration is invalid.
     """
 
-    def __init__(self, name, reason):
+    def __init__(self, name, reason=[]):
         self.name = name
         self.reason = reason
 
-    def str(self):
-        return "Invalid declaration %s: %s" % (
-            self.name.str(),
-            self.reason,
-        )
+    def tokens(self):
+        return [
+            ERROR.emit("Invalid declaration "),
+            DECL_NAME.emit(self.name.str()),
+            PLAIN.emit(": "),
+        ] + self.reason
 
 
-class AlreadyDeclared(InvalidDeclaration):
+class AlreadyDeclared(_InvalidDeclaration):
     """
     A declaration already exists in the environment.
     """
 
     def __init__(self, name, constants):
-        reason = "%s is already declared as %s" % (
-            name.str(),
-            constants[name].pretty(constants),
+        reason = [ERROR.emit("already declared as ")] + (
+            constants[name].tokens(constants)
         )
-        InvalidDeclaration.__init__(self, name, reason)
-        self.constants = constants
+        _InvalidDeclaration.__init__(self, name, reason)
 
 
-class DuplicateLevels(InvalidDeclaration):
+class DuplicateLevels(_InvalidDeclaration):
     """
     A declaration has duplicate level parameters.
     """
 
     def __init__(self, name, duplicate):
-        reason = "%s has duplicate level parameter %s" % (
-            name.str(),
-            duplicate,
-        )
-        InvalidDeclaration.__init__(self, name, reason)
-        self.duplicate = duplicate
+        reason = [
+            ERROR.emit("duplicate level parameter "),
+            DECL_NAME.emit(duplicate.str()),
+        ]
+        _InvalidDeclaration.__init__(self, name, reason)
 
 
-class ReflexiveKError(InvalidDeclaration):
+class ReflexiveKError(_InvalidDeclaration):
     """
     A reflexive inductive type has a bad recursor.
 
@@ -69,12 +72,12 @@ class ReflexiveKError(InvalidDeclaration):
     """
 
     def __init__(self, name, rec_name):
-        reason = (
-            "%s is reflexive "
-            "but recursor %s claims to support k-like reduction"
-        ) % (name.str(), rec_name.str())
-        InvalidDeclaration.__init__(self, name, reason)
-        self.rec_name = rec_name
+        reason = [
+            ERROR.emit("declaration is reflexive but recursor "),
+            DECL_NAME.emit(rec_name.str()),
+            ERROR.emit(" claims to support k-like reduction"),
+        ]
+        _InvalidDeclaration.__init__(self, name, reason)
 
 
 class InvalidProjection(W_Error):
@@ -87,18 +90,18 @@ class InvalidProjection(W_Error):
         self.field_index = field_index
         self.num_fields = num_fields
 
-    def str(self):
+    def tokens(self):
         if self.num_fields == 0:
             info = "no fields"
         elif self.num_fields == 1:
             info = "only 1 field"
         else:
             info = "only %d fields" % self.num_fields
-        return "index %d is not valid for %s, which has %s" % (
-            self.field_index,
-            self.structure.name.str(),
-            info,
-        )
+        return [
+            ERROR.emit("index %d is not valid for " % self.field_index),
+            DECL_NAME.emit(self.structure.name.str()),
+            ERROR.emit(", which has %s" % info),
+        ]
 
 
 class UnknownQuotient(W_Error):
@@ -113,8 +116,11 @@ class UnknownQuotient(W_Error):
         self.name = name
         self.type = type
 
-    def str(self):
-        return "Unknown quotient declaration: %s" % (self.name.str(),)
+    def tokens(self):
+        return [
+            ERROR.emit("Unknown quotient declaration: "),
+            DECL_NAME.emit(self.name.str()),
+        ]
 
 
 class HeartbeatExceeded(W_Error):
@@ -127,9 +133,12 @@ class HeartbeatExceeded(W_Error):
         self.heartbeats = heartbeats
         self.max_heartbeat = max_heartbeat
 
-    def str(self):
-        return "in %s:\nheartbeat limit exceeded (%s def_eq calls, limit %s)" % (
-            self.declaration.name.str(),
-            self.heartbeats,
-            self.max_heartbeat,
-        )
+    def tokens(self):
+        return [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.declaration.name.str()),
+            ERROR.emit(
+                "\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
+                % (self.heartbeats, self.max_heartbeat)
+            ),
+        ]

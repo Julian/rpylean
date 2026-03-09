@@ -7,10 +7,11 @@ from __future__ import print_function
 from time import time
 import errno
 
-from rpython.rlib.objectmodel import specialize
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
+from rpylean._rlib import plural
+from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.leanffi import FFI
 from rpylean.environment import StreamTracer, from_export
 from rpylean.objects import Name
@@ -20,6 +21,10 @@ from rpylean.parser import ExportVersionError
 cli = CLI(
     tagline="A type checker for the Lean theorem prover.",
     default="check",
+)
+COLOR = (
+    "color",
+    "colorize output (yes|no|auto, default: auto)",
 )
 
 
@@ -49,6 +54,7 @@ cli = CLI(
                 "name|dots|decls|declarations|all)"
             ),
         ),
+        COLOR,
     ],
     flags=[
         (
@@ -87,10 +93,10 @@ def check(self, args, stdin, stdout, stderr):
                 Name.from_str(each)
                 for each in args.options["filter"].split(",")
             ]
-            suffix = "%s declaration%s" % s(names)
+            suffix = "%s declaration%s" % plural(names)
             declarations = env.only(names)
         else:
-            suffix = "%s declaration%s" % s(env.declarations)
+            suffix = "%s declaration%s" % plural(env.declarations)
             declarations = env.all()
 
         stderr.write(
@@ -101,13 +107,15 @@ def check(self, args, stdin, stdout, stderr):
         )
 
         max_fail = int(args.options["max-fail"] or "0")
-        pp = Printer.from_str(args.options["print"], stdout)
+        stdoutw = writer_from_arg(args.options["color"], stdout)
+        stderrw = writer_from_arg(args.options["color"], stderr)
+        printer = Printer.from_str(args.options["print"], stdoutw)
+        pp = printer.show if printer is not None else None
 
         check_start = time()
         try:
             for w_error in env.type_check(declarations, pp=pp):
-                stderr.write(w_error.str())
-                stderr.write("\n")
+                stderrw.writeline(w_error.tokens())
 
                 failures += 1
                 if 0 < max_fail <= failures:
@@ -133,16 +141,18 @@ def check(self, args, stdin, stdout, stderr):
 @cli.subcommand(
     ["EXPORT_FILE", "*DECLS"],
     help="Dump an exported Lean environment or specific declarations from it.",
+    options=[COLOR],
 )
 def dump(self, args, stdin, stdout, stderr):
     (path,) = args.args
     environment = environment_from(path=path, stdin=stdin)
+    color_writer = writer_from_arg(args.options["color"], stdout)
     if args.varargs:
         for each in args.varargs:
             declaration = environment.declarations[Name.from_str(each)]
-            environment.print(declaration, stdout)
+            color_writer.writeline(declaration.tokens(environment.declarations))
     else:
-        environment.dump_pretty(stdout)
+        environment.dump_pretty(color_writer)
     return 0
 
 
@@ -202,43 +212,45 @@ def environment_from(path, stdin):
 
 
 class Printer(object):
-    def __init__(self, format, stream):
-        self.format = format
-        self.stream = stream
+    """
+    A pretty-printer for declarations.
+    """
 
-    def print(self, env, decl):
-        output = self.format(env, decl)
-        if output:
-            self.stream.write(output)
+    def __init__(self, writer):
+        self.writer = writer
+
+    def show(self, env, decl):
+        """Print a single declaration according to this printer's mode."""
+        raise NotImplementedError
 
     @staticmethod
-    def from_str(pp_str, stream):
+    def from_str(pp_str, writer):
+        """Construct a Printer from a CLI string, or return None for 'none'."""
         if pp_str == "all" or pp_str == "decls" or pp_str == "declarations":
-
-            def pp(env, decl):
-                return "%s\n" % (env.pretty(decl),)
+            return _DeclPrinter(writer)
         elif pp_str == "name" or pp_str == "names":
-
-            def pp(env, decl):
-                return "%s\n" % (env.pretty(decl.name),)
+            return _NamePrinter(writer)
         elif pp_str == "dots":
-
-            def pp(env, decl):
-                return "."  # FIXME: if error is None else "E"
+            return _DotPrinter(writer)
         elif pp_str is None or pp_str == "none":
             return None
         else:
             raise UsageError("Unknown pretty print choice: %s" % (pp_str,))
-        return Printer(format=pp, stream=stream).print
 
 
-@specialize.call_location()
-def s(collection):
-    """
-    Dumb pluralization based on the length of the collection.
-    """
-    length = len(collection)
-    return (length, "s" if length != 1 else "")
+class _DeclPrinter(Printer):
+    def show(self, env, decl):
+        self.writer.writeline(decl.tokens(env.declarations))
+
+
+class _NamePrinter(Printer):
+    def show(self, env, decl):
+        self.writer.writeline(decl.name.tokens(env.declarations))
+
+
+class _DotPrinter(Printer):
+    def show(self, env, decl):
+        self.writer.write([PLAIN.emit(".")])
 
 
 if __name__ == "__main__":

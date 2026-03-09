@@ -3,6 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
+from rpylean.exceptions import AlreadyDeclared
 from rpylean.objects import (
     NAT,
     PROP,
@@ -62,7 +63,7 @@ class TestTypeCheck(object):
         )
 
         error = nonTypeType.type_check(env)
-        assert error.str() == dedent(
+        assert str(error) == dedent(
             """\
             in nonTypeType:
             constType
@@ -70,7 +71,7 @@ class TestTypeCheck(object):
             Type → Type
               but is expected to be a Sort (Type or Prop)
             """,
-        ).strip("\n")
+        ).rstrip("\n")
 
 
 class TestApp(object):
@@ -138,31 +139,27 @@ class TestTypeError(object):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
 
         error = invalid.type_check(Environment.EMPTY)
-        assert error.str() == dedent(
-            """\
-            Type mismatch in foo:
-              Type
-            has type
-              Type 1
-            but is expected to have type
-              Prop
-            """,
-        ).strip("\n")
+        assert str(error) == (
+            "Type mismatch in foo:\n"
+            "  Type\n"
+            "has type\n"
+            "  Type 1\n"
+            "but is expected to have type\n"
+            "  Prop"
+        )
 
     def test_anonymous(self):
         invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
 
         error = invalid.type_check(Environment.EMPTY)
-        assert error.str() == dedent(
-            """\
-            Type mismatch in [anonymous]:
-              Type
-            has type
-              Type 1
-            but is expected to have type
-              Prop
-            """,
-        ).strip("\n")
+        assert str(error) == (
+            "Type mismatch in [anonymous]:\n"
+            "  Type\n"
+            "has type\n"
+            "  Type 1\n"
+            "but is expected to have type\n"
+            "  Prop"
+        )
 
     def test_inductive_type_must_be_sort(self):
         a, x = Name.simple("a"), Name.simple("x")
@@ -176,15 +173,13 @@ class TestTypeError(object):
         env = Environment.having([fnType, bad_inductive])
         errors = type_check(env=env)
         assert len(errors) == 1
-        assert errors[0].str() == dedent(
-            """\
-            in BadInd:
-            fnType
-              has type
-            Type → Type
-              but is expected to be a Sort (Type or Prop)
-            """,
-        ).strip("\n")
+        assert str(errors[0]) == (
+            "in BadInd:\n"
+            "fnType\n"
+            "  has type\n"
+            "Type \xe2\x86\x92 Type\n"
+            "  but is expected to be a Sort (Type or Prop)"
+        )
 
 
 def test_pp():
@@ -224,13 +219,11 @@ class TestHeartbeat(object):
         env.def_eq(PROP, PROP)
         assert env.heartbeat == 3
 
-        # 4th call exceeds the limit
-        try:
+        with pytest.raises(HeartbeatExceeded) as exc_info:
             env.def_eq(PROP, PROP)
-            assert False, "should have raised HeartbeatExceeded"
-        except HeartbeatExceeded as err:
-            assert "Test" in err.str()
-            assert "heartbeat limit exceeded" in err.str()
+        error_str = str(exc_info.value)
+        assert "in Test" in error_str
+        assert "heartbeat limit exceeded" in error_str
 
     def test_check_one_resets_heartbeat(self):
         """_check_one resets the heartbeat counter before each declaration."""
@@ -267,10 +260,7 @@ class TestDefEqCache(object):
         b = Name.simple("B").definition(type=TYPE, value=PROP)
         env = Environment.having([a, b])
 
-        list(env.type_check(env.all()))
-        # After type_check, cache should have been cleared between decls
-        # (we can't easily observe this, but at least it shouldn't crash)
-        assert env._def_eq_cache == {} or len(env._def_eq_cache) >= 0
+        assert list(env.type_check(env.all())) == []
 
 
 class TestNotRPython:
@@ -307,20 +297,27 @@ class TestPretty(object):
         env = Environment.having([Foo])
         assert env.pretty(Foo) == "def Foo : Type :=\n  Prop"
 
-
     def test_theorem(self):
         foo = Name.simple("foo").theorem(type=PROP, value=PROP)
         env = Environment.having([foo])
         assert env.pretty(foo) == "theorem foo : Prop := Prop"
-
 
     def test_inductive(self):
         Nat = Name.simple("Nat").inductive(type=TYPE)
         env = Environment.having([Nat])
         assert env.pretty(Nat) == "inductive Nat : Type"
 
-
     def test_axiom(self):
         ax = Name.simple("ax").axiom(type=PROP)
         env = Environment.having([ax])
         assert env.pretty(ax) == "axiom ax : Prop"
+
+
+class TestAlreadyDeclared(object):
+    def test_message_includes_existing_declaration(self):
+        ax = Name.simple("ax").axiom(type=PROP)
+        with pytest.raises(AlreadyDeclared) as exc_info:
+            Environment.having([ax, ax])
+        assert str(exc_info.value) == (
+            "Invalid declaration ax: already declared as axiom ax : Prop"
+        )

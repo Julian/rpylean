@@ -1,7 +1,9 @@
 """
 Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 """
+
 import pytest
+from textwrap import dedent
 
 from rpylean.exceptions import ReflexiveKError, UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_str
@@ -41,7 +43,7 @@ def test_dump_level():
     l1 = Name.simple("l1")
     l2 = Name.simple("l2")
     assert from_str(
-        # eval run <| dumpLevel (.imax (.max (.succ (.succ .zero)) (.param `l1)) (.param `l2))
+        #eval run <| dumpLevel (.imax (.max (.succ (.succ .zero)) (.param `l1)) (.param `l2))
         """
         {"il":1,"succ":0}
         {"il":2,"succ":1}
@@ -232,7 +234,7 @@ def test_empty_dump_litstr():
 def test_empty_dump_litstr_escapes():
     assert from_str(
         #eval runEmpty <| dumpExpr (.lit (.strVal "\r\rh
-#       i\t\t"))
+        #      i\t\t"))
         r"""
         {"ie":0,"strVal":"\r\rh\ni\u0009\u0009"}
         """,
@@ -247,7 +249,9 @@ def test_empty_dump_litstr_unicode():
         """,
     ) == EnvironmentBuilder(
         exprs=[
-            W_LitStr("اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"),
+            W_LitStr(
+                "اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"
+            ),
         ],
     )
 
@@ -462,7 +466,6 @@ def test_dump_opaque():
     )
 
 
-
 # ------------------------
 # |  Extra tests we add  |
 # ------------------------
@@ -517,7 +520,7 @@ def test_unknown_quotient():
             """
         ).finish()
 
-    assert e.value.str() == "Unknown quotient declaration: Quot.something"
+    assert str(e.value) == "Unknown quotient declaration: Quot.something"
 
 
 def test_reflexive_inductive_cannot_have_k_like_recursor():
@@ -531,7 +534,7 @@ def test_reflexive_inductive_cannot_have_k_like_recursor():
             {"inductive":{"ctors":[],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[],"name":2,"numIndices":0,"numMinors":0,"numMotives":1,"numParams":0,"rules":[],"type":8}],"types":[{"all":[1],"ctors":[],"isRec":false,"isReflexive":true,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
             """
         ).finish()
-    assert e.value.str() == (
-        "Invalid declaration Bad: Bad is reflexive but "
-        "recursor Bad.rec claims to support k-like reduction"
+    assert (
+        str(e.value)
+        == "Invalid declaration Bad: declaration is reflexive but recursor Bad.rec claims to support k-like reduction"
     )

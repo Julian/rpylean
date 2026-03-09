@@ -1,6 +1,11 @@
 from io import BytesIO
+from StringIO import StringIO
 
 from rpylean._rcli import CLI, Args
+from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
+from rpylean.cli import Printer
+from rpylean.environment import Environment
+from rpylean.objects import TYPE, Name
 
 
 def run(cli, argv, exit=0):
@@ -197,3 +202,20 @@ class TestFlag(object):
         out, err = run(self.cli, ["prog", "bar", "--help"])
         assert "--flag" in err
         assert "A test flag." in err
+
+
+class TestPrinter(object):
+    decl = Name.simple("Foo").axiom(type=TYPE)
+    env = Environment.having([decl])
+
+    def test_color(self):
+        out = StringIO()
+        printer = Printer.from_str("name", TokenWriter(out, FORMAT_COLOR))
+        printer.show(self.env, self.decl)
+        assert "\033[" in out.getvalue()
+
+    def test_plain(self):
+        out = StringIO()
+        printer = Printer.from_str("name", TokenWriter(out, FORMAT_PLAIN))
+        printer.show(self.env, self.decl)
+        assert out.getvalue() == "Foo\n"

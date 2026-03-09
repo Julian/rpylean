@@ -2,8 +2,10 @@ from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
 from rpython.rlib.objectmodel import compute_hash, not_rpython
 from rpython.rlib.rbigint import rbigint
 
-from rpylean._rlib import count, indent, warn
-from rpylean.exceptions import InvalidProjection
+from rpylean._rlib import count, warn
+from rpylean._tokens import DECL_NAME, KEYWORD, PLAIN, SORT
+from rpylean._tokens import indent
+from rpylean.exceptions import InvalidProjection, W_Error
 
 
 def _whnf_printable_location(expr_class):
@@ -39,25 +41,12 @@ def get_decl(declarations, name):
     return declarations[name]
 
 
-class W_CheckError(object):
+class W_CheckError(W_Error):
     """
     Base class for type-checking errors returned by type_check.
     """
 
     name = None
-
-    def str(self):
-        return "Unexpected check error!"
-
-
-TYPE_MISMATCH = """\
-Type mismatch in %s:
-  %s
-has type
-  %s
-but is expected to have type
-  %s
-""".rstrip("\n")
 
 
 class W_TypeError(W_CheckError):
@@ -69,16 +58,21 @@ class W_TypeError(W_CheckError):
         self.environment = environment
         self.term = term
         self.expected_type = expected_type
-        self.name = Name.ANONYMOUS if name is None else name
+        self.name = name
         self.inferred_type = term.infer(environment)
 
-    def str(self):
-        return TYPE_MISMATCH % (
-            self.environment.pretty(self.name),
-            self.environment.pretty(self.term),
-            self.environment.pretty(self.inferred_type),
-            self.environment.pretty(self.expected_type),
-        )
+    def tokens(self):
+        declarations = self.environment.declarations
+        name = self.name if self.name is not None else Name.ANONYMOUS
+        result = [PLAIN.emit("Type mismatch in ")]
+        result += name.tokens(declarations)
+        result.append(PLAIN.emit(":\n  "))
+        result += self.term.tokens(declarations)
+        result.append(PLAIN.emit("\nhas type\n  "))
+        result += self.inferred_type.tokens(declarations)
+        result.append(PLAIN.emit("\nbut is expected to have type\n  "))
+        result += self.expected_type.tokens(declarations)
+        return result
 
 
 class W_NotASort(W_CheckError):
@@ -89,18 +83,21 @@ class W_NotASort(W_CheckError):
     def __init__(self, environment, expr, inferred_type, name=None):
         self.environment = environment
         self.expr = expr
-        self.name = Name.ANONYMOUS if name is None else name
+        self.name = name
         self.inferred_type = inferred_type
 
-    def str(self):
-        header = ""
-        if self.name is not Name.ANONYMOUS:
-            header = "in %s:\n" % self.name.str()
-        return "%s%s\n  has type\n%s\n  but is expected to be a Sort (Type or Prop)" % (
-            header,
-            self.environment.pretty(self.expr),
-            self.environment.pretty(self.inferred_type),
-        )
+    def tokens(self):
+        declarations = self.environment.declarations
+        result = []
+        if self.name is not None:
+            result.append(PLAIN.emit("in "))
+            result += self.name.tokens(declarations)
+            result.append(PLAIN.emit(":\n"))
+        result += self.expr.tokens(declarations)
+        result.append(PLAIN.emit("\n  has type\n"))
+        result += self.inferred_type.tokens(declarations)
+        result.append(PLAIN.emit("\n  but is expected to be a Sort (Type or Prop)"))
+        return result
 
 
 class W_HeartbeatError(W_CheckError):
@@ -113,12 +110,15 @@ class W_HeartbeatError(W_CheckError):
         self.heartbeats = heartbeats
         self.max_heartbeat = max_heartbeat
 
-    def str(self):
-        return "in %s:\nheartbeat limit exceeded (%s def_eq calls, limit %s)" % (
-            self.name.str(),
-            self.heartbeats,
-            self.max_heartbeat,
-        )
+    def tokens(self):
+        return [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.name.str()),
+            PLAIN.emit(
+                ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
+                % (self.heartbeats, self.max_heartbeat)
+            ),
+        ]
 
 
 class _Item(object):
@@ -175,6 +175,18 @@ def name_with_levels(name, levels):
     return "%s.{%s}" % (pretty, ", ".join(strs))
 
 
+def name_with_levels_tokens(name, levels, constants):
+    """Produce tokens for a declaration name with optional universe levels."""
+    result = name.tokens(constants)
+    if levels:
+        strs = []
+        for level in levels:
+            each = level.str()
+            strs.append(each if each else "0")
+        result.append(PLAIN.emit(".{%s}" % ", ".join(strs)))
+    return result
+
+
 def name_eq(name, other):
     # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
     #        that directly, RPython seems unable to be convinced that name and
@@ -211,6 +223,10 @@ class Name(_Item):
 
     def pretty(self, constants):
         return self.erase_macro_scopes().str()
+
+    def tokens(self, constants):
+        """Return a token list for this name, tagged as a declaration name."""
+        return [DECL_NAME.emit(self.pretty(constants))]
 
     def erase_macro_scopes(self):
         """
@@ -907,6 +923,10 @@ class W_Expr(_Item):
         """
         return None
 
+    def tokens(self, constants):
+        """Return a token list for this expression, defaulting to plain text."""
+        return [PLAIN.emit(self.pretty(constants))]
+
 
 class W_BVar(W_Expr):
     def __init__(self, id):
@@ -1069,6 +1089,10 @@ class W_Sort(W_Expr):
         """
         return self.str()
 
+    def tokens(self, constants):
+        """Return a token list for this Sort, tagged as a sort."""
+        return [SORT.emit(self.str())]
+
     def str(self):
         text, balance = self.level.pretty_parts()
 
@@ -1155,6 +1179,10 @@ class W_Const(W_Expr):
 
     def pretty(self, constants):
         return self.str()
+
+    def tokens(self, constants):
+        """Return a token list for this constant, tagged as a declaration name."""
+        return [DECL_NAME.emit(self.str())]
 
     def str(self):
         return name_with_levels(self.name, self.levels)
@@ -2443,10 +2471,9 @@ class W_Declaration(_Item):
         """
         return self.name.const(**kwargs)
 
-    def pretty(self, constants):
-        # Is delaborate the right vocabulary for what we're doing?!
-        pretty = name_with_levels(self.name, self.levels)
-        return self.w_kind.delaborate(pretty, self.type, constants)
+    def tokens(self, constants):
+        """Produce a token stream for syntax-highlighted output."""
+        return self.w_kind.tokens(self.name, self.levels, self.type, constants)
 
     def type_check(self, env):
         error = self.w_kind.type_check(self.type, env)
@@ -2482,12 +2509,14 @@ class W_Definition(DefOrTheorem):
         self.value = value
         self.hint = hint
 
-    def delaborate(self, name_with_levels, type, constants):
-        return "def %s : %s :=\n%s" % (
-            name_with_levels,
-            type.pretty(constants),
-            indent(self.value.pretty(constants), "  "),
-        )
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        result.append(PLAIN.emit(" :="))
+        result += indent([PLAIN.emit("\n")] + self.value.tokens(constants), "  ")
+        return result
 
     def get_delta_reduce_target(self):
         return self.value
@@ -2510,17 +2539,23 @@ class W_Theorem(DefOrTheorem):
     def __init__(self, value):
         self.value = value
 
-    def delaborate(self, name_with_levels, type, constants):
-        return "theorem %s : %s := %s" % (
-            name_with_levels,
-            type.pretty(constants),
-            self.value.pretty(constants),
-        )
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        result.append(PLAIN.emit(" := "))
+        result += self.value.tokens(constants)
+        return result
 
 
 class W_Axiom(W_DeclarationKind):
-    def delaborate(self, name_with_levels, type, constants):
-        return "axiom %s : %s" % (name_with_levels, type.pretty(constants))
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        return result
 
     def type_check(self, type, env):
         # TODO - implement type checking
@@ -2558,21 +2593,22 @@ class W_Inductive(W_DeclarationKind):
         if not isinstance(inferred_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=inferred_type, name=None)
 
-    def delaborate(self, name_with_levels, type, constants):
-        ctors = [
-            each.w_kind.delaborate_in(
-                constructor_name=each.name,
-                type=each.type,
-                inductive=self,
-                constants=constants,
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        for each in self.constructors:
+            result.append(PLAIN.emit("\n"))
+            result += list(
+                each.w_kind.constructor_tokens(
+                    constructor_name=each.name,
+                    type=each.type,
+                    inductive=self,
+                    constants=constants,
+                )
             )
-            for each in self.constructors
-        ]
-        return "inductive %s : %s%s" % (
-            name_with_levels,
-            type.pretty(constants),
-            ("\n" + "\n".join(ctors)) if ctors else "",
-        )
+        return result
 
 
 class W_Constructor(W_DeclarationKind):
@@ -2585,27 +2621,20 @@ class W_Constructor(W_DeclarationKind):
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def delaborate(self, name_with_levels, type, constants):
-        return "constructor %s : %s" % (
-            name_with_levels,
-            type.pretty(constants),
-        )
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("constructor"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        return result
 
-    def delaborate_in(
-        self,
-        constructor_name,
-        type,
-        inductive,
-        constants,
-    ):
+    def constructor_tokens(self, constructor_name, type, inductive, constants):
         name = constructor_name.in_namespace(inductive.names[0])
-        if type in [each.const() for each in inductive.names]:
-            # TODO: is this right? Probably it needs to use some _eq method
-            return "| %s" % (name.str(),)
-        return "| %s : %s" % (
-            name.str(),
-            type.pretty(constants),
-        )
+        result = [PLAIN.emit("| "), DECL_NAME.emit(name.str())]
+        if type not in [each.const() for each in inductive.names]:
+            result.append(PLAIN.emit(" : "))
+            result += type.tokens(constants)
+        return result
 
 
 class W_Recursor(W_DeclarationKind):
@@ -2631,11 +2660,12 @@ class W_Recursor(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def delaborate(self, name_with_levels, type, constants):
-        return "recursor %s : %s" % (
-            name_with_levels,
-            type.pretty(constants),
-        )
+    def tokens(self, name, levels, type, constants):
+        result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PLAIN.emit(" : "))
+        result += type.tokens(constants)
+        return result
 
 
 def syntactic_eq(expr1, expr2):

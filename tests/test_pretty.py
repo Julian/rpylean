@@ -6,6 +6,7 @@ from textwrap import dedent
 
 import pytest
 
+from rpylean._tokens import DECL_NAME, FORMAT_PLAIN, KEYWORD, PLAIN, SORT
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
@@ -63,7 +64,10 @@ class TestName(object):
     )
     def test_str(self, parts, expected):
         name = Name(parts)
-        assert name.pretty({}) == name.str() == expected
+        assert name.pretty({}) == expected
+
+    def test_tokens(self):
+        assert Name.simple("foo").tokens({}) == [DECL_NAME.emit("foo")]
 
 
 class TestNameWithLevels(object):
@@ -122,6 +126,10 @@ class TestNameWithLevels(object):
 )
 def test_sort(level, expected):
     assert level.sort().pretty({}) == expected
+
+
+def test_sort_tokens():
+    assert TYPE.tokens({}) == [SORT.emit("Type")]
 
 
 class TestLet(object):
@@ -371,6 +379,9 @@ class TestConst(object):
         ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
         assert ofNat.pretty({}) == "ofNat.{0}"
 
+    def test_tokens(self):
+        assert Name.simple("foo").const().tokens({}) == [DECL_NAME.emit("foo")]
+
 
 class TestInductive(object):
     def test_multiple_constructors(self):
@@ -383,7 +394,7 @@ class TestInductive(object):
                 # TODO: test constructors with params
             ],
         )
-        assert Foo.pretty({}) == dedent(
+        assert FORMAT_PLAIN(Foo.tokens({})) == dedent(
             """
             inductive Foo : Prop
             | bar
@@ -397,7 +408,7 @@ class TestInductive(object):
             type=PROP,
             constructors=[name.child("bar").constructor(type=name.const())],
         )
-        assert Foo.pretty({}) == dedent(
+        assert FORMAT_PLAIN(Foo.tokens({})) == dedent(
             """
             inductive Foo : Prop
             | bar
@@ -406,14 +417,19 @@ class TestInductive(object):
 
     def test_no_constructors(self):
         Empty = Name.simple("Empty").inductive(type=TYPE)
-        assert Empty.pretty({}) == "inductive Empty : Type"
+        assert (
+            FORMAT_PLAIN(Empty.tokens({})) == "inductive Empty : Type"
+        )
 
 
 class TestConstructor(object):
     def test_no_params(self):
         True_ = Name.simple("True")
         intro = True_.child("intro").constructor(type=True_.const())
-        assert intro.pretty({}) == "constructor True.intro : True"
+        assert (
+            FORMAT_PLAIN(intro.tokens({}))
+            == "constructor True.intro : True"
+        )
 
 
 class TestRecursor(object):
@@ -431,8 +447,8 @@ class TestRecursor(object):
             levels=[u.name],
         )
 
-        assert rec.pretty(
-            {Name.simple("Empty"): Name.simple("Empty").axiom(type=TYPE)}
+        assert FORMAT_PLAIN(
+            rec.tokens({Name.simple("Empty"): Name.simple("Empty").axiom(type=TYPE)})
         ) == (
             "recursor Empty.rec.{u} : "
             "(motive : Empty → Sort u) → (t : Empty) → motive t"
@@ -443,13 +459,26 @@ class TestTheorem(object):
     def test_delaborate(self):
         # FIXME: this theorem is not a Prop, but that's too annoying now
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
-        assert theorem.pretty({}) == "theorem foo : Nat := Nat.zero"
+        assert (
+            FORMAT_PLAIN(theorem.tokens({}))
+            == "theorem foo : Nat := Nat.zero"
+        )
 
 
 class TestAxiom(object):
     def test_delaborate(self):
         axiom = Name.simple("sorryAx").axiom(type=NAT)
-        assert axiom.pretty({}) == "axiom sorryAx : Nat"
+        assert FORMAT_PLAIN(axiom.tokens({})) == "axiom sorryAx : Nat"
+
+    def test_tokens(self):
+        axiom = Name.simple("sorryAx").axiom(type=PROP)
+        assert axiom.tokens({}) == [
+            KEYWORD.emit("axiom"),
+            PLAIN.emit(" "),
+            DECL_NAME.emit("sorryAx"),
+            PLAIN.emit(" : "),
+            SORT.emit("Prop"),
+        ]
 
 
 class TestProj(object):
@@ -596,7 +625,7 @@ class TestLambda(object):
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(b0),
         )
-        assert f.pretty({Name.simple("Nat"): Nat}) == dedent(
+        assert FORMAT_PLAIN(f.tokens({Name.simple("Nat"): Nat})) == dedent(
             """\
             def f : Nat → Nat :=
               fun a ↦ a
@@ -608,7 +637,7 @@ class TestLambda(object):
             type=NAT,
             value=a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO),
         )
-        assert f.pretty({}) == dedent(
+        assert FORMAT_PLAIN(f.tokens({})) == dedent(
             """\
             def f : Nat :=
               let a : Nat := Nat.zero
@@ -621,7 +650,7 @@ class TestLambda(object):
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(x.let(type=NAT, value=NAT_ZERO, body=b1)),
         )
-        assert f.pretty({Name.simple("Nat"): Nat}) == dedent(
+        assert FORMAT_PLAIN(f.tokens({Name.simple("Nat"): Nat})) == dedent(
             """\
             def f : Nat → Nat :=
               fun a ↦ let x : Nat := Nat.zero
