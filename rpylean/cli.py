@@ -145,14 +145,11 @@ def check(self, args, stdin, stdout, stderr):
 )
 def dump(self, args, stdin, stdout, stderr):
     (path,) = args.args
-    environment = environment_from(path=path, stdin=stdin)
-    color_writer = writer_from_arg(args.options["color"], stdout)
-    if args.varargs:
-        for each in args.varargs:
-            declaration = environment.declarations[Name.from_str(each)]
-            color_writer.writeline(declaration.tokens(environment.declarations))
-    else:
-        environment.dump_pretty(color_writer)
+    stdoutw = writer_from_arg(args.options["color"], stdout)
+    env = environment_from(path=path, stdin=stdin)
+    declarations = env.only([Name.from_str(each) for each in args.varargs])
+    for each in declarations:
+        stdoutw.writeline(each.tokens(env.declarations))
     return 0
 
 

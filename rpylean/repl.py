@@ -67,7 +67,8 @@ def command(names, nargs=0, help=None):
 
 @command(["dump", "d"], help="Dump the current environment.")
 def dump(env, _, __, stdoutw, ___):
-    env.dump_pretty(stdoutw)
+    for each in env.public():
+        stdoutw.writeline(each.tokens(env.declarations))
 
 
 @command(

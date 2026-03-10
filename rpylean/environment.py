@@ -246,21 +246,6 @@ class Environment(object):
             by_name[each.name] = each
         return Environment(declarations=by_name)
 
-    def pretty(self, declaration):
-        """
-        Pretty-print the given declaration.
-        """
-        from rpylean._tokens import FORMAT_PLAIN
-        return FORMAT_PLAIN.format(declaration.tokens(self.declarations))
-
-    def dump_pretty(self, writer):
-        """
-        Dump the contents of this environment to the given token writer.
-        """
-        for decl in self.declarations.itervalues():
-            if not decl.is_private:
-                writer.writeline(decl.tokens(self.declarations))
-
     def type_check(self, declarations, pp=None):
         """
         Type check each declaration in the environment.
@@ -302,6 +287,8 @@ class Environment(object):
         """
         Yield declarations whose name is in the given collection.
         """
+        if not names:
+            return self.all()
         return _NamedDeclarations(self.declarations, names)
 
     def match(self, substring):
@@ -309,6 +296,12 @@ class Environment(object):
         Yield declarations whose name contains the given substring.
         """
         return _MatchingDeclarations(self.declarations, substring)
+
+    def public(self):
+        """
+        All public declarations in the environment.
+        """
+        return self.all().public()
 
     def def_eq(self, expr1, expr2):
         """
@@ -519,6 +512,9 @@ class _Declarations(object):
     def __iter__(self):
         return self
 
+    def public(self):
+        return _PublicDeclarations(self)
+
 
 class _AllDeclarations(_Declarations):
     def __init__(self, declarations):
@@ -551,3 +547,14 @@ class _NamedDeclarations(_Declarations):
         name = next(self.iter)
         assert name in self.declarations, name.str()
         return self.declarations[name]
+
+
+class _PublicDeclarations(_Declarations):
+    def __init__(self, iterator):
+        self.iter = iterator
+
+    def next(self):
+        for declaration in self.iter:
+            if declaration.is_private:
+                continue
+            return declaration
