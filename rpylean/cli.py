@@ -86,25 +86,15 @@ def check(self, args, stdin, stdout, stderr):
 
         if args.options["filter-match"] is not None:
             match = args.options["filter-match"]
-            suffix = "declarations matching %s" % (match,)
             declarations = env.match(match)
         elif args.options["filter"] is not None:
             names = [
                 Name.from_str(each)
                 for each in args.options["filter"].split(",")
             ]
-            suffix = "%s declaration%s" % plural(names)
             declarations = env.only(names)
         else:
-            suffix = "%s declaration%s" % plural(env.declarations)
             declarations = env.all()
-
-        stderr.write(
-            "Checking %s%s…\n" % (
-                suffix,
-                "" if len(args.varargs) == 1 else " from %s" % (path,),
-            ),
-        )
 
         max_fail = int(args.options["max-fail"] or "0")
         stdoutw = writer_from_arg(args.options["color"], stdout)
@@ -132,9 +122,6 @@ def check(self, args, stdin, stdout, stderr):
                 check_elapsed,
             ),
         )
-
-    if args.varargs and failures == 0:
-        stderr.write("All declarations are type-correct.\n")
     return 1 if failures else 0
 
 
