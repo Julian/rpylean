@@ -644,9 +644,11 @@ def test_succ_max_eq_imax_succ():
 def test_trace_def_eq():
     """Tracing def_eq writes each comparison to the trace stream."""
     trace = BytesIO()
+    from rpylean._tokens import TokenWriter, FORMAT_PLAIN
+
     traced_env = Environment.having(
         [Name.simple("Nat").axiom(type=TYPE)],
     )
-    traced_env.tracer = StreamTracer(trace)
+    traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
     traced_env.def_eq(NAT, NAT)
     assert "def_eq" in trace.getvalue()

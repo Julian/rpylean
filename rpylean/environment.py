@@ -13,6 +13,7 @@ from rpython.rlib.objectmodel import (
 )
 
 from rpylean import parser
+from rpylean._tokens import TRACE, TokenWriter
 from rpylean._rlib import r_dict_eq
 from rpylean.exceptions import (
     AlreadyDeclared,
@@ -156,8 +157,8 @@ class Tracer(object):
     No-op tracer.
     """
 
-    def __init__(self, stream):
-        self._stream = stream
+    def __init__(self, writer):
+        self._writer = writer
         self._depth = 0
 
     def enter(self, expr1, expr2, declarations):
@@ -173,19 +174,25 @@ class StreamTracer(Tracer):
     Tracer that writes indented def_eq comparisons to a stream.
     """
 
-    def enter(self, expr1, expr2, declarations):
-        from rpylean._tokens import FORMAT_PLAIN
+    def __init__(self, writer):
+        self._writer = writer
+        self._depth = 0
 
-        pretty1 = FORMAT_PLAIN(expr1.tokens(declarations))
-        pretty2 = FORMAT_PLAIN(expr2.tokens(declarations))
+    def enter(self, expr1, expr2, declarations):
         indent = "  " * self._depth
-        self._stream.write("%sdef_eq %s ≟ %s\n" % (indent, pretty1, pretty2))
+        self._writer.write_plain(indent)
+        self._writer.write([TRACE.emit("def_eq")])
+        self._writer.write_plain(" ")
+        self._writer.write(expr1.tokens(declarations))
+        self._writer.write_plain(" ≟ ")
+        self._writer.write(expr2.tokens(declarations))
+        self._writer.write_plain("\n")
         self._depth += 1
 
     def result(self, value):
         self._depth -= 1
         indent = "  " * self._depth
-        self._stream.write("%s=> %s\n" % (indent, value))
+        self._writer.write_plain("%s=> %s\n" % (indent, value))
         return value
 
 
@@ -271,8 +278,9 @@ class Environment(object):
             except Exception:
                 if not we_are_translated():
                     print_exc(None, stderr)
-                    stderr.write("\nwhile checking:\n\n")
-                    stderr.write(each)
+                    stderr.write("\nwhile checking ")
+                    stderr.write(each.name.str())
+                    stderr.write("\n\n")
                     pdb.post_mortem()
                 raise
             else:

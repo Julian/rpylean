@@ -49,7 +49,8 @@ COLOR = (
             "maximum number of def_eq calls per declaration before giving up",
         ),
         (
-            "print", (
+            "print",
+            (
                 "print something for each declaration (valid values are "
                 "name|dots|decls|declarations|all)"
             ),
@@ -66,7 +67,11 @@ COLOR = (
     ],
 )
 def check(self, args, stdin, stdout, stderr):
+    stdoutw = writer_from_arg(args.options["color"], stdout)
+    stderrw = writer_from_arg(args.options["color"], stderr)
+
     failures = 0
+
     for path in args.varargs:
         start = time()
         try:
@@ -78,7 +83,7 @@ def check(self, args, stdin, stdout, stderr):
         parse_elapsed = time() - start
 
         if args.options["trace"]:
-            env.tracer = StreamTracer(stderr)
+            env.tracer = StreamTracer(stderrw)
 
         max_heartbeat = int(args.options["max-heartbeat"] or "0")
         if max_heartbeat > 0:
@@ -88,17 +93,12 @@ def check(self, args, stdin, stdout, stderr):
             match = args.options["filter-match"]
             declarations = env.match(match)
         elif args.options["filter"] is not None:
-            names = [
-                Name.from_str(each)
-                for each in args.options["filter"].split(",")
-            ]
+            names = [Name.from_str(each) for each in args.options["filter"].split(",")]
             declarations = env.only(names)
         else:
             declarations = env.all()
 
         max_fail = int(args.options["max-fail"] or "0")
-        stdoutw = writer_from_arg(args.options["color"], stdout)
-        stderrw = writer_from_arg(args.options["color"], stderr)
         printer = Printer.from_str(args.options["print"], stdoutw)
         pp = printer.show if printer is not None else None
 

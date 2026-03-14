@@ -36,6 +36,7 @@ class Token(object):
 
 
 KEYWORD = Token("keyword", default_color="569cd6", bold=True)
+TRACE = Token("trace", default_color="808080")
 DECL_NAME = Token("decl.name", default_color="dcdcaa", bold=True)
 BINDER_NAME = Token("binder.name", default_color="c586c0")
 SORT = Token("sort", default_color="4ec9b0")
