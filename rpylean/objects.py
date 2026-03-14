@@ -3,7 +3,15 @@ from rpython.rlib.objectmodel import compute_hash, not_rpython
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count, warn
-from rpylean._tokens import DECL_NAME, KEYWORD, PLAIN, SORT
+from rpylean._tokens import (
+    BINDER_NAME,
+    DECL_NAME,
+    FORMAT_PLAIN,
+    KEYWORD,
+    PLAIN,
+    PUNCT,
+    SORT,
+)
 from rpylean._tokens import indent
 from rpylean.exceptions import InvalidProjection, W_Error
 
@@ -221,12 +229,9 @@ class Name(_Item):
         """
         return Name(self.components + [part])
 
-    def pretty(self, constants):
-        return self.erase_macro_scopes().str()
-
     def tokens(self, constants):
         """Return a token list for this name, tagged as a declaration name."""
-        return [DECL_NAME.emit(self.pretty(constants))]
+        return [DECL_NAME.emit(self.erase_macro_scopes().str())]
 
     def erase_macro_scopes(self):
         """
@@ -526,13 +531,13 @@ class Binder(_Item):
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
-    def pretty(self, constants):
-        return "%s%s : %s%s" % (
-            self.left,
-            self.name.pretty(constants),
-            self.type.pretty(constants),
-            self.right,
-        )
+    def tokens(self, constants):
+        result = [PLAIN.emit(self.left)]
+        result.append(BINDER_NAME.emit(self.name.str()))
+        result.append(PLAIN.emit(" : "))
+        result += self.type.tokens(constants)
+        result.append(PLAIN.emit(self.right))
+        return result
 
     def is_default(self):
         """
@@ -616,9 +621,6 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    def pretty(self, constants):
-        return self.str()
-
     def str(self):
         parts = []
         text, balance = self.pretty_parts()
@@ -925,7 +927,7 @@ class W_Expr(_Item):
 
     def tokens(self, constants):
         """Return a token list for this expression, defaulting to plain text."""
-        return [PLAIN.emit(self.pretty(constants))]
+        return [PLAIN.emit(self.str())]
 
 
 class W_BVar(W_Expr):
@@ -936,11 +938,11 @@ class W_BVar(W_Expr):
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
 
-    def pretty(self, constants):
-        return self.str()
-
     def str(self):
         return "(BVar [%s])" % (self.id,)
+
+    def tokens(self, constants):
+        return [BINDER_NAME.emit(self.str())]
 
     def syntactic_eq(self, other):
         return self.id == other.id
@@ -985,11 +987,11 @@ class W_FVar(W_Expr):
     def def_eq(self, other, def_eq):
         return self.id == other.id
 
-    def pretty(self, constants):
-        return self.str()
-
     def str(self):
         return self.binder.name.str()
+
+    def tokens(self, constants):
+        return [BINDER_NAME.emit(self.str())]
 
     def incr_free_bvars(self, count, depth):
         return self
@@ -1025,9 +1027,6 @@ class W_LitStr(W_Expr):
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
-
-    def pretty(self, constants):
-        return self.str()
 
     def str(self):
         result = ['"']
@@ -1083,17 +1082,12 @@ class W_Sort(W_Expr):
     def def_eq(self, other, def_eq):
         return self.level.eq(other.level)
 
-    def pretty(self, constants):
-        """
-        Pretty format this Sort.
-        """
-        return self.str()
-
     def tokens(self, constants):
         """Return a token list for this Sort, tagged as a sort."""
         return [SORT.emit(self.str())]
 
     def str(self):
+        """Pretty format this Sort."""
         text, balance = self.level.pretty_parts()
 
         if balance == 0:
@@ -1176,9 +1170,6 @@ class W_Const(W_Expr):
             if not level.eq(other.levels[i]):
                 return False
         return True
-
-    def pretty(self, constants):
-        return self.str()
 
     def tokens(self, constants):
         """Return a token list for this constant, tagged as a declaration name."""
@@ -1324,9 +1315,6 @@ class W_LitNat(W_Expr):
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
-
-    def pretty(self, constants):
-        return self.str()
 
     def str(self):
         return self.val.str()
@@ -1581,11 +1569,9 @@ class W_Proj(W_Expr):
             and def_eq(self.struct_expr, other.struct_expr)
         )
 
-    def pretty(self, constants):
+    def tokens(self, constants):
         struct_decl = constants[self.struct_name]
         inductive = struct_decl.w_kind
-        # TODO: better cache/calculate field names for structures
-        # TODO: out of bounds projection, non-structure type
         assert isinstance(inductive, W_Inductive)
         assert len(inductive.constructors) == 1
         (constructor,) = inductive.constructors
@@ -1595,10 +1581,12 @@ class W_Proj(W_Expr):
             field_names.append(constructor_type.binder.name.str())
             constructor_type = constructor_type.body
         field_name = field_names[self.field_index]
-        struct_expr_pretty = self.struct_expr.pretty(constants)
+        result = self.struct_expr.tokens(constants)
         if isinstance(self.struct_expr, W_App):
-            struct_expr_pretty = "(%s)" % struct_expr_pretty
-        return "%s.%s" % (struct_expr_pretty, field_name)
+            result = [PLAIN.emit("(")] + result + [PLAIN.emit(")")]
+        result.append(PLAIN.emit("."))
+        result.append(DECL_NAME.emit(field_name))
+        return result
 
     def _whnf_core(self, env):
         reduced_struct = self.struct_expr.whnf(env)
@@ -1810,46 +1798,6 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
-    def pretty(self, constants):
-        """
-        Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
-
-        ForAll represents two concepts which implementation-wise are
-        "the "same", but which are differentiated when pretty printing.
-        Those are:
-
-            * universally quantified propositions, i.e. "true" foralls
-            * dependent function types
-
-        We try to follow Lean's real pretty printer for deciding when to
-        render which.
-        """
-        lhs_type = self.binder.type
-        if isinstance(lhs_type, W_Const):
-            lhs_type = constants[lhs_type.name].type
-        elif isinstance(lhs_type, W_FVar):
-            lhs_type = lhs_type.binder.type
-
-        rhs = self.body.instantiate(self.binder.fvar())
-        if (
-            not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
-        ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
-            return "∀ %s, %s" % (
-                self.binder.pretty(constants),
-                rhs.pretty(constants),
-            )
-        else:
-            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
-                lhs = self.binder.type.pretty(constants)
-                if isinstance(self.binder.type, W_ForAll):
-                    lhs = "(%s)" % lhs
-            else:
-                lhs = self.binder.pretty(constants)
-            return "%s → %s" % (
-                lhs,
-                rhs.pretty(constants),
-            )
-
     def infer(self, env):
         binder_sort = env.infer_sort_of(self.binder.type)
         body_sort = env.infer_sort_of(self.body.instantiate(self.binder.fvar()))
@@ -1887,6 +1835,47 @@ class W_ForAll(W_FunBase):
             self.body.subst_levels(levels),
         )
 
+    def tokens(self, constants):
+        """
+        Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
+
+        ForAll represents two concepts which implementation-wise are
+        "the "same", but which are differentiated when pretty printing.
+        Those are:
+
+            * universally quantified propositions, i.e. "true" foralls
+            * dependent function types
+
+        We try to follow Lean's real pretty printer for deciding when to
+        render which.
+        """
+        lhs_type = self.binder.type
+        if isinstance(lhs_type, W_Const):
+            lhs_type = constants[lhs_type.name].type
+        elif isinstance(lhs_type, W_FVar):
+            lhs_type = lhs_type.binder.type
+
+        rhs = self.body.instantiate(self.binder.fvar())
+        if (
+            not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
+        ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
+            result = [KEYWORD.emit("∀"), PLAIN.emit(" ")]
+            result += self.binder.tokens(constants)
+            result.append(PLAIN.emit(", "))
+            result += rhs.tokens(constants)
+            return result
+        else:
+            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
+                lhs = self.binder.type.tokens(constants)
+                if isinstance(self.binder.type, W_ForAll):
+                    lhs = [PLAIN.emit("(")] + lhs + [PLAIN.emit(")")]
+            else:
+                lhs = self.binder.tokens(constants)
+            result = lhs
+            result.append(PUNCT.emit(" → "))
+            result += rhs.tokens(constants)
+            return result
+
 
 def group_to_str(group):
     assert not group[-1].is_instance()
@@ -1898,47 +1887,60 @@ def group_to_str(group):
     return "%s%s%s" % (group[-1].left, names, group[-1].right)
 
 
+def _binder_group_tokens(group, constants):
+    names = " ".join([binder.name.str() for binder in group])
+    if group[-1].is_default():
+        return [BINDER_NAME.emit(names)]
+    else:
+        result = [PLAIN.emit(group[-1].left)]
+        for i, binder in enumerate(group):
+            if i > 0:
+                result.append(PLAIN.emit(" "))
+            result.append(BINDER_NAME.emit(binder.name.str()))
+        result.append(PLAIN.emit(group[-1].right))
+        return result
+
+
 class W_Lambda(W_FunBase):
-    def pretty(self, constants):
+    def tokens(self, constants):
         binders = []
         current = self
         while isinstance(current, W_Lambda):
             binders.append(current.binder)
             current = current.body
 
+        result = [KEYWORD.emit("fun"), PLAIN.emit(" ")]
+
         groups, current_group, last_style = [], [], binders[0].left
 
-        for binder in binders:
-            if binder.is_instance():  # always shown separate
+        for i, binder in enumerate(binders):
+            if binder.is_instance():
                 if current_group:
-                    groups.append(group_to_str(current_group))
+                    result += _binder_group_tokens(current_group, constants)
+                    result.append(PLAIN.emit(" "))
                     current_group = []
-                groups.append(
-                    "%s%s : %s%s"
-                    % (
-                        binder.left,
-                        binder.name.str(),
-                        binder.type.pretty(constants),
-                        binder.right,
-                    ),
-                )
+                result += binder.tokens(constants)
+                if i < len(binders) - 1:
+                    result.append(PLAIN.emit(" "))
                 last_style = None
             elif binder.left != last_style and current_group:
-                groups.append(group_to_str(current_group))
+                result += _binder_group_tokens(current_group, constants)
+                result.append(PLAIN.emit(" "))
                 current_group, last_style = [binder], binder.left
             else:
                 current_group.append(binder)
+                last_style = binder.left
         if current_group:
-            groups.append(group_to_str(current_group))
+            result += _binder_group_tokens(current_group, constants)
+
+        result.append(PLAIN.emit(" ↦ "))
 
         body = current
         for binder in reversed(binders):
             body = body.instantiate(binder.fvar())
 
-        return "fun %s ↦ %s" % (
-            " ".join(groups),
-            body.pretty(constants),
-        )
+        result += body.tokens(constants)
+        return result
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Lambda)
@@ -1973,8 +1975,11 @@ class W_Lambda(W_FunBase):
         body_type_fvar = self.body.instantiate(fvar).infer(env)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
         if body_type is None:
+            from rpylean._tokens import FORMAT_PLAIN
+
             raise RuntimeError(
-                "W_Lambda.infer: body_type is None: %s" % env.pretty(self)
+                "W_Lambda.infer: body_type is None: %s"
+                % FORMAT_PLAIN(self.tokens(env.declarations))
             )
         return forall(self.binder)(body_type)
 
@@ -2001,14 +2006,17 @@ class W_Let(W_Expr):
             r = body_range
         self.loose_bvar_range = r
 
-    def pretty(self, constants):
+    def tokens(self, constants):
         fvar = self.name.binder(type=self.type).fvar()
-        return "let %s : %s := %s\n%s" % (
-            self.name.str(),
-            self.type.pretty(constants),
-            self.value.pretty(constants),
-            self.body.instantiate(fvar).pretty(constants),
-        )
+        result = [KEYWORD.emit("let"), PLAIN.emit(" ")]
+        result.append(BINDER_NAME.emit(self.name.str()))
+        result.append(PLAIN.emit(" : "))
+        result += self.type.tokens(constants)
+        result.append(PLAIN.emit(" := "))
+        result += self.value.tokens(constants)
+        result.append(PLAIN.emit("\n"))
+        result += self.body.instantiate(fvar).tokens(constants)
+        return result
 
     def infer(self, env):
         assert env.infer_sort_of(self.type) is not None
@@ -2112,40 +2120,32 @@ class W_App(W_Expr):
             i -= 1
         return True
 
-    def pretty(self, constants):
+    def tokens(self, constants):
         args = []
         current = self
         while isinstance(current, W_App):
             args.append(current.arg)
             current = current.fn
 
-        # args[0] = last arg applied, args[-1] = first arg applied.
-        # Determine which args are explicit (non-implicit) by walking the
-        # head's type declaration, if available.
-        explicit_mask = None  # None means "show all args"
-        fn_pretty = None
+        explicit_mask = None
+        fn_tokens = None
         if isinstance(current, W_Const):
             decl = constants.get(current.name, None)
             if decl is not None:
-                # Build a mask: True = show this arg, False = suppress.
                 n = len(args)
                 mask = []
                 decl_type = decl.type
-                # Apply universe-level substitution for the const's levels.
                 if decl.levels and current.levels:
                     substs = {}
                     for k in range(len(decl.levels)):
                         substs[decl.levels[k]] = current.levels[k]
                     decl_type = decl_type.subst_levels(substs)
-                # Walk in arg order: first arg = args[n-1], ..., last = args[0].
                 for j in range(n - 1, -1, -1):
                     if isinstance(decl_type, W_ForAll):
                         mask.append(decl_type.binder.is_default())
                         decl_type = decl_type.body.instantiate(args[j])
                     else:
                         mask.append(True)
-                # mask[0] corresponds to args[n-1] (first applied arg),
-                # mask[n-1] corresponds to args[0] (last applied arg).
                 has_implicit = False
                 for m in mask:
                     if not m:
@@ -2153,35 +2153,34 @@ class W_App(W_Expr):
                         break
                 if has_implicit:
                     explicit_mask = mask
-                    # Suppress universe levels when implicit args are hidden.
-                    fn_pretty = current.name.str()
+                    fn_tokens = [DECL_NAME.emit(current.name.str())]
 
-        if fn_pretty is None:
-            fn_pretty = current.pretty(constants)
+        if fn_tokens is None:
+            fn_tokens = current.tokens(constants)
         if isinstance(current, W_Lambda):
-            fn_pretty = "(%s)" % fn_pretty
+            fn_tokens = [PLAIN.emit("(")] + fn_tokens + [PLAIN.emit(")")]
 
-        arg_parts = []
-        # Iterate first arg ... last arg (args[n-1] ... args[0]).
+        result = fn_tokens
+
         n = len(args)
         for idx in range(n - 1, -1, -1):
             arg = args[idx]
-            # mask index: n-1 - idx (0 = first applied, n-1 = last applied).
             if explicit_mask is not None:
                 mask_idx = n - 1 - idx
                 if not explicit_mask[mask_idx]:
-                    continue  # suppress implicit arg
-            arg_pretty = arg.pretty(constants)
+                    continue
+            arg_tokens = arg.tokens(constants)
             is_last = idx == 0
             if is_last:
                 if isinstance(arg, W_App) or isinstance(arg, W_ForAll):
-                    arg_pretty = "(%s)" % arg_pretty
+                    arg_tokens = [PLAIN.emit("(")] + arg_tokens + [PLAIN.emit(")")]
             else:
                 if isinstance(arg, W_FunBase) or isinstance(arg, W_App):
-                    arg_pretty = "(%s)" % arg_pretty
-            arg_parts.append(arg_pretty)
+                    arg_tokens = [PLAIN.emit("(")] + arg_tokens + [PLAIN.emit(")")]
+            result.append(PLAIN.emit(" "))
+            result += arg_tokens
 
-        return "%s %s" % (fn_pretty, " ".join(arg_parts))
+        return result
 
     def infer(self, env):
         fn_type_base = self.fn.infer(env)
@@ -2440,13 +2439,6 @@ class W_RecRule(_Item):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
         self.val = val
-
-    def pretty(self, constants):
-        return "<RecRule ctor_name='%s' num_fields='%s' val='%s'>" % (
-            self.ctor_name.str(),
-            self.num_fields,
-            self.val.pretty(constants),
-        )
 
 
 class W_Declaration(_Item):

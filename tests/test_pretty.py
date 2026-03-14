@@ -64,7 +64,7 @@ class TestName(object):
     )
     def test_str(self, parts, expected):
         name = Name(parts)
-        assert name.pretty({}) == expected
+        assert FORMAT_PLAIN(name.tokens({})) == expected
 
     def test_tokens(self):
         assert Name.simple("foo").tokens({}) == [DECL_NAME.emit("foo")]
@@ -125,7 +125,7 @@ class TestNameWithLevels(object):
     ],
 )
 def test_sort(level, expected):
-    assert level.sort().pretty({}) == expected
+    assert FORMAT_PLAIN(level.sort().tokens({})) == expected
 
 
 def test_sort_tokens():
@@ -135,7 +135,7 @@ def test_sort_tokens():
 class TestLet(object):
     def test_basic(self):
         let = a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO)
-        assert let.pretty({}) == "let a : Nat := Nat.zero\nNat.zero"
+        assert FORMAT_PLAIN(let.tokens({})) == "let a : Nat := Nat.zero\nNat.zero"
 
 
 Nat = Name.simple("Nat").axiom(type=TYPE)
@@ -242,7 +242,7 @@ constants = {
     ],
 )
 def test_forall(binder, body, expected):
-    assert forall(binder)(body).pretty(constants=constants) == expected
+    assert FORMAT_PLAIN(forall(binder)(body).tokens(constants=constants)) == expected
 
 
 def test_forall_binder_type_reduces_to_prop():
@@ -260,7 +260,7 @@ def test_forall_binder_type_reduces_to_prop():
     local_constants = {id_prop_name: id_prop_decl}
     # ∀ (p : id_prop Prop), p
     expr = forall(p.binder(type=id_prop_name.app(PROP)))(b0)
-    assert expr.pretty(local_constants) == "∀ (p : id_prop Prop), p"
+    assert FORMAT_PLAIN(expr.tokens(local_constants)) == "∀ (p : id_prop Prop), p"
 
 
 def test_forall_binder_type_multi_arg_reduces_to_prop():
@@ -280,7 +280,7 @@ def test_forall_binder_type_multi_arg_reduces_to_prop():
     # ∀ (p : id2 Type Prop), p  -- binder type = id2 applied to two args
     binder_type = id2_name.app(TYPE, PROP)
     expr = forall(p.binder(type=binder_type))(b0)
-    assert expr.pretty(local_constants) == "∀ (p : id2 Type Prop), p"
+    assert FORMAT_PLAIN(expr.tokens(local_constants)) == "∀ (p : id2 Type Prop), p"
 
 
 def test_forall_fvar_binder_type_prop():
@@ -293,7 +293,7 @@ def test_forall_fvar_binder_type_prop():
     # ∀ (p : Prop), p → p
     # inner: forall(h : BVar(0))(BVar(1)) -- h : p, body is outer p
     expr = forall(p.binder(type=PROP))(forall(h.binder(type=b0))(b1))
-    assert expr.pretty({}) == "∀ (p : Prop), p → p"
+    assert FORMAT_PLAIN(expr.tokens({})) == "∀ (p : Prop), p → p"
 
 
 def test_forall_prop_body_is_prop():
@@ -313,7 +313,7 @@ def test_forall_prop_body_is_prop():
     # inner forall: (h : p) → p, i.e. forall(h : BVar(0))(BVar(1))
     inner = forall(h.binder(type=b0))(b1)
     expr = forall(p.binder(type=id_prop_name.app(PROP)))(inner)
-    assert expr.pretty(local_constants) == "∀ (p : id_prop Prop), p → p"
+    assert FORMAT_PLAIN(expr.tokens(local_constants)) == "∀ (p : id_prop Prop), p → p"
 
 
 def test_forall_prop_body_with_universe_polymorphic_id():
@@ -337,7 +337,7 @@ def test_forall_prop_body_with_universe_polymorphic_id():
     binder_type = id_name.const(levels=[u_succ]).app(sort_u, PROP)
     inner = forall(h.binder(type=b0))(b1)
     expr = forall(p.binder(type=binder_type))(inner)
-    assert expr.pretty(local_constants) == "∀ (p : id Prop), p → p"
+    assert FORMAT_PLAIN(expr.tokens(local_constants)) == "∀ (p : id Prop), p → p"
 
 
 class TestAppImplicitSuppression(object):
@@ -359,25 +359,25 @@ class TestAppImplicitSuppression(object):
         )
         level_2 = W_LevelSucc(W_LevelSucc(W_LEVEL_ZERO))
         expr = id_name.const(levels=[level_2]).app(TYPE, PROP)
-        assert expr.pretty({id_name: id_decl}) == "id Prop"
+        assert FORMAT_PLAIN(expr.tokens({id_name: id_decl})) == "id Prop"
 
 
 class TestConst(object):
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
-        assert foo.pretty({}) == "foo.{u, v}"
+        assert FORMAT_PLAIN(foo.tokens({})) == "foo.{u, v}"
 
     def test_one_level(self):
         List = Name.simple("List").const(levels=[u])
-        assert List.pretty({}) == "List.{u}"
+        assert FORMAT_PLAIN(List.tokens({})) == "List.{u}"
 
     def test_no_levels(self):
         foo = Name.simple("foo").const()
-        assert foo.pretty({}) == "foo"
+        assert FORMAT_PLAIN(foo.tokens({})) == "foo"
 
     def test_level_zero(self):
         ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
-        assert ofNat.pretty({}) == "ofNat.{0}"
+        assert FORMAT_PLAIN(ofNat.tokens({})) == "ofNat.{0}"
 
     def test_tokens(self):
         assert Name.simple("foo").const().tokens({}) == [DECL_NAME.emit("foo")]
@@ -417,19 +417,14 @@ class TestInductive(object):
 
     def test_no_constructors(self):
         Empty = Name.simple("Empty").inductive(type=TYPE)
-        assert (
-            FORMAT_PLAIN(Empty.tokens({})) == "inductive Empty : Type"
-        )
+        assert FORMAT_PLAIN(Empty.tokens({})) == "inductive Empty : Type"
 
 
 class TestConstructor(object):
     def test_no_params(self):
         True_ = Name.simple("True")
         intro = True_.child("intro").constructor(type=True_.const())
-        assert (
-            FORMAT_PLAIN(intro.tokens({}))
-            == "constructor True.intro : True"
-        )
+        assert FORMAT_PLAIN(intro.tokens({})) == "constructor True.intro : True"
 
 
 class TestRecursor(object):
@@ -459,10 +454,7 @@ class TestTheorem(object):
     def test_delaborate(self):
         # FIXME: this theorem is not a Prop, but that's too annoying now
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
-        assert (
-            FORMAT_PLAIN(theorem.tokens({}))
-            == "theorem foo : Nat := Nat.zero"
-        )
+        assert FORMAT_PLAIN(theorem.tokens({})) == "theorem foo : Nat := Nat.zero"
 
 
 class TestAxiom(object):
@@ -497,11 +489,16 @@ class TestProj(object):
 
     def test_fst(self):
         proj = self.Foo.proj(0, self.mk.app(NAT_ZERO, NAT_ZERO))
-        assert proj.pretty(self.constants) == "(Foo.mk Nat.zero Nat.zero).a"
+        assert (
+            FORMAT_PLAIN(proj.tokens(self.constants)) == "(Foo.mk Nat.zero Nat.zero).a"
+        )
 
     def test_third(self):
         proj = self.Foo.proj(2, self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO))
-        assert proj.pretty(self.constants) == "(Foo.mk Nat.zero Nat.zero Nat.zero).y"
+        assert (
+            FORMAT_PLAIN(proj.tokens(self.constants))
+            == "(Foo.mk Nat.zero Nat.zero Nat.zero).y"
+        )
 
     def test_simple_const_no_parens(self):
         origin = Name.simple("origin").const()
@@ -511,17 +508,17 @@ class TestProj(object):
             value=self.mk.app(NAT_ZERO, NAT_ZERO, NAT_ZERO),
         )
         proj = self.Foo.proj(0, origin)
-        assert proj.pretty(constants) == "origin.a"
+        assert FORMAT_PLAIN(proj.tokens(constants)) == "origin.a"
 
 
 def test_litnat():
     nat = W_LitNat.long(1000000000000000)
-    assert nat.pretty({}) == "1000000000000000"
+    assert FORMAT_PLAIN(nat.tokens({})) == "1000000000000000"
 
 
 def test_litstr():
     hi = W_LitStr("hi")
-    assert hi.pretty({}) == '"hi"'
+    assert FORMAT_PLAIN(hi.tokens({})) == '"hi"'
 
 
 @pytest.mark.parametrize(
@@ -538,7 +535,7 @@ def test_litstr():
     ],
 )
 def test_litstr_escapes(input_str, expected):
-    assert W_LitStr(input_str).pretty({}) == expected
+    assert FORMAT_PLAIN(W_LitStr(input_str).tokens({})) == expected
 
 
 class TestLambda(object):
@@ -557,42 +554,42 @@ class TestLambda(object):
                 "Instance binder pretty-printing doesn't yet hide unused "
                 "names when pretty printing.",
             )
-        assert fun(binder(type=NAT))(NAT_ZERO).pretty({}) == expected
+        assert FORMAT_PLAIN(fun(binder(type=NAT))(NAT_ZERO).tokens({})) == expected
 
     def test_nested_default(self):
         nested = fun(
             x.binder(type=NAT),
             y.binder(type=NAT),
         )(f.app(b1, b0))
-        assert nested.pretty({}) == "fun x y ↦ f x y"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun x y ↦ f x y"
 
     def test_nested_implicit(self):
         nested = fun(
             x.implicit_binder(type=NAT),
             y.implicit_binder(type=NAT),
         )(f.app(b1, b0))
-        assert nested.pretty({}) == "fun {x y} ↦ f x y"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun {x y} ↦ f x y"
 
     def test_nested_instance(self):
         nested = fun(
             x.instance_binder(type=NAT),
             y.instance_binder(type=NAT),
         )(f.app(b1, b0))
-        assert nested.pretty({}) == "fun [x : Nat] [y : Nat] ↦ f x y"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun [x : Nat] [y : Nat] ↦ f x y"
 
     def test_mixed_default_implicit(self):
         nested = fun(
             x.binder(type=NAT),
             y.implicit_binder(type=NAT),
         )(f.app(b1, b0))
-        assert nested.pretty({}) == "fun x {y} ↦ f x y"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun x {y} ↦ f x y"
 
     def test_mixed_implicit_default(self):
         nested = fun(
             x.implicit_binder(type=NAT),
             y.binder(type=NAT),
         )(f.app(b1, b0))
-        assert nested.pretty({}) == "fun {x} y ↦ f x y"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun {x} y ↦ f x y"
 
     def test_more_nested(self):
         nested = fun(
@@ -600,7 +597,7 @@ class TestLambda(object):
             y.binder(type=NAT),
             a.binder(type=NAT),
         )(f.app(f.app(b2, b1), b0))
-        assert nested.pretty({}) == "fun x y a ↦ f (f x y) a"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun x y a ↦ f (f x y) a"
 
     def test_more_nested_mixed(self):
         nested = fun(
@@ -613,12 +610,12 @@ class TestLambda(object):
             "Instance binder pretty-printing doesn't yet hide unused "
             "names when pretty printing.",
         )
-        assert nested.pretty({}, []) == "fun x {y} [Nat] f ↦ f"
+        assert FORMAT_PLAIN(nested.tokens({}, [])) == "fun x {y} [Nat] f ↦ f"
 
     def test_nested_non_lambda_body(self):
         let = y.let(type=NAT, value=NAT_ZERO, body=b0)
         nested = fun(x.binder(type=NAT))(let)
-        assert nested.pretty({}) == "fun x ↦ let y : Nat := Nat.zero\ny"
+        assert FORMAT_PLAIN(nested.tokens({})) == "fun x ↦ let y : Nat := Nat.zero\ny"
 
     def test_definition(self):
         f = Name.simple("f").definition(
@@ -662,41 +659,41 @@ class TestLambda(object):
 class TestApp(object):
     def test_simple(self):
         app = f.app(a.const())
-        assert app.pretty({}) == "f a"
+        assert FORMAT_PLAIN(app.tokens({})) == "f a"
 
     def test_nested_application_left_associative(self):
         app = f.app(a.const()).app(x.const())
-        assert app.pretty({}) == "f a x"
+        assert FORMAT_PLAIN(app.tokens({})) == "f a x"
 
     def test_application_with_parentheses_needed(self):
         g = Name.simple("g").const()
         outer = f.app(g.app(a.const()))
-        assert outer.pretty({}) == "f (g a)"
+        assert FORMAT_PLAIN(outer.tokens({})) == "f (g a)"
 
     def test_lambda_app(self):
         id = fun(x.binder(type=NAT))(b0)
         app = id.app(a.const())
-        assert app.pretty({}) == "(fun x ↦ x) a"
+        assert FORMAT_PLAIN(app.tokens({})) == "(fun x ↦ x) a"
 
     def test_app_lambda(self):
         id = fun(x.binder(type=NAT))(b0)
         app = f.app(id)
-        assert app.pretty({}) == "f fun x ↦ x"
+        assert FORMAT_PLAIN(app.tokens({})) == "f fun x ↦ x"
 
     def test_lambda_lambda_app(self):
         fun_fn = fun(f.binder(type=NAT), x.binder(type=NAT))(b0)
         fun_arg = fun(y.binder(type=NAT))(b0)
         app = fun_fn.app(fun_arg, NAT_ZERO)
-        assert app.pretty({}) == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
+        assert FORMAT_PLAIN(app.tokens({})) == "(fun f x ↦ x) (fun y ↦ y) Nat.zero"
 
     def test_app_multiple_lambda(self):
         fun1 = fun(x.binder(type=NAT))(b0)
         fun2 = fun(y.binder(type=NAT))(b0)
         fun3 = fun(a.binder(type=NAT))(b0)
         app = f.app(fun1, fun2, fun3)
-        assert app.pretty({}) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"
+        assert FORMAT_PLAIN(app.tokens({})) == "f (fun x ↦ x) (fun y ↦ y) fun a ↦ a"
 
     def test_app_forall(self):
         arrow = forall(x.binder(type=NAT))(NAT)  # Nat → Nat
         app = f.app(arrow)
-        assert app.pretty({Name.simple("Nat"): Nat}) == "f (Nat → Nat)"
+        assert FORMAT_PLAIN(app.tokens({Name.simple("Nat"): Nat})) == "f (Nat → Nat)"

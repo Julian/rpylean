@@ -174,8 +174,10 @@ class StreamTracer(Tracer):
     """
 
     def enter(self, expr1, expr2, declarations):
-        pretty1 = expr1.pretty(declarations)
-        pretty2 = expr2.pretty(declarations)
+        from rpylean._tokens import FORMAT_PLAIN
+
+        pretty1 = FORMAT_PLAIN(expr1.tokens(declarations))
+        pretty2 = FORMAT_PLAIN(expr2.tokens(declarations))
         indent = "  " * self._depth
         self._stream.write("%sdef_eq %s ≟ %s\n" % (indent, pretty1, pretty2))
         self._depth += 1

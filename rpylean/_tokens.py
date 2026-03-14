@@ -37,6 +37,7 @@ class Token(object):
 
 KEYWORD = Token("keyword", default_color="569cd6", bold=True)
 DECL_NAME = Token("decl.name", default_color="dcdcaa", bold=True)
+BINDER_NAME = Token("binder.name", default_color="c586c0")
 SORT = Token("sort", default_color="4ec9b0")
 LITERAL = Token("literal", default_color="b5cea8")
 LEVEL = Token("level", default_color="9cdcfe")
@@ -69,6 +70,7 @@ def formatter(tag_text_to_str):
     @wraps(tag_text_to_str)
     def format(tokens):
         return "".join([tag_text_to_str(tag, text) for tag, text in tokens])
+
     return format
 
 
