@@ -22,6 +22,7 @@ from rpylean.exceptions import (
     UnknownQuotient,
 )
 from rpylean.objects import (
+    W_CheckError,
     W_LEVEL_ZERO,
     PROP,
     Name,
@@ -275,6 +276,10 @@ class Environment(object):
                     err.heartbeats,
                     err.max_heartbeat,
                 )
+            except W_CheckError as err:
+                if err.name is None:
+                    err.name = each.name
+                yield err
             except Exception:
                 if not we_are_translated():
                     print_exc(None, stderr)
@@ -506,12 +511,6 @@ class Environment(object):
             i += 1
 
         return True
-
-    def infer_sort_of(self, expr):
-        expr_type = expr.infer(self).whnf(self)
-        if isinstance(expr_type, W_Sort):
-            return expr_type.level
-        raise RuntimeError("Expected Sort, got %s" % expr_type)
 
 
 #: The empty environment.

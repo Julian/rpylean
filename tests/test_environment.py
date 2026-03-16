@@ -66,12 +66,33 @@ class TestTypeCheck(object):
         assert str(error) == dedent(
             """\
             in nonTypeType:
-            constType
-              has type
-            Type → Type
-              but is expected to be a Sort (Type or Prop)
+              constType
+            has type
+              Type → Type
+            but is expected to be a Sort (Type or Prop)
             """,
         ).rstrip("\n")
+
+    def test_binder_type_with_non_sort_definition_raises(self):
+        """
+        A binder type must be a Sort (Type or Prop), not a function type.
+        """
+        a, x = names("a", "x")
+
+        constType_type = forall(a.binder(type=TYPE))(TYPE)
+        constType_decl = Name.simple("constType").definition(
+            type=constType_type,
+            value=fun(a.binder(type=TYPE))(TYPE),
+        )
+        env = Environment.having([constType_decl])
+
+        bad_forall = Name.simple("forallSortBad").definition(
+            type=forall(x.binder(type=constType_decl.const()))(PROP),
+            value=PROP,
+        )
+
+        error = bad_forall.type_check(env)
+        assert error is not None
 
 
 class TestApp(object):
@@ -109,21 +130,15 @@ class TestInductive(object):
             a.binder(type=W_BVar(0)),
         )(PROP)
 
-        inductive_type = forall(
-            alpha.binder(type=TYPE),
-        )(body_type)
+        inductive_type = forall(alpha.binder(type=TYPE))(body_type)
 
         refl_body = forall(
             a.binder(type=W_BVar(0)),
         )(W_BVar(1).app(W_BVar(0)).app(W_BVar(1)).app(W_BVar(0)))
 
-        refl_ctor_type = forall(
-            alpha.binder(type=TYPE),
-        )(refl_body)
+        refl_ctor_type = forall(alpha.binder(type=TYPE))(refl_body)
 
-        refl_ctor = refl.constructor(
-            type=refl_ctor_type,
-        )
+        refl_ctor = refl.constructor(type=refl_ctor_type)
         Eq_decl = Eq.inductive(
             type=inductive_type,
             constructors=[refl_ctor],
@@ -175,10 +190,10 @@ class TestTypeError(object):
         assert len(errors) == 1
         assert str(errors[0]) == (
             "in BadInd:\n"
-            "fnType\n"
-            "  has type\n"
-            "Type \xe2\x86\x92 Type\n"
-            "  but is expected to be a Sort (Type or Prop)"
+            "  fnType\n"
+            "has type\n"
+            "  Type → Type\n"
+            "but is expected to be a Sort (Type or Prop)"
         )
 
 

@@ -1,6 +1,7 @@
 """
 Type inference of Lean objects.
 """
+
 import pytest
 
 from rpylean.environment import Environment
@@ -10,6 +11,7 @@ from rpylean.objects import (
     STRING,
     TYPE,
     W_LEVEL_ZERO,
+    W_NotASort,
     Name,
     W_BVar,
     W_LitNat,
@@ -36,6 +38,14 @@ class TestSort(object):
     def test_prop(self):
         Prop = W_LEVEL_ZERO.sort()
         assert Prop.infer(Environment.EMPTY) == TYPE
+
+    def test_expect_sort_on_prop(self):
+        Prop = W_LEVEL_ZERO.sort()
+        assert Prop.expect_sort(Environment.EMPTY) == W_LEVEL_ZERO
+
+    def test_expect_sort_on_type(self):
+        Type = W_LEVEL_ZERO.succ().sort()
+        assert Type.expect_sort(Environment.EMPTY) == W_LEVEL_ZERO.succ()
 
 
 def test_nat():

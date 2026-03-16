@@ -96,15 +96,14 @@ class W_NotASort(W_CheckError):
 
     def tokens(self):
         declarations = self.environment.declarations
-        result = []
-        if self.name is not None:
-            result.append(PLAIN.emit("in "))
-            result += self.name.tokens(declarations)
-            result.append(PLAIN.emit(":\n"))
+        name = self.name if self.name is not None else Name.ANONYMOUS
+        result = [PLAIN.emit("in ")]
+        result += name.tokens(declarations)
+        result.append(PLAIN.emit(":\n  "))
         result += self.expr.tokens(declarations)
-        result.append(PLAIN.emit("\n  has type\n"))
+        result.append(PLAIN.emit("\nhas type\n  "))
         result += self.inferred_type.tokens(declarations)
-        result.append(PLAIN.emit("\n  but is expected to be a Sort (Type or Prop)"))
+        result.append(PLAIN.emit("\nbut is expected to be a Sort (Type or Prop)"))
         return result
 
 
@@ -925,6 +924,9 @@ class W_Expr(_Item):
         """
         return None
 
+    def expect_sort(self, env):
+        raise W_NotASort(env, self, inferred_type=self, name=None)
+
     def tokens(self, constants):
         """Return a token list for this expression, defaulting to plain text."""
         return [PLAIN.emit(self.str())]
@@ -1118,6 +1120,9 @@ class W_Sort(W_Expr):
     def infer(self, env):
         return self.level.succ().sort()
 
+    def expect_sort(self, env):
+        return self.level
+
     def subst_levels(self, substs):
         return self.level.subst_levels(substs).sort()
 
@@ -1225,6 +1230,9 @@ class W_Const(W_Expr):
             return decl.type
 
         return apply_const_level_params(self, decl.type, env)
+
+    def expect_sort(self, env):
+        return self.infer(env).whnf(env).expect_sort(env)
 
     @unroll_safe
     def subst_levels(self, substs):
@@ -1799,9 +1807,17 @@ class W_FunBase(W_Expr):
 
 class W_ForAll(W_FunBase):
     def infer(self, env):
-        binder_sort = env.infer_sort_of(self.binder.type)
-        body_sort = env.infer_sort_of(self.body.instantiate(self.binder.fvar()))
+        binder_sort = self.binder.type.infer(env).whnf(env).expect_sort(env)
+        body_sort = (
+            self.body.instantiate(self.binder.fvar())
+            .infer(env)
+            .whnf(env)
+            .expect_sort(env)
+        )
         return binder_sort.imax(body_sort).sort()
+
+    def expect_sort(self, env):
+        return self.infer(env).whnf(env).expect_sort(env)
 
     # TODO - double check this
     def instantiate(self, expr, depth=0):
@@ -1969,18 +1985,10 @@ class W_Lambda(W_FunBase):
         )
 
     def infer(self, env):
-        # Run this for the side effect - throwing an exception if not a Sort
-        env.infer_sort_of(self.binder.type)
+        self.binder.type.infer(env).whnf(env).expect_sort(env)
         fvar = self.binder.fvar()
         body_type_fvar = self.body.instantiate(fvar).infer(env)
         body_type = body_type_fvar.bind_fvar(fvar, 0)
-        if body_type is None:
-            from rpylean._tokens import FORMAT_PLAIN
-
-            raise RuntimeError(
-                "W_Lambda.infer: body_type is None: %s"
-                % FORMAT_PLAIN(self.tokens(env.declarations))
-            )
         return forall(self.binder)(body_type)
 
     def subst_levels(self, substs):
@@ -2019,7 +2027,7 @@ class W_Let(W_Expr):
         return result
 
     def infer(self, env):
-        assert env.infer_sort_of(self.type) is not None
+        self.type.infer(env).whnf(env).expect_sort(env)
         assert env.def_eq(self.value.infer(env), self.type)
         body_type = self.body.instantiate(self.value)
         return body_type.infer(env)
@@ -2191,6 +2199,9 @@ class W_App(W_Expr):
             )
         body_type = fn_type.body.instantiate(self.arg)
         return body_type
+
+    def expect_sort(self, env):
+        return self.whnf(env).expect_sort(env)
 
     def syntactic_eq(self, other):
         # Iterative spine walk to avoid stack overflow on deep W_App trees
