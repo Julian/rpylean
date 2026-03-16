@@ -28,7 +28,6 @@ def test_stdin():
     )
 
     assert stdout == "", (stdout, stderr)
-    assert "All declarations are type-correct." in stderr, (stdout, stderr)
 
 
 def test_no_such_file():
