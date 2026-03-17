@@ -107,6 +107,32 @@ class W_NotASort(W_CheckError):
         return result
 
 
+class W_NotAProp(W_CheckError):
+    """
+    The type of a theorem is not a proposition (Sort 0).
+    """
+
+    def __init__(self, environment, expr, inferred_sort, name=None):
+        self.environment = environment
+        self.expr = expr
+        self.name = name
+        self.inferred_sort = inferred_sort
+
+    def tokens(self):
+        declarations = self.environment.declarations
+        name = self.name if self.name is not None else Name.ANONYMOUS
+        result = [PLAIN.emit("in ")]
+        result += name.tokens(declarations)
+        result.append(PLAIN.emit(":\n  "))
+        result += self.expr.tokens(declarations)
+        result.append(PLAIN.emit("\nhas sort\n  "))
+        result += self.inferred_sort.tokens(declarations)
+        result.append(
+            PLAIN.emit("\nbut the type of a theorem must be a proposition (Prop)")
+        )
+        return result
+
+
 class W_HeartbeatError(W_CheckError):
     """
     The heartbeat limit was exceeded while checking a declaration.
@@ -2492,7 +2518,16 @@ class W_DeclarationKind(_Item):
         return None
 
 
-class DefOrTheorem(W_DeclarationKind):
+#: Reducibility hints. For regular we use positive ints.
+HINT_OPAQUE = -2
+HINT_ABBREV = -1
+
+
+class W_Definition(W_DeclarationKind):
+    def __init__(self, value, hint):
+        self.value = value
+        self.hint = hint
+
     def type_check(self, type, env):
         type_type = type.infer(env)
         if not isinstance(type_type.whnf(env), W_Sort):
@@ -2500,17 +2535,6 @@ class DefOrTheorem(W_DeclarationKind):
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
-
-
-#: Reducibility hints. For regular we use positive ints.
-HINT_OPAQUE = -2
-HINT_ABBREV = -1
-
-
-class W_Definition(DefOrTheorem):
-    def __init__(self, value, hint):
-        self.value = value
-        self.hint = hint
 
     def tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
@@ -2538,9 +2562,20 @@ class W_Opaque(W_Definition):
         self.hint = HINT_OPAQUE
 
 
-class W_Theorem(DefOrTheorem):
+class W_Theorem(W_DeclarationKind):
     def __init__(self, value):
         self.value = value
+
+    def type_check(self, type, env):
+        type_type = type.infer(env)
+        type_type_whnf = type_type.whnf(env)
+        if not isinstance(type_type_whnf, W_Sort):
+            return W_NotASort(env, type, inferred_type=type_type, name=None)
+        if not type_type_whnf.level.eq(W_LEVEL_ZERO):
+            return W_NotAProp(env, type, inferred_sort=type_type_whnf, name=None)
+        val_type = self.value.infer(env)
+        if not env.def_eq(type, val_type):
+            return W_TypeError(env, self.value, type)
 
     def tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]

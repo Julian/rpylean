@@ -10,10 +10,15 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
+    W_NotAProp,
     forall,
     fun,
     names,
 )
+
+
+a, x, f, T = names("a", "x", "f", "T")
+b0, b1 = W_BVar(0), W_BVar(1)
 
 
 def type_check(declarations=(), env=Environment.EMPTY):
@@ -45,12 +50,21 @@ class TestTypeCheck(object):
 
         assert error.expected_type == PROP
 
+    def test_theorem_type_must_be_prop(self):
+        """
+        The type of a theorem must itself be a proposition (Sort 0).
+        """
+        non_prop_value = forall(x.binder(type=PROP))(W_BVar(0))
+        invalid = Name.simple("nonPropThm").theorem(type=PROP, value=non_prop_value)
+
+        error = invalid.type_check(Environment.EMPTY)
+
+        assert isinstance(error, W_NotAProp)
+
     def test_definition_type_must_be_sort(self):
         """
         A definition's type must be a Sort (Type or Prop), not a function type.
         """
-        a, x = names("a", "x")
-        b0 = W_BVar(0)
         constType = Name.simple("constType")
         constType_decl = constType.definition(
             type=forall(a.binder(type=TYPE))(TYPE),
@@ -77,8 +91,6 @@ class TestTypeCheck(object):
         """
         A binder type must be a Sort (Type or Prop), not a function type.
         """
-        a, x = names("a", "x")
-
         constType_type = forall(a.binder(type=TYPE))(TYPE)
         constType_decl = Name.simple("constType").definition(
             type=constType_type,
@@ -97,8 +109,6 @@ class TestTypeCheck(object):
 
 class TestApp(object):
     def test_apply_const_definition(self):
-        f, x, T = names("f", "x", "T")
-        b0, b1 = W_BVar(0), W_BVar(1)
         # def T : Type := Nat → Nat
         fn_type = T.definition(
             type=TYPE,
@@ -177,8 +187,6 @@ class TestTypeError(object):
         )
 
     def test_inductive_type_must_be_sort(self):
-        a, x = Name.simple("a"), Name.simple("x")
-        b0 = W_BVar(0)
         fnType = Name.simple("fnType").definition(
             type=forall(a.binder(type=TYPE))(TYPE),
             value=fun(x.binder(type=TYPE))(b0),
