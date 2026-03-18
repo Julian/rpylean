@@ -130,9 +130,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == (
-            "index 1 is not valid for Foo, which has only 1 field"
-        )
+        assert str(e.value) == "index 1 is not valid for Foo, which has only 1 field"
 
     def test_out_of_bounds_0(self):
         Foo = Name.simple("Foo")
@@ -144,9 +142,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == (
-            "index 0 is not valid for Foo, which has no fields"
-        )
+        assert str(e.value) == "index 0 is not valid for Foo, which has no fields"
 
     def test_out_of_bounds_3(self):
         Foo = Name.simple("Foo")
@@ -159,9 +155,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == (
-            "index 3 is not valid for Foo, which has only 2 fields"
-        )
+        assert str(e.value) == "index 3 is not valid for Foo, which has only 2 fields"
 
     def test_with_dependent_body(self):
         """
