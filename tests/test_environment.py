@@ -3,7 +3,7 @@ from textwrap import dedent
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.exceptions import AlreadyDeclared
+from rpylean.exceptions import AlreadyDeclared, W_InvalidDeclaration
 from rpylean.objects import (
     NAT,
     PROP,
@@ -202,6 +202,28 @@ class TestTypeError(object):
             "has type\n"
             "  Type → Type\n"
             "but is expected to be a Sort (Type or Prop)"
+        )
+
+
+class TestInvalidDeclaration(object):
+    def test_proj_error_wraps_with_declaration_name(self):
+        N = Name.simple("N")
+        zero = N.child("zero")
+        succ = N.child("succ")
+        zero_decl = zero.constructor(type=N.const())
+        succ_decl = succ.constructor(type=forall(a.binder(type=N.const()))(N.const()))
+        N_decl = N.inductive(type=TYPE, constructors=[zero_decl, succ_decl])
+        bad = Name.simple("bad").definition(
+            type=N.const(),
+            value=fun(x.binder(type=N.const()))(N.proj(0, b0)),
+        )
+        env = Environment.having([N_decl, zero_decl, succ_decl, bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidDeclaration)
+        assert (
+            str(errors[0])
+            == "Invalid declaration bad: N is not a structure: it has 2 constructors"
         )
 
 

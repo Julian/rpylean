@@ -13,7 +13,12 @@ from rpylean._tokens import (
     SORT,
 )
 from rpylean._tokens import indent
-from rpylean.exceptions import InvalidProjection, W_Error
+from rpylean.exceptions import (
+    InvalidProjection,
+    NotAStructure,
+    UnknownStructure,
+    W_Error,
+)
 
 
 def _whnf_printable_location(expr_class):
@@ -1690,7 +1695,10 @@ class W_Proj(W_Expr):
             apps.append(struct_expr_type)
             struct_expr_type = struct_expr_type.fn
 
-        struct_type = get_decl(env.declarations, self.struct_name)
+        try:
+            struct_type = get_decl(env.declarations, self.struct_name)
+        except KeyError:
+            raise UnknownStructure(self.struct_name)
 
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
         assert isinstance(struct_expr_type, W_Const), (
@@ -1704,7 +1712,8 @@ class W_Proj(W_Expr):
 
         assert isinstance(struct_type, W_Declaration)
         assert isinstance(struct_type.w_kind, W_Inductive)
-        assert len(struct_type.w_kind.constructors) == 1
+        if len(struct_type.w_kind.constructors) != 1:
+            raise NotAStructure(struct_type)
 
         ctor_decl = struct_type.w_kind.constructors[0]
         assert isinstance(ctor_decl, W_Declaration)

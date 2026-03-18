@@ -21,6 +21,8 @@ from rpylean.exceptions import (
     HeartbeatExceeded,
     IndexGapError,
     UnknownQuotient,
+    W_Error,
+    W_InvalidDeclaration,
 )
 from rpylean.objects import (
     W_CheckError,
@@ -284,6 +286,8 @@ class Environment(object):
                 if err.name is None:
                     err.name = each.name
                 yield err
+            except W_Error as err:
+                yield W_InvalidDeclaration(each, err)
             except Exception:
                 if not we_are_translated():
                     print_exc(None, stderr)

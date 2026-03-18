@@ -151,6 +151,57 @@ class W_Error(Exception):
         raise NotImplementedError
 
 
+class W_InvalidDeclaration(W_Error):
+    """
+    A type-checking error attributed to a specific declaration.
+    """
+
+    def __init__(self, declaration, inner):
+        self.declaration = declaration
+        self.inner = inner
+
+    def tokens(self):
+        return [
+            ERROR.emit("Invalid declaration "),
+            DECL_NAME.emit(self.declaration.name.str()),
+            PLAIN.emit(": "),
+        ] + self.inner.tokens()
+
+
+class NotAStructure(W_Error):
+    """
+    A proj expression targets a type that is not a single-constructor inductive.
+    """
+
+    def __init__(self, struct_decl):
+        self.struct_decl = struct_decl
+
+    def tokens(self):
+        n = len(self.struct_decl.w_kind.constructors)
+        return [
+            DECL_NAME.emit(self.struct_decl.name.str()),
+            ERROR.emit(
+                " is not a structure: it has %d constructor%s"
+                % (n, "s" if n != 1 else "")
+            ),
+        ]
+
+
+class UnknownStructure(W_Error):
+    """
+    A proj expression names a structure type that is not in the environment.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def tokens(self):
+        return [
+            ERROR.emit("unknown structure: "),
+            DECL_NAME.emit(self.name.str()),
+        ]
+
+
 class InvalidProjection(W_Error):
     """
     An attempt was made to project a structure field that does not exist.

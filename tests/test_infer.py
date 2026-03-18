@@ -5,7 +5,7 @@ Type inference of Lean objects.
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.exceptions import InvalidProjection
+from rpylean.exceptions import InvalidProjection, NotAStructure, UnknownStructure
 from rpylean.objects import (
     NAT,
     STRING,
@@ -183,3 +183,26 @@ class TestProj(object):
         struct_expr = mk.app(W_LitNat.int(5), W_LitNat.int(3))
         proj = T.proj(1, struct_expr)
         assert proj.infer(env) == Fin.app(T.proj(0, struct_expr))
+
+    def test_not_a_structure(self):
+        N = Name.simple("N")
+        zero = N.child("zero")
+        succ = N.child("succ")
+        zero_decl = zero.constructor(type=N.const())
+        succ_decl = succ.constructor(type=forall(a.binder(type=N.const()))(N.const()))
+        N_decl = N.inductive(type=TYPE, constructors=[zero_decl, succ_decl])
+        env = Environment.having([N_decl, zero_decl, succ_decl])
+        proj = N.proj(0, zero.const())
+        with pytest.raises(NotAStructure) as e:
+            proj.infer(env)
+        assert str(e.value) == "N is not a structure: it has 2 constructors"
+
+    def test_unknown_structure(self):
+        Foo = Name.simple("Foo")
+        Bar = Name.simple("Bar")
+        bar_decl = Bar.axiom(type=Foo.const())
+        env = Environment.having([bar_decl])
+        proj = Foo.proj(0, bar_decl.const())
+        with pytest.raises(UnknownStructure) as e:
+            proj.infer(env)
+        assert str(e.value) == "unknown structure: Foo"
