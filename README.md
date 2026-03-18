@@ -38,7 +38,6 @@ just rpylean <any CLI args>
 (if you follow the section below on `just`).
 
 The argument you pass should be a file exported via [`lean4export`](https://github.com/leanprover/lean4export/).
-You can find some examples in the `tests/examples` directory if you just want to see something work.
 
 ### Translating
 

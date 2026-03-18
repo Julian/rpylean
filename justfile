@@ -6,7 +6,6 @@ rpython := pypy_checkout / "rpython/bin/rpython"
 
 package := justfile_directory() / "rpylean"
 tests := justfile_directory() / "tests"
-examples := tests / "examples"
 target := justfile_directory() / "targetrpylean.py"
 
 translated := justfile_directory() / "rpylean-c"
@@ -18,9 +17,18 @@ export PYPY_DONT_RUN_SUBPROCESS := "1"
 rpylean *ARGS:
     PYTHONPATH="{{ pypy_checkout }}/" "{{ pypy }}" -m rpylean {{ ARGS }}
 
-# Run the rpylean REPL untranslated on an example.
+# Ensure the tutorial NDJSON cache is populated, printing the cache directory.
+_ensure-tutorial-cache:
+    @just pypy "{{ tests }}/cache_lka_tutorial.py"
+
+# Run the rpylean REPL on a tutorial example by name or number (e.g. 1, 001, 001_basicDef).
 example name:
-    @just rpylean repl $(find "{{ examples }}" -iname "{{ name }}")/export
+    cache=$(just _ensure-tutorial-cache) && \
+    case '{{ name }}' in \
+        *_*) pat="{{ name }}.ndjson" ;; \
+        *)   pat="$(printf '%03d' '{{ name }}')_*.ndjson" ;; \
+    esac && \
+    just rpylean repl "$(find "$cache" -name "$pat")"
 
 # Run pypy with rpylean on the PYTHONPATH.
 pypy *ARGS:

@@ -7,5 +7,3 @@ repos:
       - id: mixed-line-ending
         args: [--fix, lf]
       - id: trailing-whitespace
-
-exclude: ^tests/examples/.*$

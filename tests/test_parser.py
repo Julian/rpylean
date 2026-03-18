@@ -3,7 +3,6 @@ from StringIO import StringIO
 from rpython.rlib.rbigint import rbigint
 import pytest
 from rpylean import parser
-from tests import examples
 
 
 def ndjson_items(source):
@@ -219,11 +218,3 @@ def test_axiom():
         parser.UniverseSucc(uidx=1, parent=0),
         parser.Axiom(nidx=1, type=0, levels=[1]),
     ]
-
-
-@pytest.mark.parametrize("path", examples.VALID, ids=examples.name_of)
-def test_valid_examples_parse_successfully(path):
-    """
-    We don't get parse errors from our examples.
-    """
-    parser.from_export(path.open())
