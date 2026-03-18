@@ -7,6 +7,7 @@ from textwrap import dedent
 
 from rpylean.exceptions import ReflexiveKError, UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_str
+from rpylean.parser import ParseError
 from rpylean.objects import (
     W_LEVEL_ZERO,
     TYPE,
@@ -22,7 +23,7 @@ from rpylean.objects import (
 
 def test_dump_name():
     assert from_str(
-        #eval run <| dumpName (`foo.bla |>.num 1 |>.str "boo")
+        # eval run <| dumpName (`foo.bla |>.num 1 |>.str "boo")
         """
         {"in":1,"str":{"pre":0,"str":"foo"}}
         {"in":2,"str":{"pre":1,"str":"bla"}}
@@ -43,7 +44,7 @@ def test_dump_level():
     l1 = Name.simple("l1")
     l2 = Name.simple("l2")
     assert from_str(
-        #eval run <| dumpLevel (.imax (.max (.succ (.succ .zero)) (.param `l1)) (.param `l2))
+        # eval run <| dumpLevel (.imax (.max (.succ (.succ .zero)) (.param `l1)) (.param `l2))
         """
         {"il":1,"succ":0}
         {"il":2,"succ":1}
@@ -72,7 +73,7 @@ def test_dump_expr_lambda():
     bvar = W_BVar(0)
     f = fun(Name.simple("a").binder(type=bvar))(bvar)
     assert from_str(
-        #eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
+        # eval run <| dumpExpr (.lam `A (.sort (.succ .zero)) (.lam `a (.bvar 0) (.bvar 0) .default) .implicit)
         """
         {"in":1,"str":{"pre":0,"str":"A"}}
         {"il":1,"succ":0}
@@ -104,7 +105,7 @@ def test_dump_expr_let():
     zero = Nat.child("zero")
 
     assert from_str(
-        #eval run <| dumpExpr (.letE `x (.const `Nat []) (.const `Nat.zero []) (.bvar 0) false)
+        # eval run <| dumpExpr (.letE `x (.const `Nat []) (.const `Nat.zero []) (.bvar 0) false)
         """
         {"in":1,"str":{"pre":0,"str":"x"}}
         {"in":2,"str":{"pre":0,"str":"Nat"}}
@@ -129,7 +130,7 @@ def test_dump_expr_proj():
     bvar = W_BVar(0)
     Prod = Name.simple("Prod")
     assert from_str(
-        #eval run <| dumpExpr (.proj `Prod 1 (.bvar 0))
+        # eval run <| dumpExpr (.proj `Prod 1 (.bvar 0))
         """
         {"in":1,"str":{"pre":0,"str":"Prod"}}
         {"bvar":0,"ie":0}
@@ -146,7 +147,7 @@ def test_dump_expr_proj():
 
 def test_empty_dump_large_natlit():
     assert from_str(
-        #eval runEmpty <| dumpExpr (.lit (.natVal 100000000000000023456789))
+        # eval runEmpty <| dumpExpr (.lit (.natVal 100000000000000023456789))
         """
         {"ie":0,"natVal":"100000000000000023456789"}
         """,
@@ -155,7 +156,7 @@ def test_empty_dump_large_natlit():
 
 def test_empty_dump_natlit():
     assert from_str(
-        #eval runEmpty <| dumpExpr (.lit (.natVal 123456789))
+        # eval runEmpty <| dumpExpr (.lit (.natVal 123456789))
         """
         {"ie":0,"natVal":"123456789"}
         """,
@@ -165,7 +166,7 @@ def test_empty_dump_natlit():
 def test_dump_large_natlit():
     pytest.xfail("until we finish recursors + constructors")
     assert from_str(
-        #eval run <| dumpExpr (.lit (.natVal 100000000000000023456789))
+        # eval run <| dumpExpr (.lit (.natVal 100000000000000023456789))
         """
         {"in":1,"str":{"pre":0,"str":"Nat"}}
         {"il":1,"succ":0}
@@ -224,7 +225,7 @@ def test_dump_large_natlit():
 
 def test_empty_dump_litstr():
     assert from_str(
-        #eval runEmpty <| dumpExpr (.lit (.strVal "hi"))
+        # eval runEmpty <| dumpExpr (.lit (.strVal "hi"))
         """
         {"ie":0,"strVal":"hi"}
         """,
@@ -233,7 +234,7 @@ def test_empty_dump_litstr():
 
 def test_empty_dump_litstr_escapes():
     assert from_str(
-        #eval runEmpty <| dumpExpr (.lit (.strVal "\r\rh
+        # eval runEmpty <| dumpExpr (.lit (.strVal "\r\rh
         #      i\t\t"))
         r"""
         {"ie":0,"strVal":"\r\rh\ni\u0009\u0009"}
@@ -243,7 +244,7 @@ def test_empty_dump_litstr_escapes():
 
 def test_empty_dump_litstr_unicode():
     assert from_str(
-        #eval runEmpty <| dumpExpr (.lit (.strVal "اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"))
+        # eval runEmpty <| dumpExpr (.lit (.strVal "اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"))
         """
         {"ie":0,"strVal":"اَلْعَرَبِيَّةُ اُرْدُو 普通话 日本語 廣東話 русский язык עִבְרִית‎ 한국어 aаoοpр"}
         """,
@@ -273,7 +274,7 @@ def test_dump_constant_id():
     )(b0)
 
     assert from_str(
-        #eval run <| dumpConstant `id
+        # eval run <| dumpConstant `id
         """
         {"in":1,"str":{"pre":0,"str":"id"}}
         {"in":2,"str":{"pre":0,"str":"u"}}
@@ -324,7 +325,7 @@ def test_dump_constant_list():
         num_fields=2,
     )
     env = from_str(
-        #eval run <| dumpConstant `List
+        # eval run <| dumpConstant `List
         """
         {"in":1,"str":{"pre":0,"str":"List"}}
         {"in":2,"str":{"pre":0,"str":"u"}}
@@ -439,7 +440,7 @@ def test_dump_opaque():
     )(b0)
 
     assert from_str(
-        #eval run <| dumpConstant ``opaqueId
+        # eval run <| dumpConstant ``opaqueId
         """
         {"in":1,"str":{"pre":0,"str":"id"}}
         {"in":2,"str":{"pre":0,"str":"u"}}
@@ -538,3 +539,13 @@ def test_reflexive_inductive_cannot_have_k_like_recursor():
         str(e.value)
         == "Invalid declaration Bad: declaration is reflexive but recursor Bad.rec claims to support k-like reduction"
     )
+
+
+def test_name_index_gap_raises_parse_error():
+    with pytest.raises(ParseError):
+        from_str(
+            """
+            {"in":1,"str":{"pre":0,"str":"foo"}}
+            {"in":3,"str":{"pre":0,"str":"bar"}}
+            """
+        )

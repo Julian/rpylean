@@ -7,6 +7,7 @@ from __future__ import print_function
 import pytest
 
 from rpylean.environment import from_export
+from rpylean.parser import ParseError
 from tests.cache_lka_tutorial import ensure_downloaded
 
 
@@ -52,12 +53,6 @@ XFAILS = frozenset(
         "105_reflOccLeft",
         "106_reflOccInIndex",
         "120_dup_defs",
-        "121_dup_ind_def",
-        "122_dup_ctor_def",
-        "123_dup_rec_def",
-        "124_dup_rec_def2",
-        "125_dup_ctor_rec",
-        "126_DupConCon",
     ]
 )
 
@@ -74,5 +69,8 @@ def test_tutorial_good(path):
 def test_tutorial_bad(path):
     if _name_of(path) in XFAILS:
         pytest.xfail("not yet implemented")
-    environment = from_export(path.open())
+    try:
+        environment = from_export(path.open())
+    except ParseError:
+        return
     assert list(environment.type_check(environment.all()))

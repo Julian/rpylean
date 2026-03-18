@@ -15,7 +15,7 @@ from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.leanffi import FFI
 from rpylean.environment import StreamTracer, from_export
 from rpylean.objects import Name
-from rpylean.parser import ExportVersionError
+from rpylean.parser import ExportVersionError, ParseError
 
 
 cli = CLI(
@@ -76,7 +76,7 @@ def check(self, args, stdin, stdout, stderr):
         start = time()
         try:
             env = environment_from(path=path, stdin=stdin)
-        except ExportVersionError as err:
+        except ParseError as err:
             stderr.write(err.__str__())
             stderr.write("\n")
             return 1
@@ -133,7 +133,12 @@ def check(self, args, stdin, stdout, stderr):
 def dump(self, args, stdin, stdout, stderr):
     (path,) = args.args
     stdoutw = writer_from_arg(args.options["color"], stdout)
-    env = environment_from(path=path, stdin=stdin)
+    try:
+        env = environment_from(path=path, stdin=stdin)
+    except ParseError as err:
+        stderr.write(err.__str__())
+        stderr.write("\n")
+        return 1
     declarations = env.only([Name.from_str(each) for each in args.varargs])
     for each in declarations:
         stdoutw.writeline(each.tokens(env.declarations))
@@ -146,7 +151,12 @@ def dump(self, args, stdin, stdout, stderr):
 )
 def repl(self, args, stdin, stdout, stderr):
     (path,) = args.args
-    environment = environment_from(path=path, stdin=stdin)
+    try:
+        environment = environment_from(path=path, stdin=stdin)
+    except ParseError as err:
+        stderr.write(err.__str__())
+        stderr.write("\n")
+        return 1
     from rpylean import repl
 
     repl.interact(environment)
