@@ -12,22 +12,13 @@ from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
 from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
-from rpylean.exceptions import ReflexiveKError
+from rpylean.exceptions import ExportError, ReflexiveKError
 
 
 EXPORT_VERSION = "3.1.0"
 
 
-class ParseError(Exception):
-    def __init__(self, message, source_pos):
-        self.message = message
-        self.source_pos = source_pos
-
-    def __str__(self):
-        return self.message
-
-
-class ExportVersionError(ParseError):
+class ExportVersionError(ExportError):
     """
     The export file version doesn't match one we know how to parse.
     """
@@ -35,11 +26,18 @@ class ExportVersionError(ParseError):
     def __init__(self, got):
         self.got = got
 
-    def __str__(self):
-        return "Expected export format version %s but got %s" % (
-            EXPORT_VERSION,
-            "no export metadata" if self.got is None else self.got,
-        )
+    def tokens(self):
+        from rpylean._tokens import ERROR
+
+        return [
+            ERROR.emit(
+                "Expected export format version %s but got %s"
+                % (
+                    EXPORT_VERSION,
+                    "no export metadata" if self.got is None else self.got,
+                )
+            ),
+        ]
 
 
 class Node(object):

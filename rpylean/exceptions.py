@@ -3,6 +3,136 @@ from __future__ import print_function
 from rpylean._tokens import DECL_NAME, ERROR, FORMAT_PLAIN, PLAIN
 
 
+class ExportError(Exception):
+    """
+    Something is wrong with the export file.
+    """
+
+    def __str__(self):
+        return FORMAT_PLAIN(self.tokens())
+
+    def tokens(self):
+        """
+        Return a token list describing this error.  Must be overridden.
+        """
+        raise NotImplementedError
+
+    def at(self, source_pos):
+        """
+        Pair this error with a source position.
+        """
+        return ErrorAtSource(self, source_pos)
+
+
+class ErrorAtSource(Exception):
+    """
+    An ExportError paired with a source position.
+    """
+
+    def __init__(self, error, source_pos):
+        self.error = error
+        self.source_pos = source_pos
+
+
+class IndexGapError(ExportError):
+    """
+    An index in the export is not the next sequential value expected.
+    """
+
+    def __init__(self, kind, expected, got):
+        self.kind = kind
+        self.expected = expected
+        self.got = got
+
+    def tokens(self):
+        return [
+            ERROR.emit(
+                "expected %s index %d, got %d" % (self.kind, self.expected, self.got)
+            ),
+        ]
+
+
+class AlreadyDeclared(ExportError):
+    """
+    A declaration already exists in the environment.
+    """
+
+    def __init__(self, name, constants):
+        self.name = name
+        reason = [ERROR.emit("already declared as ")] + (
+            constants[name].tokens(constants)
+        )
+        self.reason = reason
+
+    def tokens(self):
+        return [
+            ERROR.emit("Invalid declaration "),
+            DECL_NAME.emit(self.name.str()),
+            PLAIN.emit(": "),
+        ] + self.reason
+
+
+class DuplicateLevels(ExportError):
+    """
+    A declaration has duplicate level parameters.
+    """
+
+    def __init__(self, name, duplicate):
+        self.name = name
+        self.duplicate = duplicate
+
+    def tokens(self):
+        return [
+            ERROR.emit("Invalid declaration "),
+            DECL_NAME.emit(self.name.str()),
+            PLAIN.emit(": "),
+            ERROR.emit("duplicate level parameter "),
+            DECL_NAME.emit(self.duplicate.str()),
+        ]
+
+
+class ReflexiveKError(ExportError):
+    """
+    A reflexive inductive type has a bad recursor.
+
+    Reflexive inductive types cannot support K-like reduction, which
+    requires a single constructor with 0 arguments.
+    """
+
+    def __init__(self, name, rec_name):
+        self.name = name
+        self.rec_name = rec_name
+
+    def tokens(self):
+        return [
+            ERROR.emit("Invalid declaration "),
+            DECL_NAME.emit(self.name.str()),
+            PLAIN.emit(": "),
+            ERROR.emit("declaration is reflexive but recursor "),
+            DECL_NAME.emit(self.rec_name.str()),
+            ERROR.emit(" claims to support k-like reduction"),
+        ]
+
+
+class UnknownQuotient(ExportError):
+    """
+    An unknown quotient declaration was found.
+
+    Only a specific set of Quot declarations are expected and known compatible
+    with Lean's type theory.
+    """
+
+    def __init__(self, name, type):
+        self.name = name
+        self.type = type
+
+    def tokens(self):
+        return [
+            ERROR.emit("Unknown quotient declaration: "),
+            DECL_NAME.emit(self.name.str()),
+        ]
+
+
 class W_Error(Exception):
     """
     An exception which might happen at (rpylean) runtime.
@@ -19,65 +149,6 @@ class W_Error(Exception):
         Return a token list describing this error.  Must be overridden.
         """
         raise NotImplementedError
-
-
-class _InvalidDeclaration(W_Error):
-    """
-    A declaration is invalid.
-    """
-
-    def __init__(self, name, reason=[]):
-        self.name = name
-        self.reason = reason
-
-    def tokens(self):
-        return [
-            ERROR.emit("Invalid declaration "),
-            DECL_NAME.emit(self.name.str()),
-            PLAIN.emit(": "),
-        ] + self.reason
-
-
-class AlreadyDeclared(_InvalidDeclaration):
-    """
-    A declaration already exists in the environment.
-    """
-
-    def __init__(self, name, constants):
-        reason = [ERROR.emit("already declared as ")] + (
-            constants[name].tokens(constants)
-        )
-        _InvalidDeclaration.__init__(self, name, reason)
-
-
-class DuplicateLevels(_InvalidDeclaration):
-    """
-    A declaration has duplicate level parameters.
-    """
-
-    def __init__(self, name, duplicate):
-        reason = [
-            ERROR.emit("duplicate level parameter "),
-            DECL_NAME.emit(duplicate.str()),
-        ]
-        _InvalidDeclaration.__init__(self, name, reason)
-
-
-class ReflexiveKError(_InvalidDeclaration):
-    """
-    A reflexive inductive type has a bad recursor.
-
-    Reflexive inductive types cannot support K-like reduction, which
-    requires a single constructor with 0 arguments.
-    """
-
-    def __init__(self, name, rec_name):
-        reason = [
-            ERROR.emit("declaration is reflexive but recursor "),
-            DECL_NAME.emit(rec_name.str()),
-            ERROR.emit(" claims to support k-like reduction"),
-        ]
-        _InvalidDeclaration.__init__(self, name, reason)
 
 
 class InvalidProjection(W_Error):
@@ -101,25 +172,6 @@ class InvalidProjection(W_Error):
             ERROR.emit("index %d is not valid for " % self.field_index),
             DECL_NAME.emit(self.structure.name.str()),
             ERROR.emit(", which has %s" % info),
-        ]
-
-
-class UnknownQuotient(W_Error):
-    """
-    An unknown quotient declaration was found.
-
-    Only a specific set of Quot declarations are expected and known compatible
-    with Lean's type theory.
-    """
-
-    def __init__(self, name, type):
-        self.name = name
-        self.type = type
-
-    def tokens(self):
-        return [
-            ERROR.emit("Unknown quotient declaration: "),
-            DECL_NAME.emit(self.name.str()),
         ]
 
 

@@ -19,6 +19,7 @@ from rpylean.exceptions import (
     AlreadyDeclared,
     DuplicateLevels,
     HeartbeatExceeded,
+    IndexGapError,
     UnknownQuotient,
 )
 from rpylean.objects import (
@@ -88,26 +89,17 @@ class EnvironmentBuilder(object):
     # still contiguous.
     def register_name(self, nidx, name):
         if nidx != len(self.names):
-            raise parser.ParseError(
-                "expected name index %d, got %d" % (len(self.names), nidx),
-                source_pos=None,
-            )
+            raise IndexGapError("name", len(self.names), nidx)
         self.names.append(name)
 
     def register_expr(self, eidx, w_expr):
         if eidx != len(self.exprs):
-            raise parser.ParseError(
-                "expected expr index %d, got %d" % (len(self.exprs), eidx),
-                source_pos=None,
-            )
+            raise IndexGapError("expr", len(self.exprs), eidx)
         self.exprs.append(w_expr)
 
     def register_level(self, uidx, level):
         if uidx != len(self.levels):
-            raise parser.ParseError(
-                "expected level index %d, got %d" % (len(self.levels), uidx),
-                source_pos=None,
-            )
+            raise IndexGapError("level", len(self.levels), uidx)
         self.levels.append(level)
 
     def register_quotient(self, name, type, levels):

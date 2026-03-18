@@ -7,7 +7,7 @@ from textwrap import dedent
 
 from rpylean.exceptions import ReflexiveKError, UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_str
-from rpylean.parser import ParseError
+from rpylean.exceptions import ExportError
 from rpylean.objects import (
     W_LEVEL_ZERO,
     TYPE,
@@ -541,8 +541,8 @@ def test_reflexive_inductive_cannot_have_k_like_recursor():
     )
 
 
-def test_name_index_gap_raises_parse_error():
-    with pytest.raises(ParseError):
+def test_name_index_gap_raises_export_error():
+    with pytest.raises(ExportError):
         from_str(
             """
             {"in":1,"str":{"pre":0,"str":"foo"}}

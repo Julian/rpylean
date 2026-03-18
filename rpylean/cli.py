@@ -10,12 +10,11 @@ import errno
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean._rcli import CLI, UsageError
-from rpylean._rlib import plural
 from rpylean._tokens import PLAIN, writer_from_arg
+from rpylean.exceptions import ExportError
 from rpylean.leanffi import FFI
 from rpylean.environment import StreamTracer, from_export
 from rpylean.objects import Name
-from rpylean.parser import ExportVersionError, ParseError
 
 
 cli = CLI(
@@ -76,9 +75,9 @@ def check(self, args, stdin, stdout, stderr):
         start = time()
         try:
             env = environment_from(path=path, stdin=stdin)
-        except ParseError as err:
-            stderr.write(err.__str__())
-            stderr.write("\n")
+        except ExportError as err:
+            stderrw.writeline(err.tokens())
+            stderrw.write_plain("\n")
             return 1
         parse_elapsed = time() - start
 
@@ -131,13 +130,15 @@ def check(self, args, stdin, stdout, stderr):
     options=[COLOR],
 )
 def dump(self, args, stdin, stdout, stderr):
-    (path,) = args.args
     stdoutw = writer_from_arg(args.options["color"], stdout)
+    stderrw = writer_from_arg(args.options["color"], stderr)
+
+    (path,) = args.args
     try:
         env = environment_from(path=path, stdin=stdin)
-    except ParseError as err:
-        stderr.write(err.__str__())
-        stderr.write("\n")
+    except ExportError as err:
+        stderrw.writeline(err.tokens())
+        stderrw.write_plain("\n")
         return 1
     declarations = env.only([Name.from_str(each) for each in args.varargs])
     for each in declarations:
@@ -150,12 +151,14 @@ def dump(self, args, stdin, stdout, stderr):
     help="Open a REPL with the given export's environment loaded into it.",
 )
 def repl(self, args, stdin, stdout, stderr):
+    stderrw = writer_from_arg(args.options["color"], stderr)
+
     (path,) = args.args
     try:
         environment = environment_from(path=path, stdin=stdin)
-    except ParseError as err:
-        stderr.write(err.__str__())
-        stderr.write("\n")
+    except ExportError as err:
+        stderrw.writeline(err.tokens())
+        stderrw.write_plain("\n")
         return 1
     from rpylean import repl
 
