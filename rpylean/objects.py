@@ -1715,6 +1715,13 @@ class W_Proj(W_Expr):
         if len(struct_type.w_kind.constructors) != 1:
             raise NotAStructure(struct_type)
 
+        ind_type_whnf = apply_const_level_params(
+            struct_expr_type, struct_type.type, env
+        ).whnf(env)
+        is_prop_type = isinstance(ind_type_whnf, W_Sort) and ind_type_whnf.level.eq(
+            W_LEVEL_ZERO
+        )
+
         ctor_decl = struct_type.w_kind.constructors[0]
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
@@ -1725,9 +1732,8 @@ class W_Proj(W_Expr):
             env,
         )
 
-        # The last app pushed to 'apps' is the innermost application (applied directly to the `MyList const`),
-        # so start iteration from the end
-        # TODO: handle levels
+        # apps is collected outermost-first; reversed gives innermost-first order,
+        # matching the constructor type's parameter order.
         for app in reversed(apps):
             ctor_type = ctor_type.whnf(env)
             assert isinstance(ctor_type, W_ForAll)
@@ -1735,21 +1741,45 @@ class W_Proj(W_Expr):
             ctor_type = new_type
 
         # Fields can depend on earlier fields, so the constructor takes in 'proj'
-        # expressions for all of the previous fields ('self.field_idx' is 0-based)
-
-        # Substitute in 'proj' expressions for all of the previous fields
+        # expressions for all of the previous fields ('self.field_idx' is 0-based).
+        # For Prop-valued structures, any field that is depended upon by later fields
+        # must itself live in Prop (matching the Lean kernel's infer_proj rule).
         i = -1
         for i in range(self.field_index):
             ctor_type = ctor_type.whnf(env)
             if not isinstance(ctor_type, W_ForAll):
-                raise InvalidProjection(struct_type, self.field_index, i + 1)
-            proj = self.struct_name.proj(i, self.struct_expr)
-            # proj = W_Proj(struct_type, i, self.struct_expr)
-            ctor_type = ctor_type.body.instantiate(proj)
+                raise InvalidProjection.out_of_bounds(
+                    struct_type, self.field_index, i + 1
+                )
+            if ctor_type.body.loose_bvar_range > 0:
+                # Later fields depend on this one; for Prop structs the field must be Prop.
+                if is_prop_type:
+                    field_sort = ctor_type.binder.type.infer(env).whnf(env)
+                    if not (
+                        isinstance(field_sort, W_Sort)
+                        and field_sort.level.eq(W_LEVEL_ZERO)
+                    ):
+                        raise InvalidProjection.non_prop_field(
+                            struct_type, self.field_index
+                        )
+                proj = self.struct_name.proj(i, self.struct_expr)
+                ctor_type = ctor_type.body.instantiate(proj)
+            else:
+                # Non-dependent field: body doesn't refer to it, skip instantiation.
+                ctor_type = ctor_type.body
 
         ctor_type = ctor_type.whnf(env)
         if not isinstance(ctor_type, W_ForAll):
-            raise InvalidProjection(struct_type, self.field_index, i + 1)
+            raise InvalidProjection.out_of_bounds(struct_type, self.field_index, i + 1)
+
+        # For Prop-valued structures the target field itself must live in Prop.
+        if is_prop_type:
+            field_sort = ctor_type.binder.type.infer(env).whnf(env)
+            if not (
+                isinstance(field_sort, W_Sort) and field_sort.level.eq(W_LEVEL_ZERO)
+            ):
+                raise InvalidProjection.non_prop_field(struct_type, self.field_index)
+
         return ctor_type.binder.type
 
 

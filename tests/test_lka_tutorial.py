@@ -40,10 +40,6 @@ XFAILS = frozenset(
         "049_reduceCtorType.mk",
         "050_indNegReducible",
         "054_typeWithTooHighTypeField.mk",
-        "081_projProp2",
-        "083_projProp4",
-        "084_projProp5",
-        "085_projProp6",
         "105_reflOccLeft",
         "106_reflOccInIndex",
     ]

@@ -8,6 +8,7 @@ from rpylean.environment import Environment
 from rpylean.exceptions import InvalidProjection, NotAStructure, UnknownStructure
 from rpylean.objects import (
     NAT,
+    PROP,
     STRING,
     TYPE,
     W_LEVEL_ZERO,
@@ -130,7 +131,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == "index 1 is not valid for Foo, which has only 1 field"
+        assert str(e.value) == "invalid projection Foo.1: Foo has only 1 field"
 
     def test_out_of_bounds_0(self):
         Foo = Name.simple("Foo")
@@ -142,7 +143,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == "index 0 is not valid for Foo, which has no fields"
+        assert str(e.value) == "invalid projection Foo.0: Foo has no fields"
 
     def test_out_of_bounds_3(self):
         Foo = Name.simple("Foo")
@@ -155,7 +156,7 @@ class TestProj(object):
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
-        assert str(e.value) == "index 3 is not valid for Foo, which has only 2 fields"
+        assert str(e.value) == "invalid projection Foo.3: Foo has only 2 fields"
 
     def test_with_dependent_body(self):
         """
@@ -200,3 +201,50 @@ class TestProj(object):
         with pytest.raises(UnknownStructure) as e:
             proj.infer(env)
         assert str(e.value) == "unknown structure: Foo"
+
+    def test_prop_projection_of_prop_field_allowed(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        # Field type is Foo itself, which lives in Prop, so sort_of(Foo) = Prop.
+        mk_decl = mk.constructor(type=forall(a.binder(type=Foo.const()))(Foo.const()))
+        Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(0, mk.app(Foo.const()))
+        assert proj.infer(env) == Foo.const()
+
+    def test_prop_projection_of_non_prop_field_rejected(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        # Two independent fields; the second (TYPE-kinded) is not propositional.
+        mk_decl = mk.constructor(
+            type=forall(a.binder(type=Foo.const()), x.binder(type=TYPE))(Foo.const())
+        )
+        Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(1, mk.app(Foo.const(), TYPE))
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+        assert (
+            str(e.value)
+            == "invalid projection Foo.1: cannot project a non-propositional field from a propositional structure"
+        )
+
+    def test_prop_projection_through_dependent_non_prop_field_rejected(self):
+        Foo = Name.simple("Foo")
+        Bar = Name.simple("Bar")
+        mk = Foo.child("mk")
+        # Field 0: TYPE (non-Prop). Field 1: Bar applied to bvar 0 (depends on field 0).
+        # Projecting field 1 requires traversing field 0, which is non-Prop and depended
+        # upon -- this must be rejected even though field 1 itself could be Prop.
+        mk_decl = mk.constructor(
+            type=forall(a.binder(type=TYPE), x.binder(type=Bar.app(b0)))(Foo.const())
+        )
+        Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
+        env = Environment.having([Foo_decl, mk_decl])
+        proj = Foo.proj(1, mk.app(TYPE, Bar.const()))
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+        assert (
+            str(e.value)
+            == "invalid projection Foo.1: cannot project a non-propositional field from a propositional structure"
+        )

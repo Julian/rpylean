@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from rpylean._tokens import DECL_NAME, ERROR, FORMAT_PLAIN, PLAIN
+from rpylean._tokens import DECL_NAME, ERROR, FORMAT_PLAIN, LITERAL, PLAIN, PUNCT
 
 
 class ExportError(Exception):
@@ -204,26 +204,52 @@ class UnknownStructure(W_Error):
 
 class InvalidProjection(W_Error):
     """
-    An attempt was made to project a structure field that does not exist.
+    A projection expression is invalid.
+
+    Use the static factory methods to construct instances with the appropriate message.
     """
 
-    def __init__(self, structure, field_index, num_fields):
+    def __init__(self, structure, field_index, suffix_tokens):
         self.structure = structure
         self.field_index = field_index
-        self.num_fields = num_fields
+        self.suffix_tokens = suffix_tokens
 
-    def tokens(self):
-        if self.num_fields == 0:
+    @staticmethod
+    def out_of_bounds(structure, field_index, num_fields):
+        """The field index exceeds the number of fields in the structure."""
+        if num_fields == 0:
             info = "no fields"
-        elif self.num_fields == 1:
+        elif num_fields == 1:
             info = "only 1 field"
         else:
-            info = "only %d fields" % self.num_fields
+            info = "only %d fields" % num_fields
+        return InvalidProjection(
+            structure,
+            field_index,
+            [ERROR.emit("%s has %s" % (structure.name.str(), info))],
+        )
+
+    @staticmethod
+    def non_prop_field(structure, field_index):
+        """The field is not propositional but the structure is Prop-valued."""
+        return InvalidProjection(
+            structure,
+            field_index,
+            [
+                ERROR.emit(
+                    "cannot project a non-propositional field from a propositional structure"
+                )
+            ],
+        )
+
+    def tokens(self):
         return [
-            ERROR.emit("index %d is not valid for " % self.field_index),
+            ERROR.emit("invalid projection "),
             DECL_NAME.emit(self.structure.name.str()),
-            ERROR.emit(", which has %s" % info),
-        ]
+            PUNCT.emit("."),
+            LITERAL.emit("%d" % self.field_index),
+            ERROR.emit(": "),
+        ] + self.suffix_tokens
 
 
 class HeartbeatExceeded(W_Error):
