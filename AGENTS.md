@@ -68,6 +68,7 @@ To translate `rpylean` into a single binary:
 ### Style & Linting
 
 Ensure all public API added has clear (terse, accurate and precise) docstrings.
+Never put implementation details in docstrings, they are meant for someone trying to understand the functional behavior of the corresponding object, not its implementation nor definitely any historical reason its implementation changed from some previous iteration.
 
 `prek run --all-files` will run pre-commit linting, though doing so will only cover a small subset of important style rules.
 
