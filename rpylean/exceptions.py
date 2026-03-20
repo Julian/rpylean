@@ -150,6 +150,10 @@ class W_Error(Exception):
         """
         raise NotImplementedError
 
+    def write_to(self, writer):
+        """Write this error to a TokenWriter."""
+        writer.writeline(self.tokens())
+
 
 class W_InvalidDeclaration(W_Error):
     """

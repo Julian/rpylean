@@ -32,7 +32,8 @@ def command(names, nargs=0, help=None):
                     stderrw.write(
                         [
                             ERROR.emit(
-                                "%s takes 0 or 1 arguments, got %d.\n" % (
+                                "%s takes 0 or 1 arguments, got %d.\n"
+                                % (
                                     names[0],
                                     len(args),
                                 ),
@@ -44,7 +45,8 @@ def command(names, nargs=0, help=None):
                 stderrw.write(
                     [
                         ERROR.emit(
-                            "%s takes %s arguments, got %d.\n" % (
+                            "%s takes %s arguments, got %d.\n"
+                            % (
                                 names[0],
                                 nargs if nargs else "no",
                                 len(args),
@@ -81,7 +83,7 @@ def check(env, args, _, stdoutw, stderrw):
         succeeded, result = True, env.type_check(env.all())
         for w_error in result:
             succeeded = False
-            stderrw.writeline(w_error.tokens())
+            w_error.write_to(stderrw)
         if succeeded:
             stdoutw.write_plain(
                 "Checked %d declarations.\n" % len(env.declarations),
@@ -98,7 +100,7 @@ def check(env, args, _, stdoutw, stderrw):
     if error is None:
         stdoutw.write_plain("%s correctly type checks.\n" % name.str())
     else:
-        stdoutw.writeline(error.tokens())
+        error.write_to(stdoutw)
 
 
 @command(
@@ -119,7 +121,7 @@ def first(env, _, __, stdoutw, stderrw):
             )
             return
         if error is not None:
-            stdoutw.writeline(error.tokens())
+            error.write_to(stdoutw)
             return
     stdoutw.write_plain("All declarations type check.\n")
 
@@ -129,9 +131,7 @@ def print_decl(env, args, _, stdoutw, stderrw):
     name = Name.from_str(args[0])
     declaration = env.declarations.get(name, None)
     if declaration is None:
-        stderrw.write_plain(
-            "%s does not exist in the environment.\n" % name.str()
-        )
+        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
     stdoutw.writeline(declaration.tokens(env.declarations))
 

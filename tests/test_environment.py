@@ -79,13 +79,12 @@ class TestTypeCheck(object):
         error = nonTypeType.type_check(env)
         assert str(error) == dedent(
             """\
-            in nonTypeType:
-              constType
+            def nonTypeType : constType :=
+              Prop
             has type
               Type → Type
-            but is expected to be a Sort (Type or Prop)
-            """,
-        ).rstrip("\n")
+            but is expected to be a Sort (Type or Prop)""",
+        )
 
     def test_binder_type_with_non_sort_definition_raises(self):
         """
@@ -165,7 +164,7 @@ class TestTypeError(object):
 
         error = invalid.type_check(Environment.EMPTY)
         assert str(error) == (
-            "Type mismatch in foo:\n"
+            "def foo : Prop :=\n"
             "  Type\n"
             "has type\n"
             "  Type 1\n"
@@ -178,7 +177,7 @@ class TestTypeError(object):
 
         error = invalid.type_check(Environment.EMPTY)
         assert str(error) == (
-            "Type mismatch in [anonymous]:\n"
+            "def [anonymous] : Prop :=\n"
             "  Type\n"
             "has type\n"
             "  Type 1\n"
@@ -197,12 +196,46 @@ class TestTypeError(object):
         errors = type_check(env=env)
         assert len(errors) == 1
         assert str(errors[0]) == (
-            "in BadInd:\n"
-            "  fnType\n"
+            "inductive BadInd : fnType\n"
             "has type\n"
             "  Type → Type\n"
             "but is expected to be a Sort (Type or Prop)"
         )
+
+
+class TestDiagnosticTokens(object):
+    def test_type_error_diagnostic_message_contains_mismatch_text(self):
+        """W_TypeError.as_diagnostic() message includes type mismatch info."""
+        invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
+        error = invalid.type_check(Environment.EMPTY)
+
+        d = error.as_diagnostic()
+        assert "has type" in d.message
+        assert "but is expected to have type" in d.message
+
+    def test_not_a_sort_diagnostic_message(self):
+        """W_NotASort.as_diagnostic() message describes the sort mismatch."""
+        constType = Name.simple("constType").definition(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            value=fun(x.binder(type=TYPE))(b0),
+        )
+        env = Environment.having([constType])
+        nonTypeType = Name.simple("nonTypeType").definition(
+            type=constType.const(), value=PROP
+        )
+        error = nonTypeType.type_check(env)
+
+        d = error.as_diagnostic()
+        assert "but is expected to be a Sort" in d.message
+
+    def test_not_a_prop_diagnostic_message(self):
+        """W_NotAProp.as_diagnostic() message describes the prop requirement."""
+        non_prop_value = forall(x.binder(type=PROP))(W_BVar(0))
+        invalid = Name.simple("nonPropThm").theorem(type=PROP, value=non_prop_value)
+        error = invalid.type_check(Environment.EMPTY)
+
+        d = error.as_diagnostic()
+        assert "but the type of a theorem must be a proposition" in d.message
 
 
 class TestInvalidDeclaration(object):

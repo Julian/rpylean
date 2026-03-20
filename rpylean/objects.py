@@ -6,8 +6,10 @@ from rpylean._rlib import count, warn
 from rpylean._tokens import (
     BINDER_NAME,
     DECL_NAME,
+    Diagnostic,
     FORMAT_PLAIN,
     KEYWORD,
+    NO_SPAN,
     PLAIN,
     PUNCT,
     SORT,
@@ -60,6 +62,23 @@ class W_CheckError(W_Error):
     """
 
     name = None
+    declaration = None
+
+    def as_diagnostic(self):
+        """Return this error as a ``Diagnostic``."""
+        raise NotImplementedError
+
+    def tokens(self):
+        """Return a flat token list (without caret spans)."""
+        d = self.as_diagnostic()
+        return d.tokens + [PLAIN.emit(d.message)]
+
+    def __str__(self):
+        return FORMAT_PLAIN(self.tokens())
+
+    def write_to(self, writer):
+        """Write this error as a diagnostic with caret underlines."""
+        writer.writeline_diagnostic(self.as_diagnostic())
 
 
 class W_TypeError(W_CheckError):
@@ -74,18 +93,23 @@ class W_TypeError(W_CheckError):
         self.name = name
         self.inferred_type = term.infer(environment)
 
-    def tokens(self):
+    def as_diagnostic(self):
         declarations = self.environment.declarations
+        message = (
+            "\nhas type\n  "
+            + FORMAT_PLAIN(self.inferred_type.tokens(declarations))
+            + "\nbut is expected to have type\n  "
+            + FORMAT_PLAIN(self.expected_type.tokens(declarations))
+        )
+        if self.declaration is not None:
+            result = self.declaration.tokens(declarations)
+            return Diagnostic(result, NO_SPAN, message)
         name = self.name if self.name is not None else Name.ANONYMOUS
         result = [PLAIN.emit("Type mismatch in ")]
         result += name.tokens(declarations)
         result.append(PLAIN.emit(":\n  "))
         result += self.term.tokens(declarations)
-        result.append(PLAIN.emit("\nhas type\n  "))
-        result += self.inferred_type.tokens(declarations)
-        result.append(PLAIN.emit("\nbut is expected to have type\n  "))
-        result += self.expected_type.tokens(declarations)
-        return result
+        return Diagnostic(result, NO_SPAN, message)
 
 
 class W_NotASort(W_CheckError):
@@ -99,17 +123,22 @@ class W_NotASort(W_CheckError):
         self.name = name
         self.inferred_type = inferred_type
 
-    def tokens(self):
+    def as_diagnostic(self):
         declarations = self.environment.declarations
+        message = (
+            "\nhas type\n  "
+            + FORMAT_PLAIN(self.inferred_type.tokens(declarations))
+            + "\nbut is expected to be a Sort (Type or Prop)"
+        )
+        if self.declaration is not None:
+            result = self.declaration.tokens(declarations)
+            return Diagnostic(result, NO_SPAN, message)
         name = self.name if self.name is not None else Name.ANONYMOUS
         result = [PLAIN.emit("in ")]
         result += name.tokens(declarations)
         result.append(PLAIN.emit(":\n  "))
         result += self.expr.tokens(declarations)
-        result.append(PLAIN.emit("\nhas type\n  "))
-        result += self.inferred_type.tokens(declarations)
-        result.append(PLAIN.emit("\nbut is expected to be a Sort (Type or Prop)"))
-        return result
+        return Diagnostic(result, NO_SPAN, message)
 
 
 class W_NotAProp(W_CheckError):
@@ -123,19 +152,22 @@ class W_NotAProp(W_CheckError):
         self.name = name
         self.inferred_sort = inferred_sort
 
-    def tokens(self):
+    def as_diagnostic(self):
         declarations = self.environment.declarations
+        message = (
+            "\nhas sort\n  "
+            + FORMAT_PLAIN(self.inferred_sort.tokens(declarations))
+            + "\nbut the type of a theorem must be a proposition (Prop)"
+        )
+        if self.declaration is not None:
+            result = self.declaration.tokens(declarations)
+            return Diagnostic(result, NO_SPAN, message)
         name = self.name if self.name is not None else Name.ANONYMOUS
         result = [PLAIN.emit("in ")]
         result += name.tokens(declarations)
         result.append(PLAIN.emit(":\n  "))
         result += self.expr.tokens(declarations)
-        result.append(PLAIN.emit("\nhas sort\n  "))
-        result += self.inferred_sort.tokens(declarations)
-        result.append(
-            PLAIN.emit("\nbut the type of a theorem must be a proposition (Prop)")
-        )
-        return result
+        return Diagnostic(result, NO_SPAN, message)
 
 
 class W_HeartbeatError(W_CheckError):
@@ -148,15 +180,16 @@ class W_HeartbeatError(W_CheckError):
         self.heartbeats = heartbeats
         self.max_heartbeat = max_heartbeat
 
-    def tokens(self):
-        return [
+    def as_diagnostic(self):
+        tokens = [
             PLAIN.emit("in "),
             DECL_NAME.emit(self.name.str()),
-            PLAIN.emit(
-                ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
-                % (self.heartbeats, self.max_heartbeat)
-            ),
         ]
+        message = (
+            ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
+            % (self.heartbeats, self.max_heartbeat)
+        )
+        return Diagnostic(tokens, NO_SPAN, message)
 
 
 class _Item(object):
@@ -2547,6 +2580,7 @@ class W_Declaration(_Item):
         error = self.w_kind.type_check(self.type, env)
         if error is not None:
             error.name = self.name
+            error.declaration = self
         return error
 
 
@@ -2581,7 +2615,10 @@ class W_Definition(W_DeclarationKind):
         result.append(PLAIN.emit(" : "))
         result += type.tokens(constants)
         result.append(PLAIN.emit(" :="))
-        result += indent([PLAIN.emit("\n")] + self.value.tokens(constants), "  ")
+        result += indent(
+            [PLAIN.emit("\n")] + self.value.tokens(constants),
+            "  ",
+        )
         return result
 
     def get_delta_reduce_target(self):

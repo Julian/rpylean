@@ -104,8 +104,7 @@ def check(self, args, stdin, stdout, stderr):
         check_start = time()
         try:
             for w_error in env.type_check(declarations, pp=pp):
-                stderrw.writeline(w_error.tokens())
-
+                w_error.write_to(stderrw)
                 failures += 1
                 if 0 < max_fail <= failures:
                     break

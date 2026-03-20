@@ -58,13 +58,38 @@ for _token in Token._all:
         DEFAULT_THEME[_token.name] = _prefix
 
 
-def _ansi_wrap(tag, text, ansi_prefixes):
+#: Sentinel indicating no span is present on a ``Diagnostic``.
+NO_SPAN = (-1, -1)
+
+
+class Diagnostic(object):
     """
-    Wrap text in an ANSI escape sequence.
+    A token list paired with an optional span and message for diagnostics.
+
+    ``tokens`` is a plain token list (list of ``(tag, text)`` pairs).
+    ``span`` is a ``(start, end)`` pair of token indices into ``tokens``
+    delimiting the subexpression to underline, or ``NO_SPAN`` when there is
+    no underline.
+    ``message`` is the diagnostic message shown below the caret underline.
     """
-    if tag not in ansi_prefixes:
+
+    def __init__(self, tokens, span, message):
+        self.tokens = tokens
+        self.span = span
+        self.message = message
+
+    def format_with(self, formatter):
+        """Render this diagnostic into a string using the given formatter."""
+        return formatter(self.tokens) + self.message
+
+
+def _ansi_wrap(tag, text):
+    """
+    Wrap text in an ANSI escape sequence using the default theme.
+    """
+    if tag not in DEFAULT_THEME:
         return text
-    return ansi_prefixes[tag] + text + _ANSI_RESET
+    return DEFAULT_THEME[tag] + text + _ANSI_RESET
 
 
 def formatter(tag_text_to_str):
@@ -82,7 +107,7 @@ def FORMAT_PLAIN(tag, text):
 
 @formatter
 def FORMAT_COLOR(tag, text):
-    return _ansi_wrap(tag, text, DEFAULT_THEME)
+    return _ansi_wrap(tag, text)
 
 
 class TokenWriter(object):
@@ -99,6 +124,11 @@ class TokenWriter(object):
     def writeline(self, tokens):
         """Render tokens and write to stream followed by a newline."""
         self.write(tokens)
+        self.stream.write("\n")
+
+    def writeline_diagnostic(self, diagnostic):
+        """Render a ``Diagnostic`` and write a newline."""
+        self.stream.write(diagnostic.format_with(self.formatter))
         self.stream.write("\n")
 
     def write_plain(self, string):
