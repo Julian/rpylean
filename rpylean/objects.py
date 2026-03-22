@@ -81,6 +81,26 @@ class W_CheckError(W_Error):
         writer.writeline_diagnostic(self.as_diagnostic())
 
 
+def _error_diagnostic(declaration, name, expr, prefix, message, declarations):
+    """
+    Build a ``Diagnostic`` for a type-checking error.
+
+    When ``declaration`` is available, the full declaration is rendered.
+    Otherwise, a fallback showing ``prefix``, ``name``, and ``expr``
+    inline is used.
+    """
+    if declaration is not None:
+        result = declaration.tokens(declarations)
+        return Diagnostic(result, NO_SPAN, message)
+    if name is None:
+        name = Name.ANONYMOUS
+    result = [PLAIN.emit(prefix)]
+    result += name.tokens(declarations)
+    result.append(PLAIN.emit(":\n  "))
+    result += expr.tokens(declarations)
+    return Diagnostic(result, NO_SPAN, message)
+
+
 class W_TypeError(W_CheckError):
     """
     A term does not type check.
@@ -101,15 +121,10 @@ class W_TypeError(W_CheckError):
             + "\nbut is expected to have type\n  "
             + FORMAT_PLAIN(self.expected_type.tokens(declarations))
         )
-        if self.declaration is not None:
-            result = self.declaration.tokens(declarations)
-            return Diagnostic(result, NO_SPAN, message)
-        name = self.name if self.name is not None else Name.ANONYMOUS
-        result = [PLAIN.emit("Type mismatch in ")]
-        result += name.tokens(declarations)
-        result.append(PLAIN.emit(":\n  "))
-        result += self.term.tokens(declarations)
-        return Diagnostic(result, NO_SPAN, message)
+        return _error_diagnostic(
+            self.declaration, self.name, self.term,
+            "Type mismatch in ", message, declarations,
+        )
 
 
 class W_NotASort(W_CheckError):
@@ -130,15 +145,10 @@ class W_NotASort(W_CheckError):
             + FORMAT_PLAIN(self.inferred_type.tokens(declarations))
             + "\nbut is expected to be a Sort (Type or Prop)"
         )
-        if self.declaration is not None:
-            result = self.declaration.tokens(declarations)
-            return Diagnostic(result, NO_SPAN, message)
-        name = self.name if self.name is not None else Name.ANONYMOUS
-        result = [PLAIN.emit("in ")]
-        result += name.tokens(declarations)
-        result.append(PLAIN.emit(":\n  "))
-        result += self.expr.tokens(declarations)
-        return Diagnostic(result, NO_SPAN, message)
+        return _error_diagnostic(
+            self.declaration, self.name, self.expr,
+            "in ", message, declarations,
+        )
 
 
 class W_NotAProp(W_CheckError):
@@ -159,15 +169,10 @@ class W_NotAProp(W_CheckError):
             + FORMAT_PLAIN(self.inferred_sort.tokens(declarations))
             + "\nbut the type of a theorem must be a proposition (Prop)"
         )
-        if self.declaration is not None:
-            result = self.declaration.tokens(declarations)
-            return Diagnostic(result, NO_SPAN, message)
-        name = self.name if self.name is not None else Name.ANONYMOUS
-        result = [PLAIN.emit("in ")]
-        result += name.tokens(declarations)
-        result.append(PLAIN.emit(":\n  "))
-        result += self.expr.tokens(declarations)
-        return Diagnostic(result, NO_SPAN, message)
+        return _error_diagnostic(
+            self.declaration, self.name, self.expr,
+            "in ", message, declarations,
+        )
 
 
 class W_HeartbeatError(W_CheckError):
