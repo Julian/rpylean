@@ -70,7 +70,8 @@ class Diagnostic(object):
     ``span`` is a ``(start, end)`` pair of token indices into ``tokens``
     delimiting the subexpression to underline, or ``NO_SPAN`` when there is
     no underline.
-    ``message`` is the diagnostic message shown below the caret underline.
+    ``message`` is a token list for the diagnostic message shown below
+    the caret underline.
     """
 
     def __init__(self, tokens, span, message):
@@ -93,7 +94,7 @@ class Diagnostic(object):
         message = self.message
 
         if span == NO_SPAN:
-            return formatter(tokens) + message
+            return formatter(tokens) + formatter(message)
 
         span_start_idx, span_end_idx = span
 
@@ -169,7 +170,7 @@ class Diagnostic(object):
                 result_parts.append("\n")
                 result_parts.append(indent_str + "^" * caret_width)
                 if j == last_span_line:
-                    msg = message
+                    msg = formatter(message)
                     if msg.startswith("\n"):
                         msg = msg[1:]
                     for msg_line in msg.split("\n"):

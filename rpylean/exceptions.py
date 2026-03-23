@@ -1,6 +1,15 @@
 from __future__ import print_function
 
-from rpylean._tokens import DECL_NAME, ERROR, FORMAT_PLAIN, LITERAL, PLAIN, PUNCT
+from rpylean._tokens import (
+    DECL_NAME,
+    Diagnostic,
+    ERROR,
+    FORMAT_PLAIN,
+    LITERAL,
+    NO_SPAN,
+    PLAIN,
+    PUNCT,
+)
 
 
 class ExportError(Exception):
@@ -160,16 +169,25 @@ class W_InvalidDeclaration(W_Error):
     A type-checking error attributed to a specific declaration.
     """
 
-    def __init__(self, declaration, inner):
+    def __init__(self, declaration, inner, declarations):
         self.declaration = declaration
         self.inner = inner
+        self.declarations = declarations
+
+    def as_diagnostic(self):
+        """Return this error as a ``Diagnostic`` with declaration context."""
+        decl = self.declaration
+        tokens = [DECL_NAME.emit(decl.name.str()), PLAIN.emit(" : ")]
+        tokens += decl.type.tokens(self.declarations)
+        message = [PLAIN.emit("\n")] + self.inner.tokens()
+        return Diagnostic(tokens, NO_SPAN, message)
 
     def tokens(self):
-        return [
-            ERROR.emit("Invalid declaration "),
-            DECL_NAME.emit(self.declaration.name.str()),
-            PLAIN.emit(": "),
-        ] + self.inner.tokens()
+        return self.as_diagnostic().tokens + self.as_diagnostic().message
+
+    def write_to(self, writer):
+        """Write this error as a diagnostic with declaration context."""
+        writer.writeline_diagnostic(self.as_diagnostic())
 
 
 class NotAStructure(W_Error):

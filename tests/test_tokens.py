@@ -65,7 +65,7 @@ class TestWriter(object):
     def test_writeline_diagnostic(self):
         out = StringIO()
         writer = TokenWriter(out, FORMAT_PLAIN)
-        d = Diagnostic([PLAIN.emit("expr")], NO_SPAN, "\noops")
+        d = Diagnostic([PLAIN.emit("expr")], NO_SPAN, [PLAIN.emit("\noops")])
         writer.writeline_diagnostic(d)
         assert out.getvalue() == "expr\noops\n"
 
@@ -73,41 +73,41 @@ class TestWriter(object):
         """writeline_diagnostic with FORMAT_COLOR applies ANSI codes."""
         out = StringIO()
         writer = TokenWriter(out, FORMAT_COLOR)
-        d = Diagnostic([SORT.emit("Prop")], NO_SPAN, "\nerror")
+        d = Diagnostic([SORT.emit("Prop")], NO_SPAN, [PLAIN.emit("\nerror")])
         writer.writeline_diagnostic(d)
         assert "\033[" in out.getvalue()
 
 
 class TestFormatWith(object):
     def test_no_span_passthrough(self):
-        d = Diagnostic([PLAIN.emit("abc")], NO_SPAN, "\nmsg")
+        d = Diagnostic([PLAIN.emit("abc")], NO_SPAN, [PLAIN.emit("\nmsg")])
         assert d.format_with(FORMAT_PLAIN) == "abc\nmsg"
 
     def test_span_carets_under_spanned_token(self):
         tokens = [PLAIN.emit("xx "), SORT.emit("Type"), PLAIN.emit(" yy")]
-        d = Diagnostic(tokens, (1, 2), "\nbad")
+        d = Diagnostic(tokens, (1, 2), [PLAIN.emit("\nbad")])
         assert d.format_with(FORMAT_PLAIN) == "xx Type yy\n   ^^^^\n   bad"
 
     def test_multiline_span(self):
         tokens = [PLAIN.emit("line1\n  "), PLAIN.emit("marked"), PLAIN.emit(" end")]
-        d = Diagnostic(tokens, (1, 2), "\nerr")
+        d = Diagnostic(tokens, (1, 2), [PLAIN.emit("\nerr")])
         assert d.format_with(FORMAT_PLAIN) == "line1\n  marked end\n  ^^^^^^\n  err"
 
     def test_message_with_multiple_lines(self):
         tokens = [PLAIN.emit("x "), PLAIN.emit("y")]
-        d = Diagnostic(tokens, (1, 2), "\nline1\nline2")
+        d = Diagnostic(tokens, (1, 2), [PLAIN.emit("\nline1\nline2")])
         assert d.format_with(FORMAT_PLAIN) == "x y\n  ^\n  line1\n  line2"
 
     def test_span_across_multiple_tokens(self):
         tokens = [PLAIN.emit("a"), PLAIN.emit("b"), PLAIN.emit("c"), PLAIN.emit("d")]
-        d = Diagnostic(tokens, (1, 3), "\nerr")
+        d = Diagnostic(tokens, (1, 3), [PLAIN.emit("\nerr")])
         assert d.format_with(FORMAT_PLAIN) == "abcd\n ^^\n err"
 
     def test_color_applies_ansi(self):
-        d = Diagnostic([SORT.emit("Prop")], NO_SPAN, "\nerror")
+        d = Diagnostic([SORT.emit("Prop")], NO_SPAN, [PLAIN.emit("\nerror")])
         assert "\033[" in d.format_with(FORMAT_COLOR)
 
     def test_color_span_has_carets(self):
         tokens = [PLAIN.emit("x "), SORT.emit("Type")]
-        d = Diagnostic(tokens, (1, 2), "\nbad")
+        d = Diagnostic(tokens, (1, 2), [PLAIN.emit("\nbad")])
         assert "^" in d.format_with(FORMAT_COLOR)

@@ -291,9 +291,10 @@ class TestInvalidDeclaration(object):
         errors = type_check(env=env)
         assert len(errors) == 1
         assert isinstance(errors[0], W_InvalidDeclaration)
-        assert (
-            str(errors[0])
-            == "Invalid declaration bad: N is not a structure: it has 2 constructors"
+        assert str(errors[0]) == dedent(
+            """\
+            bad : N
+            N is not a structure: it has 2 constructors""",
         )
 
 

@@ -71,7 +71,7 @@ class W_CheckError(W_Error):
     def tokens(self):
         """Return a flat token list (without caret spans)."""
         d = self.as_diagnostic()
-        return d.tokens + [PLAIN.emit(d.message)]
+        return d.tokens + d.message
 
     def __str__(self):
         return FORMAT_PLAIN(self.tokens())
@@ -146,12 +146,10 @@ class W_TypeError(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = (
-            "\nhas type\n  "
-            + FORMAT_PLAIN(self.inferred_type.tokens(declarations))
-            + "\nbut is expected to have type\n  "
-            + FORMAT_PLAIN(self.expected_type.tokens(declarations))
-        )
+        message = [PLAIN.emit("\nhas type\n  ")]
+        message += self.inferred_type.tokens(declarations)
+        message += [PLAIN.emit("\nbut is expected to have type\n  ")]
+        message += self.expected_type.tokens(declarations)
         return _error_diagnostic(
             self.declaration, self.name, self.term,
             "Type mismatch in ", message, declarations,
@@ -171,11 +169,9 @@ class W_NotASort(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = (
-            "\nhas type\n  "
-            + FORMAT_PLAIN(self.inferred_type.tokens(declarations))
-            + "\nbut is expected to be a Sort (Type or Prop)"
-        )
+        message = [PLAIN.emit("\nhas type\n  ")]
+        message += self.inferred_type.tokens(declarations)
+        message += [PLAIN.emit("\nbut is expected to be a Sort (Type or Prop)")]
         return _error_diagnostic(
             self.declaration, self.name, self.expr,
             "in ", message, declarations,
@@ -195,11 +191,11 @@ class W_NotAProp(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = (
-            "\nhas sort\n  "
-            + FORMAT_PLAIN(self.inferred_sort.tokens(declarations))
-            + "\nbut the type of a theorem must be a proposition (Prop)"
-        )
+        message = [PLAIN.emit("\nhas sort\n  ")]
+        message += self.inferred_sort.tokens(declarations)
+        message += [PLAIN.emit(
+            "\nbut the type of a theorem must be a proposition (Prop)",
+        )]
         return _error_diagnostic(
             self.declaration, self.name, self.expr,
             "in ", message, declarations,
@@ -221,10 +217,10 @@ class W_HeartbeatError(W_CheckError):
             PLAIN.emit("in "),
             DECL_NAME.emit(self.name.str()),
         ]
-        message = (
+        message = [PLAIN.emit(
             ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
-            % (self.heartbeats, self.max_heartbeat)
-        )
+            % (self.heartbeats, self.max_heartbeat),
+        )]
         return Diagnostic(tokens, NO_SPAN, message)
 
 

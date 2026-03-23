@@ -287,7 +287,7 @@ class Environment(object):
                     err.name = each.name
                 yield err
             except W_Error as err:
-                yield W_InvalidDeclaration(each, err)
+                yield W_InvalidDeclaration(each, err, self.declarations)
             except Exception:
                 if not we_are_translated():
                     print_exc(None, stderr)
