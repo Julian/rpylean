@@ -2579,7 +2579,7 @@ class W_Declaration(_Item):
 
     def tokens(self, constants):
         """Produce a token stream for syntax-highlighted output."""
-        return self.w_kind.tokens(self.name, self.levels, self.type, constants)
+        return self.w_kind.decl_tokens(self.name, self.levels, self.type, constants)
 
     def type_check(self, env):
         error = self.w_kind.type_check(self.type, env)
@@ -2614,7 +2614,7 @@ class W_Definition(W_DeclarationKind):
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
 
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
@@ -2658,7 +2658,7 @@ class W_Theorem(W_DeclarationKind):
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
 
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
@@ -2669,7 +2669,7 @@ class W_Theorem(W_DeclarationKind):
 
 
 class W_Axiom(W_DeclarationKind):
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
@@ -2712,7 +2712,7 @@ class W_Inductive(W_DeclarationKind):
         if not isinstance(inferred_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=inferred_type, name=None)
 
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
@@ -2740,7 +2740,7 @@ class W_Constructor(W_DeclarationKind):
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("constructor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
@@ -2779,7 +2779,7 @@ class W_Recursor(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants):
         result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
