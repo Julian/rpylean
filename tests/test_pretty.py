@@ -6,7 +6,16 @@ from textwrap import dedent
 
 import pytest
 
-from rpylean._tokens import DECL_NAME, FORMAT_PLAIN, KEYWORD, PLAIN, SORT
+from rpylean._tokens import (
+    DECL_NAME,
+    FORMAT_PLAIN,
+    KEYWORD,
+    LEVEL,
+    LITERAL,
+    PLAIN,
+    PUNCT,
+    SORT,
+)
 from rpylean.objects import (
     W_LEVEL_ZERO,
     NAT,
@@ -382,6 +391,26 @@ class TestConst(object):
     def test_tokens(self):
         assert Name.simple("foo").const().tokens({}) == [DECL_NAME.emit("foo")]
 
+    def test_tokens_with_levels(self):
+        foo = Name.simple("foo").const(levels=[u, v])
+        assert foo.tokens({}) == [
+            DECL_NAME.emit("foo"),
+            PUNCT.emit(".{"),
+            LEVEL.emit("u"),
+            PUNCT.emit(", "),
+            LEVEL.emit("v"),
+            PUNCT.emit("}"),
+        ]
+
+    def test_tokens_with_level_zero(self):
+        ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
+        assert ofNat.tokens({}) == [
+            DECL_NAME.emit("ofNat"),
+            PUNCT.emit(".{"),
+            LEVEL.emit("0"),
+            PUNCT.emit("}"),
+        ]
+
 
 class TestInductive(object):
     def test_multiple_constructors(self):
@@ -468,7 +497,7 @@ class TestAxiom(object):
             KEYWORD.emit("axiom"),
             PLAIN.emit(" "),
             DECL_NAME.emit("sorryAx"),
-            PLAIN.emit(" : "),
+            PUNCT.emit(" : "),
             SORT.emit("Prop"),
         ]
 
@@ -513,12 +542,12 @@ class TestProj(object):
 
 def test_litnat():
     nat = W_LitNat.long(1000000000000000)
-    assert FORMAT_PLAIN(nat.tokens({})) == "1000000000000000"
+    assert nat.tokens({}) == [LITERAL.emit("1000000000000000")]
 
 
 def test_litstr():
     hi = W_LitStr("hi")
-    assert FORMAT_PLAIN(hi.tokens({})) == '"hi"'
+    assert hi.tokens({}) == [LITERAL.emit('"hi"')]
 
 
 @pytest.mark.parametrize(

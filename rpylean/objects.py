@@ -9,6 +9,8 @@ from rpylean._tokens import (
     Diagnostic,
     FORMAT_PLAIN,
     KEYWORD,
+    LEVEL,
+    LITERAL,
     NO_SPAN,
     PLAIN,
     PUNCT,
@@ -127,7 +129,7 @@ def _error_diagnostic(declaration, name, expr, prefix, message, declarations):
         name = Name.ANONYMOUS
     result = [PLAIN.emit(prefix)]
     result += name.tokens(declarations)
-    result.append(PLAIN.emit(":\n  "))
+    result.append(PUNCT.emit(":\n  "))
     result += expr.tokens(declarations)
     return Diagnostic(result, NO_SPAN, message)
 
@@ -282,11 +284,13 @@ def name_with_levels_tokens(name, levels, constants):
     """Produce tokens for a declaration name with optional universe levels."""
     result = name.tokens(constants)
     if levels:
-        strs = []
-        for level in levels:
+        result.append(PUNCT.emit(".{"))
+        for i, level in enumerate(levels):
+            if i > 0:
+                result.append(PUNCT.emit(", "))
             each = level.str()
-            strs.append(each if each else "0")
-        result.append(PLAIN.emit(".{%s}" % ", ".join(strs)))
+            result.append(LEVEL.emit(each if each else "0"))
+        result.append(PUNCT.emit("}"))
     return result
 
 
@@ -628,11 +632,11 @@ class Binder(_Item):
         return Binder.implicit(name=self.name, type=self.type)
 
     def tokens(self, constants, mark=None, span_holder=None):
-        result = [PLAIN.emit(self.left)]
+        result = [PUNCT.emit(self.left)]
         result.append(BINDER_NAME.emit(self.name.str()))
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, self.type, constants, mark)
-        result.append(PLAIN.emit(self.right))
+        result.append(PUNCT.emit(self.right))
         return result
 
     def is_default(self):
@@ -1152,6 +1156,10 @@ class W_LitStr(W_Expr):
         result.append('"')
         return "".join(result)
 
+    def tokens(self, constants, mark=None, span_holder=None):
+        """Return a token list tagging this string literal."""
+        return [LITERAL.emit(self.str())]
+
     def build_str_expr(self, env):
         if len(self.val) > 5:
             print("Building large str expr for %s" % self.val[:10])
@@ -1281,8 +1289,8 @@ class W_Const(W_Expr):
         return True
 
     def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list for this constant, tagged as a declaration name."""
-        return [DECL_NAME.emit(self.str())]
+        """Return a token list for this constant reference."""
+        return name_with_levels_tokens(self.name, self.levels, constants)
 
     def str(self):
         return name_with_levels(self.name, self.levels)
@@ -1430,6 +1438,10 @@ class W_LitNat(W_Expr):
 
     def str(self):
         return self.val.str()
+
+    def tokens(self, constants, mark=None, span_holder=None):
+        """Return a token list tagging this nat literal."""
+        return [LITERAL.emit(self.str())]
 
     def instantiate(self, expr, depth=0):
         return self
@@ -1696,13 +1708,13 @@ class W_Proj(W_Expr):
         result = []
         needs_parens = isinstance(self.struct_expr, W_App)
         if needs_parens:
-            result.append(PLAIN.emit("("))
+            result.append(PUNCT.emit("("))
         _append_marked_tokens(
             result, span_holder, self.struct_expr, constants, mark,
         )
         if needs_parens:
-            result.append(PLAIN.emit(")"))
-        result.append(PLAIN.emit("."))
+            result.append(PUNCT.emit(")"))
+        result.append(PUNCT.emit("."))
         result.append(DECL_NAME.emit(field_name))
         return result
 
@@ -2023,19 +2035,19 @@ class W_ForAll(W_FunBase):
             _append_marked_tokens(
                 result, span_holder, self.binder, constants, mark,
             )
-            result.append(PLAIN.emit(", "))
+            result.append(PUNCT.emit(", "))
             _append_marked_tokens(result, span_holder, rhs, constants, mark)
             return result
         else:
             result = []
             if self.binder.is_default() and not self.body.loose_bvar_range > 0:
                 if isinstance(self.binder.type, W_ForAll):
-                    result.append(PLAIN.emit("("))
+                    result.append(PUNCT.emit("("))
                 _append_marked_tokens(
                     result, span_holder, self.binder.type, constants, mark,
                 )
                 if isinstance(self.binder.type, W_ForAll):
-                    result.append(PLAIN.emit(")"))
+                    result.append(PUNCT.emit(")"))
             else:
                 _append_marked_tokens(
                     result, span_holder, self.binder, constants, mark,
@@ -2060,12 +2072,12 @@ def _binder_group_tokens(group, constants):
     if group[-1].is_default():
         return [BINDER_NAME.emit(names)]
     else:
-        result = [PLAIN.emit(group[-1].left)]
+        result = [PUNCT.emit(group[-1].left)]
         for i, binder in enumerate(group):
             if i > 0:
                 result.append(PLAIN.emit(" "))
             result.append(BINDER_NAME.emit(binder.name.str()))
-        result.append(PLAIN.emit(group[-1].right))
+        result.append(PUNCT.emit(group[-1].right))
         return result
 
 
@@ -2101,7 +2113,7 @@ class W_Lambda(W_FunBase):
         if current_group:
             result += _binder_group_tokens(current_group, constants)
 
-        result.append(PLAIN.emit(" ↦ "))
+        result.append(PUNCT.emit(" ↦ "))
 
         body = current
         for binder in reversed(binders):
@@ -2170,9 +2182,9 @@ class W_Let(W_Expr):
         fvar = self.name.binder(type=self.type).fvar()
         result = [KEYWORD.emit("let"), PLAIN.emit(" ")]
         result.append(BINDER_NAME.emit(self.name.str()))
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, self.type, constants, mark)
-        result.append(PLAIN.emit(" := "))
+        result.append(PUNCT.emit(" := "))
         _append_marked_tokens(result, span_holder, self.value, constants, mark)
         result.append(PLAIN.emit("\n"))
         body = self.body.instantiate(fvar)
@@ -2320,10 +2332,10 @@ class W_App(W_Expr):
         if fn_tokens is None:
             wrap_fn = isinstance(current, W_Lambda)
             if wrap_fn:
-                result.append(PLAIN.emit("("))
+                result.append(PUNCT.emit("("))
             _append_marked_tokens(result, span_holder, current, constants, mark)
             if wrap_fn:
-                result.append(PLAIN.emit(")"))
+                result.append(PUNCT.emit(")"))
         else:
             result = fn_tokens
 
@@ -2340,10 +2352,10 @@ class W_App(W_Expr):
             )
             result.append(PLAIN.emit(" "))
             if needs_parens:
-                result.append(PLAIN.emit("("))
+                result.append(PUNCT.emit("("))
             _append_marked_tokens(result, span_holder, arg, constants, mark)
             if needs_parens:
-                result.append(PLAIN.emit(")"))
+                result.append(PUNCT.emit(")"))
 
         return result
 
@@ -2685,9 +2697,9 @@ class W_Definition(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(PLAIN.emit(" :="))
+        result.append(PUNCT.emit(" :="))
         if mark is not None:
             result.append(PLAIN.emit("\n  "))
             _append_marked_tokens(result, span_holder, self.value, constants, mark)
@@ -2733,9 +2745,9 @@ class W_Theorem(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(PLAIN.emit(" := "))
+        result.append(PUNCT.emit(" := "))
         _append_marked_tokens(result, span_holder, self.value, constants, mark)
         return result
 
@@ -2744,7 +2756,7 @@ class W_Axiom(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
@@ -2787,7 +2799,7 @@ class W_Inductive(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
         for each in self.constructors:
             result.append(PLAIN.emit("\n"))
@@ -2815,15 +2827,15 @@ class W_Constructor(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("constructor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
     def constructor_tokens(self, constructor_name, type, inductive, constants):
         name = constructor_name.in_namespace(inductive.names[0])
-        result = [PLAIN.emit("| "), DECL_NAME.emit(name.str())]
+        result = [PUNCT.emit("| "), DECL_NAME.emit(name.str())]
         if type not in [each.const() for each in inductive.names]:
-            result.append(PLAIN.emit(" : "))
+            result.append(PUNCT.emit(" : "))
             result += type.tokens(constants)
         return result
 
@@ -2854,7 +2866,7 @@ class W_Recursor(W_DeclarationKind):
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
-        result.append(PLAIN.emit(" : "))
+        result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
