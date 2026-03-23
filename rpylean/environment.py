@@ -256,7 +256,7 @@ class Environment(object):
             levels = {}
             for level in each.levels:
                 if level in levels:
-                    raise DuplicateLevels(each.name, level)
+                    raise DuplicateLevels(each.name, each.levels, level)
                 levels[level] = True
 
             by_name[each.name] = each

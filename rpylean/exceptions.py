@@ -86,14 +86,18 @@ class DuplicateLevels(ExportError):
     A declaration has duplicate level parameters.
     """
 
-    def __init__(self, name, duplicate):
+    def __init__(self, name, levels, duplicate):
         self.name = name
+        self.levels = levels
         self.duplicate = duplicate
 
     def tokens(self):
+        level_strs = ", ".join([l.str() for l in self.levels])
         return [
             ERROR.emit("Invalid declaration "),
-            DECL_NAME.emit(self.name.str()),
+            DECL_NAME.emit(
+                "%s.{%s}" % (self.name.str(), level_strs),
+            ),
             PLAIN.emit(": "),
             ERROR.emit("duplicate level parameter "),
             DECL_NAME.emit(self.duplicate.str()),

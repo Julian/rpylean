@@ -4,7 +4,7 @@ import pytest
 
 from rpylean._tokens import FORMAT_PLAIN, MESSAGE
 from rpylean.environment import Environment
-from rpylean.exceptions import AlreadyDeclared, W_InvalidDeclaration
+from rpylean.exceptions import AlreadyDeclared, DuplicateLevels, W_InvalidDeclaration
 from rpylean.objects import (
     NAT,
     PROP,
@@ -422,4 +422,15 @@ class TestAlreadyDeclared(object):
             Environment.having([ax, ax])
         assert str(exc_info.value) == (
             "Invalid declaration ax: already declared as axiom ax : Prop"
+        )
+
+
+class TestDuplicateLevels(object):
+    def test_message_shows_level_params(self):
+        u = Name.simple("u")
+        ax = Name.simple("ax").axiom(type=PROP, levels=[u, u])
+        with pytest.raises(DuplicateLevels) as exc_info:
+            Environment.having([ax])
+        assert str(exc_info.value) == (
+            "Invalid declaration ax.{u, u}: duplicate level parameter u"
         )
