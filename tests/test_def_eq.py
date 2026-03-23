@@ -178,12 +178,6 @@ class TestSort(object):
         ],
     )
     def test_not_eq(self, level1, level2):
-        if (
-            isinstance(level1, W_LevelIMax)
-            and isinstance(level2, W_LevelIMax)
-            and not syntactic_eq(level1, level2)
-        ):
-            pytest.xfail("W_LevelIMax.gt is too permissive")
         assert not level1.eq(level2)
         assert not env.def_eq(level1.sort(), level2.sort())
 

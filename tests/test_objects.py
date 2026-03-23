@@ -440,8 +440,6 @@ class TestLevel(object):
     )
     def test_leq_lt(self, lhs, rhs):
         assert lhs.leq(rhs)
-        if isinstance(lhs, W_LevelIMax):
-            pytest.xfail("W_LevelIMax.gt is too permissive")
         assert not rhs.leq(lhs)
 
     @pytest.mark.parametrize(

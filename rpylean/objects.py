@@ -760,6 +760,14 @@ class W_Level(_Item):
         """
         return W_LevelSucc(self)
 
+    def imax_leq(self, imax, other, balance):
+        """Check imax ≤ other when self is the imax's rhs."""
+        return imax.lhs.leq(other, balance) or self.leq(other, balance)
+
+    def imax_gt(self, imax, other, balance):
+        """Check other ≤ imax when self is the imax's rhs."""
+        return imax.lhs.gt(other, balance) or self.gt(other, balance)
+
     def max(self, other):
         """
         Return the (simplified) max of this level with another.
@@ -924,11 +932,10 @@ class W_LevelIMax(W_Level):
 
     @leq
     def leq(self, other, balance):
-        return self.lhs.leq(other, balance) or self.rhs.leq(other, balance)
+        return self.rhs.imax_leq(self, other, balance)
 
     def gt(self, other, balance):
-        # XXX
-        return self.lhs.gt(other, balance) or self.rhs.gt(other, balance)
+        return self.rhs.imax_gt(self, other, balance)
 
     def pretty_parts(self):
         lhs, _ = self.lhs.pretty_parts()
@@ -978,6 +985,32 @@ class W_LevelParam(W_Level):
 
     def subst_levels(self, substs):
         return substs.get(self.name, self)
+
+    def imax_leq(self, imax, other, balance):
+        """Check imax ≤ other by case-splitting on this param."""
+        subst_zero = {self.name: W_LEVEL_ZERO}
+        subst_succ = {self.name: self.succ()}
+        return (
+            imax.subst_levels(subst_zero).leq(
+                other.subst_levels(subst_zero), balance,
+            )
+            and imax.subst_levels(subst_succ).leq(
+                other.subst_levels(subst_succ), balance,
+            )
+        )
+
+    def imax_gt(self, imax, other, balance):
+        """Check other ≤ imax by case-splitting on this param."""
+        subst_zero = {self.name: W_LEVEL_ZERO}
+        subst_succ = {self.name: self.succ()}
+        return (
+            other.subst_levels(subst_zero).leq(
+                imax.subst_levels(subst_zero), balance,
+            )
+            and other.subst_levels(subst_succ).leq(
+                imax.subst_levels(subst_succ), balance,
+            )
+        )
 
 
 class W_Expr(_Item):
