@@ -79,8 +79,107 @@ class Diagnostic(object):
         self.message = message
 
     def format_with(self, formatter):
-        """Render this diagnostic into a string using the given formatter."""
-        return formatter(self.tokens) + self.message
+        """
+        Render this diagnostic into a string using the given formatter.
+
+        When a span is present, a ``^^^^`` caret line is inserted below each
+        output line that overlaps the span.  The diagnostic message is
+        attached (indented to the caret column) after the last caret line.
+        Lines after the last span line are omitted so that content rendered
+        after the marked expression does not dangle below the message.
+        """
+        tokens = self.tokens
+        span = self.span
+        message = self.message
+
+        if span == NO_SPAN:
+            return formatter(tokens) + message
+
+        span_start_idx, span_end_idx = span
+
+        # Render line by line, tracking which lines contain the span.
+        lines = []          # completed rendered lines
+        current = []        # buffer for the current line
+        line_extents = []   # per line: list of (start_col, end_col)
+
+        in_span = False
+        span_start_col = 0
+        current_extents = []
+        col = 0             # plain-text column
+
+        for i, (tag, text) in enumerate(tokens):
+            if i == span_start_idx:
+                in_span = True
+                span_start_col = col
+
+            if i == span_end_idx:
+                in_span = False
+                current_extents.append((span_start_col, col))
+
+            rendered = formatter([(tag, text)])
+            plain_parts = text.split("\n")
+            rendered_parts = rendered.split("\n")
+
+            for p, plain_part in enumerate(plain_parts):
+                if p > 0:
+                    if in_span:
+                        current_extents.append((span_start_col, col))
+                    lines.append("".join(current))
+                    line_extents.append(list(current_extents))
+                    current = []
+                    current_extents = []
+                    col = 0
+                    if in_span:
+                        span_start_col = 0
+                current.append(rendered_parts[p])
+                try:
+                    col += len(plain_part.decode("utf-8"))
+                except (UnicodeDecodeError, AttributeError):
+                    col += len(plain_part)
+
+        if in_span:
+            current_extents.append((span_start_col, col))
+        lines.append("".join(current))
+        line_extents.append(list(current_extents))
+
+        # Find the last line with a span extent to attach the message.
+        last_span_line = -1
+        for j in range(len(lines) - 1, -1, -1):
+            if line_extents[j]:
+                last_span_line = j
+                break
+
+        # Build output, inserting caret lines after spanned lines.
+        result_parts = []
+        for j, line in enumerate(lines):
+            extents = line_extents[j]
+            result_parts.append(line)
+            if extents:
+                leftmost = extents[0][0]
+                rightmost = extents[0][1]
+                for s, e in extents:
+                    if s < leftmost:
+                        leftmost = s
+                    if e > rightmost:
+                        rightmost = e
+                caret_width = rightmost - leftmost
+                if caret_width < 1:
+                    caret_width = 1
+                indent_str = " " * leftmost
+                result_parts.append("\n")
+                result_parts.append(indent_str + "^" * caret_width)
+                if j == last_span_line:
+                    msg = message
+                    if msg.startswith("\n"):
+                        msg = msg[1:]
+                    for msg_line in msg.split("\n"):
+                        result_parts.append("\n")
+                        result_parts.append(indent_str + msg_line)
+                    break
+            if j < len(lines) - 1:
+                result_parts.append("\n")
+
+        return "".join(result_parts)
 
 
 def _ansi_wrap(tag, text):

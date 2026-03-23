@@ -81,17 +81,48 @@ class W_CheckError(W_Error):
         writer.writeline_diagnostic(self.as_diagnostic())
 
 
+def _append_marked_tokens(result, span_holder, expr, constants, mark):
+    """
+    Append tokens for ``expr`` to ``result``, tracking ``mark``.
+
+    If ``mark`` is ``expr`` (by identity), record the token index range
+    into ``span_holder[0]`` as a ``(start, end)`` tuple.
+    Otherwise, pass ``mark`` through to ``expr.tokens()`` so that
+    subexpressions can be matched.
+
+    ``expr`` is any object with a ``tokens(constants, mark, span_holder)``
+    method -- typically a ``W_Expr`` or ``Binder``.
+    """
+    if mark is not None and mark is expr:
+        start = len(result)
+        result += expr.tokens(constants)
+        span_holder[0] = (start, len(result))
+        return
+    if mark is not None and span_holder is not None and span_holder[0] == NO_SPAN:
+        inner = [NO_SPAN]
+        tokens = expr.tokens(constants, mark, inner)
+        if inner[0] != NO_SPAN:
+            offset = len(result)
+            span_holder[0] = (inner[0][0] + offset, inner[0][1] + offset)
+        result += tokens
+    else:
+        result += expr.tokens(constants)
+
+
 def _error_diagnostic(declaration, name, expr, prefix, message, declarations):
     """
     Build a ``Diagnostic`` for a type-checking error.
 
-    When ``declaration`` is available, the full declaration is rendered.
-    Otherwise, a fallback showing ``prefix``, ``name``, and ``expr``
-    inline is used.
+    When ``declaration`` is available, the full declaration is rendered
+    with the offending ``expr`` span-marked.  Otherwise, a fallback
+    showing ``prefix``, ``name``, and ``expr`` inline is used.
     """
     if declaration is not None:
-        result = declaration.tokens(declarations)
-        return Diagnostic(result, NO_SPAN, message)
+        span_holder = [NO_SPAN]
+        result = declaration.tokens(
+            declarations, mark=expr, span_holder=span_holder,
+        )
+        return Diagnostic(result, span_holder[0], message)
     if name is None:
         name = Name.ANONYMOUS
     result = [PLAIN.emit(prefix)]
@@ -297,7 +328,7 @@ class Name(_Item):
         """
         return Name(self.components + [part])
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this name, tagged as a declaration name."""
         return [DECL_NAME.emit(self.erase_macro_scopes().str())]
 
@@ -592,6 +623,7 @@ class Binder(_Item):
         self.type = type
         self.left = left
         self.right = right
+        self._fvar = None
 
     def __repr__(self):
         return "<Binder %s>" % (self.name.str())
@@ -599,11 +631,11 @@ class Binder(_Item):
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         result = [PLAIN.emit(self.left)]
         result.append(BINDER_NAME.emit(self.name.str()))
         result.append(PLAIN.emit(" : "))
-        result += self.type.tokens(constants)
+        _append_marked_tokens(result, span_holder, self.type, constants, mark)
         result.append(PLAIN.emit(self.right))
         return result
 
@@ -622,8 +654,15 @@ class Binder(_Item):
     def fvar(self):
         """
         An FVar for this binder.
+
+        Returns the same FVar each time so that identity comparisons
+        work across inference and rendering.
         """
-        return W_FVar(self)
+        fvar = self._fvar
+        if fvar is None:
+            fvar = W_FVar(self)
+            self._fvar = fvar
+        return fvar
 
     def bind_fvar(self, fvar, depth):
         return self.with_type(type=self.type.bind_fvar(fvar, depth))
@@ -996,7 +1035,7 @@ class W_Expr(_Item):
     def expect_sort(self, env):
         raise W_NotASort(env, self, inferred_type=self, name=None)
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this expression, defaulting to plain text."""
         return [PLAIN.emit(self.str())]
 
@@ -1012,7 +1051,7 @@ class W_BVar(W_Expr):
     def str(self):
         return "(BVar [%s])" % (self.id,)
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]
 
     def syntactic_eq(self, other):
@@ -1061,7 +1100,7 @@ class W_FVar(W_Expr):
     def str(self):
         return self.binder.name.str()
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]
 
     def incr_free_bvars(self, count, depth):
@@ -1153,7 +1192,7 @@ class W_Sort(W_Expr):
     def def_eq(self, other, def_eq):
         return self.level.eq(other.level)
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this Sort, tagged as a sort."""
         return [SORT.emit(self.str())]
 
@@ -1245,7 +1284,7 @@ class W_Const(W_Expr):
                 return False
         return True
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this constant, tagged as a declaration name."""
         return [DECL_NAME.emit(self.str())]
 
@@ -1646,7 +1685,7 @@ class W_Proj(W_Expr):
             and def_eq(self.struct_expr, other.struct_expr)
         )
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         struct_decl = constants[self.struct_name]
         inductive = struct_decl.w_kind
         assert isinstance(inductive, W_Inductive)
@@ -1658,9 +1697,15 @@ class W_Proj(W_Expr):
             field_names.append(constructor_type.binder.name.str())
             constructor_type = constructor_type.body
         field_name = field_names[self.field_index]
-        result = self.struct_expr.tokens(constants)
-        if isinstance(self.struct_expr, W_App):
-            result = [PLAIN.emit("(")] + result + [PLAIN.emit(")")]
+        result = []
+        needs_parens = isinstance(self.struct_expr, W_App)
+        if needs_parens:
+            result.append(PLAIN.emit("("))
+        _append_marked_tokens(
+            result, span_holder, self.struct_expr, constants, mark,
+        )
+        if needs_parens:
+            result.append(PLAIN.emit(")"))
         result.append(PLAIN.emit("."))
         result.append(DECL_NAME.emit(field_name))
         return result
@@ -1954,7 +1999,7 @@ class W_ForAll(W_FunBase):
             self.body.subst_levels(levels),
         )
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
 
@@ -1979,20 +2024,28 @@ class W_ForAll(W_FunBase):
             not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
         ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
             result = [KEYWORD.emit("∀"), PLAIN.emit(" ")]
-            result += self.binder.tokens(constants)
+            _append_marked_tokens(
+                result, span_holder, self.binder, constants, mark,
+            )
             result.append(PLAIN.emit(", "))
-            result += rhs.tokens(constants)
+            _append_marked_tokens(result, span_holder, rhs, constants, mark)
             return result
         else:
+            result = []
             if self.binder.is_default() and not self.body.loose_bvar_range > 0:
-                lhs = self.binder.type.tokens(constants)
                 if isinstance(self.binder.type, W_ForAll):
-                    lhs = [PLAIN.emit("(")] + lhs + [PLAIN.emit(")")]
+                    result.append(PLAIN.emit("("))
+                _append_marked_tokens(
+                    result, span_holder, self.binder.type, constants, mark,
+                )
+                if isinstance(self.binder.type, W_ForAll):
+                    result.append(PLAIN.emit(")"))
             else:
-                lhs = self.binder.tokens(constants)
-            result = lhs
+                _append_marked_tokens(
+                    result, span_holder, self.binder, constants, mark,
+                )
             result.append(PUNCT.emit(" → "))
-            result += rhs.tokens(constants)
+            _append_marked_tokens(result, span_holder, rhs, constants, mark)
             return result
 
 
@@ -2021,7 +2074,7 @@ def _binder_group_tokens(group, constants):
 
 
 class W_Lambda(W_FunBase):
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         binders = []
         current = self
         while isinstance(current, W_Lambda):
@@ -2058,7 +2111,7 @@ class W_Lambda(W_FunBase):
         for binder in reversed(binders):
             body = body.instantiate(binder.fvar())
 
-        result += body.tokens(constants)
+        _append_marked_tokens(result, span_holder, body, constants, mark)
         return result
 
     def syntactic_eq(self, other):
@@ -2117,16 +2170,17 @@ class W_Let(W_Expr):
             r = body_range
         self.loose_bvar_range = r
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         fvar = self.name.binder(type=self.type).fvar()
         result = [KEYWORD.emit("let"), PLAIN.emit(" ")]
         result.append(BINDER_NAME.emit(self.name.str()))
         result.append(PLAIN.emit(" : "))
-        result += self.type.tokens(constants)
+        _append_marked_tokens(result, span_holder, self.type, constants, mark)
         result.append(PLAIN.emit(" := "))
-        result += self.value.tokens(constants)
+        _append_marked_tokens(result, span_holder, self.value, constants, mark)
         result.append(PLAIN.emit("\n"))
-        result += self.body.instantiate(fvar).tokens(constants)
+        body = self.body.instantiate(fvar)
+        _append_marked_tokens(result, span_holder, body, constants, mark)
         return result
 
     def infer(self, env):
@@ -2231,7 +2285,7 @@ class W_App(W_Expr):
             i -= 1
         return True
 
-    def tokens(self, constants):
+    def tokens(self, constants, mark=None, span_holder=None):
         args = []
         current = self
         while isinstance(current, W_App):
@@ -2266,12 +2320,16 @@ class W_App(W_Expr):
                     explicit_mask = mask
                     fn_tokens = [DECL_NAME.emit(current.name.str())]
 
+        result = []
         if fn_tokens is None:
-            fn_tokens = current.tokens(constants)
-        if isinstance(current, W_Lambda):
-            fn_tokens = [PLAIN.emit("(")] + fn_tokens + [PLAIN.emit(")")]
-
-        result = fn_tokens
+            wrap_fn = isinstance(current, W_Lambda)
+            if wrap_fn:
+                result.append(PLAIN.emit("("))
+            _append_marked_tokens(result, span_holder, current, constants, mark)
+            if wrap_fn:
+                result.append(PLAIN.emit(")"))
+        else:
+            result = fn_tokens
 
         n = len(args)
         for idx in range(n - 1, -1, -1):
@@ -2280,16 +2338,16 @@ class W_App(W_Expr):
                 mask_idx = n - 1 - idx
                 if not explicit_mask[mask_idx]:
                     continue
-            arg_tokens = arg.tokens(constants)
-            is_last = idx == 0
-            if is_last:
-                if isinstance(arg, W_App) or isinstance(arg, W_ForAll):
-                    arg_tokens = [PLAIN.emit("(")] + arg_tokens + [PLAIN.emit(")")]
-            else:
-                if isinstance(arg, W_FunBase) or isinstance(arg, W_App):
-                    arg_tokens = [PLAIN.emit("(")] + arg_tokens + [PLAIN.emit(")")]
+            needs_parens = (
+                (idx == 0 and (isinstance(arg, W_App) or isinstance(arg, W_ForAll)))
+                or (idx > 0 and (isinstance(arg, W_FunBase) or isinstance(arg, W_App)))
+            )
             result.append(PLAIN.emit(" "))
-            result += arg_tokens
+            if needs_parens:
+                result.append(PLAIN.emit("("))
+            _append_marked_tokens(result, span_holder, arg, constants, mark)
+            if needs_parens:
+                result.append(PLAIN.emit(")"))
 
         return result
 
@@ -2577,12 +2635,26 @@ class W_Declaration(_Item):
         """
         return self.name.const(**kwargs)
 
-    def tokens(self, constants):
-        """Produce a token stream for syntax-highlighted output."""
-        return self.w_kind.decl_tokens(self.name, self.levels, self.type, constants)
+    def tokens(self, constants, mark=None, span_holder=None):
+        """
+        Produce a token stream for syntax-highlighted output.
+
+        When ``mark`` is provided, it identifies an expression whose token
+        span should be recorded into ``span_holder[0]`` as a
+        ``(start_idx, end_idx)`` tuple.
+        """
+        return self.w_kind.decl_tokens(
+            self.name, self.levels, self.type, constants,
+            mark=mark, span_holder=span_holder,
+        )
 
     def type_check(self, env):
-        error = self.w_kind.type_check(self.type, env)
+        try:
+            error = self.w_kind.type_check(self.type, env)
+        except W_CheckError as error:
+            error.name = self.name
+            error.declaration = self
+            return error
         if error is not None:
             error.name = self.name
             error.declaration = self
@@ -2614,16 +2686,20 @@ class W_Definition(W_DeclarationKind):
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
 
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         result.append(PLAIN.emit(" :="))
-        result += indent(
-            [PLAIN.emit("\n")] + self.value.tokens(constants),
-            "  ",
-        )
+        if mark is not None:
+            result.append(PLAIN.emit("\n  "))
+            _append_marked_tokens(result, span_holder, self.value, constants, mark)
+        else:
+            result += indent(
+                [PLAIN.emit("\n")] + self.value.tokens(constants),
+                "  ",
+            )
         return result
 
     def get_delta_reduce_target(self):
@@ -2658,22 +2734,22 @@ class W_Theorem(W_DeclarationKind):
         if not env.def_eq(type, val_type):
             return W_TypeError(env, self.value, type)
 
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         result.append(PLAIN.emit(" := "))
-        result += self.value.tokens(constants)
+        _append_marked_tokens(result, span_holder, self.value, constants, mark)
         return result
 
 
 class W_Axiom(W_DeclarationKind):
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
     def type_check(self, type, env):
@@ -2712,11 +2788,11 @@ class W_Inductive(W_DeclarationKind):
         if not isinstance(inferred_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=inferred_type, name=None)
 
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         for each in self.constructors:
             result.append(PLAIN.emit("\n"))
             result += list(
@@ -2740,11 +2816,11 @@ class W_Constructor(W_DeclarationKind):
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("constructor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
     def constructor_tokens(self, constructor_name, type, inductive, constants):
@@ -2779,11 +2855,11 @@ class W_Recursor(W_DeclarationKind):
         # TODO - implement type checking
         pass
 
-    def decl_tokens(self, name, levels, type, constants):
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PLAIN.emit(" : "))
-        result += type.tokens(constants)
+        _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
 

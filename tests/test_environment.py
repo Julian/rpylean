@@ -2,6 +2,7 @@ from textwrap import dedent
 
 import pytest
 
+from rpylean._tokens import FORMAT_PLAIN
 from rpylean.environment import Environment
 from rpylean.exceptions import AlreadyDeclared, W_InvalidDeclaration
 from rpylean.objects import (
@@ -17,7 +18,7 @@ from rpylean.objects import (
 )
 
 
-a, x, f, T = names("a", "x", "f", "T")
+a, x, y, f, T = names("a", "x", "y", "f", "T")
 b0, b1 = W_BVar(0), W_BVar(1)
 
 
@@ -204,17 +205,22 @@ class TestTypeError(object):
 
 
 class TestDiagnosticTokens(object):
-    def test_type_error_diagnostic_message_contains_mismatch_text(self):
-        """W_TypeError.as_diagnostic() message includes type mismatch info."""
+    def test_type_error_diagnostic(self):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
         error = invalid.type_check(Environment.EMPTY)
 
-        d = error.as_diagnostic()
-        assert "has type" in d.message
-        assert "but is expected to have type" in d.message
+        assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def foo : Prop :=
+              Type
+              ^^^^
+              has type
+                Type 1
+              but is expected to have type
+                Prop""",
+        )
 
-    def test_not_a_sort_diagnostic_message(self):
-        """W_NotASort.as_diagnostic() message describes the sort mismatch."""
+    def test_not_a_sort_diagnostic(self):
         constType = Name.simple("constType").definition(
             type=forall(a.binder(type=TYPE))(TYPE),
             value=fun(x.binder(type=TYPE))(b0),
@@ -225,17 +231,48 @@ class TestDiagnosticTokens(object):
         )
         error = nonTypeType.type_check(env)
 
-        d = error.as_diagnostic()
-        assert "but is expected to be a Sort" in d.message
+        assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def nonTypeType : constType :=
+                              ^^^^^^^^^
+                              has type
+                                Type → Type
+                              but is expected to be a Sort (Type or Prop)""",
+        )
 
-    def test_not_a_prop_diagnostic_message(self):
-        """W_NotAProp.as_diagnostic() message describes the prop requirement."""
+    def test_raised_not_a_sort_diagnostic(self):
+        """W_NotASort raised during inference still gets carets."""
+        bad = Name.simple("bad").definition(
+            type=PROP,
+            value=forall(x.binder(type=PROP))(
+                forall(y.binder(type=b0))(forall(a.binder(type=b0))(b1)),
+            ),
+        )
+        error = bad.type_check(Environment.EMPTY)
+
+        assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def bad : Prop :=
+              ∀ (x : Prop), ∀ (y : x), y → y
+                                   ^
+                                   has type
+                                     x
+                                   but is expected to be a Sort (Type or Prop)""",
+        )
+
+    def test_not_a_prop_diagnostic(self):
         non_prop_value = forall(x.binder(type=PROP))(W_BVar(0))
         invalid = Name.simple("nonPropThm").theorem(type=PROP, value=non_prop_value)
         error = invalid.type_check(Environment.EMPTY)
 
-        d = error.as_diagnostic()
-        assert "but the type of a theorem must be a proposition" in d.message
+        assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            theorem nonPropThm : Prop := ∀ (x : Prop), x
+                                 ^^^^
+                                 has sort
+                                   Type
+                                 but the type of a theorem must be a proposition (Prop)""",
+        )
 
 
 class TestInvalidDeclaration(object):
