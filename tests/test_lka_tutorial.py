@@ -24,7 +24,6 @@ def _name_of(path):
 
 XFAILS = frozenset(
     [
-        "095_proofIrrelevance",
         "096_unitEta1",
         "097_unitEta2",
         "098_unitEta3",

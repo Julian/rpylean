@@ -381,6 +381,14 @@ class Environment(object):
         cls1 = promote(expr1.__class__)
         cls2 = promote(expr2.__class__)
 
+        # Proof irrelevance: two proofs of the same Prop are equal.
+        expr1_ty = expr1.infer(self)
+        if syntactic_eq(expr1_ty.infer(self), PROP):
+            expr2_ty = expr2.infer(self)
+            if syntactic_eq(expr2_ty.infer(self), PROP):
+                if self.def_eq(expr1_ty, expr2_ty):
+                    return True
+
         if cls1 is cls2 and (
             # returning NotImplemented (from W_Const.def_eq)
             # isn't valid RPython, and the point is these are not comparable
@@ -389,16 +397,6 @@ class Environment(object):
             cls1 is not W_Const or expr1.name.syntactic_eq(expr2.name)
         ):
             return expr1.def_eq(expr2, self.def_eq)
-
-        # Proof irrelevance check: Get the types of our expressions
-        expr1_ty = expr1.infer(self)
-        expr2_ty = expr2.infer(self)
-        # If these types are themselves Prop (Sort 0), and the types are equal, then our original expressions are proofs of the same `Prop`
-        expr1_ty_kind = expr1_ty.infer(self)
-        expr2_ty_kind = expr2_ty.infer(self)
-        if syntactic_eq(expr1_ty_kind, PROP) and syntactic_eq(expr2_ty_kind, PROP):
-            if self.def_eq(expr1_ty, expr2_ty):
-                return True
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)

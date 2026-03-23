@@ -25,7 +25,10 @@ from rpylean.objects import (
     syntactic_eq,
 )
 
-env = Environment.EMPTY
+env = Environment.having([
+    Name.simple("Nat").axiom(type=TYPE),
+    Name.simple("String").axiom(type=TYPE),
+])
 a, f, g, x, y = names("a", "f", "g", "x", "y")
 b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
 u, v = Name.simple("u").level(), Name.simple("v").level()
@@ -221,16 +224,6 @@ class TestConst(object):
                 [x.axiom(type=TYPE), y.axiom(type=TYPE)],
             ),
             (
-                x.const(),
-                x.const(levels=[u]),
-                [x.axiom(type=TYPE, levels=[u.name])],
-            ),
-            (
-                x.const(levels=[u]),
-                x.const(),
-                [x.axiom(type=TYPE, levels=[u.name])],
-            ),
-            (
                 x.const(levels=[u, v]),
                 x.const(levels=[v, u]),
                 [x.axiom(type=TYPE, levels=[u.name, v.name])],
@@ -238,14 +231,16 @@ class TestConst(object):
         ],
         ids=[
             "different_name",
-            "missing_level",
-            "extra_level",
             "different_level_order",
         ],
     )
     def test_not_eq(self, const1, const2, decls):
         env = Environment.having(decls)
         assert not env.def_eq(const1, const2)
+
+    def test_mismatched_level_arity(self):
+        assert not x.const().def_eq(x.const(levels=[u]), env.def_eq)
+        assert not x.const(levels=[u]).def_eq(x.const(), env.def_eq)
 
     def test_def_eq_via_delta(self):
         """
@@ -436,12 +431,16 @@ class TestProj(object):
     def test_eq(self):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
-        foo_type = Foo.inductive(type=TYPE)
-        mk_decl = mk.constructor(type=Foo.const())
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+        mk_decl = mk.constructor(
+            type=forall(a.binder(type=NAT))(Foo.const()),
+            num_fields=1,
+        )
+        foo_type = Foo.structure(type=TYPE, constructor=mk_decl)
         bar = Name.simple("bar")
         x_decl = x.axiom(type=Foo.const())
         bar_def = bar.definition(type=Foo.const(), value=x.const())
-        env = Environment.having([foo_type, mk_decl, x_decl, bar_def])
+        env = Environment.having([foo_type, mk_decl, Nat_decl, x_decl, bar_def])
         proj1 = Foo.proj(0, x.const())
         proj2 = Foo.proj(0, bar.const())
         assert env.def_eq(proj1, proj2)
@@ -449,11 +448,15 @@ class TestProj(object):
     def test_not_def_eq(self):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
-        foo_type = Foo.inductive(type=TYPE)
-        mk_decl = mk.constructor(type=Foo.const())
+        Nat_decl = Name.simple("Nat").axiom(type=TYPE)
+        mk_decl = mk.constructor(
+            type=forall(a.binder(type=NAT))(Foo.const()),
+            num_fields=1,
+        )
+        foo_type = Foo.structure(type=TYPE, constructor=mk_decl)
         x_decl = x.axiom(type=Foo.const())
         y_decl = y.axiom(type=Foo.const())
-        env = Environment.having([foo_type, mk_decl, x_decl, y_decl])
+        env = Environment.having([foo_type, mk_decl, Nat_decl, x_decl, y_decl])
         proj1 = Foo.proj(0, x.const())
         proj2 = Foo.proj(0, y.const())
         assert not env.def_eq(proj1, proj2)
