@@ -163,8 +163,8 @@ def test_empty_dump_natlit():
     ) == EnvironmentBuilder(exprs=[W_LitNat.int(123456789)])
 
 
+@pytest.mark.xfail(reason="until we finish recursors + constructors")
 def test_dump_large_natlit():
-    pytest.xfail("until we finish recursors + constructors")
     assert from_str(
         # eval run <| dumpExpr (.lit (.natVal 100000000000000023456789))
         """

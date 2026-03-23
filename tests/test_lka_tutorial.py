@@ -26,9 +26,7 @@ XFAILS = frozenset(
     [
         "096_unitEta1",
         "097_unitEta2",
-        "098_unitEta3",
         "118_quotLiftReduction",
-        "119_quotIndReduction",
         "040_inductBadNonSort2",
         "042_inductTooFewParams",
         "043_inductWrongCtorParams",
@@ -47,18 +45,20 @@ XFAILS = frozenset(
 
 @pytest.mark.parametrize("path", GOOD, ids=_name_of)
 def test_tutorial_good(path):
-    if _name_of(path) in XFAILS:
-        pytest.xfail("not yet implemented")
     environment = from_export(path.open())
-    assert not list(environment.type_check(environment.all()))
+    errors = list(environment.type_check(environment.all()))
+    if errors and _name_of(path) in XFAILS:
+        pytest.xfail("not yet implemented")
+    assert not errors
 
 
 @pytest.mark.parametrize("path", BAD, ids=_name_of)
 def test_tutorial_bad(path):
-    if _name_of(path) in XFAILS:
-        pytest.xfail("not yet implemented")
     try:
         environment = from_export(path.open())
     except ExportError:
         return
-    assert list(environment.type_check(environment.all()))
+    errors = list(environment.type_check(environment.all()))
+    if not errors and _name_of(path) in XFAILS:
+        pytest.xfail("not yet implemented")
+    assert errors
