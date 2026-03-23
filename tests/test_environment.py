@@ -2,7 +2,7 @@ from textwrap import dedent
 
 import pytest
 
-from rpylean._tokens import FORMAT_PLAIN
+from rpylean._tokens import FORMAT_PLAIN, MESSAGE
 from rpylean.environment import Environment
 from rpylean.exceptions import AlreadyDeclared, W_InvalidDeclaration
 from rpylean.objects import (
@@ -273,6 +273,14 @@ class TestDiagnosticTokens(object):
                                    Type
                                  but the type of a theorem must be a proposition (Prop)""",
         )
+
+
+    def test_type_error_message_prose_uses_message_token(self):
+        invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
+        error = invalid.type_check(Environment.EMPTY)
+        message = error.as_diagnostic().message
+        prose = [(tag, text) for tag, text in message if "has type" in text]
+        assert prose == [MESSAGE.emit("\nhas type\n  ")]
 
 
 class TestInvalidDeclaration(object):

@@ -12,6 +12,7 @@ from rpylean._tokens import (
     KEYWORD,
     LEVEL,
     LITERAL,
+    OPERATOR,
     PLAIN,
     PUNCT,
     SORT,
@@ -305,6 +306,15 @@ def test_forall_fvar_binder_type_prop():
     assert FORMAT_PLAIN(expr.tokens({})) == "∀ (p : Prop), p → p"
 
 
+def test_forall_arrow_uses_operator_token():
+    """Arrow in a function type is tagged as an operator, not punctuation."""
+    # Type → Type
+    expr = forall(x.binder(type=TYPE))(TYPE)
+    tokens = expr.tokens({})
+    arrows = [(tag, text) for tag, text in tokens if "→" in text]
+    assert arrows == [OPERATOR.emit(" → ")]
+
+
 def test_forall_prop_body_is_prop():
     """
     Forall whose body is itself a forall over a Prop-typed variable uses ∀.
@@ -485,6 +495,12 @@ class TestTheorem(object):
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
         assert FORMAT_PLAIN(theorem.tokens({})) == "theorem foo : Nat := Nat.zero"
 
+    def test_assign_uses_operator_token(self):
+        theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
+        tokens = theorem.tokens({})
+        assigns = [(tag, text) for tag, text in tokens if ":=" in text]
+        assert assigns == [OPERATOR.emit(" := ")]
+
 
 class TestAxiom(object):
     def test_delaborate(self):
@@ -584,6 +600,12 @@ class TestLambda(object):
                 "names when pretty printing.",
             )
         assert FORMAT_PLAIN(fun(binder(type=NAT))(NAT_ZERO).tokens({})) == expected
+
+    def test_mapsto_uses_operator_token(self):
+        lam = fun(x.binder(type=NAT))(NAT_ZERO)
+        tokens = lam.tokens({})
+        arrows = [(tag, text) for tag, text in tokens if "↦" in text]
+        assert arrows == [OPERATOR.emit(" ↦ ")]
 
     def test_nested_default(self):
         nested = fun(

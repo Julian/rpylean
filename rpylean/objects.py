@@ -11,7 +11,9 @@ from rpylean._tokens import (
     KEYWORD,
     LEVEL,
     LITERAL,
+    MESSAGE,
     NO_SPAN,
+    OPERATOR,
     PLAIN,
     PUNCT,
     SORT,
@@ -148,9 +150,9 @@ class W_TypeError(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = [PLAIN.emit("\nhas type\n  ")]
+        message = [MESSAGE.emit("\nhas type\n  ")]
         message += self.inferred_type.tokens(declarations)
-        message += [PLAIN.emit("\nbut is expected to have type\n  ")]
+        message += [MESSAGE.emit("\nbut is expected to have type\n  ")]
         message += self.expected_type.tokens(declarations)
         return _error_diagnostic(
             self.declaration, self.name, self.term,
@@ -171,9 +173,9 @@ class W_NotASort(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = [PLAIN.emit("\nhas type\n  ")]
+        message = [MESSAGE.emit("\nhas type\n  ")]
         message += self.inferred_type.tokens(declarations)
-        message += [PLAIN.emit("\nbut is expected to be a Sort (Type or Prop)")]
+        message += [MESSAGE.emit("\nbut is expected to be a Sort (Type or Prop)")]
         return _error_diagnostic(
             self.declaration, self.name, self.expr,
             "in ", message, declarations,
@@ -193,9 +195,9 @@ class W_NotAProp(W_CheckError):
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
-        message = [PLAIN.emit("\nhas sort\n  ")]
+        message = [MESSAGE.emit("\nhas sort\n  ")]
         message += self.inferred_sort.tokens(declarations)
-        message += [PLAIN.emit(
+        message += [MESSAGE.emit(
             "\nbut the type of a theorem must be a proposition (Prop)",
         )]
         return _error_diagnostic(
@@ -219,7 +221,7 @@ class W_HeartbeatError(W_CheckError):
             PLAIN.emit("in "),
             DECL_NAME.emit(self.name.str()),
         ]
-        message = [PLAIN.emit(
+        message = [MESSAGE.emit(
             ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
             % (self.heartbeats, self.max_heartbeat),
         )]
@@ -2052,7 +2054,7 @@ class W_ForAll(W_FunBase):
                 _append_marked_tokens(
                     result, span_holder, self.binder, constants, mark,
                 )
-            result.append(PUNCT.emit(" → "))
+            result.append(OPERATOR.emit(" → "))
             _append_marked_tokens(result, span_holder, rhs, constants, mark)
             return result
 
@@ -2113,7 +2115,7 @@ class W_Lambda(W_FunBase):
         if current_group:
             result += _binder_group_tokens(current_group, constants)
 
-        result.append(PUNCT.emit(" ↦ "))
+        result.append(OPERATOR.emit(" ↦ "))
 
         body = current
         for binder in reversed(binders):
@@ -2184,7 +2186,7 @@ class W_Let(W_Expr):
         result.append(BINDER_NAME.emit(self.name.str()))
         result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, self.type, constants, mark)
-        result.append(PUNCT.emit(" := "))
+        result.append(OPERATOR.emit(" := "))
         _append_marked_tokens(result, span_holder, self.value, constants, mark)
         result.append(PLAIN.emit("\n"))
         body = self.body.instantiate(fvar)
@@ -2699,7 +2701,7 @@ class W_Definition(W_DeclarationKind):
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(PUNCT.emit(" :="))
+        result.append(OPERATOR.emit(" :="))
         if mark is not None:
             result.append(PLAIN.emit("\n  "))
             _append_marked_tokens(result, span_holder, self.value, constants, mark)
@@ -2747,7 +2749,7 @@ class W_Theorem(W_DeclarationKind):
         result += name_with_levels_tokens(name, levels, constants)
         result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(PUNCT.emit(" := "))
+        result.append(OPERATOR.emit(" := "))
         _append_marked_tokens(result, span_holder, self.value, constants, mark)
         return result
 

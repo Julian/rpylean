@@ -43,8 +43,10 @@ SORT = Token("sort", default_color="4ec9b0")
 LITERAL = Token("literal", default_color="b5cea8")
 LEVEL = Token("level", default_color="9cdcfe")
 PUNCT = Token("punctuation", default_color="cccccc")
+OPERATOR = Token("operator", default_color="d4d4d4", bold=True)
 
 PLAIN = Token("plain")
+MESSAGE = Token("message", default_color="808080")
 ERROR = Token("error", default_color="cc0000")
 
 PROMPT = Token("prompt", default_color="908084")
