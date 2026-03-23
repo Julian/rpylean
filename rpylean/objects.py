@@ -2086,9 +2086,11 @@ def _binder_group_tokens(group, constants):
 class W_Lambda(W_FunBase):
     def tokens(self, constants, mark=None, span_holder=None):
         binders = []
+        binder_used = []
         current = self
         while isinstance(current, W_Lambda):
             binders.append(current.binder)
+            binder_used.append(current.body.loose_bvar_range > 0)
             current = current.body
 
         result = [KEYWORD.emit("fun"), PLAIN.emit(" ")]
@@ -2101,7 +2103,14 @@ class W_Lambda(W_FunBase):
                     result += _binder_group_tokens(current_group, constants)
                     result.append(PLAIN.emit(" "))
                     current_group = []
-                result += binder.tokens(constants)
+                if binder_used[i]:
+                    result += binder.tokens(constants)
+                else:
+                    result.append(PUNCT.emit("["))
+                    _append_marked_tokens(
+                        result, span_holder, binder.type, constants, mark,
+                    )
+                    result.append(PUNCT.emit("]"))
                 if i < len(binders) - 1:
                     result.append(PLAIN.emit(" "))
                 last_style = None

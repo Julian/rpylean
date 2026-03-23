@@ -594,11 +594,6 @@ class TestLambda(object):
         ],
     )
     def test_simple(self, binder, expected):
-        if "[Nat]" in expected:
-            pytest.xfail(
-                "Instance binder pretty-printing doesn't yet hide unused "
-                "names when pretty printing.",
-            )
         assert FORMAT_PLAIN(fun(binder(type=NAT))(NAT_ZERO).tokens({})) == expected
 
     def test_mapsto_uses_operator_token(self):
@@ -657,10 +652,6 @@ class TestLambda(object):
             a.instance_binder(type=NAT),
             f.binder(type=NAT),
         )(b0)
-        pytest.xfail(
-            "Instance binder pretty-printing doesn't yet hide unused "
-            "names when pretty printing.",
-        )
         assert FORMAT_PLAIN(nested.tokens({}, [])) == "fun x {y} [Nat] f ↦ f"
 
     def test_nested_non_lambda_body(self):
