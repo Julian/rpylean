@@ -78,7 +78,8 @@ def check(self, args, stdin, stdout, stderr):
         except ExportError as err:
             stderrw.writeline(err.tokens())
             stderrw.write_plain("\n")
-            return 1
+            failures += 1
+            continue
         parse_elapsed = time() - start
 
         if args.options["trace"]:

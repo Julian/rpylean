@@ -10,6 +10,28 @@ from textwrap import dedent
 
 from rpylean.parser import EXPORT_VERSION
 
+META = '{"meta":{"format":{"version":"%s"}}}\n' % (EXPORT_VERSION,)
+
+#: A valid export defining ``def basicDef : Type := Prop``.
+VALID_EXPORT = META + dedent("""\
+    {"in":1,"str":{"pre":0,"str":"basicDef"}}
+    {"il":1,"succ":0}
+    {"ie":0,"sort":1}
+    {"ie":1,"sort":0}
+    {"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":1}}
+""")
+
+#: An invalid export with duplicate level parameter ``u``.
+INVALID_EXPORT = META + dedent("""\
+    {"in":1,"str":{"pre":0,"str":"bad"}}
+    {"in":2,"str":{"pre":0,"str":"u"}}
+    {"il":1,"param":2}
+    {"il":2,"succ":0}
+    {"ie":0,"sort":2}
+    {"ie":1,"sort":0}
+    {"def":{"all":[1],"hints":"opaque","levelParams":[2,2],"name":1,"safety":"safe","type":0,"value":1}}
+""")
+
 
 def rpylean(*args, **kwargs):
     return subprocess.Popen(
@@ -23,9 +45,7 @@ def rpylean(*args, **kwargs):
 
 def test_stdin():
     process = rpylean("-")
-    stdout, stderr = process.communicate(
-        '{"meta":{"format":{"version":"%s"}}}\n' % (EXPORT_VERSION,),
-    )
+    stdout, stderr = process.communicate(META)
 
     assert stdout == "", (stdout, stderr)
 
@@ -41,15 +61,26 @@ def test_no_such_file():
 def test_invalid_def_exits_nonzero():
     process = rpylean("-")
     stdout, stderr = process.communicate(
-        dedent("""\
-            {"meta":{"format":{"version":"%s"}}}
+        META + dedent("""\
             {"in":1,"str":{"pre":0,"str":"Anon"}}
             {"il":1,"succ":0}
             {"ie":0,"sort":0}
             {"ie":1,"sort":1}
             {"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":1}}
-        """)
-        % (EXPORT_VERSION,),
+        """),
     )
 
     assert process.returncode != 0, (stdout, stderr)
+
+
+def test_export_error_does_not_skip_remaining_files(tmpdir):
+    invalid = tmpdir.join("invalid.ndjson")
+    invalid.write(INVALID_EXPORT)
+
+    valid = tmpdir.join("valid.ndjson")
+    valid.write(VALID_EXPORT)
+
+    process = rpylean("check", "--print=names", str(invalid), str(valid))
+    stdout, stderr = process.communicate()
+
+    assert stdout == "basicDef\n", (stdout, stderr)
