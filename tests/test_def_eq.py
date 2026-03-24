@@ -592,6 +592,17 @@ class TestStructEta(object):
         env = Environment.having([wrap_type, mk_decl, Nat_decl, c_decl])
         assert not env.def_eq(b_fvar, ctor_app)
 
+    def test_unit_like_eta(self):
+        """Any two values of a zero-field structure are def-eq."""
+        MyUnit = Name.simple("MyUnit")
+        mk = MyUnit.child("mk")
+        mk_decl = mk.constructor(type=MyUnit.const(), num_fields=0)
+        unit_type = MyUnit.structure(type=TYPE, constructor=mk_decl)
+        env = Environment.having([unit_type, mk_decl])
+        fvar1 = W_FVar(x.binder(type=MyUnit.const()))
+        fvar2 = W_FVar(y.binder(type=MyUnit.const()))
+        assert env.def_eq(fvar1, fvar2)
+
 
 def test_beta_reduction():
     env = Environment.having(

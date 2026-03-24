@@ -39,7 +39,6 @@ from rpylean.objects import (
     W_Lambda,
     W_LitNat,
     W_LitStr,
-    W_Proj,
     W_Sort,
     fun,
     get_decl,
@@ -396,7 +395,9 @@ class Environment(object):
             # Still would love to think of a better way.
             cls1 is not W_Const or expr1.name.syntactic_eq(expr2.name)
         ):
-            return expr1.def_eq(expr2, self.def_eq)
+            if expr1.def_eq(expr2, self.def_eq):
+                return True
+            return self.try_struct_eta_fields(expr1, expr2)
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
@@ -430,6 +431,44 @@ class Environment(object):
             return self.def_eq(expr1, expr2.build_str_expr(self))
 
         return False
+
+    def try_struct_eta_fields(self, expr1, expr2):
+        """
+        Structure eta when neither side is a constructor application.
+
+        Compares field-by-field: S.proj i expr1 ≟ S.proj i expr2.
+
+        Only called from the same-class fallback path where the
+        projection comparisons cannot cycle back here (projections
+        have the field type, not the structure type).
+        """
+        ty = expr1.infer(self).whnf(self)
+        head = ty
+        while isinstance(head, W_App):
+            head = head.fn
+        if not isinstance(head, W_Const):
+            return False
+        decl = get_decl(self.declarations, head.name)
+        if not isinstance(decl.w_kind, W_Inductive):
+            return False
+        ind = decl.w_kind
+        if len(ind.constructors) != 1 or ind.num_indices != 0 or ind.is_recursive:
+            return False
+        struct_name = head.name
+        num_fields = ind.constructors[0].w_kind.num_fields
+
+        if not self.def_eq(ty, expr2.infer(self).whnf(self)):
+            return False
+
+        i = 0
+        while i < num_fields:
+            if not self.def_eq(
+                struct_name.proj(i, expr1),
+                struct_name.proj(i, expr2),
+            ):
+                return False
+            i += 1
+        return True
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):
@@ -472,46 +511,30 @@ class Environment(object):
         if len(args) != num_params + num_fields:
             return False
 
-        # Look up the inductive type to check it qualifies as a struct
-        # The constructor's type should end in an application of the
-        # inductive type, and the inductive must have exactly 1 constructor
-        # and no indices.
-        ctor_type = ctor_decl.type
-        while isinstance(ctor_type, W_ForAll):
-            ctor_type = ctor_type.body
-        # ctor_type should now be the result type, e.g. "Wrap" or "ULift α"
-        result_head = ctor_type
+        # Check that ctor_side's type is a structure-like inductive.
+        ctor_ty = ctor_side.infer(self).whnf(self)
+        result_head = ctor_ty
         while isinstance(result_head, W_App):
             result_head = result_head.fn
         if not isinstance(result_head, W_Const):
             return False
-
         struct_name = result_head.name
         inductive_decl = get_decl(self.declarations, struct_name)
         if not isinstance(inductive_decl.w_kind, W_Inductive):
             return False
-
         ind = inductive_decl.w_kind
-        # Must be a struct: exactly 1 constructor, no indices,
-        # and not recursive (matching Lean's is_structure_like).
-        if len(ind.constructors) != 1:
-            return False
-        if ind.num_indices != 0:
-            return False
-        if ind.is_recursive:
+        if len(ind.constructors) != 1 or ind.num_indices != 0 or ind.is_recursive:
             return False
 
         # Check that inferred types are def-eq
-        ctor_ty = ctor_side.infer(self)
-        other_ty = other_side.infer(self)
-        if not self.def_eq(ctor_ty, other_ty):
+        if not self.def_eq(ctor_ty, other_side.infer(self)):
             return False
 
         # Compare each field: Proj(i, other_side) ≟ args[num_params + i]
         args.reverse()
         i = 0
         while i < num_fields:
-            proj = W_Proj(struct_name, i, other_side)
+            proj = struct_name.proj(i, other_side)
             if not self.def_eq(proj, args[num_params + i]):
                 return False
             i += 1
