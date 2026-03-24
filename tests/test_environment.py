@@ -153,10 +153,30 @@ class TestInductive(object):
             type=inductive_type,
             constructors=[refl_ctor],
             num_params=1,
+            num_indices=1,
         )
 
         env = Environment.having([Eq_decl, refl_ctor])
         assert type_check(env=env) == []
+
+
+    def test_too_few_params(self):
+        """Rejects an inductive claiming more params than its type has binders."""
+        Foo = Name.simple("Foo")
+        decl = Foo.inductive(
+            type=forall(Name.simple("x").binder(type=PROP))(PROP),
+            num_params=2,
+        )
+        env = Environment.having([decl])
+        assert type_check(env=env) != []
+
+    def test_non_sort_result(self):
+        """Rejects an inductive whose result type is not a Sort."""
+        aType = Name.simple("aType").axiom(type=TYPE)
+        Foo = Name.simple("Foo")
+        decl = Foo.inductive(type=aType.const())
+        env = Environment.having([decl, aType])
+        assert type_check(env=env) != []
 
 
 class TestTypeError(object):

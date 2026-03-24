@@ -24,8 +24,6 @@ def _name_of(path):
 
 XFAILS = frozenset(
     [
-        "040_inductBadNonSort2",
-        "042_inductTooFewParams",
         "043_inductWrongCtorParams",
         "044_inductWrongCtorResParams",
         "045_inductWrongCtorResLevel",

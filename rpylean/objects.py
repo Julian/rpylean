@@ -2865,13 +2865,14 @@ class W_Inductive(W_DeclarationKind):
 
     def type_check(self, type, env):
         target = type
-        for depth in range(self.num_params):
+        for depth in range(self.num_params + self.num_indices):
             if not isinstance(target, W_ForAll):
-                break
+                return W_NotASort(env, type, inferred_type=target, name=None)
             target = target.body.instantiate(target.binder.fvar(), depth)
-        inferred_type = target.infer(env)
-        if not isinstance(inferred_type.whnf(env), W_Sort):
-            return W_NotASort(env, type, inferred_type=inferred_type, name=None)
+        if not isinstance(target.whnf(env), W_Sort):
+            return W_NotASort(
+                env, type, inferred_type=target.infer(env), name=None,
+            )
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
