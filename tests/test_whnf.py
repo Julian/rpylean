@@ -19,9 +19,10 @@ from rpylean.objects import (
 )
 
 
+Quot = Name.simple("Quot")
 S, a, b, f, x, y, z = names("S", "a", "b", "f", "x", "y", "z")
 b0, b1, b2, b3 = W_BVar(0), W_BVar(1), W_BVar(2), W_BVar(3)
-u = Name.simple("u").level()
+u, v = Name.simple("u").level(), Name.simple("v").level()
 
 
 class TestFVar(object):
@@ -853,3 +854,28 @@ class TestNativeNatReduction(object):
         # Should reduce to a
         reduced = proj.whnf(env)
         assert syntactic_eq(reduced, a_decl.const())
+
+
+def test_quot_lift_reduction():
+    """Quot.lift f h (Quot.mk r a) reduces to f a."""
+    env = Environment.having([
+        Name.simple("Nat").axiom(type=TYPE),
+        a.axiom(type=NAT),
+        f.axiom(type=forall(x.binder(type=NAT))(NAT)),
+        Name.simple("r").axiom(type=TYPE),
+        Name.simple("h").axiom(type=TYPE),
+        Quot.child("mk").axiom(type=TYPE, levels=[u.name]),
+        Quot.child("lift").axiom(type=TYPE, levels=[u.name, v.name]),
+    ])
+
+    # Quot.lift {α} {r} {β} f h (Quot.mk {α} r a)
+    mk_app = Quot.child("mk").const(levels=[u]).app(
+        NAT, Name.simple("r").const(), a.const(),
+    )
+    lift_app = Quot.child("lift").const(levels=[u, v]).app(
+        NAT, Name.simple("r").const(), NAT,
+        f.const(), Name.simple("h").const(), mk_app,
+    )
+
+    reduced = lift_app.whnf(env)
+    assert syntactic_eq(reduced, f.const().app(a.const()))

@@ -2433,6 +2433,38 @@ class W_App(W_Expr):
             rhs = rhs.fn
         return syntactic_eq(lhs, rhs)
 
+    _QUOT_LIFT = Name(["Quot", "lift"])
+    _QUOT_MK = Name(["Quot", "mk"])
+
+    def try_quot_lift_reduce(self, env):
+        """
+        Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
+        """
+        # Quot.lift needs 6 args, last must be Quot.mk with 3 args.
+        head, args = self.unapp()
+        if not isinstance(head, W_Const):
+            return None
+        if not head.name.syntactic_eq(self._QUOT_LIFT):
+            return None
+        if len(args) != 6:
+            return None
+
+        # args are reversed: args[0] is the last arg (the Quot.mk application)
+        quot_mk_app = args[0].whnf(env)
+        mk_head, mk_args = quot_mk_app.unapp()
+        if not isinstance(mk_head, W_Const):
+            return None
+        if not mk_head.name.syntactic_eq(self._QUOT_MK):
+            return None
+        if len(mk_args) != 3:
+            return None
+
+        # args[5-0]: {α} {r} {β} f h q — f is args[2] (reversed)
+        f = args[2]
+        # mk_args[2-0]: {α} r a — a is mk_args[0] (reversed)
+        a = mk_args[0]
+        return f.app(a)
+
     def try_iota_reduce(self, env):
         target, args = self.unapp()
 
@@ -2618,6 +2650,11 @@ class W_App(W_Expr):
         # Handle recursor in head position
         iota_progress, reduced = self.try_iota_reduce(env)
         if iota_progress:
+            return reduced
+
+        # Quot.lift reduction: Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
+        reduced = self.try_quot_lift_reduce(env)
+        if reduced is not None:
             return reduced
 
         if isinstance(fn, W_Const):
