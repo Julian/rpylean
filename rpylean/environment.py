@@ -443,9 +443,7 @@ class Environment(object):
         have the field type, not the structure type).
         """
         ty = expr1.infer(self).whnf(self)
-        head = ty
-        while isinstance(head, W_App):
-            head = head.fn
+        head = ty.head()
         if not isinstance(head, W_Const):
             return False
         decl = get_decl(self.declarations, head.name)
@@ -490,11 +488,7 @@ class Environment(object):
         application with the corresponding projection of other_side.
         """
         # Decompose ctor_side into head + args
-        head = ctor_side
-        args = []
-        while isinstance(head, W_App):
-            args.append(head.arg)
-            head = head.fn
+        head, args = ctor_side.unapp()
 
         if not isinstance(head, W_Const):
             return False
@@ -513,9 +507,7 @@ class Environment(object):
 
         # Check that ctor_side's type is a structure-like inductive.
         ctor_ty = ctor_side.infer(self).whnf(self)
-        result_head = ctor_ty
-        while isinstance(result_head, W_App):
-            result_head = result_head.fn
+        result_head = ctor_ty.head()
         if not isinstance(result_head, W_Const):
             return False
         struct_name = result_head.name

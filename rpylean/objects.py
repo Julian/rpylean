@@ -1014,6 +1014,32 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
+    def head(self):
+        """
+        The head of an application spine.
+
+        For ``f a b c``, returns ``f``. For non-applications, returns self.
+        """
+        expr = self
+        while isinstance(expr, W_App):
+            expr = expr.fn
+        return expr
+
+    def unapp(self):
+        """
+        Decompose an application spine into head and reversed arg list.
+
+        For ``f a b c``, returns ``(f, [c, b, a])``. The args are
+        reversed because they are peeled outermost-first; callers that
+        need left-to-right order should reverse the result.
+        """
+        args = []
+        expr = self
+        while isinstance(expr, W_App):
+            args.append(expr.arg)
+            expr = expr.fn
+        return expr, args
+
     def app(self, arg, *more):
         """
         Apply this (which better be a function) to the given argument(s).
@@ -1524,11 +1550,7 @@ def _try_reduce_nat(expr, env):
     """
     # Collect the application spine (unreduced) to find the head constant
     # and count args.  args are collected in reverse (innermost first).
-    args = []
-    target = expr
-    while isinstance(target, W_App):
-        args.append(target.arg)
-        target = target.fn
+    target, args = expr.unapp()
 
     if not isinstance(target, W_Const):
         return None
@@ -1759,11 +1781,7 @@ class W_Proj(W_Expr):
         # Try to perform projection reduction (structural iota reduction).
         # If the struct expression reduces to a constructor application,
         # extract the field at the appropriate index.
-        head = reduced_struct
-        ctor_args = []
-        while isinstance(head, W_App):
-            ctor_args.append(head.arg)
-            head = head.fn
+        head, ctor_args = reduced_struct.unapp()
 
         if isinstance(head, W_Const):
             decl = get_decl(env.declarations, head.name)
@@ -1925,11 +1943,7 @@ def _is_prop_type(expr, constants):
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
-            head = current
-            args = []
-            while isinstance(head, W_App):
-                args.append(head.arg)
-                head = head.fn
+            head, args = current.unapp()
             args.reverse()
             if isinstance(head, W_Const):
                 decl = constants.get(head.name, None)
@@ -2297,11 +2311,7 @@ class W_App(W_Expr):
             self.loose_bvar_range = arg_range
 
     def __repr__(self):
-        args = []
-        current = self
-        while isinstance(current, W_App):
-            args.append(current.arg)
-            current = current.fn
+        current, args = self.unapp()
         args.reverse()
         return "<W_App fn={!r} args={!r}>".format(current, args)
 
@@ -2338,11 +2348,7 @@ class W_App(W_Expr):
         return True
 
     def tokens(self, constants, mark=None, span_holder=None):
-        args = []
-        current = self
-        while isinstance(current, W_App):
-            args.append(current.arg)
-            current = current.fn
+        current, args = self.unapp()
 
         explicit_mask = None
         fn_tokens = None
@@ -2428,11 +2434,7 @@ class W_App(W_Expr):
         return syntactic_eq(lhs, rhs)
 
     def try_iota_reduce(self, env):
-        args = []
-        target = self
-        while isinstance(target, W_App):
-            args.append(target.arg)
-            target = target.fn
+        target, args = self.unapp()
 
         if not isinstance(target, W_Const):
             return False, self
@@ -2473,9 +2475,7 @@ class W_App(W_Expr):
             self.infer(env)
 
             old_ty = major_premise.infer(env)
-            old_ty_base = old_ty
-            while isinstance(old_ty_base, W_App):
-                old_ty_base = old_ty_base.fn
+            old_ty_base = old_ty.head()
             assert isinstance(old_ty_base, W_Const)
 
             assert len(decl.w_kind.names) == 1
@@ -2535,11 +2535,7 @@ class W_App(W_Expr):
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')
         # and add then as arguments to the recursor rule application (before the motive)
-        major_premise_ctor = major_premise
-        all_ctor_args = []
-        while isinstance(major_premise_ctor, W_App):
-            all_ctor_args.append(major_premise_ctor.arg)
-            major_premise_ctor = major_premise_ctor.fn
+        major_premise_ctor, all_ctor_args = major_premise.unapp()
 
         if not isinstance(major_premise_ctor, W_Const):
             return False, self
