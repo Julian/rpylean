@@ -151,12 +151,11 @@ def dump(self, args, stdin, stdout, stderr):
     help="Open a REPL with the given export's environment loaded into it.",
 )
 def repl(self, args, stdin, stdout, stderr):
-    stderrw = writer_from_arg(args.options["color"], stderr)
-
     (path,) = args.args
     try:
         environment = environment_from(path=path, stdin=stdin)
     except ExportError as err:
+        stderrw = writer_from_arg("auto", stderr)
         stderrw.writeline(err.tokens())
         stderrw.write_plain("\n")
         return 1
