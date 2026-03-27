@@ -1110,7 +1110,7 @@ class W_BVar(W_Expr):
         return "<BVar %s>" % (self.id,)
 
     def str(self):
-        return "(BVar [%s])" % (self.id,)
+        return "#%s" % (self.id,)
 
     def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]

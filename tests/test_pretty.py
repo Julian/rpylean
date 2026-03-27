@@ -739,3 +739,14 @@ class TestApp(object):
         arrow = forall(x.binder(type=NAT))(NAT)  # Nat → Nat
         app = f.app(arrow)
         assert FORMAT_PLAIN(app.tokens({Name.simple("Nat"): Nat})) == "f (Nat → Nat)"
+
+
+class TestBVar(object):
+    def test_str_matches_lean_format(self):
+        assert W_BVar(0).str() == "#0"
+
+    def test_str_higher_index(self):
+        assert W_BVar(42).str() == "#42"
+
+    def test_tokens_match_str(self):
+        assert FORMAT_PLAIN(W_BVar(3).tokens({})) == "#3"
