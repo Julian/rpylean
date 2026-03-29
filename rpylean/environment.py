@@ -183,8 +183,12 @@ class StreamTracer(Tracer):
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
+        self._pending_newline = False
 
     def enter(self, expr1, expr2, declarations):
+        if self._pending_newline:
+            self._writer.write_plain("\n")
+            self._pending_newline = False
         indent = "  " * self._depth
         self._writer.write_plain(indent)
         self._writer.write([TRACE.emit("def_eq")])
@@ -192,13 +196,18 @@ class StreamTracer(Tracer):
         self._writer.write(expr1.tokens(declarations))
         self._writer.write_plain(" ≟ ")
         self._writer.write(expr2.tokens(declarations))
-        self._writer.write_plain("\n")
+        self._pending_newline = True
         self._depth += 1
 
     def result(self, value):
         self._depth -= 1
-        indent = "  " * self._depth
-        self._writer.write_plain("%s=> %s\n" % (indent, value))
+        mark = " ✓" if value else " ✗"
+        if self._pending_newline:
+            self._writer.write_plain(mark + "\n")
+            self._pending_newline = False
+        else:
+            indent = "  " * self._depth
+            self._writer.write_plain("%s%s\n" % (indent, mark.lstrip()))
         return value
 
 

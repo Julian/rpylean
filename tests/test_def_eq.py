@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Tests for definitional equality of Lean objects.
 """
@@ -660,3 +661,46 @@ def test_trace_def_eq():
     traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
     traced_env.def_eq(NAT, NAT)
     assert "def_eq" in trace.getvalue()
+
+
+def test_trace_leaf_result_on_same_line():
+    """A leaf def_eq (no children) shows the result on the same line."""
+    trace = BytesIO()
+    from rpylean._tokens import TokenWriter, FORMAT_PLAIN
+
+    traced_env = Environment.having(
+        [Name.simple("Nat").axiom(type=TYPE)],
+    )
+    traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
+    traced_env.def_eq(NAT, NAT)
+    assert trace.getvalue().decode("utf-8") == u"def_eq Nat ≟ Nat ✓\n"
+
+
+def test_trace_uses_check_and_cross_marks():
+    """Successful comparisons use ✓ and failures use ✗."""
+    trace = BytesIO()
+    from rpylean._tokens import TokenWriter, FORMAT_PLAIN
+
+    traced_env = Environment.having(
+        [Name.simple("Nat").axiom(type=TYPE),
+         Name.simple("String").axiom(type=TYPE)],
+    )
+    traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
+    traced_env.def_eq(NAT, STRING)
+    assert u"✗" in trace.getvalue().decode("utf-8")
+
+
+def test_trace_nested_result_on_own_line():
+    """A parent def_eq shows its result on its own line below children."""
+    trace = BytesIO()
+    from rpylean._tokens import TokenWriter, FORMAT_PLAIN
+
+    pi = forall(Name.simple("x").binder(type=NAT))(NAT)
+    traced_env = Environment.having([
+        Name.simple("Nat").axiom(type=TYPE),
+    ])
+    traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
+    traced_env.def_eq(pi, pi)
+    output = trace.getvalue().decode("utf-8")
+    lines = output.strip().split(u"\n")
+    assert lines[-1] == u"✓"
