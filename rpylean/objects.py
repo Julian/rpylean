@@ -296,10 +296,15 @@ def name_with_levels_tokens(name, levels, constants):
     return result
 
 
+@elidable
 def name_eq(name, other):
     # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
     #        that directly, RPython seems unable to be convinced that name and
     #        other are always Names no matter how much I assert.
+    #
+    # Marked @elidable so the JIT can fold calls to this function at
+    # trace-compile time when both arguments are promoted.  This collapses
+    # all 14 sequential nat-op comparisons in _try_reduce_nat into constants.
     return name.components == other.components
 
 
@@ -1311,7 +1316,10 @@ TYPE = W_LEVEL_ZERO.succ().sort()
 # Takes the level params from 'const', and substitutes them into 'target'
 @unroll_safe
 def apply_const_level_params(const, target, env):
-    decl = get_decl(env.declarations, const.name)
+    # Promote for the same reason as W_Const._whnf_core / try_delta_reduce.
+    name = promote(const.name)
+    declarations = promote(env.declarations)
+    decl = get_decl(declarations, name)
     if len(decl.levels) != len(const.levels):
         raise RuntimeError(
             "W_Const.infer: expected %s levels, got %s"
@@ -1376,12 +1384,22 @@ class W_Const(W_Expr):
         return self
 
     def _whnf_core(self, env):
-        if self.name not in env.declarations:
+        # Promote name and declarations so the JIT can specialise one trace
+        # per hot constant and fold the get_decl lookup to a compile-time
+        # constant via the @elidable annotation.
+        name = promote(self.name)
+        declarations = promote(env.declarations)
+        if name not in declarations:
             return None
         return self.try_delta_reduce(env)
 
     def try_delta_reduce(self, env, only_abbrev=False):
-        decl = get_decl(env.declarations, self.name)
+        # Promote for the same reason as _whnf_core: lets the JIT fold
+        # get_decl (and the second call inside apply_const_level_params)
+        # to compile-time constants when this constant is hot.
+        name = promote(self.name)
+        declarations = promote(env.declarations)
+        decl = get_decl(declarations, name)
         if decl is None:
             print("Missing decl: %s" % self.name.components)
             raise RuntimeError("Missing decl: %s" % self.str())
@@ -1555,8 +1573,12 @@ def _try_reduce_nat(expr, env):
     if not isinstance(target, W_Const):
         return None
 
-    name = target.name
-    nargs = len(args)
+    # Promote the head name and arg count so the JIT can specialise one
+    # trace per head constant and fold all 14 syntactic_eq checks below
+    # to compile-time booleans.  For non-nat constants (the common case)
+    # every comparison folds to False and the whole function compiles away.
+    name = promote(target.name)
+    nargs = promote(len(args))
 
     if nargs == 1:
         # Nat.succ is handled via _to_nat_val instead of here,
@@ -1570,33 +1592,36 @@ def _try_reduce_nat(expr, env):
     # For binary ops, args[1] is the first argument, args[0] is the second
     # (because we collected them innermost-first).
 
-    if name.syntactic_eq(_NAT_ADD):
+    # Use name_eq (which is @elidable) so that with a promoted name the JIT
+    # folds every comparison to a compile-time constant and removes the whole
+    # chain from the hot trace for non-nat constants.
+    if name_eq(name, _NAT_ADD):
         return _reduce_bin_nat_op_add(args, env)
-    if name.syntactic_eq(_NAT_SUB):
+    if name_eq(name, _NAT_SUB):
         return _reduce_bin_nat_op_sub(args, env)
-    if name.syntactic_eq(_NAT_MUL):
+    if name_eq(name, _NAT_MUL):
         return _reduce_bin_nat_op_mul(args, env)
-    if name.syntactic_eq(_NAT_POW):
+    if name_eq(name, _NAT_POW):
         return _reduce_nat_pow(args, env)
-    if name.syntactic_eq(_NAT_GCD):
+    if name_eq(name, _NAT_GCD):
         return _reduce_bin_nat_op_gcd(args, env)
-    if name.syntactic_eq(_NAT_MOD):
+    if name_eq(name, _NAT_MOD):
         return _reduce_bin_nat_op_mod(args, env)
-    if name.syntactic_eq(_NAT_DIV):
+    if name_eq(name, _NAT_DIV):
         return _reduce_bin_nat_op_div(args, env)
-    if name.syntactic_eq(_NAT_BEQ):
+    if name_eq(name, _NAT_BEQ):
         return _reduce_bin_nat_pred_beq(args, env)
-    if name.syntactic_eq(_NAT_BLE):
+    if name_eq(name, _NAT_BLE):
         return _reduce_bin_nat_pred_ble(args, env)
-    if name.syntactic_eq(_NAT_LAND):
+    if name_eq(name, _NAT_LAND):
         return _reduce_bin_nat_op_land(args, env)
-    if name.syntactic_eq(_NAT_LOR):
+    if name_eq(name, _NAT_LOR):
         return _reduce_bin_nat_op_lor(args, env)
-    if name.syntactic_eq(_NAT_XOR):
+    if name_eq(name, _NAT_XOR):
         return _reduce_bin_nat_op_xor(args, env)
-    if name.syntactic_eq(_NAT_SHIFT_LEFT):
+    if name_eq(name, _NAT_SHIFT_LEFT):
         return _reduce_bin_nat_op_shiftleft(args, env)
-    if name.syntactic_eq(_NAT_SHIFT_RIGHT):
+    if name_eq(name, _NAT_SHIFT_RIGHT):
         return _reduce_bin_nat_op_shiftright(args, env)
 
     return None
@@ -2641,9 +2666,20 @@ class W_App(W_Expr):
         if reduced is not None:
             return reduced
 
-        fn, progress = self.fn.whnf_with_progress(env)
+        # Reduce the head by a single step rather than calling
+        # whnf_with_progress (which spawns its own JIT-driver loop).
+        # Returning a new App here lets the *outer* whnf_with_progress
+        # loop iterate over the entire reduction chain — every step
+        # goes through the same W_App merge-point, giving the RPython
+        # JIT enough iterations to compile a useful trace.
+        fn_next = self.fn._whnf_core(env)
+        if fn_next is not None:
+            return fn_next.app(self.arg)
 
-        # Simple case - beta reduction
+        # self.fn is now in WHNF.
+        fn = self.fn
+
+        # Beta reduction
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg)
 
@@ -2657,15 +2693,6 @@ class W_App(W_Expr):
         if reduced is not None:
             return reduced
 
-        if isinstance(fn, W_Const):
-            # Promote fn so JIT can specialize on specific constants
-            fn = promote(fn)
-            reduced = fn.try_delta_reduce(env)
-            if reduced is not None:
-                return reduced.app(self.arg)
-        # fn reduced but is not a constant - return with reduced fn
-        if progress:
-            return fn.app(self.arg)
         return None
 
     def bind_fvar(self, fvar, depth):
