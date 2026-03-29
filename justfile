@@ -72,9 +72,10 @@ test-translated *ARGS=translated_tests:
 
 # Benchmark rpylean against a given export file.
 bench file:
-    @echo "=== untranslated ==="
-    @just rpylean check "{{ file }}"
-    @echo "=== translated (no JIT) ==="
-    @"{{ translated }}-nojit" check "{{ file }}"
-    @echo "=== translated (JIT) ==="
-    @"{{ translated }}" check "{{ file }}"
+    hyperfine \
+        --command-name untranslated \
+        --command-name 'translated (no JIT)' \
+        --command-name 'translated (JIT)' \
+        "PYTHONPATH='{{ pypy_checkout }}/' '{{ pypy }}' -m rpylean check '{{ file }}'" \
+        "'{{ translated }}-nojit' check '{{ file }}'" \
+        "'{{ translated }}' check '{{ file }}'"
