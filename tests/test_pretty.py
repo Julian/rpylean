@@ -79,6 +79,14 @@ class TestName(object):
     def test_tokens(self):
         assert Name.simple("foo").tokens({}) == [DECL_NAME.emit("foo")]
 
+    def test_tokens_erases_simple_macro_scope(self):
+        name = Name(["a", "_@", "_internal", "_hyg", "0"])
+        assert FORMAT_PLAIN(name.tokens({})) == "a"
+
+    def test_tokens_erases_complex_macro_scope(self):
+        name = Name(["inst", "_@", "Init", "Prelude", "3805852345", "_hygCtx", "_hyg", "9"])
+        assert FORMAT_PLAIN(name.tokens({})) == "inst"
+
 
 class TestNameWithLevels(object):
     def test_one_level(self):

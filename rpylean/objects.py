@@ -343,24 +343,17 @@ class Name(_Item):
         """
         Erase macro scopes from this name.
 
-        See Lean.PrettyPrinter.Delaborator.Basic.sanitizeName and
-        Lean.Name.eraseMacroScopes.
+        A hygienic name is encoded as ``<actual-name>._@.<context-and-scopes>._hyg.<scopes>``.
+        This method returns everything before the first ``_@`` component.
+
+        See ``Lean.Name.eraseMacroScopes`` in ``Init.Prelude``.
         """
-        if not self.components:
-            return self
         parts = []
-        in_hygiene = False
         for part in self.components:
-            if part in ("_@", "_internal", "_hyg"):
-                in_hygiene = True
-                continue
-            if in_hygiene and part.isdigit():
-                continue
-            in_hygiene = False
+            if part == "_@":
+                return Name(parts) if parts else Name.ANONYMOUS
             parts.append(part)
-        if not parts:
-            return Name.ANONYMOUS
-        return Name(parts)
+        return self
 
     def str(self):
         if not self.components:
