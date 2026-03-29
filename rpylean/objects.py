@@ -337,7 +337,24 @@ class Name(_Item):
 
     def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this name, tagged as a declaration name."""
-        return [DECL_NAME.emit(self.erase_macro_scopes().str())]
+        return [DECL_NAME.emit(self.str())]
+
+    def has_macro_scopes(self):
+        """
+        Does this name have hygienic macro scopes?
+
+        A name has macro scopes iff, stripping any trailing numeric components,
+        its last component is the string ``_hyg``.
+
+        See ``Lean.Name.hasMacroScopes`` in ``Init.Prelude``.
+        """
+        for part in reversed(self.components):
+            if part == "_hyg":
+                return True
+            if isinstance(part, int) or (isinstance(part, str) and part.isdigit()):
+                continue
+            return False
+        return False
 
     def erase_macro_scopes(self):
         """
@@ -356,9 +373,14 @@ class Name(_Item):
         return self
 
     def str(self):
-        if not self.components:
+        parts = []
+        for part in self.components:
+            if part == "_@":
+                break
+            parts.append(part)
+        if not parts:
             return "[anonymous]"
-        return ".".join([pretty_part(each) for each in self.components])
+        return ".".join([pretty_part(each) for each in parts])
 
     @elidable
     def hash(self):
@@ -2115,6 +2137,16 @@ class W_ForAll(W_FunBase):
                 )
                 if isinstance(self.binder.type, W_ForAll):
                     result.append(PUNCT.emit(")"))
+            elif (
+                self.binder.is_instance()
+                and not self.body.loose_bvar_range > 0
+                and self.binder.name.has_macro_scopes()
+            ):
+                result.append(PUNCT.emit("["))
+                _append_marked_tokens(
+                    result, span_holder, self.binder.type, constants, mark,
+                )
+                result.append(PUNCT.emit("]"))
             else:
                 _append_marked_tokens(
                     result, span_holder, self.binder, constants, mark,

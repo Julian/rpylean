@@ -157,9 +157,11 @@ class TestLet(object):
 
 
 Nat = Name.simple("Nat").axiom(type=TYPE)
+Ord = Name.simple("Ord").axiom(type=forall(Name.ANONYMOUS.binder(type=TYPE))(TYPE))
 i, h, p, q, P, alpha = names("i", "h", "p", "q", "P", "α")
 constants = {
     Name.simple("Nat"): Nat,
+    Name.simple("Ord"): Ord,
     i: i.axiom(type=NAT),
     p: p.axiom(type=PROP),
     q: q.axiom(type=PROP),
@@ -237,6 +239,18 @@ constants = {
             "Prop → Prop",
         ),
         (
+            Name(["inst", "_@", "_internal", "_hyg", "1"]).instance_binder(
+                type=Name.simple("Ord").app(NAT),
+            ),
+            NAT,
+            "[Ord Nat] → Nat",
+        ),
+        (
+            Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=PROP),
+            b0,
+            "∀ (a : Prop), a",
+        ),
+        (
             p.binder(type=PROP),
             b0,
             "∀ (p : Prop), p",
@@ -255,7 +269,9 @@ constants = {
         "{i : Nat} → p",
         "(Nat → Nat) → Nat",
         "Prop_via_syntactic_eq",
-        "hygienic",
+        "hygienic_nondependent",
+        "hygienic_instance_nondependent",
+        "hygienic_dependent",
         "∀ (p : Prop), p",
     ],
 )
@@ -603,6 +619,10 @@ class TestLambda(object):
     )
     def test_simple(self, binder, expected):
         assert FORMAT_PLAIN(fun(binder(type=NAT))(NAT_ZERO).tokens({})) == expected
+
+    def test_hygienic_binder_name_erased(self):
+        lam = fun(Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=NAT))(b0)
+        assert FORMAT_PLAIN(lam.tokens({})) == "fun a ↦ a"
 
     def test_mapsto_uses_operator_token(self):
         lam = fun(x.binder(type=NAT))(NAT_ZERO)
