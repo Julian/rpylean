@@ -136,10 +136,12 @@ Use these commands if and when you wish to check whether Lean's true behavior ma
 When implementing features that should match Lean's behavior (especially pretty printing), use Lean via stdin with `#check` and `#eval` commands:
 
 ```bash
-echo 'set_option pp.all true
-#check <your-term>
+echo '#check <your-term>
 #eval <your-term-if-it-has-Repr>' | lean --stdin
 ```
+
+Do not enable `pp.all` when attempting to compare Lean's default behavior.
+We want our behavior by default to match Lean's by default.
 
 Common options:
 - `pp.all true` - show full term structure
