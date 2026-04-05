@@ -179,6 +179,31 @@ class W_InvalidConstructorResult(W_CheckError):
         )
 
 
+class W_NonPositiveOccurrence(W_CheckError):
+    """
+    A constructor field type has the inductive in a non-positive position.
+    """
+
+    def __init__(self, environment, field_type, field_number, name=None):
+        self.environment = environment
+        self.field_type = field_type
+        self.field_number = field_number
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [
+            MESSAGE.emit(
+                "\narg #%d has a non-positive occurrence of the datatype"
+                " being declared" % self.field_number,
+            ),
+        ]
+        return _error_diagnostic(
+            self.declaration, self.name, self.field_type,
+            "Invalid constructor ", message, declarations,
+        )
+
+
 class W_NotASort(W_CheckError):
     """
     An expression does not have a Sort (Type or Prop) as its type.
@@ -1109,6 +1134,15 @@ class W_Expr(_Item):
     def _any_subexpr_invalid_index(self, inductive):
         """Recurse into subexpressions for invalid index occurrences."""
         return False
+
+    def is_strictly_positive(self, inductive, env):
+        """
+        Whether *inductive* occurs only in strictly positive positions.
+
+        A non-positive occurrence is one on the left side of an arrow
+        (in the binder type of a ``\u2200``).
+        """
+        return True
 
     def app(self, arg, *more):
         """
@@ -2104,6 +2138,14 @@ class W_FunBase(W_Expr):
         return (inductive._has_invalid_index_occurrence(self.binder.type)
                 or inductive._has_invalid_index_occurrence(self.body))
 
+    def is_strictly_positive(self, inductive, env):
+        """The binder type must not mention any inductive in the block."""
+        if inductive._contains_any_inductive(self.binder.type):
+            return False
+        return self.body.instantiate(self.binder.fvar()).whnf(env).is_strictly_positive(
+            inductive, env,
+        )
+
     def def_eq(self, other, def_eq):
         """
         Compare binders and bodies without regard for bound variable names.
@@ -3019,8 +3061,10 @@ class W_Inductive(W_DeclarationKind):
 
     def _check_constructor(self, ctor, env):
         """
-        Verify a constructor's result type applies the inductive to its
-        parameter variables and level parameters.
+        Verify a constructor is valid for this inductive.
+
+        Checks the result type, index arguments, and strict positivity
+        of field types.
         """
         num_params = ctor.w_kind.num_params
         assert num_params >= 0
@@ -3050,11 +3094,25 @@ class W_Inductive(W_DeclarationKind):
         for i in range(num_params, len(rev_args)):
             if rev_args[i].contains_const(ind_name):
                 return error
-        # Check field types for invalid occurrences of the inductive
-        # in index positions (e.g. I (I x) where I appears in its own index).
-        for fvar in remaining_fvars:
-            if self._has_invalid_index_occurrence(fvar.binder.type):
+        # Check field types for invalid occurrences of the inductive.
+        for i in range(len(remaining_fvars)):
+            field_type = remaining_fvars[i].binder.type
+            # Inductive in its own index (e.g. I (I x)).
+            if self._has_invalid_index_occurrence(field_type):
                 return error
+            # Strict positivity: the inductive must not appear in a
+            # negative position (left of an arrow).
+            if not field_type.whnf(env).is_strictly_positive(self, env):
+                # Walk the un-opened type to get the original field
+                # expression for diagnostic span marking.
+                original = ctor.type
+                for _ in range(num_params + i):
+                    original = original.body
+                return W_NonPositiveOccurrence(
+                    env, original.binder.type,
+                    field_number=i + 1,
+                    name=ctor.name,
+                )
 
     def _has_invalid_index_occurrence(self, expr):
         """
@@ -3076,6 +3134,13 @@ class W_Inductive(W_DeclarationKind):
             return False
         return expr._any_subexpr_invalid_index(self)
 
+    def _contains_any_inductive(self, expr):
+        """Whether *expr* mentions any of the inductives in this block."""
+        for name in self.names:
+            if expr.contains_const(name):
+                return True
+        return False
+
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
@@ -3083,14 +3148,27 @@ class W_Inductive(W_DeclarationKind):
         _append_marked_tokens(result, span_holder, type, constants, mark)
         for each in self.constructors:
             result.append(PLAIN.emit("\n"))
-            result += list(
+            inner = [NO_SPAN]
+            ctor_tokens = list(
                 each.w_kind.constructor_tokens(
                     constructor_name=each.name,
                     type=each.type,
                     inductive=self,
                     constants=constants,
+                    mark=mark,
+                    span_holder=inner,
                 )
             )
+            if (
+                span_holder is not None
+                and span_holder[0] == NO_SPAN
+                and inner[0] != NO_SPAN
+            ):
+                offset = len(result)
+                span_holder[0] = (
+                    inner[0][0] + offset, inner[0][1] + offset,
+                )
+            result += ctor_tokens
         return result
 
 
@@ -3111,12 +3189,15 @@ class W_Constructor(W_DeclarationKind):
         _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
-    def constructor_tokens(self, constructor_name, type, inductive, constants):
+    def constructor_tokens(
+        self, constructor_name, type, inductive, constants,
+        mark=None, span_holder=None,
+    ):
         name = constructor_name.in_namespace(inductive.names[0])
         result = [PUNCT.emit("| "), DECL_NAME.emit(name.str())]
         if type not in [each.const() for each in inductive.names]:
             result.append(PUNCT.emit(" : "))
-            result += type.tokens(constants)
+            _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
 

@@ -24,10 +24,7 @@ def _name_of(path):
 
 XFAILS = frozenset(
     [
-        "047_indNeg",
-        "050_indNegReducible",
         "054_typeWithTooHighTypeField.mk",
-        "105_reflOccLeft",
     ]
 )
 

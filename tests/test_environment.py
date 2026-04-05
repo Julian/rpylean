@@ -13,6 +13,7 @@ from rpylean.objects import (
     W_BVar,
     W_InvalidConstructorResult,
     W_LevelParam,
+    W_NonPositiveOccurrence,
     W_NotAProp,
     W_Sort,
     W_TypeError,
@@ -437,6 +438,49 @@ class TestTypeError(object):
         env = Environment.having([ctor, ind])
         errors = type_check(env=env)
         assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_non_positive_occurrence(self):
+        """Rejects a constructor where the inductive occurs in a negative position."""
+        ind_name = Name.simple("Ind")
+
+        # Ind : Type
+        # mk : (Ind → Ind) → Ind   (Ind in negative position)
+        ctor = ind_name.child("mk").constructor(
+            type=forall(f.binder(type=forall(x.binder(type=ind_name.const()))(ind_name.const())))(
+                ind_name.const(),
+            ),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(type=TYPE, constructors=[ctor])
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == (
+            "inductive Ind : Type\n"
+            "| mk : (Ind → Ind) → Ind\n"
+            "        ^^^^^^^^^\n"
+            "        arg #1 has a non-positive occurrence"
+            " of the datatype being declared"
+        )
+
+    def test_constructor_non_positive_occurrence_behind_let(self):
+        """Rejects a non-positive occurrence hidden behind a let expression."""
+        ind_name = Name.simple("Ind")
+        ind_const = ind_name.const()
+
+        # The field type is: let T := Ind → Ind in T
+        # which whnf-reduces to Ind → Ind (non-positive).
+        arrow = forall(x.binder(type=ind_const))(ind_const)
+        field_type = T.let(type=TYPE, value=arrow, body=b0)
+        ctor = ind_name.child("mk").constructor(
+            type=forall(f.binder(type=field_type))(ind_const),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(type=TYPE, constructors=[ctor])
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_NonPositiveOccurrence)
 
     def test_inductive_type_must_be_sort(self):
         fnType = Name.simple("fnType").definition(
