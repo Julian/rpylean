@@ -160,6 +160,25 @@ class W_TypeError(W_CheckError):
         )
 
 
+class W_InvalidConstructorResult(W_CheckError):
+    """
+    A constructor's result type is not a valid application of its inductive.
+    """
+
+    def __init__(self, environment, ctor_type, name=None):
+        self.environment = environment
+        self.ctor_type = ctor_type
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit("\ninvalid return type")]
+        return _error_diagnostic(
+            self.declaration, self.name, self.ctor_type,
+            "Invalid constructor ", message, declarations,
+        )
+
+
 class W_NotASort(W_CheckError):
     """
     An expression does not have a Sort (Type or Prop) as its type.
@@ -268,6 +287,10 @@ class _Item(object):
             " " if parts else "",
             " ".join(parts),
         )
+
+    def is_named(self, name):
+        """Whether this item is a leaf (constant, level parameter) with the given name."""
+        return False
 
 
 def name_with_levels(name, levels):
@@ -1003,6 +1026,9 @@ class W_LevelParam(W_Level):
     def syntactic_eq(self, other):
         return syntactic_eq(self.name, other.name)
 
+    def is_named(self, name):
+        return self.name.syntactic_eq(name)
+
     def subst_levels(self, substs):
         return substs.get(self.name, self)
 
@@ -1059,6 +1085,30 @@ class W_Expr(_Item):
             args.append(expr.arg)
             expr = expr.fn
         return expr, args
+
+    def open_all_binders(self):
+        """
+        Open all leading forall binders, instantiating each with a fresh fvar.
+
+        Returns ``(fvars, body)``.
+        """
+        fvars = []
+        expr = self
+        while isinstance(expr, W_ForAll):
+            fvar = expr.binder.fvar()
+            fvars.append(fvar)
+            expr = expr.body.instantiate(fvar, 0)
+        return fvars, expr
+
+    def contains_const(self, name):
+        """
+        Whether this expression contains a constant with the given name.
+        """
+        return False
+
+    def _any_subexpr_invalid_index(self, inductive):
+        """Recurse into subexpressions for invalid index occurrences."""
+        return False
 
     def app(self, arg, *more):
         """
@@ -1363,6 +1413,12 @@ class W_Const(W_Expr):
         A child constant of this one.
         """
         return self.name.child(part).const()
+
+    def contains_const(self, name):
+        return self.is_named(name)
+
+    def is_named(self, name):
+        return self.name.syntactic_eq(name)
 
     def def_eq(self, other, def_eq):
         if len(self.levels) != len(other.levels):
@@ -1783,6 +1839,12 @@ class W_Proj(W_Expr):
         self.struct_expr = struct_expr
         self.loose_bvar_range = struct_expr.loose_bvar_range
 
+    def contains_const(self, name):
+        return self.struct_expr.contains_const(name)
+
+    def _any_subexpr_invalid_index(self, inductive):
+        return inductive._has_invalid_index_occurrence(self.struct_expr)
+
     def def_eq(self, other, def_eq):
         return (
             self.struct_name.syntactic_eq(other.struct_name)
@@ -2033,6 +2095,14 @@ class W_FunBase(W_Expr):
             self.loose_bvar_range = binder_range
         else:
             self.loose_bvar_range = body_range
+
+    def contains_const(self, name):
+        return (self.binder.type.contains_const(name)
+                or self.body.contains_const(name))
+
+    def _any_subexpr_invalid_index(self, inductive):
+        return (inductive._has_invalid_index_occurrence(self.binder.type)
+                or inductive._has_invalid_index_occurrence(self.body))
 
     def def_eq(self, other, def_eq):
         """
@@ -2286,6 +2356,16 @@ class W_Let(W_Expr):
             r = body_range
         self.loose_bvar_range = r
 
+    def contains_const(self, name):
+        return (self.type.contains_const(name)
+                or self.value.contains_const(name)
+                or self.body.contains_const(name))
+
+    def _any_subexpr_invalid_index(self, inductive):
+        return (inductive._has_invalid_index_occurrence(self.type)
+                or inductive._has_invalid_index_occurrence(self.value)
+                or inductive._has_invalid_index_occurrence(self.body))
+
     def tokens(self, constants, mark=None, span_holder=None):
         fvar = self.name.binder(type=self.type).fvar()
         result = [KEYWORD.emit("let"), PLAIN.emit(" ")]
@@ -2359,6 +2439,13 @@ class W_App(W_Expr):
             self.loose_bvar_range = fn_range
         else:
             self.loose_bvar_range = arg_range
+
+    def contains_const(self, name):
+        return self.fn.contains_const(name) or self.arg.contains_const(name)
+
+    def _any_subexpr_invalid_index(self, inductive):
+        return (inductive._has_invalid_index_occurrence(self.fn)
+                or inductive._has_invalid_index_occurrence(self.arg))
 
     def __repr__(self):
         current, args = self.unapp()
@@ -2925,6 +3012,69 @@ class W_Inductive(W_DeclarationKind):
             return W_NotASort(
                 env, type, inferred_type=target.infer(env), name=None,
             )
+        for ctor in self.constructors:
+            error = self._check_constructor(ctor, env)
+            if error is not None:
+                return error
+
+    def _check_constructor(self, ctor, env):
+        """
+        Verify a constructor's result type applies the inductive to its
+        parameter variables and level parameters.
+        """
+        num_params = ctor.w_kind.num_params
+        assert num_params >= 0
+        ind_name = self.names[0]
+        error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
+        all_fvars, ctor_type = ctor.type.open_all_binders()
+        if len(all_fvars) < num_params:
+            return error
+        param_fvars = all_fvars[:num_params]
+        remaining_fvars = all_fvars[num_params:]
+        # ctor_type is now the result type, e.g. Ind p1 p2 ... idx1 idx2 ...
+        head, rev_args = ctor_type.unapp()
+        if not head.is_named(ind_name):
+            return error
+        if len(head.levels) != len(ctor.levels):
+            return error
+        for i in range(len(ctor.levels)):
+            if not head.levels[i].is_named(ctor.levels[i]):
+                return error
+        rev_args.reverse()
+        if len(rev_args) < num_params:
+            return error
+        for i in range(num_params):
+            if not syntactic_eq(rev_args[i], param_fvars[i]):
+                return error
+        # Index args must not contain the inductive being defined.
+        for i in range(num_params, len(rev_args)):
+            if rev_args[i].contains_const(ind_name):
+                return error
+        # Check field types for invalid occurrences of the inductive
+        # in index positions (e.g. I (I x) where I appears in its own index).
+        for fvar in remaining_fvars:
+            if self._has_invalid_index_occurrence(fvar.binder.type):
+                return error
+
+    def _has_invalid_index_occurrence(self, expr):
+        """
+        Whether *expr* contains an application of this inductive whose
+        index arguments themselves contain this inductive.
+        """
+        ind_name = self.names[0]
+        head, rev_args = expr.unapp()
+        if head.is_named(ind_name):
+            # Check index args (those after the params) for occurrences.
+            rev_args.reverse()
+            for i in range(self.num_params, len(rev_args)):
+                if rev_args[i].contains_const(ind_name):
+                    return True
+            # Recurse into all args for nested invalid occurrences.
+            for i in range(len(rev_args)):
+                if self._has_invalid_index_occurrence(rev_args[i]):
+                    return True
+            return False
+        return expr._any_subexpr_invalid_index(self)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]

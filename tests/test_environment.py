@@ -11,7 +11,11 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
+    W_InvalidConstructorResult,
+    W_LevelParam,
     W_NotAProp,
+    W_Sort,
+    W_TypeError,
     forall,
     fun,
     names,
@@ -144,11 +148,13 @@ class TestInductive(object):
 
         refl_body = forall(
             a.binder(type=W_BVar(0)),
-        )(W_BVar(1).app(W_BVar(0)).app(W_BVar(1)).app(W_BVar(0)))
+        )(Eq.const().app(W_BVar(1)).app(W_BVar(0)).app(W_BVar(0)))
 
         refl_ctor_type = forall(alpha.binder(type=TYPE))(refl_body)
 
-        refl_ctor = refl.constructor(type=refl_ctor_type)
+        refl_ctor = refl.constructor(
+            type=refl_ctor_type, num_params=1, num_fields=1,
+        )
         Eq_decl = Eq.inductive(
             type=inductive_type,
             constructors=[refl_ctor],
@@ -205,6 +211,232 @@ class TestTypeError(object):
             "but is expected to have type\n"
             "  Prop"
         )
+
+    def test_constructor_too_few_param_binders(self):
+        """Rejects a constructor claiming more params than its type has binders."""
+        ind_name = Name.simple("Ind")
+        ind_type = forall(x.binder(type=PROP))(TYPE)
+
+        # mk : Ind   (no binders, but claims 1 param)
+        ctor = ind_name.child("mk").constructor(
+            type=ind_name.const(),
+            num_params=1,
+            num_fields=0,
+        )
+        ind = ind_name.inductive(
+            type=ind_type, constructors=[ctor], num_params=1,
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_result_head_not_const(self):
+        """Rejects a constructor whose result type head is not a constant."""
+        ind_name = Name.simple("Ind")
+        ind_type = forall(x.binder(type=PROP))(TYPE)
+
+        # mk : (x : Prop) → x   (result head is a variable, not Ind)
+        ctor_type = forall(x.binder(type=PROP))(W_BVar(0))
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=1,
+            num_fields=0,
+        )
+        ind = ind_name.inductive(
+            type=ind_type, constructors=[ctor], num_params=1,
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_result_head_wrong_inductive(self):
+        """Rejects a constructor whose result type names a different inductive."""
+        ind_name = Name.simple("Ind")
+        other_name = Name.simple("Other")
+        ind_type = forall(x.binder(type=PROP))(TYPE)
+
+        # mk : (x : Prop) → Other x   (wrong inductive name)
+        ctor_type = forall(x.binder(type=PROP))(
+            other_name.const().app(W_BVar(0)),
+        )
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=1,
+            num_fields=0,
+        )
+        other = other_name.inductive(type=ind_type, num_params=1)
+        ind = ind_name.inductive(
+            type=ind_type, constructors=[ctor], num_params=1,
+        )
+        env = Environment.having([other, ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_result_too_few_args(self):
+        """Rejects a constructor whose result type applies too few arguments."""
+        ind_name = Name.simple("Ind")
+        ind_type = forall(x.binder(type=PROP))(TYPE)
+
+        # mk : (x : Prop) → Ind   (missing the param argument)
+        ctor_type = forall(x.binder(type=PROP))(ind_name.const())
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=1,
+            num_fields=0,
+        )
+        ind = ind_name.inductive(
+            type=ind_type, constructors=[ctor], num_params=1,
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_params_must_match_inductive_params(self):
+        """Constructor result must apply the inductive to its parameter variables."""
+        aProp = Name.simple("aProp").axiom(type=PROP)
+        aProp_const = aProp.const()
+
+        ind_name = Name.simple("Ind")
+        # Ind : Prop → Type
+        ind_type = forall(x.binder(type=PROP))(TYPE)
+
+        # mk : (x : Prop) → Ind aProp   (wrong: should be Ind x)
+        ctor_type = forall(x.binder(type=PROP))(
+            ind_name.const().app(aProp_const),
+        )
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=1,
+            num_fields=0,
+        )
+
+        ind = ind_name.inductive(
+            type=ind_type,
+            constructors=[ctor],
+            num_params=1,
+        )
+
+        env = Environment.having([aProp, ctor, ind])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+        assert errors[0].name == ind_name
+
+    def test_constructor_result_wrong_level_with_zero_params(self):
+        """Rejects wrong universe levels even when the constructor has no term params."""
+        u = Name.simple("u")
+        v = Name.simple("v")
+        ind_name = Name.simple("Foo")
+
+        # Foo.{u} : Type (u+1)
+        ind_type = W_Sort(u.level().succ())
+
+        # mk.{u} : Foo.{v}   (wrong: should be Foo.{u})
+        ctor = ind_name.child("mk").constructor(
+            type=ind_name.const(levels=[v.level()]),
+            num_params=0,
+            num_fields=0,
+            levels=[u],
+        )
+        ind = ind_name.inductive(
+            type=ind_type,
+            constructors=[ctor],
+            num_params=0,
+            levels=[u],
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_result_level_params_must_match(self):
+        """Rejects a constructor whose result type swaps the inductive's level params."""
+        u1, u2 = Name.simple("u1"), Name.simple("u2")
+        ind_name = Name.simple("Ind")
+
+        # Ind.{u1, u2} : Sort u1 → Sort u2 → Type
+        ind_type = forall(
+            x.binder(type=W_Sort(u1.level())),
+            y.binder(type=W_Sort(u2.level())),
+        )(TYPE)
+
+        # mk.{u1, u2} : (x : Sort u1) → (y : Sort u2) → Ind.{u2, u1} x y
+        #   wrong: levels are swapped
+        ctor_type = forall(
+            x.binder(type=W_Sort(u1.level())),
+            y.binder(type=W_Sort(u2.level())),
+        )(ind_name.const(levels=[u2.level(), u1.level()])
+            .app(W_BVar(1)).app(W_BVar(0)))
+
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=2,
+            num_fields=0,
+            levels=[u1, u2],
+        )
+        ind = ind_name.inductive(
+            type=ind_type,
+            constructors=[ctor],
+            num_params=2,
+            levels=[u1, u2],
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_inductive_in_own_index(self):
+        """Rejects a constructor whose result type has the inductive in an index."""
+        ind_name = Name.simple("Ind")
+        aProp = Name.simple("aProp").axiom(type=PROP)
+
+        # Ind : Prop → Prop
+        ind_type = forall(x.binder(type=PROP))(PROP)
+
+        # mk : Ind (Ind aProp)   (inductive in its own index)
+        ctor = ind_name.child("mk").constructor(
+            type=ind_name.const().app(ind_name.const().app(aProp.const())),
+            num_params=0,
+            num_fields=0,
+        )
+        ind = ind_name.inductive(
+            type=ind_type,
+            constructors=[ctor],
+            num_params=0,
+            num_indices=1,
+        )
+        env = Environment.having([aProp, ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_constructor_inductive_in_field_index(self):
+        """Rejects a constructor whose field type has the inductive in an index."""
+        ind_name = Name.simple("Ind")
+
+        # Ind : Type → Type
+        ind_type = forall(x.binder(type=TYPE))(TYPE)
+
+        # mk : (α : Type) → ((x : Nat) → Ind (Ind x)) → Ind α
+        field_type = forall(x.binder(type=NAT))(
+            ind_name.const().app(ind_name.const().app(W_BVar(0))),
+        )
+        ctor_type = forall(
+            a.binder(type=TYPE),
+            f.binder(type=field_type),
+        )(ind_name.const().app(W_BVar(1)))
+
+        ctor = ind_name.child("mk").constructor(
+            type=ctor_type,
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(
+            type=ind_type,
+            constructors=[ctor],
+            num_params=0,
+            num_indices=1,
+        )
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
 
     def test_inductive_type_must_be_sort(self):
         fnType = Name.simple("fnType").definition(
@@ -309,7 +541,10 @@ class TestInvalidDeclaration(object):
         zero = N.child("zero")
         succ = N.child("succ")
         zero_decl = zero.constructor(type=N.const())
-        succ_decl = succ.constructor(type=forall(a.binder(type=N.const()))(N.const()))
+        succ_decl = succ.constructor(
+            type=forall(a.binder(type=N.const()))(N.const()),
+            num_fields=1,
+        )
         N_decl = N.inductive(type=TYPE, constructors=[zero_decl, succ_decl])
         bad = Name.simple("bad").definition(
             type=N.const(),

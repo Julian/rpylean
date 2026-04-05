@@ -24,16 +24,10 @@ def _name_of(path):
 
 XFAILS = frozenset(
     [
-        "043_inductWrongCtorParams",
-        "044_inductWrongCtorResParams",
-        "045_inductWrongCtorResLevel",
-        "046_inductInIndex",
         "047_indNeg",
-        "049_reduceCtorType.mk",
         "050_indNegReducible",
         "054_typeWithTooHighTypeField.mk",
         "105_reflOccLeft",
-        "106_reflOccInIndex",
     ]
 )
 
