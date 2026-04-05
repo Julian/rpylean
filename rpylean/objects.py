@@ -272,6 +272,41 @@ class W_HeartbeatError(W_CheckError):
         return Diagnostic(tokens, NO_SPAN, message)
 
 
+class W_UniverseTooHigh(W_CheckError):
+    """
+    A constructor field's type lives in a universe too high for the inductive.
+    """
+
+    def __init__(
+        self, environment, ctor_type, field_type,
+        field_level, inductive_level, name=None,
+    ):
+        self.environment = environment
+        self.ctor_type = ctor_type
+        self.field_type = field_type
+        self.field_level = field_level
+        self.inductive_level = inductive_level
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit("\nhas field of type\n  ")]
+        message += self.field_type.tokens(declarations)
+        message += [
+            MESSAGE.emit(
+                "\nat universe level %s, but the inductive is at"
+                " universe level %s" % (
+                    self.field_level.str(),
+                    self.inductive_level.str(),
+                ),
+            ),
+        ]
+        return _error_diagnostic(
+            self.declaration, self.name, self.ctor_type,
+            "Invalid constructor ", message, declarations,
+        )
+
+
 class _Item(object):
     """
     A common type for all Lean items.
@@ -3050,21 +3085,22 @@ class W_Inductive(W_DeclarationKind):
             if not isinstance(target, W_ForAll):
                 return W_NotASort(env, type, inferred_type=target, name=None)
             target = target.body.instantiate(target.binder.fvar(), depth)
-        if not isinstance(target.whnf(env), W_Sort):
+        target_sort = target.whnf(env)
+        if not isinstance(target_sort, W_Sort):
             return W_NotASort(
                 env, type, inferred_type=target.infer(env), name=None,
             )
         for ctor in self.constructors:
-            error = self._check_constructor(ctor, env)
+            error = self._check_constructor(ctor, target_sort.level, env)
             if error is not None:
                 return error
 
-    def _check_constructor(self, ctor, env):
+    def _check_constructor(self, ctor, inductive_level, env):
         """
         Verify a constructor is valid for this inductive.
 
-        Checks the result type, index arguments, and strict positivity
-        of field types.
+        Checks the result type, index arguments, universe levels,
+        and strict positivity of field types.
         """
         num_params = ctor.w_kind.num_params
         assert num_params >= 0
@@ -3100,6 +3136,19 @@ class W_Inductive(W_DeclarationKind):
             # Inductive in its own index (e.g. I (I x)).
             if self._has_invalid_index_occurrence(field_type):
                 return error
+            # Universe level: the field's sort must be ≤ the inductive's.
+            # Prop inductives are exempt (their fields can be in any universe).
+            field_sort = field_type.infer(env).whnf(env).expect_sort(env)
+            if (
+                not isinstance(inductive_level, W_LevelZero)
+                and not field_sort.leq(inductive_level)
+            ):
+                return W_UniverseTooHigh(
+                    env, ctor.type, field_type,
+                    field_level=field_sort,
+                    inductive_level=inductive_level,
+                    name=ctor.name,
+                )
             # Strict positivity: the inductive must not appear in a
             # negative position (left of an arrow).
             if not field_type.whnf(env).is_strictly_positive(self, env):

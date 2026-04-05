@@ -22,19 +22,10 @@ def _name_of(path):
     return path.purebasename
 
 
-XFAILS = frozenset(
-    [
-        "054_typeWithTooHighTypeField.mk",
-    ]
-)
-
-
 @pytest.mark.parametrize("path", GOOD, ids=_name_of)
 def test_tutorial_good(path):
     environment = from_export(path.open())
     errors = list(environment.type_check(environment.all()))
-    if errors and _name_of(path) in XFAILS:
-        pytest.xfail("not yet implemented")
     assert not errors
 
 
@@ -45,6 +36,4 @@ def test_tutorial_bad(path):
     except ExportError:
         return
     errors = list(environment.type_check(environment.all()))
-    if not errors and _name_of(path) in XFAILS:
-        pytest.xfail("not yet implemented")
     assert errors

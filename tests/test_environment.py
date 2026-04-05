@@ -15,6 +15,7 @@ from rpylean.objects import (
     W_LevelParam,
     W_NonPositiveOccurrence,
     W_NotAProp,
+    W_UniverseTooHigh,
     W_Sort,
     W_TypeError,
     forall,
@@ -411,18 +412,15 @@ class TestTypeError(object):
     def test_constructor_inductive_in_field_index(self):
         """Rejects a constructor whose field type has the inductive in an index."""
         ind_name = Name.simple("Ind")
+        nat = Name.simple("Nat").inductive(type=TYPE)
 
-        # Ind : Type → Type
-        ind_type = forall(x.binder(type=TYPE))(TYPE)
+        # Ind : Nat → Type (1 index)
+        ind_type = forall(x.binder(type=NAT))(TYPE)
 
-        # mk : (α : Type) → ((x : Nat) → Ind (Ind x)) → Ind α
-        field_type = forall(x.binder(type=NAT))(
-            ind_name.const().app(ind_name.const().app(W_BVar(0))),
-        )
+        # mk : (x : Nat) → Ind (Ind x)  (Ind in its own index)
         ctor_type = forall(
-            a.binder(type=TYPE),
-            f.binder(type=field_type),
-        )(ind_name.const().app(W_BVar(1)))
+            x.binder(type=NAT),
+        )(ind_name.const().app(ind_name.const().app(W_BVar(0))))
 
         ctor = ind_name.child("mk").constructor(
             type=ctor_type,
@@ -435,7 +433,7 @@ class TestTypeError(object):
             num_params=0,
             num_indices=1,
         )
-        env = Environment.having([ctor, ind])
+        env = Environment.having([nat, ctor, ind])
         errors = type_check(env=env)
         assert isinstance(errors[0], W_InvalidConstructorResult)
 
@@ -481,6 +479,45 @@ class TestTypeError(object):
         env = Environment.having([ctor, ind])
         errors = type_check(env=env)
         assert isinstance(errors[0], W_NonPositiveOccurrence)
+
+    def test_constructor_field_universe_too_high(self):
+        """Rejects a constructor whose field lives in a universe above the inductive."""
+        ind_name = Name.simple("Ind")
+
+        # Ind : Type  (Sort 1)
+        # mk : Type → Ind  (field Type has sort Sort 2, too high for Sort 1)
+        ctor = ind_name.child("mk").constructor(
+            type=forall(x.binder(type=TYPE))(ind_name.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(type=TYPE, constructors=[ctor])
+        env = Environment.having([ctor, ind])
+        errors = type_check(env=env)
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == (
+            "inductive Ind : Type\n"
+            "| mk : Type → Ind\n"
+            "       ^^^^^^^^^^\n"
+            "       has field of type\n"
+            "         Type\n"
+            "       at universe level 2,"
+            " but the inductive is at universe level 1"
+        )
+
+    def test_prop_inductive_allows_type_field(self):
+        """Prop inductives are exempt from the universe level check."""
+        ind_name = Name.simple("Ind")
+
+        # Ind : Prop
+        # mk : Type → Ind  (field in Sort 2, but Prop is exempt)
+        ctor = ind_name.child("mk").constructor(
+            type=forall(x.binder(type=TYPE))(ind_name.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(type=PROP, constructors=[ctor])
+        env = Environment.having([ctor, ind])
+        assert type_check(env=env) == []
 
     def test_inductive_type_must_be_sort(self):
         fnType = Name.simple("fnType").definition(
