@@ -163,9 +163,9 @@ def test_empty_dump_natlit():
     ) == EnvironmentBuilder(exprs=[W_LitNat.int(123456789)])
 
 
-@pytest.mark.xfail(reason="until we finish recursors + constructors")
 def test_dump_large_natlit():
-    assert from_str(
+    """Large nat literal parses correctly with Nat inductive in scope."""
+    result = from_str(
         # eval run <| dumpExpr (.lit (.natVal 100000000000000023456789))
         """
         {"in":1,"str":{"pre":0,"str":"Nat"}}
@@ -220,7 +220,8 @@ def test_dump_large_natlit():
         {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[],"name":3,"numFields":1,"numParams":0,"type":2}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[6],"name":5,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":24},{"ctor":3,"nfields":1,"rhs":35}],"type":21}],"types":[{"all":[1],"ctors":[2,3],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
         {"ie":36,"natVal":"100000000000000023456789"}
         """,
-    ) == EnvironmentBuilder(exprs=[W_LitNat.long(100000000000000023456789)])
+    )
+    assert result.exprs[-1] == W_LitNat.long(100000000000000023456789)
 
 
 def test_empty_dump_litstr():
