@@ -6,6 +6,7 @@ from rpylean._tokens import (
     ERROR,
     FORMAT_PLAIN,
     LITERAL,
+    MESSAGE,
     NO_SPAN,
     PLAIN,
     PUNCT,
@@ -167,6 +168,13 @@ class W_Error(Exception):
         """Write this error to a TokenWriter."""
         writer.writeline(self.tokens())
 
+    def diagnostic_in(self, declaration, declarations):
+        """A ``Diagnostic`` for this error within the given declaration."""
+        tokens = [DECL_NAME.emit(declaration.name.str()), PLAIN.emit(" : ")]
+        tokens += declaration.type.tokens(declarations)
+        message = [PLAIN.emit("\n")] + self.tokens()
+        return Diagnostic(tokens, NO_SPAN, message)
+
 
 class W_InvalidDeclaration(W_Error):
     """
@@ -180,11 +188,7 @@ class W_InvalidDeclaration(W_Error):
 
     def as_diagnostic(self):
         """Return this error as a ``Diagnostic`` with declaration context."""
-        decl = self.declaration
-        tokens = [DECL_NAME.emit(decl.name.str()), PLAIN.emit(" : ")]
-        tokens += decl.type.tokens(self.declarations)
-        message = [PLAIN.emit("\n")] + self.inner.tokens()
-        return Diagnostic(tokens, NO_SPAN, message)
+        return self.inner.diagnostic_in(self.declaration, self.declarations)
 
     def tokens(self):
         return self.as_diagnostic().tokens + self.as_diagnostic().message
@@ -194,54 +198,80 @@ class W_InvalidDeclaration(W_Error):
         writer.writeline_diagnostic(self.as_diagnostic())
 
 
-class NotAStructure(W_Error):
-    """
-    A proj expression targets a type that is not a single-constructor inductive.
-    """
-
-    def __init__(self, struct_decl):
-        self.struct_decl = struct_decl
-
-    def tokens(self):
-        n = len(self.struct_decl.w_kind.constructors)
-        return [
-            DECL_NAME.emit(self.struct_decl.name.str()),
-            ERROR.emit(
-                " is not a structure: it has %d constructor%s"
-                % (n, "s" if n != 1 else "")
-            ),
-        ]
-
-
-class UnknownStructure(W_Error):
-    """
-    A proj expression names a structure type that is not in the environment.
-    """
-
-    def __init__(self, name):
-        self.name = name
-
-    def tokens(self):
-        return [
-            ERROR.emit("unknown structure: "),
-            DECL_NAME.emit(self.name.str()),
-        ]
-
-
 class InvalidProjection(W_Error):
     """
     A projection expression is invalid.
-
-    Use the static factory methods to construct instances with the appropriate message.
     """
 
-    def __init__(self, structure, field_index, suffix_tokens):
-        self.structure = structure
+    def __init__(self, struct_name, field_index, expr, suffix_tokens):
+        self.struct_name = struct_name
         self.field_index = field_index
-        self.suffix_tokens = suffix_tokens
+        self.expr = expr
+        self._suffix = suffix_tokens
+
+    def tokens(self):
+        return [
+            ERROR.emit("invalid projection "),
+            DECL_NAME.emit(self.struct_name.str()),
+            PUNCT.emit("."),
+            LITERAL.emit("%d" % self.field_index),
+            ERROR.emit(": "),
+        ] + self._suffix
+
+    def diagnostic_in(self, declaration, declarations):
+        if self.expr is not None:
+            span_holder = [NO_SPAN]
+            tokens = declaration.tokens(
+                declarations, mark=self.expr, span_holder=span_holder,
+            )
+            if span_holder[0] != NO_SPAN:
+                message = [MESSAGE.emit("\n")] + self._suffix
+                return Diagnostic(tokens, span_holder[0], message)
+            # Exact subexpression not found (e.g. nested lambdas);
+            # fall back to marking the whole declaration value.
+            value = declaration.w_kind.get_delta_reduce_target()
+            if value is not None:
+                span_holder = [NO_SPAN]
+                tokens = declaration.tokens(
+                    declarations, mark=value, span_holder=span_holder,
+                )
+                if span_holder[0] != NO_SPAN:
+                    message = [MESSAGE.emit("\n")] + self.tokens()
+                    return Diagnostic(tokens, span_holder[0], message)
+        return W_Error.diagnostic_in(self, declaration, declarations)
 
     @staticmethod
-    def out_of_bounds(structure, field_index, num_fields):
+    def not_a_structure(struct_name, field_index, num_constructors, expr):
+        """The projection target is not a single-constructor inductive."""
+        n = num_constructors
+        return InvalidProjection(
+            struct_name,
+            field_index,
+            expr,
+            [
+                DECL_NAME.emit(struct_name.str()),
+                ERROR.emit(
+                    " is not a structure (it has %d constructor%s)"
+                    % (n, "s" if n != 1 else "")
+                ),
+            ],
+        )
+
+    @staticmethod
+    def unknown_structure(struct_name, field_index, expr):
+        """The projection names a structure not in the environment."""
+        return InvalidProjection(
+            struct_name,
+            field_index,
+            expr,
+            [
+                ERROR.emit("unknown structure "),
+                DECL_NAME.emit(struct_name.str()),
+            ],
+        )
+
+    @staticmethod
+    def out_of_bounds(struct_name, field_index, num_fields, expr):
         """The field index exceeds the number of fields in the structure."""
         if num_fields == 0:
             info = "no fields"
@@ -250,32 +280,29 @@ class InvalidProjection(W_Error):
         else:
             info = "only %d fields" % num_fields
         return InvalidProjection(
-            structure,
+            struct_name,
             field_index,
-            [ERROR.emit("%s has %s" % (structure.name.str(), info))],
+            expr,
+            [ERROR.emit("%s has %s" % (struct_name.str(), info))],
         )
 
     @staticmethod
-    def non_prop_field(structure, field_index):
+    def non_prop_field(struct_name, field_index, expr):
         """The field is not propositional but the structure is Prop-valued."""
         return InvalidProjection(
-            structure,
+            struct_name,
             field_index,
+            expr,
             [
                 ERROR.emit(
-                    "cannot project a non-propositional field from a propositional structure"
+                    "cannot project a non-propositional field"
+                    " from a propositional structure"
                 )
             ],
         )
 
-    def tokens(self):
-        return [
-            ERROR.emit("invalid projection "),
-            DECL_NAME.emit(self.structure.name.str()),
-            PUNCT.emit("."),
-            LITERAL.emit("%d" % self.field_index),
-            ERROR.emit(": "),
-        ] + self.suffix_tokens
+    def _suffix_tokens(self):
+        return self._suffix
 
 
 class HeartbeatExceeded(W_Error):

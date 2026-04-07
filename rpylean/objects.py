@@ -21,8 +21,6 @@ from rpylean._tokens import (
 from rpylean._tokens import indent
 from rpylean.exceptions import (
     InvalidProjection,
-    NotAStructure,
-    UnknownStructure,
     W_Error,
 )
 
@@ -1235,6 +1233,17 @@ class W_Expr(_Item):
     def expect_sort(self, env):
         raise W_NotASort(env, self, inferred_type=self, name=None)
 
+    def binder_name(self, index):
+        """The name of the ``index``-th binder, or None."""
+        expr = self
+        i = 0
+        while isinstance(expr, W_ForAll):
+            if i == index:
+                return expr.binder.name.str()
+            i += 1
+            expr = expr.body
+        return None
+
     def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this expression, defaulting to plain text."""
         return [PLAIN.emit(self.str())]
@@ -1921,29 +1930,40 @@ class W_Proj(W_Expr):
             and def_eq(self.struct_expr, other.struct_expr)
         )
 
+    def _field_name(self, constants):
+        """The name of the projected field, or its numeric index as a string."""
+        decl = constants.get(self.struct_name, None)
+        if decl is not None:
+            name = decl.w_kind.field_name(self.field_index)
+            if name is not None:
+                return name
+        return "%d" % self.field_index
+
     def tokens(self, constants, mark=None, span_holder=None):
-        struct_decl = constants[self.struct_name]
-        inductive = struct_decl.w_kind
-        assert isinstance(inductive, W_Inductive)
-        assert len(inductive.constructors) == 1
-        (constructor,) = inductive.constructors
-        field_names = []
-        constructor_type = constructor.type
-        while isinstance(constructor_type, W_ForAll):
-            field_names.append(constructor_type.binder.name.str())
-            constructor_type = constructor_type.body
-        field_name = field_names[self.field_index]
+        # When the struct_expr is the marked expression, widen the span
+        # to cover the whole projection (struct_expr + "." + field_name)
+        # rather than just the struct_expr alone.
+        mark_whole = (
+            mark is not None
+            and span_holder is not None
+            and span_holder[0] == NO_SPAN
+            and mark is self.struct_expr
+        )
+        field_name = self._field_name(constants)
         result = []
         needs_parens = isinstance(self.struct_expr, W_App)
         if needs_parens:
             result.append(PUNCT.emit("("))
         _append_marked_tokens(
-            result, span_holder, self.struct_expr, constants, mark,
+            result, span_holder, self.struct_expr, constants,
+            None if mark_whole else mark,
         )
         if needs_parens:
             result.append(PUNCT.emit(")"))
         result.append(PUNCT.emit("."))
         result.append(DECL_NAME.emit(field_name))
+        if mark_whole:
+            span_holder[0] = (0, len(result))
         return result
 
     def _whnf_core(self, env):
@@ -2013,7 +2033,9 @@ class W_Proj(W_Expr):
         try:
             struct_type = get_decl(env.declarations, self.struct_name)
         except KeyError:
-            raise UnknownStructure(self.struct_name)
+            raise InvalidProjection.unknown_structure(
+                self.struct_name, self.field_index, self.struct_expr,
+            )
 
         # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
         assert isinstance(struct_expr_type, W_Const), (
@@ -2028,7 +2050,10 @@ class W_Proj(W_Expr):
         assert isinstance(struct_type, W_Declaration)
         assert isinstance(struct_type.w_kind, W_Inductive)
         if len(struct_type.w_kind.constructors) != 1:
-            raise NotAStructure(struct_type)
+            raise InvalidProjection.not_a_structure(
+                self.struct_name, self.field_index,
+                len(struct_type.w_kind.constructors), self.struct_expr,
+            )
 
         ind_type_whnf = apply_const_level_params(
             struct_expr_type, struct_type.type, env
@@ -2064,7 +2089,8 @@ class W_Proj(W_Expr):
             ctor_type = ctor_type.whnf(env)
             if not isinstance(ctor_type, W_ForAll):
                 raise InvalidProjection.out_of_bounds(
-                    struct_type, self.field_index, i + 1
+                    self.struct_name, self.field_index, i + 1,
+                    self.struct_expr,
                 )
             if ctor_type.body.loose_bvar_range > 0:
                 # Later fields depend on this one; for Prop structs the field must be Prop.
@@ -2075,7 +2101,8 @@ class W_Proj(W_Expr):
                         and field_sort.level.eq(W_LEVEL_ZERO)
                     ):
                         raise InvalidProjection.non_prop_field(
-                            struct_type, self.field_index
+                            self.struct_name, self.field_index,
+                            self.struct_expr,
                         )
                 proj = self.struct_name.proj(i, self.struct_expr)
                 ctor_type = ctor_type.body.instantiate(proj)
@@ -2085,7 +2112,9 @@ class W_Proj(W_Expr):
 
         ctor_type = ctor_type.whnf(env)
         if not isinstance(ctor_type, W_ForAll):
-            raise InvalidProjection.out_of_bounds(struct_type, self.field_index, i + 1)
+            raise InvalidProjection.out_of_bounds(
+                self.struct_name, self.field_index, i + 1, self.struct_expr,
+            )
 
         # For Prop-valued structures the target field itself must live in Prop.
         if is_prop_type:
@@ -2093,7 +2122,9 @@ class W_Proj(W_Expr):
             if not (
                 isinstance(field_sort, W_Sort) and field_sort.level.eq(W_LEVEL_ZERO)
             ):
-                raise InvalidProjection.non_prop_field(struct_type, self.field_index)
+                raise InvalidProjection.non_prop_field(
+                    self.struct_name, self.field_index, self.struct_expr,
+                )
 
         return ctor_type.binder.type
 
@@ -2968,6 +2999,10 @@ class W_DeclarationKind(_Item):
     def get_delta_reduce_target(self):
         return None
 
+    def field_name(self, index):
+        """The name of the field at ``index``, or None."""
+        return None
+
 
 #: Reducibility hints. For regular we use positive ints.
 HINT_OPAQUE = -2
@@ -3078,6 +3113,11 @@ class W_Inductive(W_DeclarationKind):
         self.num_indices = num_indices
         self.is_reflexive = is_reflexive
         self.is_recursive = is_recursive
+
+    def field_name(self, index):
+        if len(self.constructors) != 1:
+            return None
+        return self.constructors[0].type.binder_name(index)
 
     def type_check(self, type, env):
         target = type

@@ -5,7 +5,7 @@ Type inference of Lean objects.
 import pytest
 
 from rpylean.environment import Environment
-from rpylean.exceptions import InvalidProjection, NotAStructure, UnknownStructure
+from rpylean.exceptions import InvalidProjection
 from rpylean.objects import (
     NAT,
     PROP,
@@ -188,9 +188,9 @@ class TestProj(object):
         N_decl = N.inductive(type=TYPE, constructors=[zero_decl, succ_decl])
         env = Environment.having([N_decl, zero_decl, succ_decl])
         proj = N.proj(0, zero.const())
-        with pytest.raises(NotAStructure) as e:
+        with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
-        assert str(e.value) == "N is not a structure: it has 2 constructors"
+        assert str(e.value) == "invalid projection N.0: N is not a structure (it has 2 constructors)"
 
     def test_unknown_structure(self):
         Foo = Name.simple("Foo")
@@ -198,9 +198,9 @@ class TestProj(object):
         bar_decl = Bar.axiom(type=Foo.const())
         env = Environment.having([bar_decl])
         proj = Foo.proj(0, bar_decl.const())
-        with pytest.raises(UnknownStructure) as e:
+        with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
-        assert str(e.value) == "unknown structure: Foo"
+        assert str(e.value) == "invalid projection Foo.0: unknown structure Foo"
 
     def test_prop_projection_of_prop_field_allowed(self):
         Foo = Name.simple("Foo")

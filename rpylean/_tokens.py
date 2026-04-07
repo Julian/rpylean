@@ -170,14 +170,16 @@ class Diagnostic(object):
                     caret_width = 1
                 indent_str = " " * leftmost
                 result_parts.append("\n")
-                result_parts.append(indent_str + "^" * caret_width)
+                result_parts.append(indent_str)
+                result_parts.append("^" * caret_width)
                 if j == last_span_line:
                     msg = formatter(message)
                     if msg.startswith("\n"):
                         msg = msg[1:]
                     for msg_line in msg.split("\n"):
                         result_parts.append("\n")
-                        result_parts.append(indent_str + msg_line)
+                        result_parts.append(indent_str)
+                        result_parts.append(msg_line)
                     break
             if j < len(lines) - 1:
                 result_parts.append("\n")

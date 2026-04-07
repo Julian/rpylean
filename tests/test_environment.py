@@ -617,7 +617,7 @@ class TestDiagnosticTokens(object):
 
 
 class TestInvalidDeclaration(object):
-    def test_proj_error_wraps_with_declaration_name(self):
+    def test_not_a_structure_diagnostic(self):
         N = Name.simple("N")
         zero = N.child("zero")
         succ = N.child("succ")
@@ -634,11 +634,91 @@ class TestInvalidDeclaration(object):
         env = Environment.having([N_decl, zero_decl, succ_decl, bad])
         errors = type_check(env=env)
         assert len(errors) == 1
-        assert isinstance(errors[0], W_InvalidDeclaration)
-        assert str(errors[0]) == dedent(
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
-            bad : N
-            N is not a structure: it has 2 constructors""",
+            def bad : N :=
+              fun x ↦ x.0
+                      ^^^
+                      N is not a structure (it has 2 constructors)""",
+        )
+
+    def test_invalid_projection_out_of_bounds_diagnostic(self):
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        ctor_type = forall(a.binder(type=PROP))(Foo.const())
+        mk_decl = mk.constructor(type=ctor_type)
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        bad = Name.simple("bad").definition(
+            type=PROP,
+            value=Foo.proj(3, mk.app(PROP)),
+        )
+        env = Environment.having([Foo_decl, mk_decl, bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def bad : Prop :=
+              (Foo.mk Prop).3
+              ^^^^^^^^^^^^^^^
+              Foo has only 2 fields""",
+        )
+
+    def test_nested_lambda_projection_marks_value(self):
+        """Projection inside nested lambdas marks the whole value."""
+        z = Name.simple("z")
+        And = Name.simple("And")
+        intro = And.child("intro")
+        intro_decl = intro.constructor(
+            type=forall(
+                a.binder(type=PROP), x.binder(type=PROP),
+                Name.simple("left").binder(type=b1),
+                Name.simple("right").binder(type=b1),
+            )(And.app(W_BVar(3), W_BVar(2))),
+            num_params=2,
+        )
+        And_decl = And.inductive(
+            type=forall(a.binder(type=PROP), x.binder(type=PROP))(PROP),
+            constructors=[intro_decl],
+            num_params=2,
+        )
+        # z's binder type refers to both outer binders, so instantiation
+        # copies the inner lambda and its binder, breaking fvar identity.
+        bad = Name.simple("bad").definition(
+            type=PROP,
+            value=fun(
+                a.binder(type=PROP),
+                x.binder(type=PROP),
+                z.binder(type=And.app(b1, b0)),
+            )(And.proj(2, b0)),
+        )
+        env = Environment.having([And_decl, intro_decl, bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def bad : Prop :=
+              fun a x z ↦ z.left
+              ^^^^^^^^^^^^^^^^^^
+              invalid projection And.2: And has only 2 fields""",
+        )
+
+    def test_unknown_structure_diagnostic(self):
+        Foo = Name.simple("Foo")
+        Bar = Name.simple("Bar")
+        bar_decl = Bar.axiom(type=Foo.const())
+        bad = Name.simple("bad").definition(
+            type=PROP,
+            value=Foo.proj(0, bar_decl.const()),
+        )
+        env = Environment.having([bar_decl, bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def bad : Prop :=
+              Bar.0
+              ^^^^^
+              unknown structure Foo""",
         )
 
 
