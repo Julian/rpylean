@@ -93,6 +93,31 @@ class TestTypeCheck(object):
             but is expected to be a Sort (Type or Prop)""",
         )
 
+    def test_axiom_type_must_be_sort(self):
+        """
+        An axiom's type must infer to a Sort.
+
+        If its type is not a Sort, type checking should report an error.
+        """
+        constType = Name.simple("constType")
+        constType_decl = constType.definition(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            value=fun(x.binder(type=TYPE))(b0),
+        )
+        env = Environment.having([constType_decl])
+
+        bad_axiom = Name.simple("badAxiom").axiom(type=constType.const())
+        error = bad_axiom.type_check(env)
+        assert error is not None
+        assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            axiom badAxiom : constType
+                             ^^^^^^^^^
+                             has type
+                               Type → Type
+                             but is expected to be a Sort (Type or Prop)""",
+        )
+
     def test_binder_type_with_non_sort_definition_raises(self):
         """
         A binder type must be a Sort (Type or Prop), not a function type.
@@ -705,7 +730,7 @@ class TestInvalidDeclaration(object):
     def test_unknown_structure_diagnostic(self):
         Foo = Name.simple("Foo")
         Bar = Name.simple("Bar")
-        bar_decl = Bar.axiom(type=Foo.const())
+        bar_decl = Bar.axiom(type=TYPE)
         bad = Name.simple("bad").definition(
             type=PROP,
             value=Foo.proj(0, bar_decl.const()),

@@ -3089,8 +3089,9 @@ class W_Axiom(W_DeclarationKind):
         return result
 
     def type_check(self, type, env):
-        # TODO - implement type checking
-        pass
+        type_type = type.infer(env)
+        if not isinstance(type_type.whnf(env), W_Sort):
+            return W_NotASort(env, type, inferred_type=type_type, name=None)
 
 
 class W_Inductive(W_DeclarationKind):
