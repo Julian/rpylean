@@ -11,6 +11,7 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
+    W_ConstructorFieldCountMismatch,
     W_InvalidConstructorResult,
     W_LevelParam,
     W_NonPositiveOccurrence,
@@ -529,6 +530,68 @@ class TestTypeError(object):
             " but the inductive is at universe level 1"
         )
 
+    def test_constructor_num_fields_mismatch(self):
+        """Rejects a constructor whose num_fields doesn't match its type's binders."""
+        nat = Name.simple("Nat").inductive(type=TYPE)
+        ind_name = Name.simple("Ind")
+
+        # Ind : Type
+        # mk : Nat → Nat → Ind   (2 fields in the type)
+        # but we declare num_fields=1 (wrong)
+        ctor = ind_name.child("mk").constructor(
+            type=forall(
+                x.binder(type=NAT),
+                y.binder(type=NAT),
+            )(ind_name.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = ind_name.inductive(type=TYPE, constructors=[ctor])
+        env = Environment.having([nat, ctor, ind])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_ConstructorFieldCountMismatch)
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == (
+            "inductive Ind : Type\n"
+            "| mk : Nat → Nat → Ind\n"
+            "       ^^^^^^^^^^^^^^^\n"
+            "       constructor declares 1 field but type has 2"
+        )
+
+    def test_constructor_num_fields_mismatch_with_params(self):
+        """The diagnostic highlights the fields, not the params."""
+        nat = Name.simple("Nat").inductive(type=TYPE)
+        ind_name = Name.simple("Ind")
+
+        # Ind : Type → Type   (1 param)
+        ind_type = forall(x.binder(type=TYPE))(TYPE)
+
+        # mk : (α : Type) → Nat → Nat → Ind α   (2 fields)
+        # but we declare num_fields=3 (wrong)
+        alpha = Name.simple("α")
+        ctor = ind_name.child("mk").constructor(
+            type=forall(
+                alpha.binder(type=TYPE),
+                x.binder(type=NAT),
+                y.binder(type=NAT),
+            )(ind_name.const().app(W_BVar(2))),
+            num_params=1,
+            num_fields=3,
+        )
+        ind = ind_name.inductive(
+            type=ind_type, constructors=[ctor], num_params=1,
+        )
+        env = Environment.having([nat, ctor, ind])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_ConstructorFieldCountMismatch)
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == (
+            "inductive Ind : Type → Type\n"
+            "| mk : (α : Type) → Nat → Nat → Ind α\n"
+            "       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            "       constructor declares 3 fields but type has 2"
+        )
+
     def test_prop_inductive_allows_type_field(self):
         """Prop inductives are exempt from the universe level check."""
         ind_name = Name.simple("Ind")
@@ -671,7 +734,7 @@ class TestInvalidDeclaration(object):
         Foo = Name.simple("Foo")
         mk = Foo.child("mk")
         ctor_type = forall(a.binder(type=PROP))(Foo.const())
-        mk_decl = mk.constructor(type=ctor_type)
+        mk_decl = mk.constructor(type=ctor_type, num_fields=1)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
         bad = Name.simple("bad").definition(
             type=PROP,
@@ -700,6 +763,7 @@ class TestInvalidDeclaration(object):
                 Name.simple("right").binder(type=b1),
             )(And.app(W_BVar(3), W_BVar(2))),
             num_params=2,
+            num_fields=2,
         )
         And_decl = And.inductive(
             type=forall(a.binder(type=PROP), x.binder(type=PROP))(PROP),

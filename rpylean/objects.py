@@ -177,6 +177,34 @@ class W_InvalidConstructorResult(W_CheckError):
         )
 
 
+class W_ConstructorFieldCountMismatch(W_CheckError):
+    """
+    A constructor's declared num_fields does not match its type's binders.
+    """
+
+    def __init__(self, environment, ctor_type, declared, actual, name=None):
+        self.environment = environment
+        self.ctor_type = ctor_type
+        self.declared = declared
+        self.actual = actual
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit(
+            "\nconstructor declares %d field%s"
+            " but type has %d" % (
+                self.declared,
+                "s" if self.declared != 1 else "",
+                self.actual,
+            ),
+        )]
+        return _error_diagnostic(
+            self.declaration, self.name, self.ctor_type,
+            "Invalid constructor ", message, declarations,
+        )
+
+
 class W_NonPositiveOccurrence(W_CheckError):
     """
     A constructor field type has the inductive in a non-positive position.
@@ -3152,6 +3180,13 @@ class W_Inductive(W_DeclarationKind):
             return error
         param_fvars = all_fvars[:num_params]
         remaining_fvars = all_fvars[num_params:]
+        if len(remaining_fvars) != ctor.w_kind.num_fields:
+            return W_ConstructorFieldCountMismatch(
+                env, ctor.type,
+                declared=ctor.w_kind.num_fields,
+                actual=len(remaining_fvars),
+                name=ctor.name,
+            )
         # ctor_type is now the result type, e.g. Ind p1 p2 ... idx1 idx2 ...
         head, rev_args = ctor_type.unapp()
         if not head.is_named(ind_name):
