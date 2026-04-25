@@ -2689,6 +2689,7 @@ class W_App(W_Expr):
             raise RuntimeError(
                 "W_App.infer: expected function type, got %s" % type(fn_type)
             )
+        assert env.def_eq(fn_type.binder.type, self.arg.infer(env))
         body_type = fn_type.body.instantiate(self.arg)
         return body_type
 
