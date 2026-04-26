@@ -6,6 +6,7 @@ Tests for definitional equality of Lean objects.
 import pytest
 
 from io import BytesIO
+from textwrap import dedent
 
 from rpylean.environment import Environment, StreamTracer
 from rpylean.objects import (
@@ -663,8 +664,8 @@ def test_trace_def_eq():
     assert "def_eq" in trace.getvalue()
 
 
-def test_trace_leaf_result_on_same_line():
-    """A leaf def_eq (no children) shows the result on the same line."""
+def test_trace_def_eq_records_whnf_of_each_side():
+    """A def_eq trace nests the WHNF reduction of each side under it."""
     trace = BytesIO()
     from rpylean._tokens import TokenWriter, FORMAT_PLAIN
 
@@ -673,7 +674,14 @@ def test_trace_leaf_result_on_same_line():
     )
     traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
     traced_env.def_eq(NAT, NAT)
-    assert trace.getvalue().decode("utf-8") == u"def_eq Nat ≟ Nat ✓\n"
+    assert trace.getvalue().decode("utf-8") == dedent(
+        u"""\
+        def_eq Nat ≟ Nat
+          whnf Nat
+          whnf Nat
+        ✓
+        """,
+    )
 
 
 def test_trace_uses_check_and_cross_marks():

@@ -2,7 +2,7 @@
 Tests for weak head normal form (WHNF) reduction.
 """
 
-from rpylean.environment import Environment
+from rpylean.environment import Environment, Tracer
 from rpylean.objects import (
     NAT,
     TYPE,
@@ -17,6 +17,17 @@ from rpylean.objects import (
     names,
     syntactic_eq,
 )
+
+
+class _CollectingTracer(Tracer):
+    """Tracer that records each form seen during WHNF reduction."""
+
+    def __init__(self):
+        Tracer.__init__(self, None)
+        self.steps = []
+
+    def whnf_step(self, expr, declarations):
+        self.steps.append(expr)
 
 
 Quot = Name.simple("Quot")
@@ -879,3 +890,148 @@ def test_quot_lift_reduction():
 
     reduced = lift_app.whnf(env)
     assert syntactic_eq(reduced, f.const().app(a.const()))
+
+
+class TestTracer(object):
+    """The tracer is invoked with each intermediate expression during WHNF."""
+
+    def test_default_tracer_does_not_disturb_reduction(self):
+        """WHNF returns the same result whether or not a tracer is observing."""
+        a_decl = a.axiom(type=NAT)
+        env = Environment.having([a_decl])
+        assert syntactic_eq(a_decl.const().whnf(env), a_decl.const())
+
+    def test_already_whnf_records_only_input(self):
+        """An expression already in WHNF yields a single trace entry."""
+        a_decl = a.axiom(type=NAT)
+        tracer = _CollectingTracer()
+        env = Environment.having([a_decl])
+        env.tracer = tracer
+
+        const = a_decl.const()
+        const.whnf(env)
+
+        assert len(tracer.steps) == 1
+        assert tracer.steps[0] is const
+
+    def test_beta_reduction_records_each_step(self):
+        """(fun x ↦ x) a reduces in one step: traces input then result."""
+        a_decl = a.axiom(type=NAT)
+        tracer = _CollectingTracer()
+        env = Environment.having([a_decl])
+        env.tracer = tracer
+
+        identity = fun(x.binder(type=NAT))(b0)
+        app = identity.app(a_decl.const())
+        app.whnf(env)
+
+        assert len(tracer.steps) == 2
+        assert tracer.steps[0] is app
+        assert syntactic_eq(tracer.steps[1], a_decl.const())
+
+    def test_delta_then_beta_records_full_chain(self):
+        """f a where f := fun x ↦ x traces f a, (fun x ↦ x) a, then a."""
+        a_decl = a.axiom(type=NAT)
+        f_decl = f.definition(
+            type=forall(x.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT))(b0),
+        )
+        tracer = _CollectingTracer()
+        env = Environment.having([f_decl, a_decl])
+        env.tracer = tracer
+
+        app = f_decl.const().app(a_decl.const())
+        app.whnf(env)
+
+        assert len(tracer.steps) == 3
+        assert tracer.steps[0] is app
+        assert syntactic_eq(
+            tracer.steps[1],
+            fun(x.binder(type=NAT))(b0).app(a_decl.const()),
+        )
+        assert syntactic_eq(tracer.steps[2], a_decl.const())
+
+    def test_definition_unfold_records_each_step(self):
+        """a := b traces a then b."""
+        b_decl = b.axiom(type=NAT)
+        a_decl = a.definition(type=NAT, value=b_decl.const())
+        tracer = _CollectingTracer()
+        env = Environment.having([a_decl, b_decl])
+        env.tracer = tracer
+
+        a_decl.const().whnf(env)
+
+        assert len(tracer.steps) == 2
+        assert syntactic_eq(tracer.steps[0], a_decl.const())
+        assert syntactic_eq(tracer.steps[1], b_decl.const())
+
+    def test_proj_nested_whnf_records_inner_steps(self):
+        """
+        Projection reduction whnfs its struct expression in a nested call,
+        and the tracer sees the inner steps as well as the outer ones.
+        """
+        Foo = Name.simple("Foo")
+        Foo_mk = Foo.child("mk")
+        mk_decl = Foo_mk.constructor(
+            type=forall(
+                a.binder(type=TYPE).to_implicit(),
+                x.binder(type=b0),
+            )(Foo.const().app(b1)),
+            num_params=1,
+            num_fields=1,
+        )
+        foo_type = Foo.inductive(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            constructors=[mk_decl],
+            num_params=1,
+        )
+
+        myVal_decl = Name.simple("myVal").axiom(type=NAT)
+        # def origin := Foo.mk Nat myVal — forces a nested whnf when projected.
+        origin_decl = Name.simple("origin").definition(
+            type=Foo.const().app(NAT),
+            value=Foo_mk.const().app(NAT, myVal_decl.const()),
+        )
+        env = Environment.having([foo_type, mk_decl, myVal_decl, origin_decl])
+
+        tracer = _CollectingTracer()
+        env.tracer = tracer
+
+        proj = Foo.proj(field_index=0, struct_expr=origin_decl.const())
+        proj.whnf(env)
+
+        # 1: outer proj input
+        # 2: nested whnf on `origin` (input)
+        # 3: nested whnf — `origin` deltas to `Foo.mk Nat myVal`
+        # 4: outer proj iota extracts field, lands on `myVal`
+        assert len(tracer.steps) == 4
+        assert tracer.steps[0] is proj
+        assert syntactic_eq(tracer.steps[1], origin_decl.const())
+        assert syntactic_eq(
+            tracer.steps[2],
+            Foo_mk.const().app(NAT, myVal_decl.const()),
+        )
+        assert syntactic_eq(tracer.steps[3], myVal_decl.const())
+
+    def test_stream_tracer_renders_each_step(self):
+        """StreamTracer writes one indented `whnf <expr>` line per step."""
+        from io import BytesIO
+        from textwrap import dedent
+
+        from rpylean._tokens import FORMAT_PLAIN, TokenWriter
+        from rpylean.environment import StreamTracer
+
+        b_decl = b.axiom(type=NAT)
+        a_decl = a.definition(type=NAT, value=b_decl.const())
+        env = Environment.having([a_decl, b_decl])
+
+        out = BytesIO()
+        env.tracer = StreamTracer(TokenWriter(out, FORMAT_PLAIN))
+        a_decl.const().whnf(env)
+
+        assert out.getvalue().decode("utf-8") == dedent(
+            u"""\
+            whnf a
+            whnf b
+            """,
+        )

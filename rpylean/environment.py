@@ -174,6 +174,13 @@ class Tracer(object):
         """Called when leaving a def_eq comparison. Returns the value."""
         return value
 
+    def whnf_step(self, expr, declarations):
+        """Called for each form encountered during WHNF reduction.
+
+        Invoked once per iteration of the reduction loop, including for the
+        initial expression and the final form returned as the WHNF.
+        """
+
 
 class StreamTracer(Tracer):
     """
@@ -185,10 +192,13 @@ class StreamTracer(Tracer):
         self._depth = 0
         self._pending_newline = False
 
-    def enter(self, expr1, expr2, declarations):
+    def _flush_pending(self):
         if self._pending_newline:
             self._writer.write_plain("\n")
             self._pending_newline = False
+
+    def enter(self, expr1, expr2, declarations):
+        self._flush_pending()
         indent = "  " * self._depth
         self._writer.write_plain(indent)
         self._writer.write([TRACE.emit("def_eq")])
@@ -209,6 +219,15 @@ class StreamTracer(Tracer):
             indent = "  " * self._depth
             self._writer.write_plain("%s%s\n" % (indent, mark.lstrip()))
         return value
+
+    def whnf_step(self, expr, declarations):
+        self._flush_pending()
+        indent = "  " * self._depth
+        self._writer.write_plain(indent)
+        self._writer.write([TRACE.emit("whnf")])
+        self._writer.write_plain(" ")
+        self._writer.write(expr.tokens(declarations))
+        self._writer.write_plain("\n")
 
 
 class _DefEqCacheEntry(object):

@@ -1254,6 +1254,7 @@ class W_Expr(_Item):
                 env=env,
                 made_progress=made_progress,
             )
+            env.tracer.whnf_step(expr, env.declarations)
             next = expr._whnf_core(env)
             if next is None:
                 return (expr, made_progress)

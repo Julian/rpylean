@@ -7,6 +7,7 @@ from rpython.rlib.rfile import create_stdio
 import os
 
 from rpylean._tokens import ERROR, FORMAT_COLOR, PROMPT, TokenWriter
+from rpylean.environment import StreamTracer
 from rpylean.objects import Name
 
 
@@ -134,6 +135,30 @@ def print_decl(env, args, _, stdoutw, stderrw):
         stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
     stdoutw.writeline(declaration.tokens(env.declarations))
+
+
+@command(
+    ["reduce", "r"],
+    nargs=1,
+    help="Step through WHNF reduction of a declaration's value.",
+)
+def reduce_decl(env, args, _, stdoutw, stderrw):
+    name = Name.from_str(args[0])
+    declaration = env.declarations.get(name, None)
+    if declaration is None:
+        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
+        return
+    target = declaration.w_kind.get_delta_reduce_target()
+    if target is None:
+        stderrw.write_plain("%s has no reducible value.\n" % name.str())
+        return
+
+    prev_tracer = env.tracer
+    env.tracer = StreamTracer(stdoutw)
+    try:
+        target.whnf(env)
+    finally:
+        env.tracer = prev_tracer
 
 
 @command(
