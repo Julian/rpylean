@@ -149,6 +149,12 @@ def dump(self, args, stdin, stdout, stderr):
 @cli.subcommand(
     ["EXPORT_FILE"],
     help="Open a REPL with the given export's environment loaded into it.",
+    options=[
+        (
+            "command",
+            "run a single REPL command and exit instead of starting an interactive session",
+        ),
+    ],
 )
 def repl(self, args, stdin, stdout, stderr):
     (path,) = args.args
@@ -160,6 +166,13 @@ def repl(self, args, stdin, stdout, stderr):
         stderrw.write_plain("\n")
         return 1
     from rpylean import repl
+
+    command = args.options["command"]
+    if command is not None:
+        stdoutw = writer_from_arg("auto", stdout)
+        stderrw = writer_from_arg("auto", stderr)
+        ok = repl.dispatch(environment, command, stdin, stdoutw, stderrw)
+        return 0 if ok else 1
 
     repl.interact(environment)
     return 0

@@ -148,15 +148,16 @@ def reduce_decl(env, args, _, stdoutw, stderrw):
     if declaration is None:
         stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
-    target = declaration.w_kind.get_delta_reduce_target()
-    if target is None:
+    if declaration.w_kind.get_delta_reduce_target() is None:
         stderrw.write_plain("%s has no reducible value.\n" % name.str())
         return
+
+    const = declaration.const_with_level_params()
 
     prev_tracer = env.tracer
     env.tracer = StreamTracer(stdoutw)
     try:
-        target.whnf(env)
+        const.whnf(env)
     finally:
         env.tracer = prev_tracer
 
@@ -199,6 +200,23 @@ def quit(*args):
     os._exit(0)
 
 
+def dispatch(env, input, stdin, stdoutw, stderrw):
+    """
+    Run a single REPL command line.
+
+    Returns ``True`` if the command was found (regardless of what it did),
+    or ``False`` when the command name is unknown.
+    """
+    split = input.split(" ", 1)
+    command = split[0]
+    fn = COMMANDS.get(command, None)
+    if fn is None:
+        stderrw.write_plain("Unknown command: %s\n" % command)
+        return False
+    fn(env, split[1:], stdin, stdoutw, stderrw)
+    return True
+
+
 def interact(env):
     stdin, stdout, stderr = create_stdio()
     stdoutw = TokenWriter(stdout, FORMAT_COLOR)
@@ -221,12 +239,4 @@ def interact(env):
             input = last
 
         last = input
-
-        split = input.split(" ", 1)
-        command = split[0]
-
-        fn = COMMANDS.get(command, None)
-        if fn is None:
-            stderr.write("Unknown command: %s\n" % command)
-            continue
-        fn(env, split[1:], stdin, stdoutw, stderrw)
+        dispatch(env, input, stdin, stdoutw, stderrw)

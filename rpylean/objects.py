@@ -3021,6 +3021,23 @@ class W_Declaration(_Item):
         """
         return self.name.const(**kwargs)
 
+    def const_with_level_params(self):
+        """
+        Create a constant referring to this declaration at its level params.
+
+        The returned const carries one ``W_LevelParam`` per declared level
+        parameter, so substituting the declaration's value through this const
+        leaves the value unchanged (the identity reference to this decl).
+        """
+        levels = []
+        for param in self.levels:
+            # Narrow the type for RPython's annotator: other classes (e.g.
+            # W_Sort) also expose a ``.level`` member, and without this the
+            # loop variable would unify to a wider type than Name.
+            assert isinstance(param, Name)
+            levels.append(param.level())
+        return self.name.const(levels=levels)
+
     def tokens(self, constants, mark=None, span_holder=None):
         """
         Produce a token stream for syntax-highlighted output.

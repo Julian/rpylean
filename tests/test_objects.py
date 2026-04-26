@@ -330,6 +330,18 @@ class TestDeclaration(object):
         decl = Name.simple("foo").axiom(type=NAT)
         assert decl.const() == W_Const(Name.simple("foo"), [])
 
+    def test_const_with_level_params_no_levels(self):
+        decl = Name.simple("foo").axiom(type=NAT)
+        assert decl.const_with_level_params() == W_Const(Name.simple("foo"), [])
+
+    def test_const_with_level_params_polymorphic(self):
+        u, v = Name.simple("u"), Name.simple("v")
+        decl = Name.simple("foo").axiom(type=u.level().sort(), levels=[u, v])
+        assert decl.const_with_level_params() == W_Const(
+            Name.simple("foo"),
+            [W_LevelParam(u), W_LevelParam(v)],
+        )
+
 
 class TestLevel(object):
     @pytest.mark.parametrize(
