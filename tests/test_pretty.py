@@ -579,6 +579,34 @@ class TestProj(object):
         proj = self.Foo.proj(0, origin)
         assert FORMAT_PLAIN(proj.tokens(constants)) == "origin.a"
 
+    def test_parameterized_structure_skips_params(self):
+        """
+        Field name lookup skips structure parameters.
+
+            structure Box (α : Type) where
+              unbox : α
+
+        Box.mk has binders [α, unbox]; num_params = 1. Projecting field 0
+        must render as ``.unbox`` (the field), not ``.α`` (the parameter).
+        """
+        Box = Name.simple("Box")
+        Box_mk = Box.child("mk")
+        unbox = Name.simple("unbox")
+        mk_decl = Box_mk.constructor(
+            type=forall(a.binder(type=TYPE), unbox.binder(type=b0))(Box.const().app(b1)),
+            num_params=1,
+            num_fields=1,
+        )
+        Box_decl = Box.inductive(
+            type=forall(a.binder(type=TYPE))(TYPE),
+            constructors=[mk_decl],
+            num_params=1,
+        )
+        constants = {Box: Box_decl, Box_mk: mk_decl}
+
+        proj = Box.proj(0, Box_mk.app(NAT, NAT_ZERO))
+        assert FORMAT_PLAIN(proj.tokens(constants)) == "(Box.mk Nat Nat.zero).unbox"
+
 
 def test_litnat():
     nat = W_LitNat.long(1000000000000000)

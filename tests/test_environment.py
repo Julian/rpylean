@@ -788,8 +788,8 @@ class TestInvalidDeclaration(object):
         assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
             def bad : Prop :=
-              fun a x z ↦ z.left
-              ^^^^^^^^^^^^^^^^^^
+              fun a x z ↦ z.2
+              ^^^^^^^^^^^^^^^
               invalid projection And.2: And has only 2 fields""",
         )
 

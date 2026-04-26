@@ -3172,7 +3172,7 @@ class W_Inductive(W_DeclarationKind):
     def field_name(self, index):
         if len(self.constructors) != 1:
             return None
-        return self.constructors[0].type.binder_name(index)
+        return self.constructors[0].type.binder_name(self.num_params + index)
 
     def type_check(self, type, env):
         target = type
