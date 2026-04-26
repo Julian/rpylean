@@ -139,12 +139,12 @@ class W_TypeError(W_CheckError):
     A term does not type check.
     """
 
-    def __init__(self, environment, term, expected_type, name=None):
+    def __init__(self, environment, term, expected_type, inferred_type, name=None):
         self.environment = environment
         self.term = term
         self.expected_type = expected_type
+        self.inferred_type = inferred_type
         self.name = name
-        self.inferred_type = term.infer(environment)
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
@@ -238,8 +238,8 @@ class W_NotASort(W_CheckError):
     def __init__(self, environment, expr, inferred_type, name=None):
         self.environment = environment
         self.expr = expr
-        self.name = name
         self.inferred_type = inferred_type
+        self.name = name
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
@@ -260,8 +260,8 @@ class W_NotAProp(W_CheckError):
     def __init__(self, environment, expr, inferred_sort, name=None):
         self.environment = environment
         self.expr = expr
-        self.name = name
         self.inferred_sort = inferred_sort
+        self.name = name
 
     def as_diagnostic(self):
         declarations = self.environment.declarations
@@ -270,6 +270,27 @@ class W_NotAProp(W_CheckError):
         message += [MESSAGE.emit(
             "\nbut the type of a theorem must be a proposition (Prop)",
         )]
+        return _error_diagnostic(
+            self.declaration, self.name, self.expr,
+            "in ", message, declarations,
+        )
+
+
+class W_NotAFunction(W_CheckError):
+    """
+    A non-function expression is being applied to an argument.
+    """
+
+    def __init__(self, environment, expr, inferred_type, name=None):
+        self.environment = environment
+        self.expr = expr
+        self.inferred_type = inferred_type
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit("\nfunction expected, term has type\n  ")]
+        message += self.inferred_type.tokens(declarations)
         return _error_diagnostic(
             self.declaration, self.name, self.expr,
             "in ", message, declarations,
@@ -2687,11 +2708,12 @@ class W_App(W_Expr):
         fn_type_base = self.fn.infer(env)
         fn_type = fn_type_base.whnf(env)
         if not isinstance(fn_type, W_ForAll):
-            raise RuntimeError(
-                "W_App.infer: expected function type, got %s" % type(fn_type)
+            raise W_NotAFunction(env, self.fn, inferred_type=fn_type_base)
+        arg_type = self.arg.infer(env)
+        if not env.def_eq(fn_type.binder.type, arg_type):
+            raise W_TypeError(
+                env, self.arg, fn_type.binder.type, inferred_type=arg_type,
             )
-        if not env.def_eq(fn_type.binder.type, self.arg.infer(env)):
-            raise W_TypeError(env, self.arg, fn_type.binder.type)
         body_type = fn_type.body.instantiate(self.arg)
         return body_type
 
@@ -3051,7 +3073,7 @@ class W_Definition(W_DeclarationKind):
             return W_NotASort(env, type, inferred_type=type_type, name=None)
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
-            return W_TypeError(env, self.value, type)
+            return W_TypeError(env, self.value, type, inferred_type=val_type)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
@@ -3099,7 +3121,7 @@ class W_Theorem(W_DeclarationKind):
             return W_NotAProp(env, type, inferred_sort=type_type_whnf, name=None)
         val_type = self.value.infer(env)
         if not env.def_eq(type, val_type):
-            return W_TypeError(env, self.value, type)
+            return W_TypeError(env, self.value, type, inferred_type=val_type)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]

@@ -15,6 +15,7 @@ from rpylean.objects import (
     W_InvalidConstructorResult,
     W_LevelParam,
     W_NonPositiveOccurrence,
+    W_NotAFunction,
     W_NotAProp,
     W_UniverseTooHigh,
     W_Sort,
@@ -862,6 +863,28 @@ class TestInvalidDeclaration(object):
                                                       True
                                                     but is expected to have type
                                                       False""",
+        )
+
+    def test_not_a_function_diagnostic(self):
+        """Applying a non-function term must be rejected with a clear error."""
+        Nat_decl = NAT.name.inductive(type=TYPE)
+        n = Name.simple("n").axiom(type=NAT)
+        bad = Name.simple("bad").definition(
+            type=NAT,
+            value=n.const().app(n.const()),
+        )
+        env = Environment.having([Nat_decl, n, bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotAFunction)
+        assert errors[0].inferred_type == NAT
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            def bad : Nat :=
+              n n
+              ^
+              function expected, term has type
+                Nat""",
         )
 
 
