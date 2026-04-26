@@ -128,8 +128,8 @@ class TestLitStr(object):
 
         o = ofNat.app(W_LitNat.char("o"))
         k = ofNat.app(W_LitNat.char("k"))
-        nil = Name(["List", "nil"]).const([W_LEVEL_ZERO])
-        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO])
+        nil = Name(["List", "nil"]).const([W_LEVEL_ZERO]).app(Char.const())
+        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO]).app(Char.const())
         o_k = cons.app(o, cons.app(k, nil))
         assert env.def_eq(W_LitStr("ok"), String_mk.app(o_k))
 

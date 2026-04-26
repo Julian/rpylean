@@ -1400,8 +1400,9 @@ class W_LitStr(W_Expr):
     def build_str_expr(self, env):
         if len(self.val) > 5:
             print("Building large str expr for %s" % self.val[:10])
-        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO])
-        expr = Name(["List", "nil"]).const([W_LEVEL_ZERO])
+        Char = Name.simple("Char").const()
+        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO]).app(Char)
+        expr = Name(["List", "nil"]).const([W_LEVEL_ZERO]).app(Char)
         for i in range(len(self.val) - 1, -1, -1):
             char_expr = Name(["Char", "ofNat"]).app(W_LitNat.char(self.val[i]))
             expr = cons.app(char_expr, expr)
@@ -2689,7 +2690,8 @@ class W_App(W_Expr):
             raise RuntimeError(
                 "W_App.infer: expected function type, got %s" % type(fn_type)
             )
-        assert env.def_eq(fn_type.binder.type, self.arg.infer(env))
+        if not env.def_eq(fn_type.binder.type, self.arg.infer(env)):
+            raise W_TypeError(env, self.arg, fn_type.binder.type)
         body_type = fn_type.body.instantiate(self.arg)
         return body_type
 
