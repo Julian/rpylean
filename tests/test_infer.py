@@ -114,9 +114,9 @@ class TestProj(object):
         mk = Foo.child("mk")
         mk_decl = mk.constructor(type=forall(a.binder(type=NAT))(Foo.const()))
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
-        x_decl = x.axiom(type=Foo.const())
-        env = Environment.having([Foo_decl, mk_decl, x_decl])
-        proj = Foo.proj(0, mk.app(NAT))
+        nat_decl = NAT.name.axiom(type=TYPE)
+        env = Environment.having([Foo_decl, mk_decl, nat_decl])
+        proj = Foo.proj(0, mk.app(W_LitNat.int(0)))
         inferred = proj.infer(env)
         assert inferred == NAT
 
@@ -126,8 +126,9 @@ class TestProj(object):
         ctor_type = forall(a.binder(type=NAT))(Foo.const())
         mk_decl = mk.constructor(type=ctor_type)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
-        env = Environment.having([Foo_decl, mk_decl])
-        proj = Foo.proj(1, mk.app(NAT))
+        nat_decl = NAT.name.axiom(type=TYPE)
+        env = Environment.having([Foo_decl, mk_decl, nat_decl])
+        proj = Foo.proj(1, mk.app(W_LitNat.int(0)))
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
@@ -151,8 +152,9 @@ class TestProj(object):
         ctor_type = forall(a.binder(type=NAT))(Foo.const())
         mk_decl = mk.constructor(type=ctor_type)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
-        env = Environment.having([Foo_decl, mk_decl])
-        proj = Foo.proj(3, mk.app(NAT))
+        nat_decl = NAT.name.axiom(type=TYPE)
+        env = Environment.having([Foo_decl, mk_decl, nat_decl])
+        proj = Foo.proj(3, mk.app(W_LitNat.int(0)))
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
 
@@ -174,8 +176,12 @@ class TestProj(object):
             )(T.const()),
         )
         T_decl = T.inductive(type=TYPE, constructors=[mk_decl])
-        env = Environment.having([T_decl, mk_decl])
-        struct_expr = mk.app(W_LitNat.int(5), W_LitNat.int(3))
+        nat_decl = NAT.name.axiom(type=TYPE)
+        Fin_decl = Fin.axiom(type=forall(x.binder(type=NAT))(TYPE))
+        fin5 = Name.simple("fin5")
+        fin5_decl = fin5.axiom(type=Fin.app(W_LitNat.int(5)))
+        env = Environment.having([T_decl, mk_decl, nat_decl, Fin_decl, fin5_decl])
+        struct_expr = mk.app(W_LitNat.int(5), fin5.const())
         proj = T.proj(1, struct_expr)
         assert proj.infer(env) == Fin.app(T.proj(0, struct_expr))
 
@@ -208,8 +214,9 @@ class TestProj(object):
         # Field type is Foo itself, which lives in Prop, so sort_of(Foo) = Prop.
         mk_decl = mk.constructor(type=forall(a.binder(type=Foo.const()))(Foo.const()))
         Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
-        env = Environment.having([Foo_decl, mk_decl])
-        proj = Foo.proj(0, mk.app(Foo.const()))
+        q = Name.simple("q").axiom(type=Foo.const())
+        env = Environment.having([Foo_decl, mk_decl, q])
+        proj = Foo.proj(0, mk.app(q.const()))
         assert proj.infer(env) == Foo.const()
 
     def test_prop_projection_of_non_prop_field_rejected(self):
@@ -220,8 +227,9 @@ class TestProj(object):
             type=forall(a.binder(type=Foo.const()), x.binder(type=TYPE))(Foo.const())
         )
         Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
-        env = Environment.having([Foo_decl, mk_decl])
-        proj = Foo.proj(1, mk.app(Foo.const(), TYPE))
+        q = Name.simple("q").axiom(type=Foo.const())
+        env = Environment.having([Foo_decl, mk_decl, q])
+        proj = Foo.proj(1, mk.app(q.const(), PROP))
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
         assert (
@@ -240,8 +248,10 @@ class TestProj(object):
             type=forall(a.binder(type=TYPE), x.binder(type=Bar.app(b0)))(Foo.const())
         )
         Foo_decl = Foo.inductive(type=PROP, constructors=[mk_decl])
-        env = Environment.having([Foo_decl, mk_decl])
-        proj = Foo.proj(1, mk.app(TYPE, Bar.const()))
+        Bar_decl = Bar.axiom(type=forall(a.binder(type=TYPE))(TYPE))
+        b = Name.simple("b").axiom(type=Bar.app(PROP))
+        env = Environment.having([Foo_decl, mk_decl, Bar_decl, b])
+        proj = Foo.proj(1, mk.app(PROP, b.const()))
         with pytest.raises(InvalidProjection) as e:
             proj.infer(env)
         assert (

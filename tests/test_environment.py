@@ -736,18 +736,19 @@ class TestInvalidDeclaration(object):
         ctor_type = forall(a.binder(type=PROP))(Foo.const())
         mk_decl = mk.constructor(type=ctor_type, num_fields=1)
         Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        p = Name.simple("p").axiom(type=PROP)
         bad = Name.simple("bad").definition(
             type=PROP,
-            value=Foo.proj(3, mk.app(PROP)),
+            value=Foo.proj(3, mk.app(p.const())),
         )
-        env = Environment.having([Foo_decl, mk_decl, bad])
+        env = Environment.having([Foo_decl, mk_decl, p, bad])
         errors = type_check(env=env)
         assert len(errors) == 1
         assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
             def bad : Prop :=
-              (Foo.mk Prop).3
-              ^^^^^^^^^^^^^^^
+              (Foo.mk p).3
+              ^^^^^^^^^^^^
               Foo has only 2 fields""",
         )
 
@@ -808,6 +809,59 @@ class TestInvalidDeclaration(object):
               Bar.0
               ^^^^^
               unknown structure Foo""",
+        )
+
+    def test_proj_of_prop_with_ill_typed_ctor_arg_rejected(self):
+        """
+        ``(Wrapper.mk True.intro).p`` is a "proof" of ``False`` only if the
+        kernel skips checking ``Wrapper.mk``'s argument types: ``mk`` expects
+        a ``False``, so passing ``True.intro : True`` must be rejected during
+        application inference, before the projection ever reads back ``False``.
+
+        See lean-kernel-arena's ``tests/proj-of-prop.lean``.
+        """
+        Wrapper = Name.simple("Wrapper")
+        wrapper_mk = Wrapper.child("mk")
+        p = Name.simple("p")
+        True_ = Name.simple("True")
+        true_intro = True_.child("intro")
+        False_ = Name.simple("False")
+        bad = Name.simple("badFalse")
+
+        False_decl = False_.inductive(type=PROP, constructors=[])
+        true_intro_decl = true_intro.constructor(type=True_.const())
+        True_decl = True_.inductive(type=PROP, constructors=[true_intro_decl])
+        wrapper_mk_decl = wrapper_mk.constructor(
+            type=forall(p.binder(type=False_.const()))(Wrapper.const()),
+            num_fields=1,
+        )
+        Wrapper_decl = Wrapper.inductive(
+            type=PROP, constructors=[wrapper_mk_decl],
+        )
+        bad_decl = bad.theorem(
+            type=False_.const(),
+            value=Wrapper.proj(0, wrapper_mk.app(true_intro.const())),
+        )
+
+        env = Environment.having([
+            False_decl,
+            True_decl, true_intro_decl,
+            Wrapper_decl, wrapper_mk_decl,
+            bad_decl,
+        ])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_TypeError)
+        assert errors[0].expected_type == False_.const()
+        assert errors[0].inferred_type == True_.const()
+        assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
+            """\
+            theorem badFalse : False := (Wrapper.mk True.intro).p
+                                                    ^^^^^^^^^^
+                                                    has type
+                                                      True
+                                                    but is expected to have type
+                                                      False""",
         )
 
 
