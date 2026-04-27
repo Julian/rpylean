@@ -1032,13 +1032,6 @@ class W_LevelMax(W_Level):
 
     @leq
     def leq(self, other, balance):
-        if isinstance(other, W_LevelMax):
-            return (
-                self.lhs.leq(other.lhs, balance)
-                and self.rhs.leq(other.rhs, balance)
-                or self.lhs.leq(other.rhs, balance)
-                and self.rhs.leq(other.lhs, balance)
-            )
         return self.lhs.leq(other, balance) and self.rhs.leq(other, balance)
 
     def gt(self, other, balance):

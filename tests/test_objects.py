@@ -507,6 +507,19 @@ class TestLevel(object):
         assert u2.leq(u1)
         assert u1.eq(u2)
 
+    def test_leq_eq_nested_max_dup(self):
+        """max (max 1 u) (max 1 u) ≤ max 1 u."""
+        u1 = Name.simple("u").level()
+        u2 = Name.simple("u").level()
+        u3 = Name.simple("u").level()
+        inner1 = W_LEVEL_ZERO.succ().max(u1)
+        inner2 = W_LEVEL_ZERO.succ().max(u2)
+        lhs = W_LevelMax(inner1, inner2)
+        rhs = W_LEVEL_ZERO.succ().max(u3)
+        assert lhs.leq(rhs)
+        assert rhs.leq(lhs)
+        assert lhs.eq(rhs)
+
     def test_max_gt_zero(self):
         """0 ≤ max(u, v)"""
         assert u.max(v).gt(W_LEVEL_ZERO, 0)
