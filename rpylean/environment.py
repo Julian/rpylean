@@ -408,6 +408,13 @@ class Environment(object):
         cls1 = promote(expr1.__class__)
         cls2 = promote(expr2.__class__)
 
+        # Fast-path: syntactically identical expressions are def-eq without
+        # needing to infer types or do proof-irrelevance work. Critical for
+        # avoiding redundant type inference on every recursive def_eq call
+        # over a large expression tree.
+        if cls1 is cls2 and syntactic_eq(expr1, expr2):
+            return True
+
         # Proof irrelevance: two proofs of the same Prop are equal.
         expr1_ty = expr1.infer(self)
         if syntactic_eq(expr1_ty.infer(self), PROP):
