@@ -1735,6 +1735,18 @@ class W_LitNat(W_Expr):
             i = i.add(rbigint.fromint(1))
         return expr
 
+    def one_step_constructor(self):
+        """
+        Expose one Nat constructor: ``Nat.zero`` if the value is zero,
+        otherwise ``Nat.succ (W_LitNat (val - 1))``.
+
+        Used by iota reduction so the inductive step sees a concrete
+        constructor without materialising the full Nat.succ chain.
+        """
+        if self.val.eq(rbigint.fromint(0)):
+            return NAT_ZERO
+        return NAT_SUCC.app(W_LitNat(self.val.sub(rbigint.fromint(1))))
+
     def bind_fvar(self, fvar, depth):
         return self
 
@@ -2852,9 +2864,12 @@ class W_App(W_Expr):
         # We try to delay materializing LitNat expressions as late as possible,
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
         # However, we need an actual constructor and application for iota reduction.
-        # Hopefully we won't reach this spot with any especially large literals.
+        # Expose one constructor (Nat.zero or Nat.succ of W_LitNat predecessor)
+        # so iota can fire one step; the predecessor stays a W_LitNat and is only
+        # re-expanded lazily on the next WHNF iteration. This avoids materialising
+        # an N-deep Nat.succ chain up front for large literals.
         if isinstance(major_premise, W_LitNat):
-            major_premise = major_premise.build_nat_expr()
+            major_premise = major_premise.one_step_constructor()
 
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')

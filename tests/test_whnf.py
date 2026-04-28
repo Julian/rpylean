@@ -8,6 +8,7 @@ from rpylean.objects import (
     TYPE,
     PROP,
     Name,
+    W_App,
     W_BVar,
     W_LitNat,
     W_LitStr,
@@ -578,6 +579,129 @@ class TestIotaReduction(object):
 
         result = app.whnf(env)
         assert syntactic_eq(result, t_val.const())
+
+    def _make_nat_env(self):
+        """
+        Build an environment with Nat, Nat.zero, Nat.succ, Nat.rec.
+
+        Returns (env, dict of names).
+        """
+        Nat = Name.simple("Nat")
+        Nat_zero = Nat.child("zero")
+        Nat_succ = Nat.child("succ")
+        Nat_rec = Nat.child("rec")
+
+        u_name = Name.simple("u")
+        u_level = u_name.level()
+
+        zero_decl = Nat_zero.constructor(
+            type=NAT,
+            num_params=0,
+            num_fields=0,
+        )
+        succ_decl = Nat_succ.constructor(
+            type=forall(Name.simple("n").binder(type=NAT))(NAT),
+            num_params=0,
+            num_fields=1,
+        )
+        nat_decl = Nat.inductive(
+            type=TYPE,
+            constructors=[zero_decl, succ_decl],
+        )
+
+        # Nat.rec.{u} :
+        #   (motive : Nat → Sort u) →
+        #   motive Nat.zero →
+        #   ((n : Nat) → motive n → motive (Nat.succ n)) →
+        #   (t : Nat) → motive t
+        motive = Name.simple("motive")
+        n = Name.simple("n")
+        ih = Name.simple("ih")
+        t = Name.simple("t")
+        motive_type = forall(t.binder(type=NAT))(u_level.sort())
+        # In the hs binder context, motive is bvar 2 (after motive, hz).
+        hs_binder_type = forall(
+            n.binder(type=NAT),
+            ih.binder(type=W_BVar(2).app(W_BVar(0))),
+        )(W_BVar(3).app(Nat_succ.const().app(W_BVar(1))))
+
+        rec_type = forall(
+            motive.binder(type=motive_type),
+            Name.simple("hz").binder(type=W_BVar(0).app(Nat_zero.const())),
+            Name.simple("hs").binder(type=hs_binder_type),
+            t.binder(type=NAT),
+        )(W_BVar(3).app(W_BVar(0)))
+
+        # Zero rule: λ motive hz hs => hz
+        zero_rule_val = fun(
+            motive.binder(type=motive_type),
+            Name.simple("hz").binder(type=W_BVar(0).app(Nat_zero.const())),
+            Name.simple("hs").binder(type=hs_binder_type),
+        )(W_BVar(1))
+
+        # Succ rule: λ motive hz hs n => hs n (Nat.rec.{u} motive hz hs n)
+        succ_rule_val = fun(
+            motive.binder(type=motive_type),
+            Name.simple("hz").binder(type=W_BVar(0).app(Nat_zero.const())),
+            Name.simple("hs").binder(type=hs_binder_type),
+            n.binder(type=NAT),
+        )(
+            W_BVar(1).app(W_BVar(0)).app(
+                Nat_rec.const(levels=[u_level])
+                    .app(W_BVar(3))
+                    .app(W_BVar(2))
+                    .app(W_BVar(1))
+                    .app(W_BVar(0))
+            )
+        )
+
+        rec_decl = Nat_rec.recursor(
+            type=rec_type,
+            rules=[
+                W_RecRule(ctor_name=Nat_zero, num_fields=0, val=zero_rule_val),
+                W_RecRule(ctor_name=Nat_succ, num_fields=1, val=succ_rule_val),
+            ],
+            num_motives=1,
+            num_params=0,
+            num_indices=0,
+            num_minors=2,
+            levels=[u_name],
+        )
+
+        env = Environment.having([nat_decl, zero_decl, succ_decl, rec_decl])
+        return env, {
+            "Nat_rec": Nat_rec,
+            "Nat_zero": Nat_zero,
+            "u_level": u_level,
+        }
+
+    def test_iota_natrec_on_huge_litnat_is_lazy(self):
+        """Nat.rec on a huge W_LitNat does one constructor step instead of building a deep succ chain."""
+        env, d = self._make_nat_env()
+
+        n = Name.simple("n")
+        ih = Name.simple("ih")
+        # Step: λ n ih => Nat.succ ih  (uses the IH but does not force its WHNF)
+        Nat_succ = Name.simple("Nat").child("succ").const()
+        ms = fun(
+            n.binder(type=NAT),
+            ih.binder(type=NAT),
+        )(Nat_succ.app(W_BVar(0)))
+
+        motive = fun(Name.simple("_").binder(type=NAT))(NAT)
+
+        depth = 1000000
+        app = (
+            d["Nat_rec"].const(levels=[d["u_level"].succ()])
+                .app(motive)
+                .app(d["Nat_zero"].const())
+                .app(ms)
+                .app(W_LitNat.int(depth))
+        )
+
+        result = app.whnf(env)
+        assert (isinstance(result, W_App)
+                and syntactic_eq(result.fn, Nat_succ))
 
 
 class TestNativeNatReduction(object):
