@@ -114,6 +114,14 @@ class TestConst(object):
 
         assert syntactic_eq(a_decl.const().whnf(env), c_decl.const())
 
+    def test_opaque_declaration_does_not_unfold(self):
+        b_decl = b.axiom(type=NAT)
+        a_decl = a.opaque(type=NAT, value=b_decl.const())
+        env = Environment.having([a_decl, b_decl])
+
+        const = a_decl.const()
+        assert const.whnf(env) is const
+
 
 class TestApp(object):
     """W_App.whnf performs beta reduction when head is a lambda."""

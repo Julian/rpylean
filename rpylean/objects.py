@@ -3118,6 +3118,9 @@ class W_Opaque(W_Definition):
         self.value = value
         self.hint = HINT_OPAQUE
 
+    def get_delta_reduce_target(self):
+        return None
+
 
 class W_Theorem(W_DeclarationKind):
     def __init__(self, value):
