@@ -2298,14 +2298,24 @@ class W_ForAll(W_FunBase):
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
 
-    # TODO - double check this
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
-        # Don't increment - not yet inside a binder
-        return forall(self.binder.instantiate(expr, depth))(
-            self.body.instantiate(expr, depth + 1),
-        )
+        # Walk a chain of nested W_ForAll binders iteratively to avoid
+        # blowing the stack on deeply-curried types.
+        binders = []
+        cur = self
+        cur_depth = depth
+        while isinstance(cur, W_ForAll) and cur.loose_bvar_range > cur_depth:
+            binders.append(cur.binder.instantiate(expr, cur_depth))
+            cur = cur.body
+            cur_depth += 1
+        body = cur.instantiate(expr, cur_depth)
+        i = len(binders) - 1
+        while i >= 0:
+            body = W_ForAll(binders[i], body)
+            i -= 1
+        return body
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
@@ -2478,10 +2488,23 @@ class W_Lambda(W_FunBase):
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
-        # Don't increment - not yet inside a binder
-        return fun(self.binder.instantiate(expr, depth))(
-            self.body.instantiate(expr, depth + 1),
-        )
+        # Walk a chain of nested W_Lambda binders iteratively to avoid
+        # blowing the stack on deeply-curried terms (e.g. app-lam.ndjson
+        # builds chains of ~4000 lambdas). Each inner binder's depth is one
+        # greater than its enclosing one.
+        binders = []
+        cur = self
+        cur_depth = depth
+        while isinstance(cur, W_Lambda) and cur.loose_bvar_range > cur_depth:
+            binders.append(cur.binder.instantiate(expr, cur_depth))
+            cur = cur.body
+            cur_depth += 1
+        body = cur.instantiate(expr, cur_depth)
+        i = len(binders) - 1
+        while i >= 0:
+            body = W_Lambda(binders[i], body)
+            i -= 1
+        return body
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -2713,9 +2736,10 @@ class W_App(W_Expr):
     def infer(self, env):
         # Iterative spine walk: infer the head once and step through the
         # binder chain, instead of recursively re-inferring each prefix of an
-        # n-deep application spine (which is O(n²) total).
+        # n-deep application spine (which is O(n²) total).  Use ``env.infer``
+        # so DAG-shared subexpressions are inferred only once.
         target, args = self.unapp()
-        fn_type_base = target.infer(env)
+        fn_type_base = env.infer(target)
         spine_so_far = target
         i = len(args) - 1
         while i >= 0:
@@ -2723,7 +2747,7 @@ class W_App(W_Expr):
             if not isinstance(fn_type, W_ForAll):
                 raise W_NotAFunction(env, spine_so_far, inferred_type=fn_type_base)
             arg = args[i]
-            arg_type = arg.infer(env)
+            arg_type = env.infer(arg)
             if not env.def_eq(fn_type.binder.type, arg_type):
                 raise W_TypeError(
                     env, arg, fn_type.binder.type, inferred_type=arg_type,
@@ -2995,9 +3019,20 @@ class W_App(W_Expr):
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
-        return self.fn.instantiate(expr, depth).app(
-            self.arg.instantiate(expr, depth),
-        )
+        # Iteratively walk down the App spine to avoid blowing the stack
+        # on deep applications. Args are collected outermost-first; we
+        # rebuild bottom-up so they come out in original order.
+        args = []
+        cur = self
+        while isinstance(cur, W_App) and cur.loose_bvar_range > depth:
+            args.append(cur.arg.instantiate(expr, depth))
+            cur = cur.fn
+        body = cur.instantiate(expr, depth)
+        i = len(args) - 1
+        while i >= 0:
+            body = body.app(args[i])
+            i -= 1
+        return body
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:

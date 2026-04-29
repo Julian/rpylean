@@ -241,6 +241,16 @@ class _DefEqCacheEntry(object):
         self.result = result
 
 
+class _InferCacheEntry(object):
+    """
+    An entry in the infer cache, keyed by expression identity.
+    """
+
+    def __init__(self, expr, result):
+        self.expr = expr
+        self.result = result
+
+
 class Environment(object):
     """
     A Lean environment with its declarations.
@@ -253,6 +263,32 @@ class Environment(object):
         self.max_heartbeat = 0
         self._current_decl = None
         self._def_eq_cache = {}
+        self._infer_cache = {}
+
+    def infer(self, expr):
+        """
+        Infer the type of ``expr``, caching the result by identity.
+
+        Crucial for type-checking proof terms with DAG-shared subexpressions
+        (e.g. ``app-lam.ndjson``): without caching, sharing turns into O(2ⁿ)
+        re-inference of the same lambda.
+        """
+        key = compute_identity_hash(expr)
+        entries = self._infer_cache.get(key, None)
+        if entries is not None:
+            i = 0
+            while i < len(entries):
+                entry = entries[i]
+                if entry.expr is expr:
+                    return entry.result
+                i += 1
+        result = expr.infer(self)
+        new_entry = _InferCacheEntry(expr, result)
+        if entries is not None:
+            entries.append(new_entry)
+        else:
+            self._infer_cache[key] = [new_entry]
+        return result
 
     @not_rpython
     def __getitem__(self, value):
@@ -301,6 +337,7 @@ class Environment(object):
             self.heartbeat = 0
             self._current_decl = each
             self._def_eq_cache = {}
+            self._infer_cache = {}
             try:
                 error = each.type_check(self)
             except HeartbeatExceeded as err:
