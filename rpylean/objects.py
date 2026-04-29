@@ -2711,17 +2711,27 @@ class W_App(W_Expr):
         return result
 
     def infer(self, env):
-        fn_type_base = self.fn.infer(env)
-        fn_type = fn_type_base.whnf(env)
-        if not isinstance(fn_type, W_ForAll):
-            raise W_NotAFunction(env, self.fn, inferred_type=fn_type_base)
-        arg_type = self.arg.infer(env)
-        if not env.def_eq(fn_type.binder.type, arg_type):
-            raise W_TypeError(
-                env, self.arg, fn_type.binder.type, inferred_type=arg_type,
-            )
-        body_type = fn_type.body.instantiate(self.arg)
-        return body_type
+        # Iterative spine walk: infer the head once and step through the
+        # binder chain, instead of recursively re-inferring each prefix of an
+        # n-deep application spine (which is O(n²) total).
+        target, args = self.unapp()
+        fn_type_base = target.infer(env)
+        spine_so_far = target
+        i = len(args) - 1
+        while i >= 0:
+            fn_type = fn_type_base.whnf(env)
+            if not isinstance(fn_type, W_ForAll):
+                raise W_NotAFunction(env, spine_so_far, inferred_type=fn_type_base)
+            arg = args[i]
+            arg_type = arg.infer(env)
+            if not env.def_eq(fn_type.binder.type, arg_type):
+                raise W_TypeError(
+                    env, arg, fn_type.binder.type, inferred_type=arg_type,
+                )
+            fn_type_base = fn_type.body.instantiate(arg)
+            spine_so_far = spine_so_far.app(arg)
+            i -= 1
+        return fn_type_base
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
