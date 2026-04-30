@@ -25,6 +25,7 @@ from rpylean.objects import (
     W_LevelParam,
     W_LevelSucc,
     W_LitNat,
+    W_LitStr,
     W_Opaque,
     W_Proj,
     W_Recursor,
@@ -582,6 +583,21 @@ class TestLitNat(object):
 
     def test_int(self):
         assert W_LitNat.int(37) == W_LitNat(rbigint.fromint(37))
+
+
+class TestLitStr(object):
+    def test_subst_levels(self):
+        lit = W_LitStr("hi")
+        assert lit.subst_levels({Name.simple("u"): W_LEVEL_ZERO}) is lit
+
+    def test_bind_fvar(self):
+        lit = W_LitStr("hi")
+        fvar = x.binder(type=NAT).fvar()
+        assert lit.bind_fvar(fvar, 0) is lit
+
+    def test_incr_free_bvars(self):
+        lit = W_LitStr("hi")
+        assert lit.incr_free_bvars(1, 0) is lit
 
 
 class TestForAll(object):

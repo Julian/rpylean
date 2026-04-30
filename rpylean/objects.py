@@ -1432,6 +1432,15 @@ class W_LitStr(W_Expr):
     def instantiate(self, expr, depth=0):
         return self
 
+    def subst_levels(self, substs):
+        return self
+
+    def bind_fvar(self, fvar, depth):
+        return self
+
+    def incr_free_bvars(self, count, depth):
+        return self
+
     def syntactic_eq(self, other):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
