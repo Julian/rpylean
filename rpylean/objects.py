@@ -2255,6 +2255,8 @@ class W_FunBase(W_Expr):
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
         self._inst_cache_result = None
+        # Inline infer cache.
+        self._infer_cache_result = None
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -2599,6 +2601,8 @@ class W_App(W_Expr):
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
         self._inst_cache_result = None
+        # Inline infer cache.
+        self._infer_cache_result = None
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -3564,22 +3568,19 @@ def _iter_infer(env, root):
         item = work.pop()
         if isinstance(item, _InferVisit):
             cur = item.expr
-            # Cache lookup
-            key = compute_identity_hash(cur)
-            entries = env._infer_cache.get(key, None)
-            hit = None
-            if entries is not None:
-                j = 0
-                while j < len(entries):
-                    e = entries[j]
-                    if e.expr is cur:
-                        hit = e.result
-                        break
-                    j += 1
-            if hit is not None:
-                values.append(hit)
-                continue
             cls = cur.__class__
+            # Cache lookup. Recursive types (App/Lambda/ForAll) keep a
+            # per-instance inline result; non-recursive expression types
+            # are passed through env.infer (which has its own cache
+            # fallback) and pushed straight onto the value stack.
+            if cls is W_App or cls is W_Lambda or cls is W_ForAll:
+                cached = cur._infer_cache_result
+                if cached is not None:
+                    values.append(cached)
+                    continue
+            else:
+                values.append(env.infer(cur))
+                continue
             if cls is W_Lambda:
                 cur.binder.type.infer(env).whnf(env).expect_sort(env)
                 fvar = cur.binder.fvar()
@@ -3641,14 +3642,7 @@ def _iter_infer(env, root):
             values.append(item.binder_sort.imax(body_sort).sort())
         else:
             assert isinstance(item, _InferStore)
-            res = values[len(values) - 1]
-            key = compute_identity_hash(item.expr)
-            entries = env._infer_cache.get(key, None)
-            new_entry = _InferCacheEntry(item.expr, res)
-            if entries is None:
-                env._infer_cache[key] = [new_entry]
-            else:
-                entries.append(new_entry)
+            item.expr._infer_cache_result = values[len(values) - 1]
     return values[0]
 
 
