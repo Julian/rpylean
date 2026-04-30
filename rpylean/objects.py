@@ -2603,6 +2603,8 @@ class W_App(W_Expr):
         self._inst_cache_result = None
         # Inline infer cache.
         self._infer_cache_result = None
+        # Inline whnf cache.
+        self._whnf_cache_result = None
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -2712,6 +2714,14 @@ class W_App(W_Expr):
 
     def infer(self, env):
         return _iter_infer(env, self)
+
+    def whnf(self, env):
+        cached = self._whnf_cache_result
+        if cached is not None:
+            return cached
+        (expr, _progress) = self.whnf_with_progress(env)
+        self._whnf_cache_result = expr
+        return expr
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
