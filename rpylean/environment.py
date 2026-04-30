@@ -40,6 +40,7 @@ from rpylean.objects import (
     W_LitNat,
     W_LitStr,
     W_Sort,
+    _InferCacheEntry,
     fun,
     get_decl,
     name_eq,
@@ -238,16 +239,6 @@ class _DefEqCacheEntry(object):
     def __init__(self, expr1, expr2, result):
         self.expr1 = expr1
         self.expr2 = expr2
-        self.result = result
-
-
-class _InferCacheEntry(object):
-    """
-    An entry in the infer cache, keyed by expression identity.
-    """
-
-    def __init__(self, expr, result):
-        self.expr = expr
         self.result = result
 
 

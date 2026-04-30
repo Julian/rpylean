@@ -1,5 +1,5 @@
 from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
-from rpython.rlib.objectmodel import compute_hash, not_rpython
+from rpython.rlib.objectmodel import compute_hash, compute_identity_hash, not_rpython
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count, warn
@@ -2251,6 +2251,10 @@ class W_FunBase(W_Expr):
             self.loose_bvar_range = binder_range
         else:
             self.loose_bvar_range = body_range
+        # 1-entry inline instantiate cache.
+        self._inst_cache_expr = None
+        self._inst_cache_depth = -1
+        self._inst_cache_result = None
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -2286,6 +2290,9 @@ class W_FunBase(W_Expr):
 
 class W_ForAll(W_FunBase):
     def infer(self, env):
+        return _iter_infer(env, self)
+
+    def _infer_recursive(self, env):
         binder_sort = self.binder.type.infer(env).whnf(env).expect_sort(env)
         body_sort = (
             self.body.instantiate(self.binder.fvar())
@@ -2299,23 +2306,7 @@ class W_ForAll(W_FunBase):
         return self.infer(env).whnf(env).expect_sort(env)
 
     def instantiate(self, expr, depth=0):
-        if self.loose_bvar_range <= depth:
-            return self
-        # Walk a chain of nested W_ForAll binders iteratively to avoid
-        # blowing the stack on deeply-curried types.
-        binders = []
-        cur = self
-        cur_depth = depth
-        while isinstance(cur, W_ForAll) and cur.loose_bvar_range > cur_depth:
-            binders.append(cur.binder.instantiate(expr, cur_depth))
-            cur = cur.body
-            cur_depth += 1
-        body = cur.instantiate(expr, cur_depth)
-        i = len(binders) - 1
-        while i >= 0:
-            body = W_ForAll(binders[i], body)
-            i -= 1
-        return body
+        return _iter_instantiate(self, expr, depth)
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
@@ -2486,25 +2477,7 @@ class W_Lambda(W_FunBase):
         )
 
     def instantiate(self, expr, depth=0):
-        if self.loose_bvar_range <= depth:
-            return self
-        # Walk a chain of nested W_Lambda binders iteratively to avoid
-        # blowing the stack on deeply-curried terms (e.g. app-lam.ndjson
-        # builds chains of ~4000 lambdas). Each inner binder's depth is one
-        # greater than its enclosing one.
-        binders = []
-        cur = self
-        cur_depth = depth
-        while isinstance(cur, W_Lambda) and cur.loose_bvar_range > cur_depth:
-            binders.append(cur.binder.instantiate(expr, cur_depth))
-            cur = cur.body
-            cur_depth += 1
-        body = cur.instantiate(expr, cur_depth)
-        i = len(binders) - 1
-        while i >= 0:
-            body = W_Lambda(binders[i], body)
-            i -= 1
-        return body
+        return _iter_instantiate(self, expr, depth)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -2514,11 +2487,7 @@ class W_Lambda(W_FunBase):
         )
 
     def infer(self, env):
-        self.binder.type.infer(env).whnf(env).expect_sort(env)
-        fvar = self.binder.fvar()
-        body_type_fvar = self.body.instantiate(fvar).infer(env)
-        body_type = body_type_fvar.bind_fvar(fvar, 0)
-        return forall(self.binder)(body_type)
+        return _iter_infer(env, self)
 
     def subst_levels(self, substs):
         return fun(self.binder.subst_levels(substs))(
@@ -2626,6 +2595,10 @@ class W_App(W_Expr):
             self.loose_bvar_range = fn_range
         else:
             self.loose_bvar_range = arg_range
+        # 1-entry inline instantiate cache.
+        self._inst_cache_expr = None
+        self._inst_cache_depth = -1
+        self._inst_cache_result = None
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -2734,28 +2707,7 @@ class W_App(W_Expr):
         return result
 
     def infer(self, env):
-        # Iterative spine walk: infer the head once and step through the
-        # binder chain, instead of recursively re-inferring each prefix of an
-        # n-deep application spine (which is O(n²) total).  Use ``env.infer``
-        # so DAG-shared subexpressions are inferred only once.
-        target, args = self.unapp()
-        fn_type_base = env.infer(target)
-        spine_so_far = target
-        i = len(args) - 1
-        while i >= 0:
-            fn_type = fn_type_base.whnf(env)
-            if not isinstance(fn_type, W_ForAll):
-                raise W_NotAFunction(env, spine_so_far, inferred_type=fn_type_base)
-            arg = args[i]
-            arg_type = env.infer(arg)
-            if not env.def_eq(fn_type.binder.type, arg_type):
-                raise W_TypeError(
-                    env, arg, fn_type.binder.type, inferred_type=arg_type,
-                )
-            fn_type_base = fn_type.body.instantiate(arg)
-            spine_so_far = spine_so_far.app(arg)
-            i -= 1
-        return fn_type_base
+        return _iter_infer(env, self)
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
@@ -3017,22 +2969,7 @@ class W_App(W_Expr):
         )
 
     def instantiate(self, expr, depth=0):
-        if self.loose_bvar_range <= depth:
-            return self
-        # Iteratively walk down the App spine to avoid blowing the stack
-        # on deep applications. Args are collected outermost-first; we
-        # rebuild bottom-up so they come out in original order.
-        args = []
-        cur = self
-        while isinstance(cur, W_App) and cur.loose_bvar_range > depth:
-            args.append(cur.arg.instantiate(expr, depth))
-            cur = cur.fn
-        body = cur.instantiate(expr, depth)
-        i = len(args) - 1
-        while i >= 0:
-            body = body.app(args[i])
-            i -= 1
-        return body
+        return _iter_instantiate(self, expr, depth)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -3463,6 +3400,256 @@ def syntactic_eq(expr1, expr2):
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
+
+
+class _InferCacheEntry(object):
+    """An entry in ``Environment._infer_cache``, keyed by expression identity."""
+
+    def __init__(self, expr, result):
+        self.expr = expr
+        self.result = result
+
+
+# Iterative instantiate driver. Same shape as the infer driver below.
+class _InstWork(object):
+    pass
+
+
+class _InstVisit(_InstWork):
+    def __init__(self, expr, depth):
+        self.expr = expr
+        self.depth = depth
+
+
+class _InstBuildApp(_InstWork):
+    pass
+
+
+class _InstBuildLambda(_InstWork):
+    def __init__(self, binder):
+        self.binder = binder
+
+
+class _InstBuildForAll(_InstWork):
+    def __init__(self, binder):
+        self.binder = binder
+
+
+class _InstStore(_InstWork):
+    def __init__(self, expr, depth):
+        self.expr = expr
+        self.depth = depth
+
+
+def _iter_instantiate(root, expr, depth):
+    """
+    Iteratively substitute ``expr`` for the bvar at ``depth`` in ``root``.
+
+    Drives the ``W_App`` / ``W_Lambda`` / ``W_ForAll`` alternation through
+    an explicit work stack so deeply nested terms (e.g. ``app-lam``) do
+    not blow the host stack. Per-instance 1-entry inline cache breaks
+    the 2^N work that DAG-shared subexpressions would cause, with no
+    dict allocation per call.
+    """
+    if root.loose_bvar_range <= depth:
+        return root
+    work = [_InstVisit(root, depth)]
+    values = []
+    while len(work) > 0:
+        item = work.pop()
+        if isinstance(item, _InstVisit):
+            cur = item.expr
+            d = item.depth
+            if cur.loose_bvar_range <= d:
+                values.append(cur)
+                continue
+            cls = cur.__class__
+            if cls is W_App:
+                if (cur._inst_cache_expr is expr
+                        and cur._inst_cache_depth == d):
+                    values.append(cur._inst_cache_result)
+                    continue
+                work.append(_InstStore(cur, d))
+                work.append(_InstBuildApp())
+                work.append(_InstVisit(cur.arg, d))
+                work.append(_InstVisit(cur.fn, d))
+            elif cls is W_Lambda:
+                if (cur._inst_cache_expr is expr
+                        and cur._inst_cache_depth == d):
+                    values.append(cur._inst_cache_result)
+                    continue
+                new_binder = cur.binder.instantiate(expr, d)
+                work.append(_InstStore(cur, d))
+                work.append(_InstBuildLambda(new_binder))
+                work.append(_InstVisit(cur.body, d + 1))
+            elif cls is W_ForAll:
+                if (cur._inst_cache_expr is expr
+                        and cur._inst_cache_depth == d):
+                    values.append(cur._inst_cache_result)
+                    continue
+                new_binder = cur.binder.instantiate(expr, d)
+                work.append(_InstStore(cur, d))
+                work.append(_InstBuildForAll(new_binder))
+                work.append(_InstVisit(cur.body, d + 1))
+            else:
+                values.append(cur.instantiate(expr, d))
+        elif isinstance(item, _InstBuildApp):
+            arg = values.pop()
+            fn = values.pop()
+            values.append(fn.app(arg))
+        elif isinstance(item, _InstBuildLambda):
+            body = values.pop()
+            values.append(W_Lambda(item.binder, body))
+        elif isinstance(item, _InstBuildForAll):
+            body = values.pop()
+            values.append(W_ForAll(item.binder, body))
+        else:
+            assert isinstance(item, _InstStore)
+            res = values[len(values) - 1]
+            item.expr._inst_cache_expr = expr
+            item.expr._inst_cache_depth = item.depth
+            item.expr._inst_cache_result = res
+    return values[0]
+
+
+# Iterative infer driver. The work stack carries items of the following
+# kinds; pushes use LIFO ordering so the bottom of the stack runs last.
+class _InferWork(object):
+    pass
+
+
+class _InferVisit(_InferWork):
+    def __init__(self, expr):
+        self.expr = expr
+
+
+class _InferAppStep(_InferWork):
+    def __init__(self, arg, spine_so_far):
+        self.arg = arg
+        self.spine_so_far = spine_so_far
+
+
+class _InferBindLambda(_InferWork):
+    def __init__(self, binder, fvar):
+        self.binder = binder
+        self.fvar = fvar
+
+
+class _InferBindForAll(_InferWork):
+    def __init__(self, binder_sort):
+        self.binder_sort = binder_sort
+
+
+class _InferStore(_InferWork):
+    def __init__(self, expr):
+        self.expr = expr
+
+
+def _iter_infer(env, root):
+    """
+    Iteratively infer the type of ``root`` for the recursive expression
+    constructors (``W_App``, ``W_Lambda``, ``W_ForAll``).
+
+    Avoids the mutual recursion between ``W_App.infer`` and
+    ``W_Lambda.infer`` that grows the host stack linearly with the
+    nesting depth (e.g. ~4000 levels in ``app-lam.ndjson``). Other
+    expression types fall back to their recursive ``infer``.
+
+    Reuses ``env._infer_cache`` so DAG-shared subexpressions are
+    inferred only once.
+    """
+    work = [_InferVisit(root)]
+    values = []
+    while len(work) > 0:
+        item = work.pop()
+        if isinstance(item, _InferVisit):
+            cur = item.expr
+            # Cache lookup
+            key = compute_identity_hash(cur)
+            entries = env._infer_cache.get(key, None)
+            hit = None
+            if entries is not None:
+                j = 0
+                while j < len(entries):
+                    e = entries[j]
+                    if e.expr is cur:
+                        hit = e.result
+                        break
+                    j += 1
+            if hit is not None:
+                values.append(hit)
+                continue
+            cls = cur.__class__
+            if cls is W_Lambda:
+                cur.binder.type.infer(env).whnf(env).expect_sort(env)
+                fvar = cur.binder.fvar()
+                body_with_fvar = cur.body.instantiate(fvar)
+                work.append(_InferStore(cur))
+                work.append(_InferBindLambda(cur.binder, fvar))
+                work.append(_InferVisit(body_with_fvar))
+            elif cls is W_ForAll:
+                binder_sort = cur.binder.type.infer(env).whnf(env).expect_sort(env)
+                fvar = cur.binder.fvar()
+                body_with_fvar = cur.body.instantiate(fvar)
+                work.append(_InferStore(cur))
+                work.append(_InferBindForAll(binder_sort))
+                work.append(_InferVisit(body_with_fvar))
+            elif cls is W_App:
+                target, args = cur.unapp()
+                # Pre-compute spine_so_far for each app step so error
+                # diagnostics still point at the function sub-expression
+                # (matching the recursive version's behaviour).
+                spines = [None] * len(args)
+                spine = target
+                j = len(args) - 1
+                while j >= 0:
+                    spines[j] = spine
+                    spine = spine.app(args[j])
+                    j -= 1
+                # Process: VISIT(target), then for each arg outermost-first,
+                # VISIT(arg) then APP_STEP. args is innermost-first; pushing
+                # in increasing index puts the outermost on top after LIFO.
+                work.append(_InferStore(cur))
+                k = 0
+                while k < len(args):
+                    work.append(_InferAppStep(args[k], spines[k]))
+                    work.append(_InferVisit(args[k]))
+                    k += 1
+                work.append(_InferVisit(target))
+            else:
+                values.append(cur.infer(env))
+        elif isinstance(item, _InferAppStep):
+            arg_type = values.pop()
+            fn_type_base = values.pop()
+            fn_type = fn_type_base.whnf(env)
+            if not isinstance(fn_type, W_ForAll):
+                raise W_NotAFunction(
+                    env, item.spine_so_far, inferred_type=fn_type_base,
+                )
+            if not env.def_eq(fn_type.binder.type, arg_type):
+                raise W_TypeError(
+                    env, item.arg, fn_type.binder.type,
+                    inferred_type=arg_type,
+                )
+            values.append(fn_type.body.instantiate(item.arg))
+        elif isinstance(item, _InferBindLambda):
+            body_type = values.pop()
+            body_type = body_type.bind_fvar(item.fvar, 0)
+            values.append(forall(item.binder)(body_type))
+        elif isinstance(item, _InferBindForAll):
+            body_sort = values.pop().whnf(env).expect_sort(env)
+            values.append(item.binder_sort.imax(body_sort).sort())
+        else:
+            assert isinstance(item, _InferStore)
+            res = values[len(values) - 1]
+            key = compute_identity_hash(item.expr)
+            entries = env._infer_cache.get(key, None)
+            new_entry = _InferCacheEntry(item.expr, res)
+            if entries is None:
+                env._infer_cache[key] = [new_entry]
+            else:
+                entries.append(new_entry)
+    return values[0]
 
 
 class Telescope(object):
