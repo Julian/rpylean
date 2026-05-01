@@ -3445,7 +3445,9 @@ class _InstVisit(_InstWork):
 
 
 class _InstBuildApp(_InstWork):
-    pass
+    def __init__(self, fn, arg):
+        self.fn = fn
+        self.arg = arg
 
 
 class _InstBuildLambda(_InstWork):
@@ -3492,10 +3494,19 @@ def _iter_instantiate(root, expr, depth):
                         and cur._inst_cache_depth == d):
                     values.append(cur._inst_cache_result)
                     continue
+                fn = cur.fn
+                arg = cur.arg
+                fn_static = fn.loose_bvar_range <= d
+                arg_static = arg.loose_bvar_range <= d
                 work.append(_InstStore(cur, d))
-                work.append(_InstBuildApp())
-                work.append(_InstVisit(cur.arg, d))
-                work.append(_InstVisit(cur.fn, d))
+                work.append(_InstBuildApp(
+                    fn if fn_static else None,
+                    arg if arg_static else None,
+                ))
+                if not arg_static:
+                    work.append(_InstVisit(arg, d))
+                if not fn_static:
+                    work.append(_InstVisit(fn, d))
             elif cls is W_Lambda:
                 if (cur._inst_cache_expr is expr
                         and cur._inst_cache_depth == d):
@@ -3517,8 +3528,14 @@ def _iter_instantiate(root, expr, depth):
             else:
                 values.append(cur.instantiate(expr, d))
         elif isinstance(item, _InstBuildApp):
-            arg = values.pop()
-            fn = values.pop()
+            if item.arg is None:
+                arg = values.pop()
+            else:
+                arg = item.arg
+            if item.fn is None:
+                fn = values.pop()
+            else:
+                fn = item.fn
             values.append(fn.app(arg))
         elif isinstance(item, _InstBuildLambda):
             body = values.pop()
