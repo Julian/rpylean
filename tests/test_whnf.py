@@ -210,6 +210,42 @@ class TestApp(object):
         assert syntactic_eq(reduced, expected)
 
 
+class TestClosure(object):
+    def test_resolves_inner_bvar(self):
+        """Closure([fvar], BVar(0)) reduces to fvar."""
+        fvar = x.binder(type=NAT).fvar()
+        closure = b0.closure([fvar])
+        assert syntactic_eq(closure.whnf(Environment.EMPTY), fvar)
+
+    def test_shifts_outer_bvar_down(self):
+        """Closure([fvar], BVar(2)) reduces to BVar(1) (env consumed bvar(0))."""
+        fvar = x.binder(type=NAT).fvar()
+        closure = b2.closure([fvar])
+        assert syntactic_eq(closure.whnf(Environment.EMPTY), b1)
+
+    def test_atomic_body_passes_through(self):
+        """Closure([fvar], Const) is just Const."""
+        a_decl = a.axiom(type=NAT)
+        env = Environment.having([a_decl])
+        const = a_decl.const()
+        # Const has no loose bvars, so .closure() should already collapse.
+        # Construct W_Closure directly to exercise WHNF too.
+        from rpylean.objects import W_Closure
+        fvar = x.binder(type=NAT).fvar()
+        closure = W_Closure([fvar], const)
+        assert syntactic_eq(closure.whnf(env), const)
+
+    def test_pushes_through_app_to_resolve_bvar(self):
+        """Closure([arg], App(f, BVar(0))) reduces to App(f, arg)."""
+        f_decl = f.axiom(type=forall(x.binder(type=NAT))(NAT))
+        arg_decl = a.axiom(type=NAT)
+        env = Environment.having([f_decl, arg_decl])
+        body = f_decl.const().app(b0)
+        closure = body.closure([arg_decl.const()])
+        expected = f_decl.const().app(arg_decl.const())
+        assert syntactic_eq(closure.whnf(env), expected)
+
+
 class TestLet(object):
     def test_zeta(self):
         """

@@ -1248,6 +1248,10 @@ class W_Expr(_Item):
             return self
         if self.loose_bvar_range == 0:
             return self
+        if isinstance(self, W_BVar):
+            if self.id < len(env):
+                return env[self.id]
+            return W_BVar(self.id - len(env))
         return W_Closure(env, self)
 
     def whnf_with_progress(self, env):
@@ -3057,6 +3061,42 @@ class W_Closure(W_Expr):
         self.loose_bvar_range = max_loose
         self._whnf_cache_result = None
         self._infer_cache_result = None
+
+    def whnf(self, env):
+        cached = self._whnf_cache_result
+        if cached is not None:
+            return cached
+        (expr, _progress) = self.whnf_with_progress(env)
+        self._whnf_cache_result = expr
+        return expr
+
+    def _whnf_core(self, env):
+        body = self.body
+        closure_env = self.env
+        n = len(closure_env)
+        if isinstance(body, W_BVar):
+            if body.id < n:
+                return closure_env[body.id]
+            return W_BVar(body.id - n)
+        if isinstance(body, W_App):
+            return body.fn.closure(closure_env).app(
+                body.arg.closure(closure_env),
+            )
+        if isinstance(body, W_Let):
+            # let x = val in body'  ⇒  body' with bvar(0) ↦ val, all under
+            # the outer closure's env.
+            inner = body.body.closure([body.value])
+            return inner.closure(closure_env)
+        if isinstance(body, W_Proj):
+            return body.with_expr(body.struct_expr.closure(closure_env))
+        if isinstance(body, W_Closure):
+            inner_step = body._whnf_core(env)
+            if inner_step is not None:
+                return inner_step.closure(closure_env)
+            return None
+        if isinstance(body, W_FunBase):
+            return None
+        return body
 
 
 class W_RecRule(_Item):
