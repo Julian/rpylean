@@ -1552,10 +1552,6 @@ class W_Const(W_Expr):
         # to one ``W_Const``), so caching on identity is effectively a
         # per-name cache.
         self._infer_cache_result = None
-        # Inline infer cache — every reference to a constant in a proof
-        # term hits the same shared instance, so caching on identity is
-        # effectively a per-name cache.
-        self._infer_cache_result = None
 
     def __repr__(self):
         return "`%s" % self.str()
