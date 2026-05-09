@@ -59,13 +59,18 @@ class EnvironmentBuilder(object):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] + names
-        self.quotient = []
         self.declarations = []
+        self.env = Environment(declarations=r_dict(name_eq, Name.hash))
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
-        return vars(self) == vars(other)
+        return (
+            self.levels == other.levels
+            and self.exprs == other.exprs
+            and self.names == other.names
+            and self.declarations == other.declarations
+        )
 
     def __ne__(self, other):
         if self.__class__ is not other.__class__:
@@ -75,14 +80,29 @@ class EnvironmentBuilder(object):
     def __repr__(self):
         return "<EnvironmentBuilder with %s declarations>" % (len(self.declarations),)
 
-    def consume(self, items):
+    def consume(self, items, hook=None):
         """
         Incrementally consume some items into this builder.
 
-        Returns self, even though this mutates, so that chaining is possible.
+        If ``hook`` is given, its ``on_declaration`` is invoked for each
+        declaration as it is registered, with the partially-built environment
+        available at ``self.env`` for streaming type-checking. Returning a
+        truthy value from ``on_declaration`` aborts the loop early.
+
+        Returns self.
         """
+        if hook is None:
+            for item in items:
+                item.compile(self)
+            return self
+
+        n = 0
         for item in items:
             item.compile(self)
+            while n < len(self.declarations):
+                if hook.on_declaration(self.declarations[n]):
+                    return self
+                n += 1
         return self
 
     # We assume nidx, eidx and uidx are always the next index to use.
@@ -105,37 +125,41 @@ class EnvironmentBuilder(object):
         self.levels.append(level)
 
     def register_quotient(self, name, type, levels):
-        self.quotient.append((name, type, levels))
+        n = len(name.components)
+        if n == 0 or n > 2 or name.components[0] != "Quot":
+            raise UnknownQuotient(name, type)
+        if n == 2 and name.components[1] not in ("mk", "ind", "lift"):
+            raise UnknownQuotient(name, type)
+        self.register_declaration(name.axiom(type=type, levels=levels))
 
     def register_declaration(self, decl):
+        env_decls = self.env.declarations
+        if decl.name in env_decls:
+            raise AlreadyDeclared(decl.name, env_decls)
+        if len(decl.levels) > 1:
+            seen = {}
+            for level in decl.levels:
+                if level in seen:
+                    raise DuplicateLevels(decl.name, decl.levels, level)
+                seen[level] = True
         self.declarations.append(decl)
+        env_decls[decl.name] = decl
 
     def finish(self):
         """
-        Finish building, generating the known-valid and immutable environment.
+        Finish building, returning the live environment.
         """
-        if self.quotient:
-            from rpylean.quot import QUOT, QUOT_MK, QUOT_IND, QUOT_LIFT
+        return self.env
 
-            for name, type, levels in self.quotient:
-                n = len(name.components)
-                if n == 0 or n > 2 or name.components[0] != "Quot":
-                    raise UnknownQuotient(name, type)
 
-                if n == 1:
-                    expected = QUOT
-                elif name.components[1] == "mk":
-                    expected = QUOT_MK
-                elif name.components[1] == "ind":
-                    expected = QUOT_IND
-                elif name.components[1] == "lift":
-                    expected = QUOT_LIFT
-                else:
-                    raise UnknownQuotient(name, type)
+class DeclarationHook(object):
+    """
+    Base class for streaming hooks invoked on each newly-registered declaration.
+    """
 
-                self.register_declaration(name.axiom(type=type, levels=levels))
-
-        return Environment.having(self.declarations)
+    def on_declaration(self, decl):
+        """Return a truthy value to abort the consume loop early."""
+        return False
 
 
 def from_export(export):
@@ -333,39 +357,46 @@ class Environment(object):
         Type check each declaration in the environment.
         """
         for each in declarations:
-            if pp is not None:
-                pp(self, each)
-
-            # FIXME: Better state encapsulation for heartbeats...
-            self.heartbeat = 0
-            self._current_decl = each
-            self._def_eq_cache = {}
-            self._infer_cache = {}
-            try:
-                error = each.type_check(self)
-            except HeartbeatExceeded as err:
-                yield W_HeartbeatError(
-                    each.name,
-                    err.heartbeats,
-                    err.max_heartbeat,
-                )
-            except W_CheckError as err:
-                if err.name is None:
-                    err.name = each.name
+            for err in self.type_check_one(each, pp=pp):
                 yield err
-            except W_Error as err:
-                yield W_InvalidDeclaration(each, err, self.declarations)
-            except Exception:
-                if not we_are_translated():
-                    print_exc(None, stderr)
-                    stderr.write("\nwhile checking ")
-                    stderr.write(each.name.str())
-                    stderr.write("\n\n")
-                    pdb.post_mortem()
-                raise
-            else:
-                if error is not None:
-                    yield error
+
+    def type_check_one(self, decl, pp=None):
+        """
+        Type check a single declaration, yielding zero or one errors.
+        """
+        if pp is not None:
+            pp(self, decl)
+
+        # FIXME: Better state encapsulation for heartbeats...
+        self.heartbeat = 0
+        self._current_decl = decl
+        self._def_eq_cache = {}
+        self._infer_cache = {}
+        try:
+            error = decl.type_check(self)
+        except HeartbeatExceeded as err:
+            yield W_HeartbeatError(
+                decl.name,
+                err.heartbeats,
+                err.max_heartbeat,
+            )
+        except W_CheckError as err:
+            if err.name is None:
+                err.name = decl.name
+            yield err
+        except W_Error as err:
+            yield W_InvalidDeclaration(decl, err, self.declarations)
+        except Exception:
+            if not we_are_translated():
+                print_exc(None, stderr)
+                stderr.write("\nwhile checking ")
+                stderr.write(decl.name.str())
+                stderr.write("\n\n")
+                pdb.post_mortem()
+            raise
+        else:
+            if error is not None:
+                yield error
 
     def all(self):
         """

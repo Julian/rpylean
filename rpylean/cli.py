@@ -7,14 +7,21 @@ from __future__ import print_function
 from time import time
 import errno
 
+from rpython.rlib.objectmodel import r_dict
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
+from rpylean import parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
 from rpylean.leanffi import FFI
-from rpylean.environment import StreamTracer, from_export
-from rpylean.objects import Name
+from rpylean.environment import (
+    DeclarationHook,
+    EnvironmentBuilder,
+    StreamTracer,
+    from_export,
+)
+from rpylean.objects import Name, name_eq
 
 
 cli = CLI(
@@ -71,57 +78,123 @@ def check(self, args, stdin, stdout, stderr):
 
     failures = 0
 
+    max_fail = int(args.options["max-fail"] or "0")
+    max_heartbeat = int(args.options["max-heartbeat"] or "0")
+    printer = Printer.from_str(args.options["print"], stdoutw)
+    pp = printer.show if printer is not None else None
+
+    filter_match = args.options["filter-match"]
+    filter_names = None
+    if filter_match is None and args.options["filter"] is not None:
+        filter_names = r_dict(name_eq, Name.hash)
+        for each in args.options["filter"].split(","):
+            filter_names[Name.from_str(each)] = True
+
+    trace = args.options["trace"]
+
     for path in args.varargs:
         start = time()
+        if max_fail > 0:
+            # `max(1, ...)` preserves a quirk of the original: once we've hit
+            # max_fail, subsequent files still parse and emit a single error
+            # each before aborting.
+            abort_at = max_fail - failures
+            if abort_at < 1:
+                abort_at = 1
+        else:
+            abort_at = 0
+        new_failures = _check_one_file(
+            path,
+            stdin,
+            stderr,
+            stderrw,
+            pp,
+            filter_match,
+            filter_names,
+            abort_at,
+            max_heartbeat,
+            trace,
+        )
+        failures += new_failures
+        elapsed = time() - start
+        stderr.write("checked in %fs\n" % (elapsed,))
+    return 1 if failures else 0
+
+
+class _StreamingChecker(DeclarationHook):
+    """
+    Per-declaration filter + type-check, accumulating errors and failure count.
+    """
+
+    def __init__(self, env, stderrw, pp, filter_match, filter_names, abort_at):
+        self.env = env
+        self.stderrw = stderrw
+        self.pp = pp
+        self.filter_match = filter_match
+        self.filter_names = filter_names
+        self.abort_at = abort_at
+        self.failures = 0
+
+    def on_declaration(self, decl):
+        if self.filter_match is not None and self.filter_match not in decl.name.str():
+            return False
+        if self.filter_names is not None and decl.name not in self.filter_names:
+            return False
+        for w_error in self.env.type_check_one(decl, pp=self.pp):
+            w_error.write_to(self.stderrw)
+            self.failures += 1
+            if 0 < self.abort_at <= self.failures:
+                return True
+        return False
+
+
+def _check_one_file(
+    path,
+    stdin,
+    stderr,
+    stderrw,
+    pp,
+    filter_match,
+    filter_names,
+    abort_at,
+    max_heartbeat,
+    trace,
+):
+    """
+    Stream-check a single export file, returning the number of new failures.
+
+    ``abort_at`` is the failure count at which to stop (0 means unlimited).
+    """
+    file = _open_export(path, stdin)
+    builder = EnvironmentBuilder()
+    checker = _StreamingChecker(
+        env=builder.env,
+        stderrw=stderrw,
+        pp=pp,
+        filter_match=filter_match,
+        filter_names=filter_names,
+        abort_at=abort_at,
+    )
+    try:
         try:
-            env = environment_from(path=path, stdin=stdin)
+            if trace:
+                builder.env.tracer = StreamTracer(stderrw)
+            if max_heartbeat > 0:
+                builder.env.max_heartbeat = max_heartbeat
+            builder.consume(parser.from_export(file), hook=checker)
         except ExportError as err:
             stderrw.writeline(err.tokens())
             stderrw.write_plain("\n")
-            failures += 1
-            continue
-        parse_elapsed = time() - start
-
-        if args.options["trace"]:
-            env.tracer = StreamTracer(stderrw)
-
-        max_heartbeat = int(args.options["max-heartbeat"] or "0")
-        if max_heartbeat > 0:
-            env.max_heartbeat = max_heartbeat
-
-        if args.options["filter-match"] is not None:
-            match = args.options["filter-match"]
-            declarations = env.match(match)
-        elif args.options["filter"] is not None:
-            names = [Name.from_str(each) for each in args.options["filter"].split(",")]
-            declarations = env.only(names)
-        else:
-            declarations = env.all()
-
-        max_fail = int(args.options["max-fail"] or "0")
-        printer = Printer.from_str(args.options["print"], stdoutw)
-        pp = printer.show if printer is not None else None
-
-        check_start = time()
-        try:
-            for w_error in env.type_check(declarations, pp=pp):
-                w_error.write_to(stderrw)
-                failures += 1
-                if 0 < max_fail <= failures:
-                    break
+            return checker.failures + 1
+        except UsageError:
+            raise
         except:
             stderr.write("Unexpected error during type checking\n")
             raise
-        check_elapsed = time() - check_start
-
-        stderr.write(
-            "parsed in %fs, checked in %fs\n"
-            % (
-                parse_elapsed,
-                check_elapsed,
-            ),
-        )
-    return 1 if failures else 0
+    finally:
+        if path != "-":
+            file.close()
+    return checker.failures
 
 
 @cli.subcommand(
@@ -204,20 +277,24 @@ def ffi(self, args, stdin, stdout, stderr):
     return 0
 
 
-def environment_from(path, stdin):
+def _open_export(path, stdin):
     if path == "-":
-        return from_export(fdopen_as_stream(stdin.fileno(), "r"))
-
+        return fdopen_as_stream(stdin.fileno(), "r")
     try:
-        file = open_file_as_stream(path)
+        return open_file_as_stream(path)
     except OSError as err:
         if err.errno != errno.ENOENT:
             raise
         raise UsageError("`%s` does not exist." % (path,))
 
-    environment = from_export(file)
-    file.close()
-    return environment
+
+def environment_from(path, stdin):
+    file = _open_export(path, stdin)
+    try:
+        return from_export(file)
+    finally:
+        if path != "-":
+            file.close()
 
 
 class Printer(object):
