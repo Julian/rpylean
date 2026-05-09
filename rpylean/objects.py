@@ -3420,6 +3420,8 @@ def syntactic_eq(expr1, expr2):
     """
     Check if two expressions are syntactically equal.
     """
+    if expr1 is expr2:
+        return True
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
