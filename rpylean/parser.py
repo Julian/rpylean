@@ -11,6 +11,7 @@ from textwrap import dedent
 from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
+from rpylean._line_parser import LineCursor
 from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
 from rpylean.exceptions import ExportError, ReflexiveKError
 
@@ -870,63 +871,494 @@ def from_ndjson(stream):
         line = stream.readline()
         if not line:
             return
-        value = from_json(line)
-        assert value.is_object, line
-        obj = value.value_object()
-
-        if "str" in obj:
-            cls = NameStr
-        elif "app" in obj:
-            cls = App
-        elif "bvar" in obj:
-            cls = BVar
-        elif "const" in obj:
-            cls = Const
-        elif "num" in obj:
-            cls = NameNum
-        elif "max" in obj:
-            cls = UniverseMax
-        elif "imax" in obj:
-            cls = UniverseIMax
-        elif "succ" in obj:
-            cls = UniverseSucc
-        elif "param" in obj:
-            cls = UniverseParam
-        elif "sort" in obj:
-            cls = Sort
-        elif "axiom" in obj:
-            cls = Axiom
-        elif "def" in obj:
-            cls = Definition
-        elif "opaque" in obj:
-            cls = Opaque
-        elif "inductive" in obj:
-            cls = Inductive
-        elif "quot" in obj:
-            cls = Quot
-        elif "rec" in obj:
-            cls = Recursor
-        elif "thm" in obj:
-            cls = Theorem
-        elif "forallE" in obj:
-            cls = ForAll
-        elif "letE" in obj:
-            cls = Let
-        elif "lam" in obj:
-            cls = Lambda
-        elif "proj" in obj:
-            cls = Proj
-        elif "natVal" in obj:
-            cls = LitNat
-        elif "strVal" in obj:
-            cls = LitStr
-        else:
-            assert False, "unknown export object: %s" % (line,)
         try:
-            yield cls.from_dict(obj)
+            yield parse_line(line)
         except Exception:
             print(line)
             raise
+
+
+def parse_line(line):
+    """
+    Parse a single lean4export NDJSON line directly into a Node, bypassing
+    the generic JSON parser for the bulk of shapes.
+
+    Inductive and Recursor lines (rare and structurally complex) fall back
+    to the JSON-based path since they carry nested arrays of objects.
+    """
+    cursor = LineCursor(line)
+    cursor.expect('{')
+    first_key = cursor.read_key()
+
+    if first_key == "in":
+        return _parse_name(cursor)
+    if first_key == "il":
+        return _parse_universe(cursor)
+    if first_key == "ie":
+        return _parse_expr_ie_first(cursor)
+    if first_key == "axiom":
+        return _parse_axiom(cursor)
+    if first_key == "def":
+        return _parse_definition(cursor)
+    if first_key == "opaque":
+        return _parse_opaque(cursor)
+    if first_key == "thm":
+        return _parse_theorem(cursor)
+    if first_key == "quot":
+        return _parse_quot(cursor)
+    if first_key == "inductive" or first_key == "rec":
+        return _node_from_json(line, first_key)
+    # Else: an expression where the discriminator (app, bvar, const, ...)
+    # came before "ie" in this line.
+    val = _parse_expr_value(cursor, first_key)
+    cursor.expect(',')
+    cursor.expect_key("ie")
+    eidx = cursor.read_int()
+    cursor.expect('}')
+    return Expr(eidx=eidx, val=val)
+
+
+def _node_from_json(line, first_key):
+    """Fallback: parse via the generic JSON tree for complex shapes."""
+    value = from_json(line)
+    obj = value.value_object()
+    if first_key == "inductive":
+        return Inductive.from_dict(obj)
+    if first_key == "rec":
+        return Recursor.from_dict(obj)
+    assert False, "unexpected fallback shape: %s" % first_key
+
+
+# ---- Names ---------------------------------------------------------------
+
+def _parse_name(cursor):
+    """Parse `{"in":N,"str":...}` or `{"in":N,"num":...}` after `"in":`."""
+    nidx = cursor.read_int()
+    cursor.expect(',')
+    second_key = cursor.read_key()
+    if second_key == "str":
+        parent_nidx, part = _parse_name_str_inner(cursor)
+        cursor.expect('}')
+        return NameStr(nidx=nidx, parent_nidx=parent_nidx, part=part)
+    if second_key == "num":
+        parent_nidx, id_val = _parse_name_num_inner(cursor)
+        cursor.expect('}')
+        return NameNum(nidx=nidx, parent_nidx=parent_nidx, id=id_val)
+    raise ValueError("unknown name discriminator: %s" % second_key)
+
+
+def _parse_name_str_inner(cursor):
+    cursor.expect('{')
+    parent_nidx = 0
+    part = ""
+    while True:
+        key = cursor.read_key()
+        if key == "pre":
+            parent_nidx = cursor.read_int()
+        elif key == "str":
+            part = cursor.read_string()
+        else:
+            raise ValueError("unexpected key %s in name str" % key)
+        if cursor.maybe('}'):
+            return parent_nidx, part
+        cursor.expect(',')
+
+
+def _parse_name_num_inner(cursor):
+    cursor.expect('{')
+    parent_nidx = 0
+    id_val = 0
+    while True:
+        key = cursor.read_key()
+        if key == "pre":
+            parent_nidx = cursor.read_int()
+        elif key == "i":
+            id_val = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in name num" % key)
+        if cursor.maybe('}'):
+            return parent_nidx, id_val
+        cursor.expect(',')
+
+
+# ---- Universes -----------------------------------------------------------
+
+def _parse_universe(cursor):
+    """Parse `{"il":N,"<succ|max|imax|param>":...}` after `"il":`."""
+    uidx = cursor.read_int()
+    cursor.expect(',')
+    second_key = cursor.read_key()
+    if second_key == "succ":
+        parent = cursor.read_int()
+        cursor.expect('}')
+        return UniverseSucc(uidx=uidx, parent=parent)
+    if second_key == "max":
+        cursor.expect('[')
+        lhs = cursor.read_int()
+        cursor.expect(',')
+        rhs = cursor.read_int()
+        cursor.expect(']')
+        cursor.expect('}')
+        return UniverseMax(uidx=uidx, lhs=lhs, rhs=rhs)
+    if second_key == "imax":
+        cursor.expect('[')
+        lhs = cursor.read_int()
+        cursor.expect(',')
+        rhs = cursor.read_int()
+        cursor.expect(']')
+        cursor.expect('}')
+        return UniverseIMax(uidx=uidx, lhs=lhs, rhs=rhs)
+    if second_key == "param":
+        nidx = cursor.read_int()
+        cursor.expect('}')
+        return UniverseParam(uidx=uidx, nidx=nidx)
+    raise ValueError("unknown universe discriminator: %s" % second_key)
+
+
+# ---- Expressions ---------------------------------------------------------
+
+def _parse_expr_ie_first(cursor):
+    """Parse expr lines whose first key is ``"ie"``."""
+    eidx = cursor.read_int()
+    cursor.expect(',')
+    second_key = cursor.read_key()
+    val = _parse_expr_value(cursor, second_key)
+    cursor.expect('}')
+    return Expr(eidx=eidx, val=val)
+
+
+def _parse_expr_value(cursor, disc):
+    """Read the value of an expression's discriminator and return its ExprVal."""
+    if disc == "bvar":
+        return BVar(id=cursor.read_int())
+    if disc == "sort":
+        return Sort(level=cursor.read_int())
+    if disc == "app":
+        return _parse_app_inner(cursor)
+    if disc == "const":
+        return _parse_const_inner(cursor)
+    if disc == "lam":
+        return _parse_binder_expr(cursor, "lam")
+    if disc == "forallE":
+        return _parse_binder_expr(cursor, "forallE")
+    if disc == "letE":
+        return _parse_let_inner(cursor)
+    if disc == "natVal":
+        nat = rbigint.fromstr(cursor.read_string())
+        assert nat.int_ge(0)
+        return LitNat(val=nat)
+    if disc == "strVal":
+        return LitStr(val=cursor.read_string())
+    if disc == "proj":
+        return _parse_proj_inner(cursor)
+    raise ValueError("unknown expr discriminator: %s" % disc)
+
+
+def _parse_app_inner(cursor):
+    cursor.expect('{')
+    fn_eidx = 0
+    arg_eidx = 0
+    while True:
+        key = cursor.read_key()
+        if key == "fn":
+            fn_eidx = cursor.read_int()
+        elif key == "arg":
+            arg_eidx = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in app" % key)
+        if cursor.maybe('}'):
+            return App(fn_eidx=fn_eidx, arg_eidx=arg_eidx)
+        cursor.expect(',')
+
+
+def _parse_const_inner(cursor):
+    cursor.expect('{')
+    nidx = 0
+    levels = None
+    while True:
+        key = cursor.read_key()
+        if key == "name":
+            nidx = cursor.read_int()
+        elif key == "us":
+            levels = cursor.read_int_array()
+        else:
+            raise ValueError("unexpected key %s in const" % key)
+        if cursor.maybe('}'):
+            if levels is None:
+                levels = []
+            return Const(nidx=nidx, levels=levels)
+        cursor.expect(',')
+
+
+def _parse_binder_expr(cursor, kind):
+    cursor.expect('{')
+    binder_info = ""
+    body = 0
+    name = 0
+    type_ = 0
+    while True:
+        key = cursor.read_key()
+        if key == "binderInfo":
+            binder_info = cursor.read_string()
+        elif key == "body":
+            body = cursor.read_int()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in %s" % (key, kind))
+        if cursor.maybe('}'):
+            if kind == "lam":
+                return Lambda(
+                    name=name, type=type_, binder_info=binder_info, body=body,
+                )
+            return ForAll(
+                name=name, type=type_, binder_info=binder_info, body=body,
+            )
+        cursor.expect(',')
+
+
+def _parse_let_inner(cursor):
+    cursor.expect('{')
+    body = 0
+    name = 0
+    type_ = 0
+    val = 0
+    while True:
+        key = cursor.read_key()
+        if key == "body":
+            body = cursor.read_int()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "nondep":
+            # boolean — currently unused; just consume
+            _skip_value(cursor)
+        elif key == "type":
+            type_ = cursor.read_int()
+        elif key == "value":
+            val = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in letE" % key)
+        if cursor.maybe('}'):
+            return Let(nidx=name, type=type_, value=val, body=body)
+        cursor.expect(',')
+
+
+def _parse_proj_inner(cursor):
+    cursor.expect('{')
+    idx = 0
+    struct = 0
+    type_name = 0
+    while True:
+        key = cursor.read_key()
+        if key == "idx":
+            idx = cursor.read_int()
+        elif key == "struct":
+            struct = cursor.read_int()
+        elif key == "typeName":
+            type_name = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in proj" % key)
+        if cursor.maybe('}'):
+            return Proj(type_name=type_name, index=idx, struct=struct)
+        cursor.expect(',')
+
+
+def _skip_value(cursor):
+    """Skip a JSON value of any shape (for fields the parser ignores)."""
+    cursor.skip_ws()
+    if cursor.pos >= cursor.length:
+        raise ValueError("unexpected end of input")
+    c = cursor.line[cursor.pos]
+    if c == '"':
+        cursor.read_string()
+    elif c == '-' or ('0' <= c <= '9'):
+        cursor.read_int()
+    elif c == 't':
+        cursor.pos += 4
+    elif c == 'f':
+        cursor.pos += 5
+    elif c == 'n':
+        cursor.pos += 4
+    elif c == '[':
+        cursor.pos += 1
+        if cursor.maybe(']'):
+            return
+        while True:
+            _skip_value(cursor)
+            if cursor.maybe(']'):
+                return
+            cursor.expect(',')
+    elif c == '{':
+        cursor.pos += 1
+        if cursor.maybe('}'):
+            return
+        while True:
+            cursor.read_key()
+            _skip_value(cursor)
+            if cursor.maybe('}'):
+                return
+            cursor.expect(',')
+    else:
+        raise ValueError("unsupported value at pos %d" % cursor.pos)
+
+
+# ---- Declarations --------------------------------------------------------
+
+def _parse_axiom(cursor):
+    """Parse `{"axiom":{...}}` after `"axiom":`."""
+    cursor.expect('{')
+    levels = None
+    name = 0
+    type_ = 0
+    while True:
+        key = cursor.read_key()
+        if key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            if levels is None:
+                levels = []
+            return Axiom(nidx=name, type=type_, levels=levels)
+        cursor.expect(',')
+
+
+def _parse_quot(cursor):
+    """Parse `{"quot":{...}}` after `"quot":`."""
+    cursor.expect('{')
+    levels = None
+    name = 0
+    type_ = 0
+    while True:
+        key = cursor.read_key()
+        if key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            if levels is None:
+                levels = []
+            return Quot(nidx=name, type=type_, levels=levels)
+        cursor.expect(',')
+
+
+def _parse_theorem(cursor):
+    """Parse `{"thm":{...}}` after `"thm":`."""
+    cursor.expect('{')
+    levels = None
+    name = 0
+    type_ = 0
+    val = 0
+    while True:
+        key = cursor.read_key()
+        if key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        elif key == "value":
+            val = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            if levels is None:
+                levels = []
+            return Theorem(nidx=name, type=type_, value=val, levels=levels)
+        cursor.expect(',')
+
+
+def _parse_opaque(cursor):
+    """Parse `{"opaque":{...}}` after `"opaque":`."""
+    cursor.expect('{')
+    levels = None
+    name = 0
+    type_ = 0
+    val = 0
+    while True:
+        key = cursor.read_key()
+        if key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        elif key == "value":
+            val = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            if levels is None:
+                levels = []
+            return Opaque(nidx=name, type=type_, value=val, levels=levels)
+        cursor.expect(',')
+
+
+def _parse_definition(cursor):
+    """Parse `{"def":{...}}` after `"def":`."""
+    cursor.expect('{')
+    levels = None
+    name = 0
+    type_ = 0
+    val = 0
+    hint = objects.HINT_OPAQUE
+    while True:
+        key = cursor.read_key()
+        if key == "hints":
+            hint = _parse_def_hint(cursor)
+        elif key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            name = cursor.read_int()
+        elif key == "type":
+            type_ = cursor.read_int()
+        elif key == "value":
+            val = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            if levels is None:
+                levels = []
+            return Definition(
+                nidx=name,
+                type=type_,
+                value=val,
+                hint=hint,
+                levels=levels,
+            )
+        cursor.expect(',')
+
+
+def _parse_def_hint(cursor):
+    """Parse the polymorphic ``"hints"`` field — string or `{"regular":N}`."""
+    cursor.skip_ws()
+    if cursor.pos < cursor.length and cursor.line[cursor.pos] == '"':
+        raw = cursor.read_string()
+        if raw == "opaque":
+            return objects.HINT_OPAQUE
+        if raw == "abbrev":
+            return objects.HINT_ABBREV
+        raise ValueError("unknown def hint: %s" % raw)
+    cursor.expect('{')
+    cursor.expect_key("regular")
+    n = cursor.read_int()
+    cursor.expect('}')
+    return n
 
 
 def from_str(text):
