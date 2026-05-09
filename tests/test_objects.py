@@ -12,6 +12,7 @@ from rpylean.objects import (
     W_App,
     W_Axiom,
     W_BVar,
+    W_Closure,
     W_Const,
     W_Constructor,
     W_Declaration,
@@ -628,3 +629,29 @@ class TestFun(object):
             binder=x_nat,
             body=W_Lambda(binder=y_type, body=P),
         )
+
+
+class TestClosure(object):
+    def test_loose_bvar_range_closed_body(self):
+        """Closure([fvar], BVar(0)) has no loose bvars (env entry is closed)."""
+        fvar = x.binder(type=NAT).fvar()
+        assert W_BVar(0).closure([fvar]).loose_bvar_range == 0
+
+    def test_loose_bvar_range_body_leaks(self):
+        """Closure([fvar], BVar(2)) leaks bvar(2-1) = bvar(1) outside."""
+        fvar = x.binder(type=NAT).fvar()
+        assert W_BVar(2).closure([fvar]).loose_bvar_range == 2
+
+    def test_loose_bvar_range_env_entry_open(self):
+        """An env entry's loose bvars contribute to the closure's range."""
+        assert W_BVar(0).closure([W_BVar(3)]).loose_bvar_range == 4
+
+    def test_closure_of_closed_body_is_identity(self):
+        """A body with no loose bvars doesn't need wrapping."""
+        const = Name.simple("c").const()
+        fvar = x.binder(type=NAT).fvar()
+        assert const.closure([fvar]) is const
+
+    def test_closure_with_empty_env_is_identity(self):
+        bvar = W_BVar(0)
+        assert bvar.closure([]) is bvar

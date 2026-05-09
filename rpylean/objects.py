@@ -1240,6 +1240,16 @@ class W_Expr(_Item):
             return expr
         return expr.app(*more)
 
+    def closure(self, env):
+        """
+        Wrap this expression in a closure that defers ``env``'s substitution.
+        """
+        if not env:
+            return self
+        if self.loose_bvar_range == 0:
+            return self
+        return W_Closure(env, self)
+
     def whnf_with_progress(self, env):
         """
         Reduce this expression to weak head normal form.
@@ -3020,6 +3030,33 @@ class W_App(W_Expr):
 
     def subst_levels(self, substs):
         return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))
+
+
+class W_Closure(W_Expr):
+    """
+    A deferred substitution: ``body`` evaluated under ``env``.
+
+    Represents the result of substituting ``[bvar(0) ↦ env[0],
+    bvar(1) ↦ env[1], ...]`` into ``body``, with bvars at indices
+    ``>= len(env)`` shifted down by ``len(env)``. Each entry of
+    ``env`` lives in the closure's outer scope (i.e. the scope
+    containing the closure itself).
+    """
+
+    def __init__(self, env, body):
+        self.env = env
+        self.body = body
+        n = len(env)
+        body_outside = body.loose_bvar_range - n
+        if body_outside < 0:
+            body_outside = 0
+        max_loose = body_outside
+        for v in env:
+            if v.loose_bvar_range > max_loose:
+                max_loose = v.loose_bvar_range
+        self.loose_bvar_range = max_loose
+        self._whnf_cache_result = None
+        self._infer_cache_result = None
 
 
 class W_RecRule(_Item):
