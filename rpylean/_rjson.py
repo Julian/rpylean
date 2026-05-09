@@ -264,11 +264,40 @@ class OwnJSONDecoder(JSONDecoder):
         self.pos = i
         return self.space.newfloat(float(self.getslice(start, i)))
 
-    def _create_dict(self, dct):
+    def decode_object(self, i):
+        # Parse `{ "k": v, ... }` directly into a str-keyed dict, skipping the
+        # base class's intermediate JsonString-keyed accumulator + copy step.
+        start = i
+        i = self.skip_whitespace(i)
+        if self.ll_chars[i] == '}':
+            self.pos = i + 1
+            return JsonObject({})
+
         d = {}
-        for key, value in dct.iteritems():
-            d[key.value_string()] = value
-        return JsonObject(d)
+        while True:
+            w_name = self.decode_key(i)
+            i = self.skip_whitespace(self.pos)
+            ch = self.ll_chars[i]
+            if ch != ':':
+                self._raise("No ':' found at char %d", i)
+            i += 1
+            i = self.skip_whitespace(i)
+            w_value = self.decode_any(i)
+            d[w_name.value_string()] = w_value
+            i = self.skip_whitespace(self.pos)
+            ch = self.ll_chars[i]
+            i += 1
+            if ch == '}':
+                self.pos = i
+                return JsonObject(d)
+            elif ch == ',':
+                pass
+            elif ch == '\0':
+                self._raise("Unterminated object starting at char %d", start)
+            else:
+                self._raise(
+                    "Unexpected '%s' when decoding object (char %d)", ch, i - 1
+                )
 
 
 
