@@ -80,9 +80,9 @@ class EnvironmentBuilder(object):
     def __repr__(self):
         return "<EnvironmentBuilder with %s declarations>" % (len(self.declarations),)
 
-    def consume(self, items, hook=None):
+    def consume(self, stream, hook=None):
         """
-        Incrementally consume some items into this builder.
+        Parse NDJSON lines from ``stream`` directly into this builder.
 
         If ``hook`` is given, its ``on_declaration`` is invoked for each
         declaration as it is registered, with the partially-built environment
@@ -92,18 +92,22 @@ class EnvironmentBuilder(object):
         Returns self.
         """
         if hook is None:
-            for item in items:
-                item.compile(self)
-            return self
+            while True:
+                line = stream.readline()
+                if not line:
+                    return self
+                parser.parse_line(line, self)
 
         n = 0
-        for item in items:
-            item.compile(self)
+        while True:
+            line = stream.readline()
+            if not line:
+                return self
+            parser.parse_line(line, self)
             while n < len(self.declarations):
                 if hook.on_declaration(self.declarations[n]):
                     return self
                 n += 1
-        return self
 
     # We assume nidx, eidx and uidx are always the next index to use.
     # This seems to hold for exports we've seen, but if it ever weren't the
@@ -166,21 +170,15 @@ def from_export(export):
     """
     Load an environment out of some lean4export-formatted export.
     """
-    return from_items(parser.from_export(export)).finish()
-
-
-def from_items(items):
-    """
-    Load an environment builder out of some parsed lean4export items.
-    """
-    return EnvironmentBuilder().consume(items)
+    parser.validate_export_metadata(export)
+    return EnvironmentBuilder().consume(export).finish()
 
 
 def from_str(text):
     """
     Load an environment out of a lean4export-formatted string.
     """
-    return from_items(parser.from_str(text))
+    return parser.from_str(text)
 
 
 class Tracer(object):

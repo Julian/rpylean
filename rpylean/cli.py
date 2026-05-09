@@ -181,7 +181,8 @@ def _check_one_file(
                 builder.env.tracer = StreamTracer(stderrw)
             if max_heartbeat > 0:
                 builder.env.max_heartbeat = max_heartbeat
-            builder.consume(parser.from_export(file), hook=checker)
+            parser.validate_export_metadata(file)
+            builder.consume(file, hook=checker)
         except ExportError as err:
             stderrw.writeline(err.tokens())
             stderrw.write_plain("\n")

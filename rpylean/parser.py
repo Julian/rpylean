@@ -1,11 +1,17 @@
 """
+Parse lean4export NDJSON exports directly into an EnvironmentBuilder.
+
 See https://ammkrn.github.io/type_checking_in_lean4/export_format.html
+
+Each line is a self-describing record (a name, a level, an expression, or
+a declaration). We walk the bytes of each line directly via ``LineCursor``
+and call ``builder.register_X`` immediately — no intermediate AST nodes,
+no JSON tree, no per-line ``compile()`` step.
 """
 
 from __future__ import print_function
 
 from StringIO import StringIO
-from pprint import pprint as pp  # noqa: F401
 from textwrap import dedent
 
 from rpython.rlib.rbigint import rbigint
@@ -40,546 +46,76 @@ class ExportVersionError(ExportError):
         ]
 
 
-class Node(object):
+# ---- Public entry points -------------------------------------------------
+
+def from_str(text):
     """
-    An AST node.
+    Parse a lean4export-formatted string (no metadata header) into a fresh
+    ``EnvironmentBuilder`` and return it.
     """
+    from rpylean.environment import EnvironmentBuilder
 
-    def __eq__(self, other):
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return vars(self) == vars(other)
+    return EnvironmentBuilder().consume(StringIO(dedent(text).strip()))
 
-    def __ne__(self, other):
-        return not self == other
 
-    def __repr__(self):
-        contents = ("%s=%r" % (k, v) for k, v in self.__dict__.iteritems())
-        return "<%s %s>" % (self.__class__.__name__, ", ".join(contents))
-
-
-class NameStr(Node):
-    def __init__(self, nidx, parent_nidx, part):
-        self.nidx = nidx
-        self.parent_nidx = parent_nidx
-        self.part = part
-
-    def compile(self, builder):
-        parent = builder.names[self.parent_nidx]
-        builder.register_name(nidx=self.nidx, name=parent.child(self.part))
-
-
-class NameNum(Node):
-    def __init__(self, nidx, parent_nidx, id):
-        self.nidx = nidx
-        self.parent_nidx = parent_nidx
-        self.id = id
-
-    def compile(self, builder):
-        parent = builder.names[self.parent_nidx]
-        builder.register_name(nidx=self.nidx, name=parent.child(str(self.id)))
-
-
-class Universe(Node):
-    pass
-
-
-class UniverseSucc(Universe):
-    def __init__(self, uidx, parent):
-        self.uidx = uidx
-        self.parent = parent
-
-    def compile(self, builder):
-        level = builder.levels[self.parent].succ()
-        builder.register_level(self.uidx, level)
-
-
-class UniverseMax(Universe):
-    def __init__(self, uidx, lhs, rhs):
-        self.uidx = uidx
-        self.lhs = lhs
-        self.rhs = rhs
-
-    def compile(self, builder):
-        level = builder.levels[self.lhs].max(builder.levels[self.rhs])
-        builder.register_level(self.uidx, level)
-
-
-class UniverseIMax(Universe):
-    def __init__(self, uidx, lhs, rhs):
-        self.uidx = uidx
-        self.lhs = lhs
-        self.rhs = rhs
-
-    def compile(self, builder):
-        level = builder.levels[self.lhs].imax(builder.levels[self.rhs])
-        builder.register_level(self.uidx, level)
-
-
-class UniverseParam(Universe):
-    def __init__(self, uidx, nidx):
-        self.uidx = uidx
-        self.nidx = nidx
-
-    def compile(self, builder):
-        level = builder.names[self.nidx].level()
-        builder.register_level(self.uidx, level)
-
-
-class Expr(Node):
-    def __init__(self, eidx, val):
-        self.eidx = eidx
-        self.val = val
-
-    def compile(self, builder):
-        w_expr = self.val.to_w_expr(builder)
-        builder.register_expr(self.eidx, w_expr)
-
-
-class ExprVal(Node):
-    pass
-
-
-class BVar(ExprVal):
-    def __init__(self, id):
-        self.id = id
-
-    def to_w_expr(self, builder):
-        return objects.W_BVar(id=self.id)
-
-
-class LitStr(ExprVal):
-    def __init__(self, val):
-        self.val = val
-
-    def to_w_expr(self, builder):
-        return objects.W_LitStr(val=self.val)
-
-
-class LitNat(ExprVal):
-    def __init__(self, val):
-        self.val = val
-
-    def to_w_expr(self, builder):
-        return objects.W_LitNat(val=self.val)
-
-
-class Sort(ExprVal):
-    def __init__(self, level):
-        self.level = level
-
-    def to_w_expr(self, builder):
-        return builder.levels[self.level].sort()
-
-
-class Const(ExprVal):
-    def __init__(self, nidx, levels):
-        self.nidx = nidx
-        self.levels = levels
-
-    def to_w_expr(self, builder):
-        levels = [builder.levels[level] for level in self.levels]
-        return builder.names[self.nidx].const(levels)
-
-
-class Let(ExprVal):
-    def __init__(self, nidx, type, value, body):
-        self.nidx = nidx
-        self.type = type
-        self.value = value
-        self.body = body
-
-    def to_w_expr(self, builder):
-        return builder.names[self.nidx].let(
-            type=builder.exprs[self.type],
-            value=builder.exprs[self.value],
-            body=builder.exprs[self.body],
-        )
-
-
-class App(ExprVal):
-    def __init__(self, fn_eidx, arg_eidx):
-        self.fn_eidx = fn_eidx
-        self.arg_eidx = arg_eidx
-
-    def to_w_expr(self, builder):
-        fn = builder.exprs[self.fn_eidx]
-        arg = builder.exprs[self.arg_eidx]
-        return fn.app(arg)
-
-
-def binder(name, info, type):
-    if info == "default":
-        return name.binder(type=type)
-    elif info == "implicit":
-        return name.implicit_binder(type=type)
-    elif info == "strictImplicit":
-        return name.strict_implicit_binder(type=type)
-    elif info == "instImplicit":
-        return name.instance_binder(type=type)
-    else:
-        assert False, "Unknown binder info %s" % info
-
-
-class Lambda(ExprVal):
-    def __init__(self, name, type, binder_info, body):
-        self.name = name
-        self.type = type
-        self.binder_info = binder_info
-        self.body = body
-
-    def to_w_expr(self, builder):
-        return objects.fun(
-            binder(
-                name=builder.names[self.name],
-                type=builder.exprs[self.type],
-                info=self.binder_info,
-            ),
-        )(builder.exprs[self.body])
-
-
-class ForAll(ExprVal):
-    def __init__(self, name, type, binder_info, body):
-        self.name = name
-        self.type = type
-        self.binder_info = binder_info
-        self.body = body
-
-    def to_w_expr(self, builder):
-        return objects.forall(
-            binder(
-                name=builder.names[self.name],
-                type=builder.exprs[self.type],
-                info=self.binder_info,
-            )
-        )(builder.exprs[self.body])
-
-
-class Proj(ExprVal):
-    def __init__(self, type_name, index, struct):
-        self.type_name = type_name
-        self.index = index
-        self.struct = struct
-
-    def to_w_expr(self, builder):
-        struct = builder.exprs[self.struct]
-        return builder.names[self.type_name].proj(self.index, struct)
-
-
-class Definition(Node):
-    def __init__(self, nidx, type, value, hint, levels):
-        self.nidx = nidx
-        self.type = type
-        self.value = value
-        self.hint = hint
-        self.levels = levels
-
-    def compile(self, builder):
-        declaration = builder.names[self.nidx].definition(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type],
-            value=builder.exprs[self.value],
-            hint=self.hint,
-        )
-        builder.register_declaration(declaration)
-
-
-class Opaque(Node):
-    def __init__(self, nidx, type, value, levels):
-        self.nidx = nidx
-        self.type = type
-        self.value = value
-        self.levels = levels
-
-    def compile(self, builder):
-        declaration = builder.names[self.nidx].opaque(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type],
-            value=builder.exprs[self.value],
-        )
-        builder.register_declaration(declaration)
-
-
-class Theorem(Node):
-    def __init__(self, nidx, type, value, levels):
-        self.nidx = nidx
-        self.type = type
-        self.value = value
-        self.levels = levels
-
-    def compile(self, builder):
-        declaration = builder.names[self.nidx].theorem(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type],
-            value=builder.exprs[self.value],
-        )
-        builder.register_declaration(declaration)
-
-
-class Axiom(Node):
-    def __init__(self, nidx, type, levels):
-        self.nidx = nidx
-        self.type = type
-        self.levels = levels
-
-    def compile(self, builder):
-        declaration = builder.names[self.nidx].axiom(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type],
-        )
-        builder.register_declaration(declaration)
-
-
-class Quot(Node):
-    def __init__(self, nidx, type, levels):
-        self.nidx = nidx
-        self.type = type
-        self.levels = levels
-
-    def compile(self, builder):
-        name = builder.names[self.nidx]
-        levels = [builder.names[nidx] for nidx in self.levels]
-        builder.register_quotient(name, builder.exprs[self.type], levels)
-
-
-class MutualInductive(Node):
+def validate_export_metadata(stream):
     """
-    Mutually inductive types.
+    Read and validate the metadata line of an export. Raises
+    ``ExportVersionError`` on mismatch.
     """
-
-    def __init__(self, inductives, constructors, recursors):
-        self.inductives = inductives
-        self.constructors = constructors
-        self.recursors = recursors
-
-    def compile(self, builder):
-        for each in self.inductives:
-            each.compile(builder)
-        for each in self.constructors:
-            each.compile(builder)
-        for each in self.recursors:
-            each.compile(builder)
-
-
-class Inductive(Node):
-    """
-    An inductive type.
-    """
-
-    def __init__(
-        self,
-        nidx,
-        type_idx,
-        constructors,
-        recursors,
-        is_reflexive,
-        is_recursive,
-        num_nested,
-        num_params,
-        num_indices,
-        name_idxs,
-        levels,
-    ):
-        self.nidx = nidx
-        self.type_idx = type_idx
-        self.constructors = constructors
-        self.recursors = recursors
-        self.is_reflexive = is_reflexive
-        self.is_recursive = is_recursive
-        self.num_nested = num_nested
-        self.num_params = num_params
-        self.num_indices = num_indices
-        self.name_idxs = name_idxs
-        self.levels = levels
-
-    def compile(self, builder):
-        name = builder.names[self.nidx]
-        if self.is_reflexive:
-            for rec in self.recursors:
-                if rec.k:
-                    raise ReflexiveKError(name, builder.names[rec.nidx])
-        declaration = name.inductive(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type_idx],
-            names=[builder.names[nidx] for nidx in self.name_idxs],
-            constructors=[each.compile(builder) for each in self.constructors],
-            recursors=[each.compile(builder) for each in self.recursors],
-            num_nested=self.num_nested,
-            num_params=self.num_params,
-            num_indices=self.num_indices,
-            is_reflexive=self.is_reflexive,
-            is_recursive=self.is_recursive,
-        )
-        builder.register_declaration(declaration)
-
-
-class Constructor(Node):
-    def __init__(
-        self,
-        nidx,
-        type_idx,
-        inductive_nidx,
-        cidx,
-        num_params,
-        num_fields,
-        levels,
-    ):
-        self.nidx = nidx
-        self.type_idx = type_idx
-        self.inductive_nidx = inductive_nidx
-        self.cidx = cidx
-        self.num_params = num_params
-        self.num_fields = num_fields
-        self.levels = levels
-
-    def compile(self, builder):
-        """
-        Add this constructor to the environment.
-
-        Then check whether our parent inductive type has all its constructors
-        now set, in which case compile it too.
-        """
-        constructor = builder.names[self.nidx].constructor(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type_idx],
-            num_params=self.num_params,
-            num_fields=self.num_fields,
-        )
-        builder.register_declaration(constructor)
-        return constructor
-
-
-class Recursor(Node):
-    def __init__(
-        self,
-        nidx,
-        type_idx,
-        k,
-        num_params,
-        num_indices,
-        num_motives,
-        num_minors,
-        ind_name_idxs,
-        rules,
-        levels,
-    ):
-        self.nidx = nidx
-        self.type_idx = type_idx
-        self.k = k
-        self.num_params = num_params
-        self.num_indices = num_indices
-        self.num_motives = num_motives
-        self.num_minors = num_minors
-        self.ind_name_idxs = ind_name_idxs
-        self.rules = rules
-        self.levels = levels
-
-    def compile(self, builder):
-        declaration = builder.names[self.nidx].recursor(
-            levels=[builder.names[nidx] for nidx in self.levels],
-            type=builder.exprs[self.type_idx],
-            names=[builder.names[nidx] for nidx in self.ind_name_idxs],
-            rules=[each.to_w(builder) for each in self.rules],
-            k=self.k,
-            num_params=self.num_params,
-            num_indices=self.num_indices,
-            num_motives=self.num_motives,
-            num_minors=self.num_minors,
-        )
-        builder.register_declaration(declaration)
-
-
-class RecRule(Node):
-    def __init__(self, ctor_name_idx, num_fields, val):
-        self.ctor_name_idx = ctor_name_idx
-        self.num_fields = num_fields
-        self.val = val
-
-    def to_w(self, builder):
-        return objects.W_RecRule(
-            ctor_name=builder.names[self.ctor_name_idx],
-            num_fields=self.num_fields,
-            val=builder.exprs[self.val],
-        )
-
-
-def from_export(stream):
-    """
-    Parse lean4export-format NDJSON from a stream.
-    """
-    meta_line = stream.readline()
-    if not meta_line:
+    line = stream.readline()
+    if not line:
         raise ExportVersionError(None)
-
-    version = _parse_metadata_version(meta_line)
+    version = _parse_metadata_version(line)
     if version != EXPORT_VERSION:
         raise ExportVersionError(version)
 
-    return from_ndjson(stream)
 
+# ---- Per-line dispatch ---------------------------------------------------
 
-def from_ndjson(stream):
+def parse_line(line, builder):
     """
-    Parse NDJSON from a stream *without* the initial metadata line.
-    """
-    while True:
-        line = stream.readline()
-        if not line:
-            return
-        try:
-            yield parse_line(line)
-        except Exception:
-            print(line)
-            raise
-
-
-def parse_line(line):
-    """
-    Parse a single lean4export NDJSON line directly into a Node, bypassing
-    the generic JSON parser for the bulk of shapes.
-
-    Inductive and Recursor lines (rare and structurally complex) fall back
-    to the JSON-based path since they carry nested arrays of objects.
+    Parse a single lean4export NDJSON line and apply it to ``builder``
+    via the appropriate ``register_*`` call. Lines come in 23 shapes:
+    names (str/num), four kinds of universe expressions, ten kinds of
+    expression atom, six declarations (axiom/def/opaque/thm/quot/inductive),
+    and standalone recursors.
     """
     cursor = LineCursor(line)
     cursor.expect('{')
     first_key = cursor.read_key()
 
     if first_key == "in":
-        return _parse_name(cursor)
-    if first_key == "il":
-        return _parse_universe(cursor)
-    if first_key == "ie":
-        return _parse_expr_ie_first(cursor)
-    if first_key == "axiom":
-        return _parse_axiom(cursor)
-    if first_key == "def":
-        return _parse_definition(cursor)
-    if first_key == "opaque":
-        return _parse_opaque(cursor)
-    if first_key == "thm":
-        return _parse_theorem(cursor)
-    if first_key == "quot":
-        return _parse_quot(cursor)
-    if first_key == "inductive":
-        return _parse_inductive(cursor)
-    if first_key == "rec":
-        node = _parse_recursor_record(cursor)
+        _parse_name(cursor, builder)
+    elif first_key == "il":
+        _parse_universe(cursor, builder)
+    elif first_key == "ie":
+        _parse_expr_ie_first(cursor, builder)
+    elif first_key == "axiom":
+        _parse_axiom(cursor, builder)
+    elif first_key == "def":
+        _parse_definition(cursor, builder)
+    elif first_key == "opaque":
+        _parse_opaque(cursor, builder)
+    elif first_key == "thm":
+        _parse_theorem(cursor, builder)
+    elif first_key == "quot":
+        _parse_quot(cursor, builder)
+    elif first_key == "inductive":
+        _parse_inductive(cursor, builder)
+    elif first_key == "rec":
+        type_data = _parse_recursor_record(cursor)
         cursor.expect('}')
-        return node
-    # Else: an expression where the discriminator (app, bvar, const, ...)
-    # came before "ie" in this line.
-    val = _parse_expr_value(cursor, first_key)
-    cursor.expect(',')
-    cursor.expect_key("ie")
-    eidx = cursor.read_int()
-    cursor.expect('}')
-    return Expr(eidx=eidx, val=val)
+        _register_recursor(builder, type_data)
+    else:
+        # An expression where the discriminator (app, bvar, const, ...)
+        # came before "ie" in this line.
+        _parse_expr_disc_first(cursor, builder, first_key)
 
 
 # ---- Names ---------------------------------------------------------------
 
-def _parse_name(cursor):
+def _parse_name(cursor, builder):
     """Parse `{"in":N,"str":...}` or `{"in":N,"num":...}` after `"in":`."""
     nidx = cursor.read_int()
     cursor.expect(',')
@@ -587,12 +123,15 @@ def _parse_name(cursor):
     if second_key == "str":
         parent_nidx, part = _parse_name_str_inner(cursor)
         cursor.expect('}')
-        return NameStr(nidx=nidx, parent_nidx=parent_nidx, part=part)
-    if second_key == "num":
+        parent = builder.names[parent_nidx]
+        builder.register_name(nidx, parent.child(part))
+    elif second_key == "num":
         parent_nidx, id_val = _parse_name_num_inner(cursor)
         cursor.expect('}')
-        return NameNum(nidx=nidx, parent_nidx=parent_nidx, id=id_val)
-    raise ValueError("unknown name discriminator: %s" % second_key)
+        parent = builder.names[parent_nidx]
+        builder.register_name(nidx, parent.child(str(id_val)))
+    else:
+        raise ValueError("unknown name discriminator: %s" % second_key)
 
 
 def _parse_name_str_inner(cursor):
@@ -631,78 +170,95 @@ def _parse_name_num_inner(cursor):
 
 # ---- Universes -----------------------------------------------------------
 
-def _parse_universe(cursor):
+def _parse_universe(cursor, builder):
     """Parse `{"il":N,"<succ|max|imax|param>":...}` after `"il":`."""
     uidx = cursor.read_int()
     cursor.expect(',')
-    second_key = cursor.read_key()
-    if second_key == "succ":
+    disc = cursor.read_key()
+    if disc == "succ":
         parent = cursor.read_int()
         cursor.expect('}')
-        return UniverseSucc(uidx=uidx, parent=parent)
-    if second_key == "max":
+        builder.register_level(uidx, builder.levels[parent].succ())
+    elif disc == "max":
         cursor.expect('[')
         lhs = cursor.read_int()
         cursor.expect(',')
         rhs = cursor.read_int()
         cursor.expect(']')
         cursor.expect('}')
-        return UniverseMax(uidx=uidx, lhs=lhs, rhs=rhs)
-    if second_key == "imax":
+        builder.register_level(
+            uidx, builder.levels[lhs].max(builder.levels[rhs]),
+        )
+    elif disc == "imax":
         cursor.expect('[')
         lhs = cursor.read_int()
         cursor.expect(',')
         rhs = cursor.read_int()
         cursor.expect(']')
         cursor.expect('}')
-        return UniverseIMax(uidx=uidx, lhs=lhs, rhs=rhs)
-    if second_key == "param":
+        builder.register_level(
+            uidx, builder.levels[lhs].imax(builder.levels[rhs]),
+        )
+    elif disc == "param":
         nidx = cursor.read_int()
         cursor.expect('}')
-        return UniverseParam(uidx=uidx, nidx=nidx)
-    raise ValueError("unknown universe discriminator: %s" % second_key)
+        builder.register_level(uidx, builder.names[nidx].level())
+    else:
+        raise ValueError("unknown universe discriminator: %s" % disc)
 
 
 # ---- Expressions ---------------------------------------------------------
 
-def _parse_expr_ie_first(cursor):
-    """Parse expr lines whose first key is ``"ie"``."""
+def _parse_expr_ie_first(cursor, builder):
+    """Parse expression lines whose first key is ``"ie"``."""
     eidx = cursor.read_int()
     cursor.expect(',')
-    second_key = cursor.read_key()
-    val = _parse_expr_value(cursor, second_key)
+    disc = cursor.read_key()
+    w_expr = _read_expr_value(cursor, builder, disc)
     cursor.expect('}')
-    return Expr(eidx=eidx, val=val)
+    builder.register_expr(eidx, w_expr)
 
 
-def _parse_expr_value(cursor, disc):
-    """Read the value of an expression's discriminator and return its ExprVal."""
+def _parse_expr_disc_first(cursor, builder, disc):
+    """Parse expression lines whose first key is the discriminator."""
+    w_expr = _read_expr_value(cursor, builder, disc)
+    cursor.expect(',')
+    cursor.expect_key("ie")
+    eidx = cursor.read_int()
+    cursor.expect('}')
+    builder.register_expr(eidx, w_expr)
+
+
+def _read_expr_value(cursor, builder, disc):
+    """Read the value of an expression's discriminator and return its
+    fully-resolved ``W_Expr``. The cursor is positioned just after the
+    ``:`` following the discriminator key."""
     if disc == "bvar":
-        return BVar(id=cursor.read_int())
+        return objects.W_BVar(id=cursor.read_int())
     if disc == "sort":
-        return Sort(level=cursor.read_int())
+        return builder.levels[cursor.read_int()].sort()
     if disc == "app":
-        return _parse_app_inner(cursor)
+        return _read_app(cursor, builder)
     if disc == "const":
-        return _parse_const_inner(cursor)
+        return _read_const(cursor, builder)
     if disc == "lam":
-        return _parse_binder_expr(cursor, "lam")
+        return _read_binder_expr(cursor, builder, is_lam=True)
     if disc == "forallE":
-        return _parse_binder_expr(cursor, "forallE")
+        return _read_binder_expr(cursor, builder, is_lam=False)
     if disc == "letE":
-        return _parse_let_inner(cursor)
+        return _read_let(cursor, builder)
     if disc == "natVal":
         nat = rbigint.fromstr(cursor.read_string())
         assert nat.int_ge(0)
-        return LitNat(val=nat)
+        return objects.W_LitNat(val=nat)
     if disc == "strVal":
-        return LitStr(val=cursor.read_string())
+        return objects.W_LitStr(val=cursor.read_string())
     if disc == "proj":
-        return _parse_proj_inner(cursor)
+        return _read_proj(cursor, builder)
     raise ValueError("unknown expr discriminator: %s" % disc)
 
 
-def _parse_app_inner(cursor):
+def _read_app(cursor, builder):
     cursor.expect('{')
     fn_eidx = 0
     arg_eidx = 0
@@ -715,101 +271,122 @@ def _parse_app_inner(cursor):
         else:
             raise ValueError("unexpected key %s in app" % key)
         if cursor.maybe('}'):
-            return App(fn_eidx=fn_eidx, arg_eidx=arg_eidx)
+            return builder.exprs[fn_eidx].app(builder.exprs[arg_eidx])
         cursor.expect(',')
 
 
-def _parse_const_inner(cursor):
+def _read_const(cursor, builder):
     cursor.expect('{')
     nidx = 0
-    levels = None
+    level_idxs = None
     while True:
         key = cursor.read_key()
         if key == "name":
             nidx = cursor.read_int()
         elif key == "us":
-            levels = cursor.read_int_array()
+            level_idxs = cursor.read_int_array()
         else:
             raise ValueError("unexpected key %s in const" % key)
         if cursor.maybe('}'):
-            if levels is None:
-                levels = []
-            return Const(nidx=nidx, levels=levels)
+            if level_idxs is None:
+                level_idxs = []
+            return builder.names[nidx].const(
+                [builder.levels[i] for i in level_idxs],
+            )
         cursor.expect(',')
 
 
-def _parse_binder_expr(cursor, kind):
+def _read_binder_expr(cursor, builder, is_lam):
     cursor.expect('{')
     binder_info = ""
-    body = 0
-    name = 0
-    type_ = 0
+    body_eidx = 0
+    name_idx = 0
+    type_eidx = 0
     while True:
         key = cursor.read_key()
         if key == "binderInfo":
             binder_info = cursor.read_string()
         elif key == "body":
-            body = cursor.read_int()
+            body_eidx = cursor.read_int()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in %s" % (key, kind))
+            raise ValueError("unexpected key %s in binder" % key)
         if cursor.maybe('}'):
-            if kind == "lam":
-                return Lambda(
-                    name=name, type=type_, binder_info=binder_info, body=body,
-                )
-            return ForAll(
-                name=name, type=type_, binder_info=binder_info, body=body,
+            bound = _binder(
+                builder.names[name_idx],
+                binder_info,
+                builder.exprs[type_eidx],
+            )
+            body = builder.exprs[body_eidx]
+            if is_lam:
+                return objects.fun(bound)(body)
+            return objects.forall(bound)(body)
+        cursor.expect(',')
+
+
+def _binder(name, info, type):
+    if info == "default":
+        return name.binder(type=type)
+    if info == "implicit":
+        return name.implicit_binder(type=type)
+    if info == "strictImplicit":
+        return name.strict_implicit_binder(type=type)
+    if info == "instImplicit":
+        return name.instance_binder(type=type)
+    raise ValueError("Unknown binder info %s" % info)
+
+
+def _read_let(cursor, builder):
+    cursor.expect('{')
+    body_eidx = 0
+    name_idx = 0
+    type_eidx = 0
+    value_eidx = 0
+    while True:
+        key = cursor.read_key()
+        if key == "body":
+            body_eidx = cursor.read_int()
+        elif key == "name":
+            name_idx = cursor.read_int()
+        elif key == "nondep":
+            _skip_value(cursor)
+        elif key == "type":
+            type_eidx = cursor.read_int()
+        elif key == "value":
+            value_eidx = cursor.read_int()
+        else:
+            raise ValueError("unexpected key %s in letE" % key)
+        if cursor.maybe('}'):
+            return builder.names[name_idx].let(
+                type=builder.exprs[type_eidx],
+                value=builder.exprs[value_eidx],
+                body=builder.exprs[body_eidx],
             )
         cursor.expect(',')
 
 
-def _parse_let_inner(cursor):
-    cursor.expect('{')
-    body = 0
-    name = 0
-    type_ = 0
-    val = 0
-    while True:
-        key = cursor.read_key()
-        if key == "body":
-            body = cursor.read_int()
-        elif key == "name":
-            name = cursor.read_int()
-        elif key == "nondep":
-            # boolean — currently unused; just consume
-            _skip_value(cursor)
-        elif key == "type":
-            type_ = cursor.read_int()
-        elif key == "value":
-            val = cursor.read_int()
-        else:
-            raise ValueError("unexpected key %s in letE" % key)
-        if cursor.maybe('}'):
-            return Let(nidx=name, type=type_, value=val, body=body)
-        cursor.expect(',')
-
-
-def _parse_proj_inner(cursor):
+def _read_proj(cursor, builder):
     cursor.expect('{')
     idx = 0
-    struct = 0
-    type_name = 0
+    struct_eidx = 0
+    type_name_idx = 0
     while True:
         key = cursor.read_key()
         if key == "idx":
             idx = cursor.read_int()
         elif key == "struct":
-            struct = cursor.read_int()
+            struct_eidx = cursor.read_int()
         elif key == "typeName":
-            type_name = cursor.read_int()
+            type_name_idx = cursor.read_int()
         else:
             raise ValueError("unexpected key %s in proj" % key)
         if cursor.maybe('}'):
-            return Proj(type_name=type_name, index=idx, struct=struct)
+            return builder.names[type_name_idx].proj(
+                idx, builder.exprs[struct_eidx],
+            )
         cursor.expect(',')
 
 
@@ -852,117 +429,139 @@ def _skip_value(cursor):
         raise ValueError("unsupported value at pos %d" % cursor.pos)
 
 
-# ---- Declarations --------------------------------------------------------
+# ---- Declarations (axiom/def/opaque/thm/quot) ----------------------------
 
-def _parse_axiom(cursor):
+def _parse_axiom(cursor, builder):
     """Parse `{"axiom":{...}}` after `"axiom":`."""
     cursor.expect('{')
     levels = None
-    name = 0
-    type_ = 0
+    name_idx = 0
+    type_eidx = 0
     while True:
         key = cursor.read_key()
         if key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
             cursor.expect('}')
             if levels is None:
                 levels = []
-            return Axiom(nidx=name, type=type_, levels=levels)
+            decl = builder.names[name_idx].axiom(
+                levels=[builder.names[i] for i in levels],
+                type=builder.exprs[type_eidx],
+            )
+            builder.register_declaration(decl)
+            return
         cursor.expect(',')
 
 
-def _parse_quot(cursor):
+def _parse_quot(cursor, builder):
     """Parse `{"quot":{...}}` after `"quot":`."""
     cursor.expect('{')
     levels = None
-    name = 0
-    type_ = 0
+    name_idx = 0
+    type_eidx = 0
     while True:
         key = cursor.read_key()
         if key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
             cursor.expect('}')
             if levels is None:
                 levels = []
-            return Quot(nidx=name, type=type_, levels=levels)
+            builder.register_quotient(
+                builder.names[name_idx],
+                builder.exprs[type_eidx],
+                [builder.names[i] for i in levels],
+            )
+            return
         cursor.expect(',')
 
 
-def _parse_theorem(cursor):
+def _parse_theorem(cursor, builder):
     """Parse `{"thm":{...}}` after `"thm":`."""
     cursor.expect('{')
     levels = None
-    name = 0
-    type_ = 0
-    val = 0
+    name_idx = 0
+    type_eidx = 0
+    value_eidx = 0
     while True:
         key = cursor.read_key()
         if key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         elif key == "value":
-            val = cursor.read_int()
+            value_eidx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
             cursor.expect('}')
             if levels is None:
                 levels = []
-            return Theorem(nidx=name, type=type_, value=val, levels=levels)
+            decl = builder.names[name_idx].theorem(
+                levels=[builder.names[i] for i in levels],
+                type=builder.exprs[type_eidx],
+                value=builder.exprs[value_eidx],
+            )
+            builder.register_declaration(decl)
+            return
         cursor.expect(',')
 
 
-def _parse_opaque(cursor):
+def _parse_opaque(cursor, builder):
     """Parse `{"opaque":{...}}` after `"opaque":`."""
     cursor.expect('{')
     levels = None
-    name = 0
-    type_ = 0
-    val = 0
+    name_idx = 0
+    type_eidx = 0
+    value_eidx = 0
     while True:
         key = cursor.read_key()
         if key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         elif key == "value":
-            val = cursor.read_int()
+            value_eidx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
             cursor.expect('}')
             if levels is None:
                 levels = []
-            return Opaque(nidx=name, type=type_, value=val, levels=levels)
+            decl = builder.names[name_idx].opaque(
+                levels=[builder.names[i] for i in levels],
+                type=builder.exprs[type_eidx],
+                value=builder.exprs[value_eidx],
+            )
+            builder.register_declaration(decl)
+            return
         cursor.expect(',')
 
 
-def _parse_definition(cursor):
+def _parse_definition(cursor, builder):
     """Parse `{"def":{...}}` after `"def":`."""
     cursor.expect('{')
     levels = None
-    name = 0
-    type_ = 0
-    val = 0
+    name_idx = 0
+    type_eidx = 0
+    value_eidx = 0
     hint = objects.HINT_OPAQUE
     while True:
         key = cursor.read_key()
@@ -971,24 +570,25 @@ def _parse_definition(cursor):
         elif key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
-            name = cursor.read_int()
+            name_idx = cursor.read_int()
         elif key == "type":
-            type_ = cursor.read_int()
+            type_eidx = cursor.read_int()
         elif key == "value":
-            val = cursor.read_int()
+            value_eidx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
             cursor.expect('}')
             if levels is None:
                 levels = []
-            return Definition(
-                nidx=name,
-                type=type_,
-                value=val,
+            decl = builder.names[name_idx].definition(
+                levels=[builder.names[i] for i in levels],
+                type=builder.exprs[type_eidx],
+                value=builder.exprs[value_eidx],
                 hint=hint,
-                levels=levels,
             )
+            builder.register_declaration(decl)
+            return
         cursor.expect(',')
 
 
@@ -1009,40 +609,22 @@ def _parse_def_hint(cursor):
     return n
 
 
-# ---- Inductive types and recursors ---------------------------------------
-
-def _parse_inductive(cursor):
-    """Parse `{"inductive":{...}}` after `"inductive":`."""
-    cursor.expect('{')
-    inductive_types = []
-    constructors = []
-    recursors = []
-    while True:
-        key = cursor.read_key()
-        if key == "types":
-            inductive_types = _parse_inductive_type_array(cursor)
-        elif key == "ctors":
-            constructors = _parse_constructor_array(cursor)
-        elif key == "recs":
-            recursors = _parse_recursor_array(cursor)
-        else:
-            _skip_value(cursor)
-        if cursor.maybe('}'):
-            cursor.expect('}')
-            break
-        cursor.expect(',')
-
-    if len(inductive_types) == 1:
-        return _make_inductive(inductive_types[0], constructors, recursors)
-    return MutualInductive(
-        inductives=[_make_inductive(t, [], []) for t in inductive_types],
-        constructors=constructors,
-        recursors=recursors,
-    )
+# ---- Inductives + recursors ---------------------------------------------
+#
+# Inductive lines carry nested arrays of constructor and recursor records,
+# so we can't directly stream them into the builder while parsing. Instead
+# we collect the records into lightweight value carriers, then apply them
+# after the close brace in the order the existing compile flow used:
+#   - reflexive sanity check
+#   - register each constructor
+#   - register each recursor
+#   - register the inductive itself
+# (For mutual inductives, all inductives are registered first, then all
+# constructors, then all recursors — matching MutualInductive.compile.)
 
 
-class _InductiveTypeFields(object):
-    """Plain-old-data carrier for the fields of one inductive ``types`` entry."""
+class _IndType(object):
+    """Fields of one entry in an inductive line's ``types`` array."""
 
     def __init__(self):
         self.nidx = 0
@@ -1056,20 +638,153 @@ class _InductiveTypeFields(object):
         self.levels = []
 
 
-def _make_inductive(fields, constructors, recursors):
-    return Inductive(
-        nidx=fields.nidx,
-        type_idx=fields.type_idx,
-        is_reflexive=fields.is_reflexive,
-        is_recursive=fields.is_recursive,
-        num_nested=fields.num_nested,
-        num_params=fields.num_params,
-        num_indices=fields.num_indices,
-        name_idxs=fields.name_idxs,
-        constructors=constructors,
-        recursors=recursors,
-        levels=fields.levels,
+class _IndCtor(object):
+    """Fields of one entry in an inductive line's ``ctors`` array."""
+
+    def __init__(self):
+        self.nidx = 0
+        self.type_idx = 0
+        self.num_params = 0
+        self.num_fields = 0
+        self.levels = []
+
+
+class _IndRec(object):
+    """Fields of one entry in an inductive line's ``recs`` array, or of a
+    standalone ``rec`` line."""
+
+    def __init__(self):
+        self.nidx = 0
+        self.type_idx = 0
+        self.k = False
+        self.num_params = 0
+        self.num_indices = 0
+        self.num_motives = 0
+        self.num_minors = 0
+        self.ind_name_idxs = []
+        self.rules = []
+        self.levels = []
+
+
+class _IndRule(object):
+    """Fields of one entry in a recursor's ``rules`` array."""
+
+    def __init__(self, ctor_nidx, num_fields, rhs_eidx):
+        self.ctor_nidx = ctor_nidx
+        self.num_fields = num_fields
+        self.rhs_eidx = rhs_eidx
+
+
+def _parse_inductive(cursor, builder):
+    """Parse `{"inductive":{...}}` after `"inductive":`."""
+    cursor.expect('{')
+    types = []
+    ctors = []
+    recs = []
+    while True:
+        key = cursor.read_key()
+        if key == "types":
+            types = _parse_inductive_type_array(cursor)
+        elif key == "ctors":
+            ctors = _parse_constructor_array(cursor)
+        elif key == "recs":
+            recs = _parse_recursor_array(cursor)
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            break
+        cursor.expect(',')
+
+    if len(types) == 1:
+        _register_single_inductive(builder, types[0], ctors, recs)
+    else:
+        _register_mutual_inductive(builder, types, ctors, recs)
+
+
+def _register_single_inductive(builder, type_data, ctor_records, rec_records):
+    name = builder.names[type_data.nidx]
+    if type_data.is_reflexive:
+        for rec in rec_records:
+            if rec.k:
+                raise ReflexiveKError(name, builder.names[rec.nidx])
+
+    ctor_decls = [_register_constructor(builder, c) for c in ctor_records]
+    rec_decls = [_register_recursor(builder, r) for r in rec_records]
+
+    inductive = name.inductive(
+        levels=[builder.names[i] for i in type_data.levels],
+        type=builder.exprs[type_data.type_idx],
+        names=[builder.names[i] for i in type_data.name_idxs],
+        constructors=ctor_decls,
+        recursors=rec_decls,
+        num_nested=type_data.num_nested,
+        num_params=type_data.num_params,
+        num_indices=type_data.num_indices,
+        is_reflexive=type_data.is_reflexive,
+        is_recursive=type_data.is_recursive,
     )
+    builder.register_declaration(inductive)
+
+
+def _register_mutual_inductive(builder, types, ctor_records, rec_records):
+    for type_data in types:
+        name = builder.names[type_data.nidx]
+        if type_data.is_reflexive:
+            for rec in rec_records:
+                if rec.k:
+                    raise ReflexiveKError(name, builder.names[rec.nidx])
+        inductive = name.inductive(
+            levels=[builder.names[i] for i in type_data.levels],
+            type=builder.exprs[type_data.type_idx],
+            names=[builder.names[i] for i in type_data.name_idxs],
+            constructors=[],
+            recursors=[],
+            num_nested=type_data.num_nested,
+            num_params=type_data.num_params,
+            num_indices=type_data.num_indices,
+            is_reflexive=type_data.is_reflexive,
+            is_recursive=type_data.is_recursive,
+        )
+        builder.register_declaration(inductive)
+
+    for ctor in ctor_records:
+        _register_constructor(builder, ctor)
+    for rec in rec_records:
+        _register_recursor(builder, rec)
+
+
+def _register_constructor(builder, ctor):
+    decl = builder.names[ctor.nidx].constructor(
+        levels=[builder.names[i] for i in ctor.levels],
+        type=builder.exprs[ctor.type_idx],
+        num_params=ctor.num_params,
+        num_fields=ctor.num_fields,
+    )
+    builder.register_declaration(decl)
+    return decl
+
+
+def _register_recursor(builder, rec):
+    decl = builder.names[rec.nidx].recursor(
+        levels=[builder.names[i] for i in rec.levels],
+        type=builder.exprs[rec.type_idx],
+        names=[builder.names[i] for i in rec.ind_name_idxs],
+        rules=[
+            objects.W_RecRule(
+                ctor_name=builder.names[r.ctor_nidx],
+                num_fields=r.num_fields,
+                val=builder.exprs[r.rhs_eidx],
+            ) for r in rec.rules
+        ],
+        k=rec.k,
+        num_params=rec.num_params,
+        num_indices=rec.num_indices,
+        num_motives=rec.num_motives,
+        num_minors=rec.num_minors,
+    )
+    builder.register_declaration(decl)
+    return decl
 
 
 def _parse_inductive_type_array(cursor):
@@ -1086,31 +801,31 @@ def _parse_inductive_type_array(cursor):
 
 def _parse_inductive_type(cursor):
     cursor.expect('{')
-    fields = _InductiveTypeFields()
+    type_data = _IndType()
     while True:
         key = cursor.read_key()
         if key == "all":
-            fields.name_idxs = cursor.read_int_array()
+            type_data.name_idxs = cursor.read_int_array()
         elif key == "isRec":
-            fields.is_recursive = cursor.read_bool()
+            type_data.is_recursive = cursor.read_bool()
         elif key == "isReflexive":
-            fields.is_reflexive = cursor.read_bool()
+            type_data.is_reflexive = cursor.read_bool()
         elif key == "levelParams":
-            fields.levels = cursor.read_int_array()
+            type_data.levels = cursor.read_int_array()
         elif key == "name":
-            fields.nidx = cursor.read_int()
+            type_data.nidx = cursor.read_int()
         elif key == "numIndices":
-            fields.num_indices = cursor.read_int()
+            type_data.num_indices = cursor.read_int()
         elif key == "numNested":
-            fields.num_nested = cursor.read_int()
+            type_data.num_nested = cursor.read_int()
         elif key == "numParams":
-            fields.num_params = cursor.read_int()
+            type_data.num_params = cursor.read_int()
         elif key == "type":
-            fields.type_idx = cursor.read_int()
+            type_data.type_idx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
-            return fields
+            return type_data
         cursor.expect(',')
 
 
@@ -1128,41 +843,27 @@ def _parse_constructor_array(cursor):
 
 def _parse_constructor(cursor):
     cursor.expect('{')
-    nidx = 0
-    type_idx = 0
-    inductive_nidx = 0
-    cidx = 0
-    num_params = 0
-    num_fields = 0
-    levels = []
+    ctor = _IndCtor()
     while True:
         key = cursor.read_key()
         if key == "cidx":
-            cidx = cursor.read_int()
+            cursor.read_int()  # not used
         elif key == "induct":
-            inductive_nidx = cursor.read_int()
+            cursor.read_int()  # not used
         elif key == "levelParams":
-            levels = cursor.read_int_array()
+            ctor.levels = cursor.read_int_array()
         elif key == "name":
-            nidx = cursor.read_int()
+            ctor.nidx = cursor.read_int()
         elif key == "numFields":
-            num_fields = cursor.read_int()
+            ctor.num_fields = cursor.read_int()
         elif key == "numParams":
-            num_params = cursor.read_int()
+            ctor.num_params = cursor.read_int()
         elif key == "type":
-            type_idx = cursor.read_int()
+            ctor.type_idx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
-            return Constructor(
-                nidx=nidx,
-                type_idx=type_idx,
-                inductive_nidx=inductive_nidx,
-                cidx=cidx,
-                num_params=num_params,
-                num_fields=num_fields,
-                levels=levels,
-            )
+            return ctor
         cursor.expect(',')
 
 
@@ -1179,56 +880,36 @@ def _parse_recursor_array(cursor):
 
 
 def _parse_recursor_record(cursor):
-    """Parse a single recursor record `{...}`. Used both inside an
-    inductive's ``recs`` array and as the top-level body of a ``rec`` line."""
+    """Parse one recursor record. Used both inside an inductive's ``recs``
+    array and as the body of a top-level ``rec`` line."""
     cursor.expect('{')
-    nidx = 0
-    type_idx = 0
-    k = False
-    num_params = 0
-    num_indices = 0
-    num_motives = 0
-    num_minors = 0
-    ind_name_idxs = []
-    rules = []
-    levels = []
+    rec = _IndRec()
     while True:
         key = cursor.read_key()
         if key == "all":
-            ind_name_idxs = cursor.read_int_array()
+            rec.ind_name_idxs = cursor.read_int_array()
         elif key == "k":
-            k = cursor.read_bool()
+            rec.k = cursor.read_bool()
         elif key == "levelParams":
-            levels = cursor.read_int_array()
+            rec.levels = cursor.read_int_array()
         elif key == "name":
-            nidx = cursor.read_int()
+            rec.nidx = cursor.read_int()
         elif key == "numIndices":
-            num_indices = cursor.read_int()
+            rec.num_indices = cursor.read_int()
         elif key == "numMinors":
-            num_minors = cursor.read_int()
+            rec.num_minors = cursor.read_int()
         elif key == "numMotives":
-            num_motives = cursor.read_int()
+            rec.num_motives = cursor.read_int()
         elif key == "numParams":
-            num_params = cursor.read_int()
+            rec.num_params = cursor.read_int()
         elif key == "rules":
-            rules = _parse_rec_rule_array(cursor)
+            rec.rules = _parse_rec_rule_array(cursor)
         elif key == "type":
-            type_idx = cursor.read_int()
+            rec.type_idx = cursor.read_int()
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
-            return Recursor(
-                nidx=nidx,
-                type_idx=type_idx,
-                k=k,
-                num_params=num_params,
-                num_indices=num_indices,
-                num_motives=num_motives,
-                num_minors=num_minors,
-                ind_name_idxs=ind_name_idxs,
-                rules=rules,
-                levels=levels,
-            )
+            return rec
         cursor.expect(',')
 
 
@@ -1260,9 +941,7 @@ def _parse_rec_rule(cursor):
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
-            return RecRule(
-                ctor_name_idx=ctor, num_fields=nfields, val=rhs,
-            )
+            return _IndRule(ctor, nfields, rhs)
         cursor.expect(',')
 
 
@@ -1311,10 +990,3 @@ def _parse_format_inner(cursor):
         if cursor.maybe('}'):
             return version
         cursor.expect(',')
-
-
-def from_str(text):
-    """
-    Parse NDJSON out of a lean4export-formatted string.
-    """
-    return from_ndjson(StringIO(dedent(text).strip()))
