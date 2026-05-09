@@ -12,7 +12,6 @@ from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
-from rpylean._rjson import loads as from_json, json_true as JSON_TRUE
 from rpylean.exceptions import ExportError, ReflexiveKError
 
 
@@ -60,15 +59,6 @@ class Node(object):
 
 
 class NameStr(Node):
-    @staticmethod
-    def from_dict(value):
-        string = value["str"].value_object()
-        return NameStr(
-            nidx=value["in"].value_int(),
-            parent_nidx=string["pre"].value_int(),
-            part=string["str"].value_string(),
-        )
-
     def __init__(self, nidx, parent_nidx, part):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
@@ -80,15 +70,6 @@ class NameStr(Node):
 
 
 class NameNum(Node):
-    @staticmethod
-    def from_dict(value):
-        num = value["num"].value_object()
-        return NameNum(
-            nidx=value["in"].value_int(),
-            parent_nidx=num["pre"].value_int(),
-            id=num["i"].value_int(),
-        )
-
     def __init__(self, nidx, parent_nidx, id):
         self.nidx = nidx
         self.parent_nidx = parent_nidx
@@ -104,13 +85,6 @@ class Universe(Node):
 
 
 class UniverseSucc(Universe):
-    @staticmethod
-    def from_dict(value):
-        return UniverseSucc(
-            uidx=value["il"].value_int(),
-            parent=value["succ"].value_int(),
-        )
-
     def __init__(self, uidx, parent):
         self.uidx = uidx
         self.parent = parent
@@ -121,15 +95,6 @@ class UniverseSucc(Universe):
 
 
 class UniverseMax(Universe):
-    @staticmethod
-    def from_dict(value):
-        lhs, rhs = value["max"].value_array()
-        return UniverseMax(
-            uidx=value["il"].value_int(),
-            lhs=lhs.value_int(),
-            rhs=rhs.value_int(),
-        )
-
     def __init__(self, uidx, lhs, rhs):
         self.uidx = uidx
         self.lhs = lhs
@@ -141,15 +106,6 @@ class UniverseMax(Universe):
 
 
 class UniverseIMax(Universe):
-    @staticmethod
-    def from_dict(value):
-        lhs, rhs = value["imax"].value_array()
-        return UniverseIMax(
-            uidx=value["il"].value_int(),
-            lhs=lhs.value_int(),
-            rhs=rhs.value_int(),
-        )
-
     def __init__(self, uidx, lhs, rhs):
         self.uidx = uidx
         self.lhs = lhs
@@ -161,13 +117,6 @@ class UniverseIMax(Universe):
 
 
 class UniverseParam(Universe):
-    @staticmethod
-    def from_dict(value):
-        return UniverseParam(
-            uidx=value["il"].value_int(),
-            nidx=value["param"].value_int(),
-        )
-
     def __init__(self, uidx, nidx):
         self.uidx = uidx
         self.nidx = nidx
@@ -205,11 +154,6 @@ class BVar(ExprVal):
 
 
 class LitStr(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        val = LitStr(val=value["strVal"].value_string())
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, val):
         self.val = val
 
@@ -218,12 +162,6 @@ class LitStr(ExprVal):
 
 
 class LitNat(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        nat = rbigint.fromstr(value["natVal"].value_string())
-        assert nat.int_ge(0)
-        return Expr(eidx=value["ie"].value_int(), val=LitNat(nat))
-
     def __init__(self, val):
         self.val = val
 
@@ -232,11 +170,6 @@ class LitNat(ExprVal):
 
 
 class Sort(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        val = Sort(level=value["sort"].value_int())
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, level):
         self.level = level
 
@@ -245,15 +178,6 @@ class Sort(ExprVal):
 
 
 class Const(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        info = value["const"].value_object()
-        val = Const(
-            nidx=info["name"].value_int(),
-            levels=[each.value_int() for each in info["us"].value_array()],
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, nidx, levels):
         self.nidx = nidx
         self.levels = levels
@@ -264,18 +188,6 @@ class Const(ExprVal):
 
 
 class Let(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        let = value["letE"].value_object()
-        val = Let(
-            nidx=let["name"].value_int(),
-            type=let["type"].value_int(),
-            value=let["value"].value_int(),
-            body=let["body"].value_int(),
-            # TODO: nondep = ...
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, nidx, type, value, body):
         self.nidx = nidx
         self.type = type
@@ -291,15 +203,6 @@ class Let(ExprVal):
 
 
 class App(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        info = value["app"].value_object()
-        val = App(
-            fn_eidx=info["fn"].value_int(),
-            arg_eidx=info["arg"].value_int(),
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, fn_eidx, arg_eidx):
         self.fn_eidx = fn_eidx
         self.arg_eidx = arg_eidx
@@ -324,17 +227,6 @@ def binder(name, info, type):
 
 
 class Lambda(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        lam = value["lam"].value_object()
-        val = Lambda(
-            name=lam["name"].value_int(),
-            type=lam["type"].value_int(),
-            binder_info=lam["binderInfo"].value_string(),
-            body=lam["body"].value_int(),
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, name, type, binder_info, body):
         self.name = name
         self.type = type
@@ -352,17 +244,6 @@ class Lambda(ExprVal):
 
 
 class ForAll(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        forall = value["forallE"].value_object()
-        val = ForAll(
-            name=forall["name"].value_int(),
-            type=forall["type"].value_int(),
-            binder_info=forall["binderInfo"].value_string(),
-            body=forall["body"].value_int(),
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, name, type, binder_info, body):
         self.name = name
         self.type = type
@@ -380,16 +261,6 @@ class ForAll(ExprVal):
 
 
 class Proj(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        proj = value["proj"].value_object()
-        val = Proj(
-            type_name=proj["typeName"].value_int(),
-            index=proj["idx"].value_int(),
-            struct=proj["struct"].value_int(),
-        )
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, type_name, index, struct):
         self.type_name = type_name
         self.index = index
@@ -401,30 +272,6 @@ class Proj(ExprVal):
 
 
 class Definition(Node):
-    @staticmethod
-    def from_dict(value):
-        info = value["def"].value_object()
-        hints = info["hints"]
-        if hints.is_object:
-            hint = hints.value_object()["regular"].value_int()
-        else:
-            raw = hints.value_string()
-            if raw == "opaque":
-                hint = objects.HINT_OPAQUE
-            elif raw == "abbrev":
-                hint = objects.HINT_ABBREV
-            else:
-                assert False, hints
-        return Definition(
-            nidx=info["name"].value_int(),
-            type=info["type"].value_int(),
-            value=info["value"].value_int(),
-            hint=hint,
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(self, nidx, type, value, hint, levels):
         self.nidx = nidx
         self.type = type
@@ -443,19 +290,6 @@ class Definition(Node):
 
 
 class Opaque(Node):
-    @staticmethod
-    def from_dict(value):
-        info = value["opaque"].value_object()
-        return Opaque(
-            nidx=info["name"].value_int(),
-            type=info["type"].value_int(),
-            value=info["value"].value_int(),
-            # TODO: isUnsafe and name_idxs
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(self, nidx, type, value, levels):
         self.nidx = nidx
         self.type = type
@@ -472,18 +306,6 @@ class Opaque(Node):
 
 
 class Theorem(Node):
-    @staticmethod
-    def from_dict(value):
-        info = value["thm"].value_object()
-        return Theorem(
-            nidx=info["name"].value_int(),
-            type=info["type"].value_int(),
-            value=info["value"].value_int(),
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(self, nidx, type, value, levels):
         self.nidx = nidx
         self.type = type
@@ -499,31 +321,7 @@ class Theorem(Node):
         builder.register_declaration(declaration)
 
 
-class MutualTheorems(Node):
-    """
-    A block of mutually recursive theorems.
-    """
-
-    def __init__(self, theorems):
-        self.theorems = theorems
-
-    def compile(self, builder):
-        for each in self.theorems:
-            each.compile(builder)
-
-
 class Axiom(Node):
-    @staticmethod
-    def from_dict(value):
-        info = value["axiom"].value_object()
-        return Axiom(
-            nidx=info["name"].value_int(),
-            type=info["type"].value_int(),
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(self, nidx, type, levels):
         self.nidx = nidx
         self.type = type
@@ -538,17 +336,6 @@ class Axiom(Node):
 
 
 class Quot(Node):
-    @staticmethod
-    def from_dict(value):
-        info = value["quot"].value_object()
-        return Quot(
-            nidx=info["name"].value_int(),
-            type=info["type"].value_int(),
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(self, nidx, type, levels):
         self.nidx = nidx
         self.type = type
@@ -583,53 +370,6 @@ class Inductive(Node):
     """
     An inductive type.
     """
-
-    @staticmethod
-    def from_dict(value):
-        info = value["inductive"].value_object()
-
-        inductives = info["types"].value_array()
-        constructors = [
-            Constructor.from_dict(each.value_object())
-            for each in info["ctors"].value_array()
-        ]
-        recursors = [
-            Recursor.from_dict(each.value_object())
-            for each in info["recs"].value_array()
-        ]
-
-        if len(inductives) == 1:
-            inductive = inductives[0].value_object()
-            return Inductive.single(inductive, constructors, recursors)
-        return MutualInductive(
-            inductives=[
-                Inductive.single(each.value_object(), [], [])
-                for each in inductives
-            ],
-            constructors=constructors,
-            recursors=recursors,
-        )
-
-    @staticmethod
-    def single(inductive, constructors, recursors):
-        return Inductive(
-            nidx=inductive["name"].value_int(),
-            type_idx=inductive["type"].value_int(),
-            is_reflexive=inductive["isReflexive"] is JSON_TRUE,
-            is_recursive=inductive["isRec"] is JSON_TRUE,
-            num_nested=inductive["numNested"].value_int(),
-            num_params=inductive["numParams"].value_int(),
-            num_indices=inductive["numIndices"].value_int(),
-            name_idxs=[
-                each.value_int() for each in inductive["all"].value_array()
-            ],
-            constructors=constructors,
-            recursors=recursors,
-            levels=[
-                each.value_int()
-                for each in inductive["levelParams"].value_array()
-            ],
-        )
 
     def __init__(
         self,
@@ -679,21 +419,6 @@ class Inductive(Node):
 
 
 class Constructor(Node):
-    @staticmethod
-    def from_dict(info):
-        return Constructor(
-            nidx=info["name"].value_int(),
-            type_idx=info["type"].value_int(),
-            inductive_nidx=info["induct"].value_int(),
-            cidx=info["cidx"].value_int(),
-            num_params=info["numParams"].value_int(),
-            num_fields=info["numFields"].value_int(),
-            # TODO: isUnsafe
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(
         self,
         nidx,
@@ -730,28 +455,6 @@ class Constructor(Node):
 
 
 class Recursor(Node):
-    @staticmethod
-    def from_dict(info):
-        return Recursor(
-            nidx=info["name"].value_int(),
-            type_idx=info["type"].value_int(),
-            ind_name_idxs=[
-                each.value_int() for each in info["all"].value_array()
-            ],
-            rules=[
-                RecRule.from_dict(each.value_object())
-                for each in info["rules"].value_array()
-            ],
-            k=info["k"] is JSON_TRUE,
-            num_params=info["numParams"].value_int(),
-            num_indices=info["numIndices"].value_int(),
-            num_motives=info["numMotives"].value_int(),
-            num_minors=info["numMinors"].value_int(),
-            levels=[
-                each.value_int() for each in info["levelParams"].value_array()
-            ],
-        )
-
     def __init__(
         self,
         nidx,
@@ -792,14 +495,6 @@ class Recursor(Node):
 
 
 class RecRule(Node):
-    @staticmethod
-    def from_dict(value):
-        return RecRule(
-            ctor_name_idx=value["ctor"].value_int(),
-            num_fields=value["nfields"].value_int(),
-            val=value["rhs"].value_int(),
-        )
-
     def __init__(self, ctor_name_idx, num_fields, val):
         self.ctor_name_idx = ctor_name_idx
         self.num_fields = num_fields
@@ -813,35 +508,6 @@ class RecRule(Node):
         )
 
 
-for cls in [
-    App,
-    Axiom,
-    BVar,
-    Const,
-    Constructor,
-    Definition,
-    ForAll,
-    Inductive,
-    Lambda,
-    Let,
-    LitNat,
-    NameNum,
-    NameStr,
-    Opaque,
-    Proj,
-    Recursor,
-    RecRule,
-    Quot,
-    Sort,
-    Theorem,
-    UniverseMax,
-    UniverseIMax,
-    UniverseParam,
-    UniverseSucc,
-]:
-    cls.from_dict.func_name += "_" + cls.__name__
-
-
 def from_export(stream):
     """
     Parse lean4export-format NDJSON from a stream.
@@ -850,13 +516,7 @@ def from_export(stream):
     if not meta_line:
         raise ExportVersionError(None)
 
-    obj = from_json(meta_line)
-    meta = obj.value_object()["meta"].value_object()
-    if "format" in meta:  # normal export file
-        info = meta["format"].value_object()
-    else:  # transition file, delete me when lean-kernel-arena updates
-        info = meta["exporter"].value_object()
-    version = info["version"].value_string()
+    version = _parse_metadata_version(meta_line)
     if version != EXPORT_VERSION:
         raise ExportVersionError(version)
 
@@ -906,8 +566,12 @@ def parse_line(line):
         return _parse_theorem(cursor)
     if first_key == "quot":
         return _parse_quot(cursor)
-    if first_key == "inductive" or first_key == "rec":
-        return _node_from_json(line, first_key)
+    if first_key == "inductive":
+        return _parse_inductive(cursor)
+    if first_key == "rec":
+        node = _parse_recursor_record(cursor)
+        cursor.expect('}')
+        return node
     # Else: an expression where the discriminator (app, bvar, const, ...)
     # came before "ie" in this line.
     val = _parse_expr_value(cursor, first_key)
@@ -916,17 +580,6 @@ def parse_line(line):
     eidx = cursor.read_int()
     cursor.expect('}')
     return Expr(eidx=eidx, val=val)
-
-
-def _node_from_json(line, first_key):
-    """Fallback: parse via the generic JSON tree for complex shapes."""
-    value = from_json(line)
-    obj = value.value_object()
-    if first_key == "inductive":
-        return Inductive.from_dict(obj)
-    if first_key == "rec":
-        return Recursor.from_dict(obj)
-    assert False, "unexpected fallback shape: %s" % first_key
 
 
 # ---- Names ---------------------------------------------------------------
@@ -1359,6 +1012,310 @@ def _parse_def_hint(cursor):
     n = cursor.read_int()
     cursor.expect('}')
     return n
+
+
+# ---- Inductive types and recursors ---------------------------------------
+
+def _parse_inductive(cursor):
+    """Parse `{"inductive":{...}}` after `"inductive":`."""
+    cursor.expect('{')
+    inductive_types = []
+    constructors = []
+    recursors = []
+    while True:
+        key = cursor.read_key()
+        if key == "types":
+            inductive_types = _parse_inductive_type_array(cursor)
+        elif key == "ctors":
+            constructors = _parse_constructor_array(cursor)
+        elif key == "recs":
+            recursors = _parse_recursor_array(cursor)
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            break
+        cursor.expect(',')
+
+    if len(inductive_types) == 1:
+        return _make_inductive(inductive_types[0], constructors, recursors)
+    return MutualInductive(
+        inductives=[_make_inductive(t, [], []) for t in inductive_types],
+        constructors=constructors,
+        recursors=recursors,
+    )
+
+
+class _InductiveTypeFields(object):
+    """Plain-old-data carrier for the fields of one inductive ``types`` entry."""
+
+    def __init__(self):
+        self.nidx = 0
+        self.type_idx = 0
+        self.is_reflexive = False
+        self.is_recursive = False
+        self.num_nested = 0
+        self.num_params = 0
+        self.num_indices = 0
+        self.name_idxs = []
+        self.levels = []
+
+
+def _make_inductive(fields, constructors, recursors):
+    return Inductive(
+        nidx=fields.nidx,
+        type_idx=fields.type_idx,
+        is_reflexive=fields.is_reflexive,
+        is_recursive=fields.is_recursive,
+        num_nested=fields.num_nested,
+        num_params=fields.num_params,
+        num_indices=fields.num_indices,
+        name_idxs=fields.name_idxs,
+        constructors=constructors,
+        recursors=recursors,
+        levels=fields.levels,
+    )
+
+
+def _parse_inductive_type_array(cursor):
+    cursor.expect('[')
+    result = []
+    if cursor.maybe(']'):
+        return result
+    while True:
+        result.append(_parse_inductive_type(cursor))
+        if cursor.maybe(']'):
+            return result
+        cursor.expect(',')
+
+
+def _parse_inductive_type(cursor):
+    cursor.expect('{')
+    fields = _InductiveTypeFields()
+    while True:
+        key = cursor.read_key()
+        if key == "all":
+            fields.name_idxs = cursor.read_int_array()
+        elif key == "isRec":
+            fields.is_recursive = cursor.read_bool()
+        elif key == "isReflexive":
+            fields.is_reflexive = cursor.read_bool()
+        elif key == "levelParams":
+            fields.levels = cursor.read_int_array()
+        elif key == "name":
+            fields.nidx = cursor.read_int()
+        elif key == "numIndices":
+            fields.num_indices = cursor.read_int()
+        elif key == "numNested":
+            fields.num_nested = cursor.read_int()
+        elif key == "numParams":
+            fields.num_params = cursor.read_int()
+        elif key == "type":
+            fields.type_idx = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return fields
+        cursor.expect(',')
+
+
+def _parse_constructor_array(cursor):
+    cursor.expect('[')
+    result = []
+    if cursor.maybe(']'):
+        return result
+    while True:
+        result.append(_parse_constructor(cursor))
+        if cursor.maybe(']'):
+            return result
+        cursor.expect(',')
+
+
+def _parse_constructor(cursor):
+    cursor.expect('{')
+    nidx = 0
+    type_idx = 0
+    inductive_nidx = 0
+    cidx = 0
+    num_params = 0
+    num_fields = 0
+    levels = []
+    while True:
+        key = cursor.read_key()
+        if key == "cidx":
+            cidx = cursor.read_int()
+        elif key == "induct":
+            inductive_nidx = cursor.read_int()
+        elif key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            nidx = cursor.read_int()
+        elif key == "numFields":
+            num_fields = cursor.read_int()
+        elif key == "numParams":
+            num_params = cursor.read_int()
+        elif key == "type":
+            type_idx = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return Constructor(
+                nidx=nidx,
+                type_idx=type_idx,
+                inductive_nidx=inductive_nidx,
+                cidx=cidx,
+                num_params=num_params,
+                num_fields=num_fields,
+                levels=levels,
+            )
+        cursor.expect(',')
+
+
+def _parse_recursor_array(cursor):
+    cursor.expect('[')
+    result = []
+    if cursor.maybe(']'):
+        return result
+    while True:
+        result.append(_parse_recursor_record(cursor))
+        if cursor.maybe(']'):
+            return result
+        cursor.expect(',')
+
+
+def _parse_recursor_record(cursor):
+    """Parse a single recursor record `{...}`. Used both inside an
+    inductive's ``recs`` array and as the top-level body of a ``rec`` line."""
+    cursor.expect('{')
+    nidx = 0
+    type_idx = 0
+    k = False
+    num_params = 0
+    num_indices = 0
+    num_motives = 0
+    num_minors = 0
+    ind_name_idxs = []
+    rules = []
+    levels = []
+    while True:
+        key = cursor.read_key()
+        if key == "all":
+            ind_name_idxs = cursor.read_int_array()
+        elif key == "k":
+            k = cursor.read_bool()
+        elif key == "levelParams":
+            levels = cursor.read_int_array()
+        elif key == "name":
+            nidx = cursor.read_int()
+        elif key == "numIndices":
+            num_indices = cursor.read_int()
+        elif key == "numMinors":
+            num_minors = cursor.read_int()
+        elif key == "numMotives":
+            num_motives = cursor.read_int()
+        elif key == "numParams":
+            num_params = cursor.read_int()
+        elif key == "rules":
+            rules = _parse_rec_rule_array(cursor)
+        elif key == "type":
+            type_idx = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return Recursor(
+                nidx=nidx,
+                type_idx=type_idx,
+                k=k,
+                num_params=num_params,
+                num_indices=num_indices,
+                num_motives=num_motives,
+                num_minors=num_minors,
+                ind_name_idxs=ind_name_idxs,
+                rules=rules,
+                levels=levels,
+            )
+        cursor.expect(',')
+
+
+def _parse_rec_rule_array(cursor):
+    cursor.expect('[')
+    result = []
+    if cursor.maybe(']'):
+        return result
+    while True:
+        result.append(_parse_rec_rule(cursor))
+        if cursor.maybe(']'):
+            return result
+        cursor.expect(',')
+
+
+def _parse_rec_rule(cursor):
+    cursor.expect('{')
+    ctor = 0
+    nfields = 0
+    rhs = 0
+    while True:
+        key = cursor.read_key()
+        if key == "ctor":
+            ctor = cursor.read_int()
+        elif key == "nfields":
+            nfields = cursor.read_int()
+        elif key == "rhs":
+            rhs = cursor.read_int()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return RecRule(
+                ctor_name_idx=ctor, num_fields=nfields, val=rhs,
+            )
+        cursor.expect(',')
+
+
+# ---- Metadata header -----------------------------------------------------
+
+def _parse_metadata_version(line):
+    """Read the ``version`` from the export's metadata line. Returns ``""``
+    if no version is present."""
+    cursor = LineCursor(line)
+    cursor.expect('{')
+    version = ""
+    while True:
+        key = cursor.read_key()
+        if key == "meta":
+            version = _parse_meta_inner(cursor)
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return version
+        cursor.expect(',')
+
+
+def _parse_meta_inner(cursor):
+    cursor.expect('{')
+    version = ""
+    while True:
+        key = cursor.read_key()
+        if key == "format" or key == "exporter":
+            version = _parse_format_inner(cursor)
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return version
+        cursor.expect(',')
+
+
+def _parse_format_inner(cursor):
+    cursor.expect('{')
+    version = ""
+    while True:
+        key = cursor.read_key()
+        if key == "version":
+            version = cursor.read_string()
+        else:
+            _skip_value(cursor)
+        if cursor.maybe('}'):
+            return version
+        cursor.expect(',')
 
 
 def from_str(text):

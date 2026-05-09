@@ -103,7 +103,7 @@ from rpython.rlib.objectmodel import compute_hash
 from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
-from rpylean._rjson import loads as from_json
+from rpylean._line_parser import LineCursor
 ```
 
 ## Running `rpylean`

@@ -124,6 +124,18 @@ class LineCursor(object):
                 return result
             self.expect(',')
 
+    def read_bool(self):
+        self.skip_ws()
+        line = self.line
+        n = self.length
+        if self.pos + 4 <= n and line[self.pos:self.pos + 4] == "true":
+            self.pos += 4
+            return True
+        if self.pos + 5 <= n and line[self.pos:self.pos + 5] == "false":
+            self.pos += 5
+            return False
+        raise ValueError("expected bool at pos %d" % self.pos)
+
 
 def _decode_escapes(line, start, end):
     builder = StringBuilder(end - start)

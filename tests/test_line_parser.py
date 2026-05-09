@@ -142,3 +142,27 @@ def test_maybe_absent():
     c.expect("[")
     assert c.maybe("]") is False
     assert c.pos == 1
+
+
+def test_read_bool_true():
+    c = LineCursor("true")
+    assert c.read_bool() is True
+    assert c.pos == 4
+
+
+def test_read_bool_false():
+    c = LineCursor("false")
+    assert c.read_bool() is False
+    assert c.pos == 5
+
+
+def test_read_bool_with_whitespace():
+    c = LineCursor("  true ")
+    assert c.read_bool() is True
+    assert c.pos == 6
+
+
+def test_read_bool_neither():
+    c = LineCursor("null")
+    with pytest.raises(ValueError):
+        c.read_bool()
