@@ -55,20 +55,23 @@ class LineCursor(object):
         self.skip_ws()
         line = self.line
         n = self.length
-        start = self.pos
-        i = start
+        i = self.pos
+        sign = 1
         if i < n and line[i] == '-':
+            sign = -1
             i += 1
-        digits_start = i
+        if i >= n or line[i] < '0' or line[i] > '9':
+            raise ValueError("expected int at pos %d in %s" % (self.pos, line))
+        val = 0
+        zero = ord('0')
         while i < n:
             c = line[i]
             if c < '0' or c > '9':
                 break
+            val = val * 10 + ord(c) - zero
             i += 1
-        if i == digits_start:
-            raise ValueError("expected int at pos %d in %s" % (start, line))
         self.pos = i
-        return int(line[start:i])
+        return sign * val
 
     def read_string(self):
         self.skip_ws()
