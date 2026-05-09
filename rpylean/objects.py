@@ -3566,9 +3566,32 @@ class _InferVisit(_InferWork):
 
 
 class _InferAppStep(_InferWork):
-    def __init__(self, arg, spine_so_far):
-        self.arg = arg
-        self.spine_so_far = spine_so_far
+    """One arg in an application spine.
+
+    ``head`` is the spine origin (the leftmost expression) and ``args`` is
+    the immutable, outermost-first list of arguments; ``j`` is the index
+    of *this* step's argument. We carry the triple instead of a
+    pre-built ``spine_so_far`` so ``_iter_infer`` doesn't allocate ``N``
+    intermediate ``W_App``s per application — those would only be read
+    for the rare error-diagnostic case, and we can rebuild the spine
+    on demand there.
+    """
+
+    def __init__(self, head, args, j):
+        self.head = head
+        self.args = args
+        self.j = j
+
+    def arg(self):
+        return self.args[self.j]
+
+    def spine_so_far(self):
+        spine = self.head
+        i = len(self.args) - 1
+        while i > self.j:
+            spine = spine.app(self.args[i])
+            i -= 1
+        return spine
 
 
 class _InferBindLambda(_InferWork):
@@ -3635,23 +3658,14 @@ def _iter_infer(env, root):
                 work.append(_InferVisit(body_with_fvar))
             elif cls is W_App:
                 target, args = cur.unapp()
-                # Pre-compute spine_so_far for each app step so error
-                # diagnostics still point at the function sub-expression
-                # (matching the recursive version's behaviour).
-                spines = [None] * len(args)
-                spine = target
-                j = len(args) - 1
-                while j >= 0:
-                    spines[j] = spine
-                    spine = spine.app(args[j])
-                    j -= 1
                 # Process: VISIT(target), then for each arg outermost-first,
                 # VISIT(arg) then APP_STEP. args is innermost-first; pushing
                 # in increasing index puts the outermost on top after LIFO.
                 work.append(_InferStore(cur))
                 k = 0
-                while k < len(args):
-                    work.append(_InferAppStep(args[k], spines[k]))
+                n = len(args)
+                while k < n:
+                    work.append(_InferAppStep(target, args, k))
                     work.append(_InferVisit(args[k]))
                     k += 1
                 work.append(_InferVisit(target))
@@ -3661,16 +3675,17 @@ def _iter_infer(env, root):
             arg_type = values.pop()
             fn_type_base = values.pop()
             fn_type = fn_type_base.whnf(env)
+            arg = item.arg()
             if not isinstance(fn_type, W_ForAll):
                 raise W_NotAFunction(
-                    env, item.spine_so_far, inferred_type=fn_type_base,
+                    env, item.spine_so_far(), inferred_type=fn_type_base,
                 )
             if not env.def_eq(fn_type.binder.type, arg_type):
                 raise W_TypeError(
-                    env, item.arg, fn_type.binder.type,
+                    env, arg, fn_type.binder.type,
                     inferred_type=arg_type,
                 )
-            values.append(fn_type.body.instantiate(item.arg))
+            values.append(fn_type.body.instantiate(arg))
         elif isinstance(item, _InferBindLambda):
             body_type = values.pop()
             body_type = body_type.bind_fvar(item.fvar, 0)
