@@ -14,6 +14,7 @@ robustness we don't rely on that — every reader scans for its key by name.
 from __future__ import print_function
 
 from rpython.rlib.rstring import StringBuilder
+from rpython.rlib.rutf8 import unichr_as_utf8_append
 
 
 class LineCursor(object):
@@ -109,12 +110,35 @@ class LineCursor(object):
         return s
 
     def expect_key(self, expected):
-        actual = self.read_key()
-        if actual != expected:
+        """Match ``"<expected>":`` literally without allocating the key.
+
+        For known keys this avoids the string slice + dict-style equality
+        check the generic ``read_key`` then ``==`` would do — and on hot
+        paths (e.g. expecting ``"ie"`` after a disc-first expression body)
+        that's millions of avoided allocations per export.
+        """
+        self.skip_ws()
+        line = self.line
+        elen = len(expected)
+        end = self.pos + elen + 3
+        if (
+            end > self.length
+            or line[self.pos] != '"'
+            or line[self.pos + elen + 1] != '"'
+            or line[self.pos + elen + 2] != ':'
+        ):
             raise ValueError(
-                "expected key %s, got %s at pos %d in %s"
-                % (expected, actual, self.pos, self.line)
+                "expected key %s at pos %d in %s"
+                % (expected, self.pos, self.line)
             )
+        j = self.pos + 1
+        for k in range(elen):
+            if line[j + k] != expected[k]:
+                raise ValueError(
+                    "expected key %s at pos %d in %s"
+                    % (expected, self.pos, self.line)
+                )
+        self.pos = end
 
     def read_int_array(self):
         self.expect('[')
@@ -166,15 +190,7 @@ def _decode_escapes(line, start, end):
                 builder.append('\t')
             elif ec == 'u':
                 code = int(line[i + 1:i + 5], 16)
-                if code < 0x80:
-                    builder.append(chr(code))
-                elif code < 0x800:
-                    builder.append(chr(0xC0 | (code >> 6)))
-                    builder.append(chr(0x80 | (code & 0x3F)))
-                else:
-                    builder.append(chr(0xE0 | (code >> 12)))
-                    builder.append(chr(0x80 | ((code >> 6) & 0x3F)))
-                    builder.append(chr(0x80 | (code & 0x3F)))
+                unichr_as_utf8_append(builder, code, allow_surrogates=True)
                 i += 4
             else:
                 raise ValueError("bad escape \\%s" % ec)
