@@ -286,11 +286,14 @@ class Environment(object):
         (e.g. ``app-lam.ndjson``): without caching, sharing turns into O(2ⁿ)
         re-inference of the same lambda.
         """
-        # Recursive types use a per-instance inline cache slot. Avoids the
-        # dict / hash / list-walk overhead of the generic cache below for the
-        # most-frequently-cached classes.
+        # Recursive types and W_Const use a per-instance inline cache slot.
+        # W_Const references are heavily DAG-shared (every use of e.g.
+        # ``Nat.add`` resolves to the same instance) so caching on identity
+        # acts as a per-name cache and avoids the dict / hash / list-walk
+        # overhead of the generic cache below.
         cls = expr.__class__
-        if cls is W_App or cls is W_Lambda or cls is W_ForAll:
+        if (cls is W_App or cls is W_Lambda or cls is W_ForAll
+                or cls is W_Const):
             cached = expr._infer_cache_result
             if cached is not None:
                 return cached

@@ -354,6 +354,18 @@ class W_UniverseTooHigh(W_CheckError):
         )
 
 
+@not_rpython
+def _public_vars(obj):
+    """``vars(obj)`` filtered to public attributes only.
+
+    Used by ``_Item.__eq__`` so that mutable, by-design implementation
+    details (inline caches, JIT-relevant state) don't make two otherwise
+    equal Lean items compare unequal — comparison reflects the *Lean
+    object* the instance represents, not its current cache state.
+    """
+    return {k: v for k, v in vars(obj).iteritems() if not k.startswith("_")}
+
+
 class _Item(object):
     """
     A common type for all Lean items.
@@ -370,7 +382,7 @@ class _Item(object):
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
-        return vars(self) == vars(other)
+        return _public_vars(self) == _public_vars(other)
 
     @not_rpython
     def __ne__(self, other):
@@ -1535,6 +1547,15 @@ class W_Const(W_Expr):
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
         self.loose_bvar_range = 0
+        # Inline infer cache. References to a constant in a proof term hit
+        # the same shared instance (every use of e.g. ``Nat.add`` resolves
+        # to one ``W_Const``), so caching on identity is effectively a
+        # per-name cache.
+        self._infer_cache_result = None
+        # Inline infer cache — every reference to a constant in a proof
+        # term hits the same shared instance, so caching on identity is
+        # effectively a per-name cache.
+        self._infer_cache_result = None
 
     def __repr__(self):
         return "`%s" % self.str()
