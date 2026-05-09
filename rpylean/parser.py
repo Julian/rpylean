@@ -141,11 +141,6 @@ class ExprVal(Node):
 
 
 class BVar(ExprVal):
-    @staticmethod
-    def from_dict(value):
-        val = BVar(id=value["bvar"].value_int())
-        return Expr(eidx=value["ie"].value_int(), val=val)
-
     def __init__(self, id):
         self.id = id
 
