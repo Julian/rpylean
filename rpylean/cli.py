@@ -13,7 +13,9 @@ from rpylean import parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
-from rpylean.ffi import FFI, UnsupportedLeanMPZ, read_constant_info
+from rpylean.ffi import (
+    FFI, UnsupportedLeanMPZ, detect_prefix, read_constant_info,
+)
 from rpylean.ffi import _lltypes as _lean
 from rpylean.environment import (
     DeclarationHook,
@@ -290,6 +292,11 @@ def check(self, args, stdin, stdout, stderr):
         return 1
     prefix = args.options["prefix"]
     if prefix is None:
+        prefix = detect_prefix()
+    if prefix is None:
+        stderr.write(
+            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
+        )
         return 1
 
     stderrw = writer_from_arg(args.options["color"], stderr)

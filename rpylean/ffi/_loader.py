@@ -40,12 +40,49 @@ layouts we depend on, ctor by ctor.
 """
 from __future__ import print_function
 from os.path import join
+import os
 import sys
 
 from rpython.rlib.rdynload import RTLD_LAZY, dlclose, dlopen, dlsym
+from rpython.rlib.rfile import create_popen_file
 from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean.ffi import _lltypes as _lean
+
+
+def detect_prefix():
+    """
+    Find a Lean toolchain prefix without requiring `--prefix` on the
+    command line. Tries, in order:
+
+      1. The ``LEAN_PREFIX`` environment variable.
+      2. The output of ``lean --print-prefix``, run via popen.
+
+    Returns ``None`` if neither yields a non-empty string. Callers
+    that need a usable prefix should report a friendly error in that
+    case (a typical message: "no --prefix and no `lean` on PATH").
+
+    Spelled as a top-level function so it's callable without
+    instantiating ``FFI`` first; the CLI uses it before deciding
+    whether to dlopen anything.
+    """
+    env = os.environ.get("LEAN_PREFIX")
+    if env:
+        return env
+    try:
+        # `2>/dev/null` so a missing `lean` doesn't spam stderr; we
+        # rely on the empty-stdout case to detect failure.
+        pipe = create_popen_file("lean --print-prefix 2>/dev/null", "r")
+    except OSError:
+        return None
+    try:
+        line = pipe.readline()
+    finally:
+        pipe.close()
+    line = line.strip()
+    if not line:
+        return None
+    return line
 
 
 # Magic numbers used when calling into Lean's compiled APIs. Named here

@@ -10,7 +10,13 @@ Public surface:
 `_runtime` converts the returned `lean_object *` instances into
 `rpylean.objects` declarations.
 """
-from rpylean.ffi._loader import FFI, FFIError
+from rpylean.ffi._loader import FFI, FFIError, detect_prefix
 from rpylean.ffi._runtime import UnsupportedLeanMPZ, read_constant_info
 
-__all__ = ["FFI", "FFIError", "UnsupportedLeanMPZ", "read_constant_info"]
+__all__ = [
+    "FFI",
+    "FFIError",
+    "UnsupportedLeanMPZ",
+    "detect_prefix",
+    "read_constant_info",
+]

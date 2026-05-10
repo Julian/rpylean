@@ -73,14 +73,13 @@ def test_invalid_def_exits_nonzero():
     assert process.returncode != 0, (stdout, stderr)
 
 
-def _lean_prefix():
-    """Resolve the Lean prefix from PATH, or None if `lean` isn't available."""
+def _lean_on_path():
     try:
-        out = subprocess.check_output(["lean", "--print-prefix"],
-                                       stderr=subprocess.PIPE)
+        subprocess.check_output(["lean", "--print-prefix"],
+                                stderr=subprocess.PIPE)
     except (OSError, subprocess.CalledProcessError):
-        return None
-    return out.strip()
+        return False
+    return True
 
 
 def test_ffi_check_against_pinned_toolchain():
@@ -88,18 +87,16 @@ def test_ffi_check_against_pinned_toolchain():
 
     In CI that's the toolchain pinned by `lean-toolchain` (picked up by
     `Julian/setup-lean`). Locally it's whatever the user has installed.
-    Either way: exercises FFI startup, the deep self-test, and the
-    per-name find_constant + walk path on a handful of stable Init
-    declarations.
+    Either way: exercises FFI startup, the deep self-test, the prefix
+    auto-detection path, and find_constant + walk on a handful of
+    stable Init declarations.
     """
-    prefix = _lean_prefix()
-    if prefix is None:
+    if not _lean_on_path():
         import pytest
         pytest.skip("`lean` not on PATH")
 
     process = rpylean(
-        "ffi", "--prefix", prefix, "check",
-        "--filter", "Nat,Eq.refl,Nat.succ", "Init",
+        "ffi", "check", "--filter", "Nat,Eq.refl,Nat.succ", "Init",
     )
     stdout, stderr = process.communicate()
     assert process.returncode == 0, (stdout, stderr)
