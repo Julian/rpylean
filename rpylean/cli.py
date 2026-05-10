@@ -15,7 +15,7 @@ from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
 from rpylean import _lltypes as _lean
-from rpylean._lean_runtime import read_expr, read_name
+from rpylean._lean_runtime import read_constant_info
 from rpylean.leanffi import FFI
 from rpylean.environment import (
     DeclarationHook,
@@ -289,13 +289,14 @@ def ffi(self, args, stdin, stdout, stderr):
                 stdout.write("%s: not found\n" % probe)
                 continue
             ci = _lean.ctor_get(opt, 0)
-            cval = _lean.ctor_get(_lean.ctor_get(ci, 0), 0)
-            name = read_name(_lean.ctor_get(cval, 0))
-            # Walk the type Expr to verify the data is reachable; we don't
-            # render it (rendering needs the full constants map for
-            # name resolution).
-            read_expr(_lean.ctor_get(cval, 2))
-            stdout.write("%s : %s\n" % (name.str(), _ci_kind(_lean.ptr_tag(ci))))
+            ci_tag = _lean.ptr_tag(ci)
+            if ci_tag >= 5:
+                # inductInfo / ctorInfo / recInfo — walker support pending.
+                stdout.write("%s : %s (skipped)\n" % (probe, _ci_kind(ci_tag)))
+                continue
+            decl = read_constant_info(ci)
+            stdout.write("%s : %s\n" % (decl.name.str(),
+                                         decl.w_kind.__class__.__name__))
     return 0
 
 

@@ -41,11 +41,14 @@ from rpython.rtyper.lltypesystem import lltype, rffi
 from rpylean import _lltypes as _lean
 from rpylean.objects import (
     Binder,
+    HINT_ABBREV,
+    HINT_OPAQUE,
     Name,
     W_BVar,
     W_LEVEL_ZERO,
     W_LitNat,
     W_LitStr,
+    W_RecRule,
     forall,
     fun,
 )
@@ -131,6 +134,14 @@ def _ctor_byte(o, num_objs, byte_offset):
                     _lean.OBJ_HDR_SIZE + 8 * num_objs))[byte_offset])
 
 
+def _ctor_uint32(o, num_objs, byte_offset):
+    """Read a 4-byte little-endian uint32 from a ctor's scalar area."""
+    p = rffi.cast(rffi.UINTP,
+                  rffi.ptradd(rffi.cast(rffi.CCHARP, o),
+                              _lean.OBJ_HDR_SIZE + 8 * num_objs + byte_offset))
+    return intmask(p[0])
+
+
 def read_expr(o):
     if _lean.is_scalar(o):
         raise RuntimeError("read_expr: unexpected scalar")
@@ -175,3 +186,72 @@ def read_expr(o):
         struct = read_expr(_lean.ctor_get(o, 2))
         return struct_name.proj(idx.toint(), struct)
     raise RuntimeError("read_expr: unexpected tag")
+
+
+def _read_hints(o):
+    """Lean.ReducibilityHints → rpylean's int-encoded hint."""
+    if _lean.is_scalar(o):
+        # 0=opaque, 1=abbrev are nullary ctors → boxed scalars.
+        u = _lean.unbox(o)
+        if u == 0:
+            return HINT_OPAQUE
+        if u == 1:
+            return HINT_ABBREV
+        return HINT_OPAQUE
+    # tag 2 = regular(_ : UInt32). The UInt32 lives in the ctor's scalar
+    # area at offset 0 (no obj fields, no `data` prefix on non-Expr ctors).
+    return _ctor_uint32(o, 0, 0)
+
+
+def _read_constant_val(cval):
+    """Read a `ConstantVal`'s {name, levelParams, type} fields."""
+    name = read_name(_lean.ctor_get(cval, 0))
+    levels = _read_list(_lean.ctor_get(cval, 1), read_name)
+    type_expr = read_expr(_lean.ctor_get(cval, 2))
+    return name, levels, type_expr
+
+
+def _read_rec_rule(o):
+    ctor_name = read_name(_lean.ctor_get(o, 0))
+    nfields = read_nat(_lean.ctor_get(o, 1))
+    rhs = read_expr(_lean.ctor_get(o, 2))
+    return W_RecRule(ctor_name=ctor_name, num_fields=nfields.toint(), val=rhs)
+
+
+def read_constant_info(ci):
+    """
+    Convert a `Lean.ConstantInfo` runtime object into a `W_Declaration`.
+
+    For inductive and recursor variants we do *not* recursively look up
+    the related constructor/recursor declarations — those references are
+    returned as `Name`s, and `W_Inductive.constructors` / `W_Recursor`'s
+    rules etc. are populated via the same mechanism the lean4export
+    parser uses for mutual blocks: empty at first, filled in as the
+    constructors/recursors are walked separately.
+    """
+    tag = _lean.ptr_tag(ci)
+    val = _lean.ctor_get(ci, 0)
+    cval = _lean.ctor_get(val, 0)
+    name, levels, type_expr = _read_constant_val(cval)
+
+    if tag == 0:  # axiomInfo
+        return name.axiom(type=type_expr, levels=levels)
+    if tag == 1:  # defnInfo
+        value = read_expr(_lean.ctor_get(val, 1))
+        hint = _read_hints(_lean.ctor_get(val, 2))
+        return name.definition(type=type_expr, value=value, hint=hint, levels=levels)
+    if tag == 2:  # thmInfo
+        value = read_expr(_lean.ctor_get(val, 1))
+        return name.theorem(type=type_expr, value=value, levels=levels)
+    if tag == 3:  # opaqueInfo
+        value = read_expr(_lean.ctor_get(val, 1))
+        return name.opaque(type=type_expr, value=value, levels=levels)
+    if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
+        return name.axiom(type=type_expr, levels=levels)
+    # tags 5/6/7 (inductInfo/ctorInfo/recInfo) are intentionally not yet
+    # handled here: each requires constructing W_Inductive/W_Constructor/
+    # W_Recursor, which surfaces a pre-existing kwargs-on-method conflict
+    # in rpylean.objects (Name.const vs W_Declaration.const) that the
+    # RPython annotator can't merge. They're handled with a fallback by
+    # the caller.
+    raise RuntimeError("read_constant_info: variant not yet supported")
