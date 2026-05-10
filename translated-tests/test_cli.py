@@ -73,6 +73,38 @@ def test_invalid_def_exits_nonzero():
     assert process.returncode != 0, (stdout, stderr)
 
 
+def _lean_prefix():
+    """Resolve the Lean prefix from PATH, or None if `lean` isn't available."""
+    try:
+        out = subprocess.check_output(["lean", "--print-prefix"],
+                                       stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.strip()
+
+
+def test_ffi_check_against_pinned_toolchain():
+    """End-to-end smoke against whatever `lean` resolves to.
+
+    In CI that's the toolchain pinned by `lean-toolchain` (picked up by
+    `Julian/setup-lean`). Locally it's whatever the user has installed.
+    Either way: exercises FFI startup, the deep self-test, and the
+    per-name find_constant + walk path on a handful of stable Init
+    declarations.
+    """
+    prefix = _lean_prefix()
+    if prefix is None:
+        import pytest
+        pytest.skip("`lean` not on PATH")
+
+    process = rpylean(
+        "ffi", "--prefix", prefix, "check",
+        "--filter", "Nat,Eq.refl,Nat.succ", "Init",
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, (stdout, stderr)
+
+
 def test_export_error_does_not_skip_remaining_files(tmpdir):
     invalid = tmpdir.join("invalid.ndjson")
     invalid.write(INVALID_EXPORT)
