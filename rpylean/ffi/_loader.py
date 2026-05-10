@@ -35,11 +35,6 @@ TRUST_LEVEL_BELIEVER = 1024
 #: server, private). See `Lean.OLeanLevel` in Lean's source.
 OLEAN_LEVEL_PRIVATE = 2
 
-#: Empty `NameMap ImportArtifacts` is just `box(1)` at runtime: the
-#: empty `Std.TreeMap` is the second nullary ctor of its leaf node.
-#: Confirmed against Lean's compiled C output for `Lean.importModules`.
-EMPTY_NAME_MAP = _lean.box(1)
-
 #: `IO.Error.userError` is constructor tag 18 (the last constructor of
 #: `Lean.IO.Error`, after every OS-error variant). When `importModules`
 #: returns `Except.error e` and `e` has this tag, field 0 is the
@@ -261,7 +256,10 @@ class FFI(object):
             rffi.cast(rffi.UCHAR, 0),  # leakEnv
             rffi.cast(rffi.UCHAR, 0),  # loadExts
             rffi.cast(rffi.UCHAR, OLEAN_LEVEL_PRIVATE),
-            EMPTY_NAME_MAP,
+            _lean.box(1),  # empty `NameMap ImportArtifacts`; the empty
+                            # `Std.TreeMap` is a nullary ctor encoded as
+                            # the boxed scalar `1`. Confirmed against
+                            # Lean's compiled C output for importModules.
         )
         if _lean.obj_tag(result) != 0:
             err = _lean.ctor_get(result, 0)
