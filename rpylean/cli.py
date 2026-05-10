@@ -253,54 +253,23 @@ def repl(self, args, stdin, stdout, stderr):
     return 0
 
 
-@cli.subcommand(
-    ["*MODULES"],
-    help="Directly extract an environment via FFI to a real Lean toolchain.",
-    options=[
-        (
-            "prefix",
-            "path to the Lean prefix to link against ",
-            # TODO: "[default: `lean --print-prefix`]",
-        ),
-        (
-            "lookup",
-            "comma-separated declaration names to print the type of",
-        ),
-    ],
-)
-def ffi(self, args, stdin, stdout, stderr):
-    modules = args.varargs
-    if not modules:
-        return 1  # TODO: some default, maybe Init
-
-    prefix = args.options["prefix"]
-    if prefix is None:
-        return 1  # TODO: some default, lean --print-prefix but RPython spawn??
-
-    lookup_arg = args.options["lookup"]
-    lookups = lookup_arg.split(",") if lookup_arg else []
-
-    with FFI.from_prefix(prefix) as ffi:
-        env = ffi.import_modules(modules)
-        for probe in lookups:
-            opt = ffi.find_constant(env, probe)
-            if _lean.obj_tag(opt) == 0:
-                stdout.write("%s: not found\n" % probe)
-                continue
-            decl = read_constant_info(_lean.ctor_get(opt, 0))
-            stdout.write("%s : %s\n" % (decl.name.str(),
-                                         decl.w_kind.__class__.__name__))
-    return 0
-
-
-@cli.subcommand(
-    ["*MODULES"],
-    help="Type-check declarations from a Lean toolchain via FFI.",
+ffi = cli.subcli(
+    "ffi",
+    help="Talk to a real Lean toolchain via FFI.",
     options=[
         (
             "prefix",
             "path to the Lean prefix to link against",
+            # TODO: default to `lean --print-prefix` once we can spawn from RPython.
         ),
+    ],
+)
+
+
+@ffi.subcommand(
+    ["*MODULES"],
+    help="Type-check declarations from a Lean toolchain via FFI.",
+    options=[
         (
             "filter",
             "only check the given declaration(s), separated by commas",
@@ -316,7 +285,7 @@ def ffi(self, args, stdin, stdout, stderr):
         COLOR,
     ],
 )
-def ffi_check(self, args, stdin, stdout, stderr):
+def check(self, args, stdin, stdout, stderr):
     modules = args.varargs
     if not modules:
         return 1
@@ -361,7 +330,7 @@ def ffi_check(self, args, stdin, stdout, stderr):
             ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
     if collector.skipped:
-        stderr.write("[ffi-check] skipped %d unwalkable constants\n"
+        stderr.write("[ffi check] skipped %d unwalkable constants\n"
                      % collector.skipped)
     return 1 if checker.failures else 0
 

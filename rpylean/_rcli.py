@@ -45,7 +45,20 @@ USAGE
 """
 
 
-class Command(object):
+class _CommandLike(object):
+    """Common base for top-level commands (`Command`) and nested
+    subcommand groups (`SubCLI`), so they're storable in the same
+    `CLI._commands` dict without RPython complaining about
+    can't-unify instances."""
+
+    name = ""
+    short_help = ""
+
+    def run(self, executable, args, stdin, stdout, stderr):
+        raise NotImplementedError
+
+
+class Command(_CommandLike):
     def __init__(
         self,
         name,
@@ -189,6 +202,21 @@ class CLI(object):
 
         return _subcommand
 
+    def subcli(self, name, help, options=None):
+        """Register a nested-subcommand group.
+
+        Returns a `SubCLI` that exposes its own `subcommand` decorator.
+        The `options` here are *shared* across every child: each child's
+        parser receives them in `args.options` alongside its own.
+        """
+        assert name not in self._commands, name
+        sub = self._commands[name] = SubCLI(
+            name=name,
+            help=help.strip("\n"),
+            options=options or [],
+        )
+        return sub
+
     def parse(self, argv):
         if len(argv) == 1 or argv[1] == "--help":
             raise self.with_tagline(argv[0])
@@ -240,6 +268,90 @@ class CLI(object):
             self.tagline + "\n\n" + self.usage(executable),
             exit_code=0,
         )
+
+
+class SubCLI(_CommandLike):
+    """A nested-subcommand group.
+
+    Looks like a `Command` to the top-level `CLI` (has `.run`,
+    `.short_help`, etc.) but dispatches further based on the first
+    non-option positional in its args. Each registered child sees the
+    parent's shared options merged into its own option set.
+    """
+
+    def __init__(self, name, help, options):
+        self.name = name
+        self._help = help
+        self.short_help = help.split("\n", 1)[0]
+        self._options = options  # list of (name, desc) tuples
+        self._commands = {}
+
+    def subcommand(self, metavars, help, options=None, flags=None):
+        def _subcommand(fn):
+            sub_name = fn.__name__.replace("_", "-")
+            assert sub_name not in self._commands, sub_name
+            merged = list(self._options) + list(options or [])
+            command = self._commands[sub_name] = Command(
+                name="%s %s" % (self.name, sub_name),
+                help=help.strip("\n"),
+                metavars=metavars,
+                options=merged,
+                flags=flags or [],
+                run=fn,
+            )
+            return command
+
+        return _subcommand
+
+    def run(self, executable, args, stdin, stdout, stderr):
+        # Scan for the first positional argument — that's the sub-subcommand
+        # name. Skip option-value pairs only for our shared options; unknown
+        # `--opt VAL` pairs belong to the child (which we don't recurse
+        # into here — we just need to find where the positional sits).
+        parent_opt_names = {}
+        for opt_name, _ in self._options:
+            parent_opt_names[opt_name] = True
+        sub_name = None
+        sub_idx = None
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--help":
+                raise self.help(executable)
+            if a.startswith("--"):
+                # Unknown options before the subcommand could be either ours
+                # or the child's; we conservatively skip ahead by 2 only when
+                # we recognise the option and it's not `--opt=value` form.
+                key = a[2:].split("=", 1)[0]
+                if "=" in a or key not in parent_opt_names:
+                    i += 1
+                else:
+                    i += 2
+            else:
+                sub_name = a
+                sub_idx = i
+                break
+        if sub_name is None:
+            raise UsageError(self._help + "\n\nMissing subcommand for " + self.name)
+        if sub_name not in self._commands:
+            raise UsageError(self._help + "\n\nUnknown subcommand: " + sub_name)
+        # Pass the child everything except the subcommand-name token itself.
+        sub_args = args[:sub_idx] + args[sub_idx + 1:]
+        return self._commands[sub_name].run(
+            executable, sub_args, stdin, stdout, stderr,
+        )
+
+    def help(self, executable):
+        if executable.endswith("__main__.py"):
+            executable = "pypy -m rpylean"
+        else:
+            executable = executable.split("/")[-1]
+        lines = [self._help, "", "USAGE", "",
+                 "  %s %s <subcommand> [<args>]" % (executable, self.name),
+                 "", "SUBCOMMANDS", ""]
+        for k, cmd in self._commands.iteritems():
+            lines.append("  %s: %s" % (k, cmd.short_help))
+        raise UsageError("\n".join(lines), exit_code=0)
 
 
 class Args(object):

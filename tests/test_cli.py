@@ -51,6 +51,61 @@ def test_underscored_command_name_dispatches_via_hyphen():
     assert "ok" in out
 
 
+def test_subcli_dispatches_to_named_child():
+    cli = CLI()
+    grp = cli.subcli("grp", help="A group.")
+
+    @grp.subcommand([], help="Alpha leaf.")
+    def alpha(self, args, stdin, stdout, stderr):
+        stdout.write("alpha\n")
+        return 0
+
+    @grp.subcommand([], help="Beta leaf.")
+    def beta(self, args, stdin, stdout, stderr):
+        stdout.write("beta\n")
+        return 0
+
+    out, _ = run(cli, ["prog", "grp", "alpha"])
+    assert "alpha" in out
+    out, _ = run(cli, ["prog", "grp", "beta"])
+    assert "beta" in out
+
+
+def test_subcli_shared_options_flow_to_child():
+    cli = CLI()
+    grp = cli.subcli("grp", help="A group.", options=[("shared", "shared opt")])
+
+    @grp.subcommand([], help="Leaf.", options=[("local", "local opt")])
+    def leaf(self, args, stdin, stdout, stderr):
+        stdout.write("shared=%s local=%s\n"
+                     % (args.options["shared"], args.options["local"]))
+        return 0
+
+    # Shared option before the leaf name.
+    out, _ = run(
+        cli, ["prog", "grp", "--shared", "S", "leaf", "--local", "L"],
+    )
+    assert "shared=S local=L" in out
+
+    # Shared option after the leaf name still works.
+    out, _ = run(
+        cli, ["prog", "grp", "leaf", "--shared", "S", "--local", "L"],
+    )
+    assert "shared=S local=L" in out
+
+
+def test_subcli_unknown_child_raises_usage():
+    cli = CLI()
+    grp = cli.subcli("grp", help="A group.")
+
+    @grp.subcommand([], help="Only leaf.")
+    def only(self, args, stdin, stdout, stderr):
+        return 0
+
+    _, err = run(cli, ["prog", "grp", "nope"], exit=1)
+    assert "Unknown subcommand: nope" in err
+
+
 def test_unknown_command_falls_back_to_default():
     cli = CLI(default="foo")
 
