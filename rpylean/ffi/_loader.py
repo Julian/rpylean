@@ -21,6 +21,32 @@ from rpython.rtyper.lltypesystem import lltype, rffi
 from rpylean.ffi import _lltypes as _lean
 
 
+# Magic numbers used when calling into Lean's compiled APIs. Named here
+# so the grep target is in one place and the rationale is captured.
+
+#: Above this trust level, the kernel skips re-checking declarations.
+#: We're going to re-check everything in rpylean, so we want Lean's
+#: importer to load decls without its own kernel pass — saving time
+#: at the cost of relying on rpylean for soundness, which is the
+#: whole point.
+TRUST_LEVEL_BELIEVER = 1024
+
+#: `Lean.OLeanLevel.private` ctor tag — load every visibility (exported,
+#: server, private). See `Lean.OLeanLevel` in Lean's source.
+OLEAN_LEVEL_PRIVATE = 2
+
+#: Empty `NameMap ImportArtifacts` is just `box(1)` at runtime: the
+#: empty `Std.TreeMap` is the second nullary ctor of its leaf node.
+#: Confirmed against Lean's compiled C output for `Lean.importModules`.
+EMPTY_NAME_MAP = _lean.box(1)
+
+#: `IO.Error.userError` is constructor tag 18 (the last constructor of
+#: `Lean.IO.Error`, after every OS-error variant). When `importModules`
+#: returns `Except.error e` and `e` has this tag, field 0 is the
+#: error-message `String`.
+IO_ERROR_USER = 18
+
+
 if sys.platform == "win32":
     def library(name):
         return "lib%s.dll" % name
@@ -227,21 +253,19 @@ class FFI(object):
         for m in modules:
             arr = self._array_push(arr, self._build_import(m))
 
-        # Empty NameMap ImportArtifacts is `box(1)` (the leaf-tag scalar);
         # `self._options_empty` is dlsym'd once in __enter__.
         result = self._import_modules(
             arr, self._options_empty,
-            rffi.cast(rffi.UINT, 1024),
+            rffi.cast(rffi.UINT, TRUST_LEVEL_BELIEVER),
             self._array_empty(),
             rffi.cast(rffi.UCHAR, 0),  # leakEnv
             rffi.cast(rffi.UCHAR, 0),  # loadExts
-            rffi.cast(rffi.UCHAR, 2),  # OLeanLevel.private
-            _lean.box(1),
+            rffi.cast(rffi.UCHAR, OLEAN_LEVEL_PRIVATE),
+            EMPTY_NAME_MAP,
         )
         if _lean.obj_tag(result) != 0:
             err = _lean.ctor_get(result, 0)
-            if not _lean.is_scalar(err) and _lean.ptr_tag(err) == 18:
-                # IO.Error.userError(msg : String)
+            if not _lean.is_scalar(err) and _lean.ptr_tag(err) == IO_ERROR_USER:
                 raise FFIError("import failed: " + _lean.string_cstr(_lean.ctor_get(err, 0)))
             raise FFIError("import failed (IO.Error tag=%d)" %
                            _lean.ptr_tag(err))
