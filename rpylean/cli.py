@@ -291,7 +291,6 @@ def ffi(self, args, stdin, stdout, stderr):
             ci = _lean.ctor_get(opt, 0)
             ci_tag = _lean.ptr_tag(ci)
             if ci_tag >= 5:
-                # inductInfo / ctorInfo / recInfo — walker support pending.
                 stdout.write("%s : %s (skipped)\n" % (probe, _ci_kind(ci_tag)))
                 continue
             decl = read_constant_info(ci)

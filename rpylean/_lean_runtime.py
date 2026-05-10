@@ -48,7 +48,6 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     W_LitNat,
     W_LitStr,
-    W_RecRule,
     forall,
     fun,
 )
@@ -100,11 +99,16 @@ def read_level(o):
 
 
 def _read_list(o, read_elt):
-    """Walk a Lean `List α` (0=nil, 1=cons head tail) into a Python list."""
+    """Walk a Lean `List α` (0=nil, 1=cons head tail) into a Python list.
+
+    Currently called only with `read_name` and `read_level`, which return
+    distinct `_Item` subtypes. Adding a third caller whose element type
+    has a name-clashing attribute (e.g. `W_RecRule.val` vs `W_LitStr.val`)
+    will need this split into per-element-type specialisations to keep
+    RPython's annotator from unifying the return type to `_Item`.
+    """
     out = []
-    while not _lean.is_scalar(o):
-        if _lean.ptr_tag(o) != 1:
-            break
+    while not _lean.is_scalar(o) and _lean.ptr_tag(o) == 1:
         out.append(read_elt(_lean.ctor_get(o, 0)))
         o = _lean.ctor_get(o, 1)
     return out
@@ -211,13 +215,6 @@ def _read_constant_val(cval):
     return name, levels, type_expr
 
 
-def _read_rec_rule(o):
-    ctor_name = read_name(_lean.ctor_get(o, 0))
-    nfields = read_nat(_lean.ctor_get(o, 1))
-    rhs = read_expr(_lean.ctor_get(o, 2))
-    return W_RecRule(ctor_name=ctor_name, num_fields=nfields.toint(), val=rhs)
-
-
 def read_constant_info(ci):
     """
     Convert a `Lean.ConstantInfo` runtime object into a `W_Declaration`.
@@ -248,10 +245,7 @@ def read_constant_info(ci):
         return name.opaque(type=type_expr, value=value, levels=levels)
     if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
         return name.axiom(type=type_expr, levels=levels)
-    # tags 5/6/7 (inductInfo/ctorInfo/recInfo) are intentionally not yet
-    # handled here: each requires constructing W_Inductive/W_Constructor/
-    # W_Recursor, which surfaces a pre-existing kwargs-on-method conflict
-    # in rpylean.objects (Name.const vs W_Declaration.const) that the
-    # RPython annotator can't merge. They're handled with a fallback by
-    # the caller.
+    # tags 5/6/7 (inductInfo/ctorInfo/recInfo): walker support pending a
+    # separate cleanup of rpylean.objects (RPython annotator can't yet
+    # type-check W_Constructor.constructor_tokens through the FFI path).
     raise RuntimeError("read_constant_info: variant not yet supported")

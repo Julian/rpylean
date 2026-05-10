@@ -3210,11 +3210,11 @@ class W_Declaration(_Item):
         """
         return self.name.is_private
 
-    def const(self, **kwargs):
+    def const(self, levels=None):
         """
         Create a constant referring to this declaration by name.
         """
-        return self.name.const(**kwargs)
+        return self.name.const(levels=levels)
 
     def const_with_level_params(self):
         """
