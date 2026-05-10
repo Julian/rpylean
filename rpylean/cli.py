@@ -14,6 +14,8 @@ from rpylean import parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
+from rpylean import _lltypes as _lean
+from rpylean._lean_runtime import read_expr, read_name
 from rpylean.leanffi import FFI
 from rpylean.environment import (
     DeclarationHook,
@@ -261,6 +263,10 @@ def repl(self, args, stdin, stdout, stderr):
             "path to the Lean prefix to link against ",
             # TODO: "[default: `lean --print-prefix`]",
         ),
+        (
+            "lookup",
+            "comma-separated declaration names to print the type of",
+        ),
     ],
 )
 def ffi(self, args, stdin, stdout, stderr):
@@ -271,11 +277,38 @@ def ffi(self, args, stdin, stdout, stderr):
     prefix = args.options["prefix"]
     if prefix is None:
         return 1  # TODO: some default, lean --print-prefix but RPython spawn??
+
+    lookup_arg = args.options["lookup"]
+    lookups = lookup_arg.split(",") if lookup_arg else []
+
     with FFI.from_prefix(prefix) as ffi:
-        for name in modules:
-            module = ffi.initialize_module(name)
-            stdout.write("%s: %s\n" % (name, module))
+        env = ffi.import_modules(modules)
+        for probe in lookups:
+            opt = ffi.find_constant(env, probe)
+            if _lean.obj_tag(opt) == 0:
+                stdout.write("%s: not found\n" % probe)
+                continue
+            ci = _lean.ctor_get(opt, 0)
+            cval = _lean.ctor_get(_lean.ctor_get(ci, 0), 0)
+            name = read_name(_lean.ctor_get(cval, 0))
+            # Walk the type Expr to verify the data is reachable; we don't
+            # render it (rendering needs the full constants map for
+            # name resolution).
+            read_expr(_lean.ctor_get(cval, 2))
+            stdout.write("%s : %s\n" % (name.str(), _ci_kind(_lean.ptr_tag(ci))))
     return 0
+
+
+def _ci_kind(tag):
+    if tag == 0: return "axiom"
+    if tag == 1: return "defn"
+    if tag == 2: return "thm"
+    if tag == 3: return "opaque"
+    if tag == 4: return "quot"
+    if tag == 5: return "induct"
+    if tag == 6: return "ctor"
+    if tag == 7: return "recursor"
+    return "?"
 
 
 def _open_export(path, stdin):

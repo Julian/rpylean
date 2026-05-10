@@ -1,0 +1,177 @@
+"""
+Convert Lean runtime objects (returned by `FFI.import_modules` /
+`FFI.find_constant`) into rpylean's `objects` types.
+
+Layout assumptions are validated by `FFI._layout_self_test` at runtime
+and double-checked here against the Lean compiler's emitted C (see
+docs/closures-spec.md vicinity for context).
+
+# Ctor tags
+
+    Lean.Name      0=anonymous   1=str(parent, suffix)  2=num(parent, idx)
+    Lean.Level     0=zero        1=succ(l)              2=max(l, l)
+                   3=imax(l, l)  4=param(name)          5=mvar  -- unused
+    Lean.Expr      0=bvar(Nat)   1=fvar      2=mvar      3=sort(level)
+                   4=const(name, levels)     5=app(fn, arg)
+                   6=lam(name, ty, body)     7=forallE(name, ty, body)
+                   8=letE(name, ty, val, body)           9=lit(Literal)
+                   10=mdata(data, expr)                  11=proj(name, idx, struct)
+
+# Caveats
+
+- `extends` is *not* flattened in compiled C: a `*Val` with parent
+  `ConstantVal` has `toConstantVal` at field 0, then its own fields
+  starting at 1. We don't bridge ConstantInfo here yet — that's the
+  next step.
+- Each Expr ctor has a trailing `data : Data` scalar (a 64-bit hash)
+  *before* any user-level scalar fields. So a `forallE`/`lam` ctor's
+  scalar area is `[data:8 bytes, binderInfo:1 byte]`, and `letE`'s is
+  `[data:8 bytes, nondep:1 byte]`. The `data` itself doesn't matter
+  for our walking but the offset to subsequent bytes does.
+- `Nat` is small-encoded as a scalar when it fits in a word. Larger
+  Nats use `LeanMPZ`; we don't see those in any kernel-ABI test data
+  so far, but `read_nat` handles both.
+"""
+from __future__ import print_function
+
+from rpython.rlib.rarithmetic import intmask
+from rpython.rlib.rbigint import rbigint
+from rpython.rtyper.lltypesystem import lltype, rffi
+
+from rpylean import _lltypes as _lean
+from rpylean.objects import (
+    Binder,
+    Name,
+    W_BVar,
+    W_LEVEL_ZERO,
+    W_LitNat,
+    W_LitStr,
+    forall,
+    fun,
+)
+
+
+def read_nat(o):
+    """Decode a Lean.Nat (scalar small or LeanMPZ heap) into an rbigint."""
+    if _lean.is_scalar(o):
+        return rbigint.fromint(intmask(_lean.unbox(o)))
+    # MPZ path: not exercised by current tests; fail loudly so we notice.
+    raise RuntimeError("read_nat: large/MPZ Nat not yet supported")
+
+
+def read_name(o):
+    if _lean.is_scalar(o):
+        return Name.ANONYMOUS
+    tag = _lean.ptr_tag(o)
+    if tag == 1:  # str
+        parent = read_name(_lean.ctor_get(o, 0))
+        suffix = _lean.string_cstr(_lean.ctor_get(o, 1))
+        return parent.child(suffix)
+    if tag == 2:  # num
+        parent = read_name(_lean.ctor_get(o, 0))
+        idx = read_nat(_lean.ctor_get(o, 1))
+        # Name.components is a list of str (stringify the numeric component
+        # to match the existing parser's convention).
+        return parent.child(idx.str())
+    raise RuntimeError("read_name: unexpected tag")
+
+
+def read_level(o):
+    if _lean.is_scalar(o):
+        # Level.zero is the only scalar we expect.
+        return W_LEVEL_ZERO
+    tag = _lean.ptr_tag(o)
+    if tag == 0:
+        return W_LEVEL_ZERO
+    if tag == 1:  # succ
+        return read_level(_lean.ctor_get(o, 0)).succ()
+    if tag == 2:  # max
+        return read_level(_lean.ctor_get(o, 0)).max(
+            read_level(_lean.ctor_get(o, 1)))
+    if tag == 3:  # imax
+        return read_level(_lean.ctor_get(o, 0)).imax(
+            read_level(_lean.ctor_get(o, 1)))
+    if tag == 4:  # param
+        return read_name(_lean.ctor_get(o, 0)).level()
+    raise RuntimeError("read_level: unexpected tag")
+
+
+def _read_list(o, read_elt):
+    """Walk a Lean `List α` (0=nil, 1=cons head tail) into a Python list."""
+    out = []
+    while not _lean.is_scalar(o):
+        if _lean.ptr_tag(o) != 1:
+            break
+        out.append(read_elt(_lean.ctor_get(o, 0)))
+        o = _lean.ctor_get(o, 1)
+    return out
+
+
+def _read_binder_info(scalar_byte):
+    # BinderInfo: 0=default 1=implicit 2=strictImplicit 3=instImplicit
+    if scalar_byte == 1:
+        return Binder.implicit
+    if scalar_byte == 2:
+        return Binder.strict_implicit
+    if scalar_byte == 3:
+        return Binder.instance
+    return Binder.default
+
+
+def _ctor_byte(o, num_objs, byte_offset):
+    """Read one byte from a ctor's trailing scalar area.
+
+    `byte_offset` is relative to the start of the scalar area, which sits
+    immediately after the 8 * num_objs object-pointer bytes. The first 8
+    scalar bytes are typically Lean's cached `data` hash; user-level
+    scalar fields (binderInfo, nondep) start at offset 8.
+    """
+    return rffi.cast(lltype.Signed, rffi.cast(rffi.UCHARP,
+        rffi.ptradd(rffi.cast(rffi.CCHARP, o),
+                    _lean.OBJ_HDR_SIZE + 8 * num_objs))[byte_offset])
+
+
+def read_expr(o):
+    if _lean.is_scalar(o):
+        raise RuntimeError("read_expr: unexpected scalar")
+    tag = _lean.ptr_tag(o)
+    if tag == 0:  # bvar(deBruijnIndex)
+        idx = read_nat(_lean.ctor_get(o, 0))
+        return W_BVar(idx.toint())
+    if tag == 3:  # sort(u)
+        return read_level(_lean.ctor_get(o, 0)).sort()
+    if tag == 4:  # const(name, us : List Level)
+        name = read_name(_lean.ctor_get(o, 0))
+        levels = _read_list(_lean.ctor_get(o, 1), read_level)
+        return name.const(levels=levels)
+    if tag == 5:  # app(fn, arg)
+        return read_expr(_lean.ctor_get(o, 0)).app(
+            read_expr(_lean.ctor_get(o, 1)))
+    if tag == 6 or tag == 7:  # lam / forallE
+        name = read_name(_lean.ctor_get(o, 0))
+        ty = read_expr(_lean.ctor_get(o, 1))
+        body = read_expr(_lean.ctor_get(o, 2))
+        bi = _read_binder_info(_ctor_byte(o, 3, 8))
+        binder = bi(name, ty)
+        return fun(binder)(body) if tag == 6 else forall(binder)(body)
+    if tag == 8:  # letE(name, type, value, body, nondep)
+        name = read_name(_lean.ctor_get(o, 0))
+        ty = read_expr(_lean.ctor_get(o, 1))
+        val = read_expr(_lean.ctor_get(o, 2))
+        body = read_expr(_lean.ctor_get(o, 3))
+        return name.let(ty, val, body)
+    if tag == 9:  # lit(Literal)
+        lit = _lean.ctor_get(o, 0)
+        ltag = _lean.ptr_tag(lit)
+        if ltag == 0:  # natVal
+            return W_LitNat(read_nat(_lean.ctor_get(lit, 0)))
+        # strVal
+        return W_LitStr(_lean.string_cstr(_lean.ctor_get(lit, 0)))
+    if tag == 10:  # mdata: drop the metadata, walk the inner expr
+        return read_expr(_lean.ctor_get(o, 1))
+    if tag == 11:  # proj(typeName, idx, struct)
+        struct_name = read_name(_lean.ctor_get(o, 0))
+        idx = read_nat(_lean.ctor_get(o, 1))
+        struct = read_expr(_lean.ctor_get(o, 2))
+        return struct_name.proj(idx.toint(), struct)
+    raise RuntimeError("read_expr: unexpected tag")
