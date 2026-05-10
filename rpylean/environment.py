@@ -8,7 +8,6 @@ from rpython.rlib.jit import promote
 from rpython.rlib.objectmodel import (
     compute_identity_hash,
     not_rpython,
-    r_dict,
     we_are_translated,
 )
 
@@ -44,8 +43,7 @@ from rpylean.objects import (
     _InferCacheEntry,
     fun,
     get_decl,
-    name_eq,
-    name_hash,
+    name_dict,
     syntactic_eq,
 )
 
@@ -62,7 +60,7 @@ class EnvironmentBuilder(object):
         self.exprs = [] if exprs is None else exprs
         self.names = [Name.ANONYMOUS] + names
         self.declarations = []
-        self.env = Environment(declarations=r_dict(name_eq, name_hash))
+        self.env = Environment(declarations=name_dict())
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
@@ -341,7 +339,7 @@ class Environment(object):
         """
         Construct an environment with the given declarations.
         """
-        by_name = r_dict(name_eq, name_hash)
+        by_name = name_dict()
         for each in declarations:
             if each.name in by_name:
                 raise AlreadyDeclared(each.name, by_name)

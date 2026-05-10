@@ -1,5 +1,7 @@
 from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
-from rpython.rlib.objectmodel import compute_hash, compute_identity_hash, not_rpython
+from rpython.rlib.objectmodel import (
+    compute_hash, compute_identity_hash, not_rpython, specialize,
+)
 from rpython.rlib.rbigint import rbigint
 
 from rpylean._rlib import count, warn
@@ -439,13 +441,6 @@ def name_with_levels_tokens(name, levels, constants):
 
 
 @elidable
-def name_hash(name):
-    # See `name_eq` for why this lives at module level rather than
-    # being passed as the unbound `Name.hash` method.
-    return name.hash()
-
-
-@elidable
 def name_eq(name, other):
     # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
     #        that directly, RPython seems unable to be convinced that name and
@@ -455,6 +450,25 @@ def name_eq(name, other):
     # trace-compile time when both arguments are promoted.  This collapses
     # all 14 sequential nat-op comparisons in _try_reduce_nat into constants.
     return name.components == other.components
+
+
+@elidable
+def _name_hash(name):
+    # See `name_eq` for why this lives at module level rather than
+    # being passed as the unbound `Name.hash` method.
+    return name.hash()
+
+
+@specialize.call_location()
+def name_dict():
+    """A fresh empty `r_dict` keyed by `Name`.
+
+    Specialised per call site so each dict gets its own value-type
+    annotation (otherwise RPython unifies, e.g., the `Name → bool`
+    filter dict with the `Name → W_Declaration` env dict).
+    """
+    from rpython.rlib.objectmodel import r_dict
+    return r_dict(name_eq, _name_hash)
 
 
 class Name(_Item):

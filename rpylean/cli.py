@@ -7,7 +7,6 @@ from __future__ import print_function
 from time import time
 import errno
 
-from rpython.rlib.objectmodel import r_dict
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean import parser
@@ -23,7 +22,7 @@ from rpylean.environment import (
     StreamTracer,
     from_export,
 )
-from rpylean.objects import Name, name_eq, name_hash
+from rpylean.objects import Name, name_dict
 
 
 cli = CLI(
@@ -88,7 +87,7 @@ def check(self, args, stdin, stdout, stderr):
     filter_match = args.options["filter-match"]
     filter_names = None
     if filter_match is None and args.options["filter"] is not None:
-        filter_names = r_dict(name_eq, name_hash)
+        filter_names = name_dict()
         for each in args.options["filter"].split(","):
             filter_names[Name.from_str(each)] = True
 
