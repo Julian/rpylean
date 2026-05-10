@@ -172,7 +172,10 @@ class CLI(object):
 
     def subcommand(self, metavars, help, options=None, flags=None):
         def _subcommand(fn):
-            name = fn.__name__
+            # Underscores in the function name become hyphens in the
+            # subcommand name, matching the option-naming convention
+            # (e.g. "max-fail", "filter-match").
+            name = fn.__name__.replace("_", "-")
             assert name not in self._commands, name
             command = self._commands[name] = Command(
                 name=name,

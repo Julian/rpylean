@@ -39,6 +39,18 @@ def test_known_command_runs():
     assert "ran test with foo" in out
 
 
+def test_underscored_command_name_dispatches_via_hyphen():
+    cli = CLI()
+
+    @cli.subcommand([], help="Multi-word command.")
+    def my_command(self, args, stdin, stdout, stderr):
+        stdout.write("ok\n")
+        return 0
+
+    out, _ = run(cli, ["prog", "my-command"])
+    assert "ok" in out
+
+
 def test_unknown_command_falls_back_to_default():
     cli = CLI(default="foo")
 
