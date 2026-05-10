@@ -10,6 +10,33 @@ The basic flow:
 
 `__enter__` initialises Lean's runtime, the Init/Lean modules, and the
 search path (rooted at `prefix` so we are not coupled to `$PATH`'s `lean`).
+It also resolves and caches the function pointers we use on hot paths
+and runs `_layout_self_test`. The first successful `import_modules`
+also runs `_deep_self_test`, which probes the loaded-env shapes
+(ConstantInfo, forallE) we depend on in the walker.
+
+# Lean-side data structures we construct or consume
+
+- `Lean.Import` (built by `_build_import`): ctor tag 0 with 1 obj
+  field (`module : Name`) and 8 trailing scalar bytes covering three
+  Bool flags (`importAll`, `isExported`, `isMeta`) + padding.
+
+- `Lean.OLeanLevel`, `Lean.IO.Error`: see the named constants at the
+  top of this module.
+
+- `Lean.SMap Name ConstantInfo` (consumed by `each_constant`): three
+  fields source-level (stage₁ Bool, map₁ Std.HashMap, map₂ PHashMap),
+  but Lean's compiler inlines the HashMap → DHashMap → Raw wrapper
+  chain, so `ctor_get(smap, 0)` is the HashMap and that HashMap
+  directly has `[size:Nat, buckets:Array AssocList]` as its two obj
+  fields. After `importModules` everything we want is in map₁; map₂
+  stays empty until local additions, which we don't make.
+
+  `AssocList` is the standard `inductive | nil | cons key value tail`;
+  see `Std/Data/DHashMap/Internal/AssocList/Basic.lean`.
+
+The walker (`rpylean.ffi._runtime`) catalogues the rest of the
+layouts we depend on, ctor by ctor.
 """
 from __future__ import print_function
 from os.path import join

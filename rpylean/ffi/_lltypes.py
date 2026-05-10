@@ -5,7 +5,7 @@ Mirrors the static-inline primitives from `lean.h` so we can read and
 construct Lean runtime objects directly from RPython, without needing a
 shim library.
 
-# Object layout
+# Object header
 
     typedef struct {
         int      m_rc;          // bytes 0-3
@@ -14,14 +14,37 @@ shim library.
         unsigned m_tag   : 8;   // byte  7
     } lean_object;
 
-A constructor object follows the header with `lean_object * m_objs[]`,
-then trailing scalar bytes.
+A constructor object follows the header with `lean_object * m_objs[]`
+(`m_other` is the count), then trailing scalar bytes. `ctor_get(o, i)`
+reads slot `i` at header+8+8*i; `ctor_set_byte(o, num_objs, k, v)`
+writes one scalar byte at header+8+8*num_objs+k.
+
+A string object has header + `m_size:size_t` + `m_capacity:size_t` +
+`m_length:size_t` + UTF-8 bytes; `string_cstr` reads at offset 32.
+
+An array object has header + `m_size:size_t` + `m_capacity:size_t` +
+`m_data[]:lean_object*`; `array_size` reads offset 8 and `array_get`
+reads each pointer starting at offset 24.
+
+Scalar (small-immediate) values are pointer-encoded with bit 0 set:
+`box(n) = (n << 1) | 1`, `unbox(o) = (uintptr_t)o >> 1`, and
+`is_scalar(o) = ((uintptr_t)o & 1) == 1`.
 
 # ABI
 
 Every Lean function consumes its `lean_object *` arguments unless they
 are marked `@&` in the signature. Callers that want to keep using the
-borrowed reference must `inc()` it before each consume-call.
+borrowed reference must `inc()` it before each consume-call; conversely
+`FFI.release(o)` drops one ref (mirroring inline `lean_dec_ref`).
+
+# Where to look when this drifts
+
+Each layout constant here is verified at startup by `FFI`:
+`_layout_self_test` exercises the synthetic shapes (Name, ctor header,
+string body), and `_deep_self_test` covers the loaded-env shapes
+(ConstantInfo's `toConstantVal` indirection, forallE's slot order).
+`rpylean.ffi._runtime`'s module docstring catalogues every ctor we
+walk and points at its Lean source.
 """
 from __future__ import print_function
 

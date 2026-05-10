@@ -2,35 +2,69 @@
 Convert Lean runtime objects (returned by `FFI.import_modules` /
 `FFI.find_constant`) into rpylean's `objects` types.
 
-Layout assumptions are validated by `FFI._layout_self_test` at runtime
-and double-checked here against the Lean compiler's emitted C (see
-docs/closures-spec.md vicinity for context).
+Layout assumptions are validated at startup: `FFI._layout_self_test`
+probes runtime-object shapes (header, ctor, string, array) and
+`FFI._deep_self_test` probes loaded-env shapes (ConstantInfo,
+forallE). Anything inconsistent there fails loudly; everything below
+relies on those invariants holding.
 
 # Ctor tags
 
     Lean.Name      0=anonymous   1=str(parent, suffix)  2=num(parent, idx)
+                   See `Init.Prelude` (`inductive Name`).
+
     Lean.Level     0=zero        1=succ(l)              2=max(l, l)
-                   3=imax(l, l)  4=param(name)          5=mvar  -- unused
+                   3=imax(l, l)  4=param(name)          5=mvar -- unused
+                   See `Lean/Level.lean`.
+
     Lean.Expr      0=bvar(Nat)   1=fvar      2=mvar      3=sort(level)
                    4=const(name, levels)     5=app(fn, arg)
                    6=lam(name, ty, body)     7=forallE(name, ty, body)
                    8=letE(name, ty, val, body)           9=lit(Literal)
-                   10=mdata(data, expr)                  11=proj(name, idx, struct)
+                   10=mdata(data, expr)     11=proj(name, idx, struct)
+                   See `Lean/Expr.lean` (`inductive Expr`). fvar/mvar
+                   don't occur in declaration bodies and are treated
+                   as walker errors.
 
-# Caveats
+    Lean.ConstantInfo
+                   0=axiomInfo   1=defnInfo  2=thmInfo   3=opaqueInfo
+                   4=quotInfo    5=inductInfo 6=ctorInfo 7=recInfo
+                   See `Lean/Declaration.lean`. Each variant wraps a
+                   single `*Val` at field 0.
 
-- `extends` is *not* flattened in compiled C: a `*Val` with parent
-  `ConstantVal` has `toConstantVal` at field 0, then its own fields
-  starting at 1. We don't bridge ConstantInfo here yet — that's the
-  next step.
-- Each Expr ctor has a trailing `data : Data` scalar (a 64-bit hash)
-  *before* any user-level scalar fields. So a `forallE`/`lam` ctor's
-  scalar area is `[data:8 bytes, binderInfo:1 byte]`, and `letE`'s is
-  `[data:8 bytes, nondep:1 byte]`. The `data` itself doesn't matter
-  for our walking but the offset to subsequent bytes does.
-- `Nat` is small-encoded as a scalar when it fits in a word. Larger
-  Nats use `LeanMPZ`; we don't see those in any kernel-ABI test data
-  so far, but `read_nat` handles both.
+    Lean.ReducibilityHints
+                   0=opaque      1=abbrev    2=regular(_: UInt32)
+                   The regular's UInt32 lives at *scalar* offset 0
+                   (no `data` prefix on non-Expr ctors); see
+                   `_read_hints`.
+
+# Field positions
+
+Every `*Val` has `toConstantVal` at field 0 — Lean's `extends` is
+*not* flattened in compiled C. `ConstantVal`'s field order is
+`[name, levelParams, type]`. Per-variant additional fields:
+
+    AxiomVal       [toConstantVal] + scalar byte isUnsafe
+    DefinitionVal  [toConstantVal, value, hints, all] + scalar byte safety
+    TheoremVal     [toConstantVal, value, all]
+    OpaqueVal      [toConstantVal, value, all] + scalar byte isUnsafe
+    QuotVal        [toConstantVal] + scalar byte kind
+    InductiveVal   [toConstantVal, numParams, numIndices, all, ctors,
+                    numNested] + scalar bytes isRec/isUnsafe/isReflexive
+    ConstructorVal [toConstantVal, induct, cidx, numParams, numFields]
+                   + scalar byte isUnsafe
+    RecursorVal    [toConstantVal, all, numParams, numIndices, numMotives,
+                    numMinors, rules] + scalar bytes k/isUnsafe
+
+`Lean.Expr` ctors with binder info / nondep flags interleave a
+`data : Data` 64-bit hash *before* any user-level scalar fields. So
+forallE/lam's scalar area is `[data:8 bytes, binderInfo:1 byte]`
+and letE's is `[data:8 bytes, nondep:1 byte]`. The `data` doesn't
+matter for walking but it shifts the offset to the byte we do read.
+
+`Nat` is small-encoded as a scalar when it fits in a word; larger
+Nats use `LeanMPZ`. `read_nat` raises `UnsupportedLeanMPZ` for the
+MPZ path (caller decides whether to skip or abort).
 """
 from __future__ import print_function
 
