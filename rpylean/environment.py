@@ -31,6 +31,7 @@ from rpylean.objects import (
     Name,
     W_App,
     W_BVar,
+    W_Closure,
     W_Const,
     W_Constructor,
     W_ForAll,
@@ -474,6 +475,14 @@ class Environment(object):
         """
         Core definitional equality logic, called after WHNF reduction.
         """
+        # Closures are an internal representation of deferred substitution;
+        # peel any that survive WHNF here so the rest of the dispatch
+        # can compare canonical forms.
+        if isinstance(expr1, W_Closure):
+            expr1 = expr1.force()
+        if isinstance(expr2, W_Closure):
+            expr2 = expr2.force()
+
         # Promote the classes so the JIT can specialize on expression types.
         # This is critical for the type dispatch below - it allows the JIT
         # to compile specialized traces for common type combinations.

@@ -2318,6 +2318,25 @@ class W_FunBase(W_Expr):
         self._inst_cache_result = None
         # Inline infer cache.
         self._infer_cache_result = None
+        # 1-entry inline closure cache, keyed on env identity. Critical
+        # for DAG-shared lambdas: when ``λ`` appears N times under the
+        # same env (e.g. wrap2 lam lam) all N calls return the same
+        # ``W_Closure``, preserving the inferred-type cache across
+        # references and avoiding exponential blowup.
+        self._closure_cache_env = None
+        self._closure_cache_result = None
+
+    def closure(self, env):
+        if not env:
+            return self
+        if self.loose_bvar_range == 0:
+            return self
+        if self._closure_cache_env is env:
+            return self._closure_cache_result
+        result = W_Closure(env, self)
+        self._closure_cache_env = env
+        self._closure_cache_result = result
+        return result
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -3585,6 +3604,10 @@ def syntactic_eq(expr1, expr2):
     """
     if expr1 is expr2:
         return True
+    if isinstance(expr1, W_Closure):
+        expr1 = expr1.force()
+    if isinstance(expr2, W_Closure):
+        expr2 = expr2.force()
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
@@ -3793,11 +3816,12 @@ def _iter_infer(env, root):
         if isinstance(item, _InferVisit):
             cur = item.expr
             cls = cur.__class__
-            # Cache lookup. Recursive types (App/Lambda/ForAll) keep a
-            # per-instance inline result; non-recursive expression types
-            # are passed through env.infer (which has its own cache
+            # Cache lookup. Recursive types (App/Lambda/ForAll/Closure)
+            # keep a per-instance inline result; non-recursive expression
+            # types are passed through env.infer (which has its own cache
             # fallback) and pushed straight onto the value stack.
-            if cls is W_App or cls is W_Lambda or cls is W_ForAll:
+            if (cls is W_App or cls is W_Lambda or cls is W_ForAll
+                    or cls is W_Closure):
                 cached = cur._infer_cache_result
                 if cached is not None:
                     values.append(cached)
@@ -3808,14 +3832,14 @@ def _iter_infer(env, root):
             if cls is W_Lambda:
                 cur.binder.type.infer(env).whnf(env).expect_sort(env)
                 fvar = cur.binder.fvar()
-                body_with_fvar = cur.body.instantiate(fvar)
+                body_with_fvar = cur.body.closure([fvar])
                 work.append(_InferStore(cur))
                 work.append(_InferBindLambda(cur.binder, fvar))
                 work.append(_InferVisit(body_with_fvar))
             elif cls is W_ForAll:
                 binder_sort = cur.binder.type.infer(env).whnf(env).expect_sort(env)
                 fvar = cur.binder.fvar()
-                body_with_fvar = cur.body.instantiate(fvar)
+                body_with_fvar = cur.body.closure([fvar])
                 work.append(_InferStore(cur))
                 work.append(_InferBindForAll(binder_sort))
                 work.append(_InferVisit(body_with_fvar))
@@ -3832,12 +3856,51 @@ def _iter_infer(env, root):
                     work.append(_InferVisit(args[k]))
                     k += 1
                 work.append(_InferVisit(target))
+            elif cls is W_Closure:
+                inner = cur.body
+                closure_env = cur.env
+                inner_cls = inner.__class__
+                if inner_cls is W_App:
+                    # Push the closure through to the App's pieces.
+                    new_app = inner.fn.closure(closure_env).app(
+                        inner.arg.closure(closure_env),
+                    )
+                    work.append(_InferStore(cur))
+                    work.append(_InferVisit(new_app))
+                elif inner_cls is W_Lambda or inner_cls is W_ForAll:
+                    # Open the binder while keeping body shared. The
+                    # new env extends the closure's env with a fresh
+                    # fvar at position 0 (innermost).
+                    new_binder_type = inner.binder.type.closure(closure_env)
+                    new_binder_type.infer(env).whnf(env).expect_sort(env)
+                    if new_binder_type is inner.binder.type:
+                        new_binder = inner.binder
+                    else:
+                        new_binder = inner.binder.with_type(type=new_binder_type)
+                    fvar = new_binder.fvar()
+                    new_env = [fvar]
+                    for v in closure_env:
+                        new_env.append(v)
+                    body_with_fvar = inner.body.closure(new_env)
+                    work.append(_InferStore(cur))
+                    if inner_cls is W_Lambda:
+                        work.append(_InferBindLambda(new_binder, fvar))
+                    else:
+                        binder_sort = new_binder_type.infer(env).whnf(env).expect_sort(env)
+                        work.append(_InferBindForAll(binder_sort))
+                    work.append(_InferVisit(body_with_fvar))
+                else:
+                    # Atoms / BVar / Let / Proj / nested Closure: fall back
+                    # to forcing.
+                    values.append(env.infer(cur))
             else:
                 values.append(cur.infer(env))
         elif isinstance(item, _InferAppStep):
             arg_type = values.pop()
             fn_type_base = values.pop()
             fn_type = fn_type_base.whnf(env)
+            if isinstance(fn_type, W_Closure):
+                fn_type = fn_type.force()
             arg = item.arg()
             if not isinstance(fn_type, W_ForAll):
                 raise W_NotAFunction(
