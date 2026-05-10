@@ -1248,11 +1248,17 @@ class W_Expr(_Item):
             return self
         if self.loose_bvar_range == 0:
             return self
-        if isinstance(self, W_BVar):
-            if self.id < len(env):
-                return env[self.id]
-            return W_BVar(self.id - len(env))
         return W_Closure(env, self)
+
+    def _whnf_under_closure(self, closure_env):
+        """
+        One WHNF step for ``W_Closure(closure_env, self)``.
+
+        Default: the closure has no further effect on this expression
+        (e.g. atoms have no bvars to resolve), so emit ``self`` and let
+        the outer WHNF loop continue from there.
+        """
+        return self
 
     def whnf_with_progress(self, env):
         """
@@ -1356,6 +1362,18 @@ class W_BVar(W_Expr):
 
     def subst_levels(self, substs):
         return self
+
+    def closure(self, env):
+        if not env:
+            return self
+        if self.id < len(env):
+            return env[self.id]
+        return W_BVar(self.id - len(env))
+
+    def _whnf_under_closure(self, closure_env):
+        if self.id < len(closure_env):
+            return closure_env[self.id]
+        return W_BVar(self.id - len(closure_env))
 
 
 class W_FVar(W_Expr):
@@ -2110,6 +2128,9 @@ class W_Proj(W_Expr):
     def with_expr(self, expr):
         return self.struct_name.proj(self.field_index, expr)
 
+    def _whnf_under_closure(self, closure_env):
+        return self.with_expr(self.struct_expr.closure(closure_env))
+
     def syntactic_eq(self, other):
         return (
             self.struct_name.syntactic_eq(other.struct_name)
@@ -2328,6 +2349,10 @@ class W_FunBase(W_Expr):
         other_body = other.body.instantiate(fvar)
 
         return def_eq(body, other_body)
+
+    def _whnf_under_closure(self, closure_env):
+        # Closure-of-lambda (or -ForAll) is itself a value in WHNF.
+        return None
 
 
 class W_ForAll(W_FunBase):
@@ -2625,6 +2650,10 @@ class W_Let(W_Expr):
             value=self.value.subst_levels(substs),
             body=self.body.subst_levels(substs),
         )
+
+    def _whnf_under_closure(self, closure_env):
+        # let x := val in body  ⇒  body[x ↦ val], all under closure_env.
+        return self.body.closure([self.value]).closure(closure_env)
 
 
 class W_App(W_Expr):
@@ -3035,6 +3064,9 @@ class W_App(W_Expr):
     def subst_levels(self, substs):
         return self.fn.subst_levels(substs).app(self.arg.subst_levels(substs))
 
+    def _whnf_under_closure(self, closure_env):
+        return self.fn.closure(closure_env).app(self.arg.closure(closure_env))
+
 
 class W_Closure(W_Expr):
     """
@@ -3071,32 +3103,69 @@ class W_Closure(W_Expr):
         return expr
 
     def _whnf_core(self, env):
-        body = self.body
-        closure_env = self.env
-        n = len(closure_env)
-        if isinstance(body, W_BVar):
-            if body.id < n:
-                return closure_env[body.id]
-            return W_BVar(body.id - n)
-        if isinstance(body, W_App):
-            return body.fn.closure(closure_env).app(
-                body.arg.closure(closure_env),
-            )
-        if isinstance(body, W_Let):
-            # let x = val in body'  ⇒  body' with bvar(0) ↦ val, all under
-            # the outer closure's env.
-            inner = body.body.closure([body.value])
-            return inner.closure(closure_env)
-        if isinstance(body, W_Proj):
-            return body.with_expr(body.struct_expr.closure(closure_env))
-        if isinstance(body, W_Closure):
-            inner_step = body._whnf_core(env)
-            if inner_step is not None:
-                return inner_step.closure(closure_env)
+        return self.body._whnf_under_closure(self.env)
+
+    def _whnf_under_closure(self, closure_env):
+        # Nested closure: peel inner first, then re-wrap.
+        inner_step = self.body._whnf_under_closure(self.env)
+        if inner_step is None:
             return None
-        if isinstance(body, W_FunBase):
-            return None
-        return body
+        return inner_step.closure(closure_env)
+
+    def force(self):
+        """
+        Materialize the closure-free form by performing the deferred
+        substitution eagerly.
+        """
+        n = len(self.env)
+        result = self.body
+        # Substitute outermost-first (env[n-1] for bvar(n-1) at depth n-1)
+        # down to innermost (env[0] for bvar(0) at depth 0). This keeps
+        # already-substituted env entries' free bvars from being
+        # over-substituted by later iterations.
+        k = n - 1
+        while k >= 0:
+            result = result.instantiate(self.env[k], k)
+            k -= 1
+        return result
+
+    def syntactic_eq(self, other):
+        return syntactic_eq(self.force(), other)
+
+    def infer(self, env):
+        return self.force().infer(env)
+
+    def instantiate(self, expr, depth=0):
+        return self.force().instantiate(expr, depth)
+
+    def bind_fvar(self, fvar, depth):
+        return self.force().bind_fvar(fvar, depth)
+
+    def incr_free_bvars(self, count, depth):
+        return self.force().incr_free_bvars(count, depth)
+
+    def subst_levels(self, substs):
+        return self.force().subst_levels(substs)
+
+    def def_eq(self, other, def_eq):
+        # Re-dispatch through env.def_eq so the forced LHS gets WHNF'd
+        # against ``other`` (which may itself still be a closure).
+        return def_eq(self.force(), other)
+
+    def tokens(self, constants, mark=None, span_holder=None):
+        return self.force().tokens(constants, mark=mark, span_holder=span_holder)
+
+    def expect_sort(self, env):
+        return self.force().expect_sort(env)
+
+    def contains_const(self, name):
+        return self.force().contains_const(name)
+
+    def _any_subexpr_invalid_index(self, inductive):
+        return self.force()._any_subexpr_invalid_index(inductive)
+
+    def is_strictly_positive(self, inductive, env):
+        return self.force().is_strictly_positive(inductive, env)
 
 
 class W_RecRule(_Item):

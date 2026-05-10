@@ -634,6 +634,26 @@ def test_nested_beta_reduction():
     assert env.def_eq(a_decl.const(), outer.app(a_decl.const()))
 
 
+def test_forall_chain_eq_app_of_fun():
+    """
+    `∀ (z : Nat), (fun T ↦ T) Nat` ≟ `(fun T ↦ ∀ (z : Nat), T) Nat`.
+
+    Both reduce to `∀ (z : Nat), Nat` after beta. The first puts the
+    redex inside the forall body; the second has it at the top.
+    """
+    nat_decl = Name.simple("Nat").axiom(type=TYPE)
+    e = Environment.having([nat_decl])
+    nat_const = nat_decl.const()
+
+    z_binder = Name.simple("z").binder(type=nat_const)
+    inner_fun = fun(Name.simple("T").binder(type=TYPE))(b0)
+    lhs = forall(z_binder)(inner_fun.app(nat_const))
+    outer_fun = fun(Name.simple("T").binder(type=TYPE))(forall(z_binder)(b1))
+    rhs = outer_fun.app(nat_const)
+
+    assert e.def_eq(lhs, rhs)
+
+
 def test_zeta_reduction():
     env = Environment.having(
         [

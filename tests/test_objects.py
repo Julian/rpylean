@@ -655,3 +655,31 @@ class TestClosure(object):
     def test_closure_with_empty_env_is_identity(self):
         bvar = W_BVar(0)
         assert bvar.closure([]) is bvar
+
+    def test_force_substitutes_innermost_bvar(self):
+        """Closure([a], BVar(0)).force() = a."""
+        a_decl = Name.simple("a").axiom(type=NAT)
+        a = a_decl.const()
+        closure = W_Closure([a], W_BVar(0))
+        assert closure.force() == a
+
+    def test_force_with_multi_env(self):
+        """Closure([a, b], App(BVar(0), BVar(1))).force() = App(a, b)."""
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        a = a_decl.const()
+        b = b_decl.const()
+        body = W_App(W_BVar(0), W_BVar(1))
+        closure = W_Closure([a, b], body)
+        assert closure.force() == W_App(a, b)
+
+    def test_force_preserves_env_entry_bvars(self):
+        """env entries' free bvars survive force without being over-substituted."""
+        # env=[BVar(0), BVar(0)], body=App(BVar(0), BVar(1))
+        # Semantics: body's bvar(0) -> env[0] = BVar(0) (refers to OUTER bvar(0));
+        #           body's bvar(1) -> env[1] = BVar(0) (also refers to OUTER bvar(0)).
+        # Both env entries refer to the same outer bvar, so result should be
+        # App(BVar(0), BVar(0)).
+        body = W_App(W_BVar(0), W_BVar(1))
+        closure = W_Closure([W_BVar(0), W_BVar(0)], body)
+        assert closure.force() == W_App(W_BVar(0), W_BVar(0))
