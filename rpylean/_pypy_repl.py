@@ -10,7 +10,7 @@ import os
 
 from rpylean import objects as o  # noqa: F401
 from rpylean.environment import from_export
-from rpylean.leanffi import FFI  # noqa: F401
+from rpylean.ffi import FFI  # noqa: F401
 
 Name = o.Name
 n = names = o.names

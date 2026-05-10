@@ -18,7 +18,7 @@ import sys
 from rpython.rlib.rdynload import RTLD_LAZY, dlclose, dlopen, dlsym
 from rpython.rtyper.lltypesystem import lltype, rffi
 
-from rpylean import _lltypes as _lean
+from rpylean.ffi import _lltypes as _lean
 
 
 if sys.platform == "win32":

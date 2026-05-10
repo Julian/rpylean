@@ -34,13 +34,12 @@ docs/closures-spec.md vicinity for context).
 """
 from __future__ import print_function
 
+from rpython.rlib.objectmodel import specialize
 from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.rbigint import rbigint
 from rpython.rtyper.lltypesystem import lltype, rffi
 
-from rpylean import _lltypes as _lean
-from rpython.rlib.objectmodel import specialize
-
+from rpylean.ffi import _lltypes as _lean
 from rpylean.objects import (
     Binder,
     HINT_ABBREV,

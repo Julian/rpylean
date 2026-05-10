@@ -13,9 +13,8 @@ from rpylean import parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
-from rpylean import _lltypes as _lean
-from rpylean._lean_runtime import read_constant_info
-from rpylean.leanffi import FFI
+from rpylean.ffi import FFI, read_constant_info
+from rpylean.ffi import _lltypes as _lean
 from rpylean.environment import (
     DeclarationHook,
     EnvironmentBuilder,
