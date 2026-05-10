@@ -78,6 +78,7 @@ class FFI(object):
         self.leanshared = leanshared
         self.leanshared_1 = leanshared_1
         self._close = close
+        self._deep_self_test_done = False
 
     def __enter__(self):
         """
@@ -138,15 +139,15 @@ class FFI(object):
 
     def _layout_self_test(self):
         """
-        Probe a known-shape Lean object to confirm `lean.h`'s layout still
-        matches what `_lltypes` assumes. Cheap (a handful of FFI calls,
-        runs once per process) and fails loudly the day Lean shifts
-        something underneath us.
+        Probe runtime-object layouts that don't need a loaded env.
 
         Verifies, via `Name.mkStr Name.anonymous "rpylean"`:
         - ctor tag byte at header offset 7
         - object slots starting at header offset 8
         - string bytes starting at string-header offset 32
+
+        Loaded-env shapes (ConstantInfo, forallE) are probed separately
+        in `_deep_self_test` on the first `import_modules` call.
         """
         probe = self._build_name("rpylean")
         if _lean.is_scalar(probe):
@@ -159,6 +160,59 @@ class FFI(object):
         suffix = _lean.string_cstr(_lean.ctor_get(probe, 1))
         if suffix != "rpylean":
             raise FFIError("layout self-test: string roundtrip got " + suffix)
+
+    def _deep_self_test(self, env):
+        """
+        Confirm the layouts we depend on for *loaded environments*:
+        ConstantInfo's `toConstantVal` field-0 indirection and the
+        forallE Expr ctor's slot ordering.
+
+        Runs once per `FFI` session, the first time `import_modules`
+        returns a usable environment. Any module — Init at minimum —
+        will have `Nat` and `Nat.succ`, so we use them as the canary.
+        """
+        opt = self.find_constant(env, "Nat")
+        if _lean.obj_tag(opt) == 0:
+            raise FFIError("deep self-test: Nat not found in imported env")
+        ci = _lean.ctor_get(opt, 0)
+        if _lean.ptr_tag(ci) != 5:
+            raise FFIError("deep self-test: Nat ConstantInfo tag should be 5 "
+                           "(inductInfo)")
+        # ConstantInfo.inductInfo wraps an InductiveVal whose field 0 is
+        # `toConstantVal`. ConstantVal's first field is `name`.
+        cval = _lean.ctor_get(_lean.ctor_get(ci, 0), 0)
+        nat_name = _lean.ctor_get(cval, 0)
+        if _lean.is_scalar(nat_name) or _lean.ptr_tag(nat_name) != 1:
+            raise FFIError("deep self-test: Nat ConstantVal.name should be "
+                           "Name.str")
+        if _lean.string_cstr(_lean.ctor_get(nat_name, 1)) != "Nat":
+            raise FFIError("deep self-test: ConstantVal.name field 1 should "
+                           "be the suffix string \"Nat\"")
+        self.release(opt)
+
+        # `Nat.succ`'s type is `Nat → Nat`, i.e. a forallE Expr. Verify
+        # the binder name is readable at slot 0 and the body is a Const
+        # at slot 2 (Lean.Expr.forallE field order, modulo the cached
+        # data scalar that doesn't move object slots).
+        opt = self.find_constant(env, "Nat.succ")
+        if _lean.obj_tag(opt) == 0:
+            raise FFIError("deep self-test: Nat.succ not found")
+        ci = _lean.ctor_get(opt, 0)
+        cval = _lean.ctor_get(_lean.ctor_get(ci, 0), 0)
+        type_expr = _lean.ctor_get(cval, 2)  # ConstantVal.type
+        if _lean.is_scalar(type_expr) or _lean.ptr_tag(type_expr) != 7:
+            raise FFIError("deep self-test: Nat.succ.type should be forallE "
+                           "(tag 7)")
+        # binder name (slot 0) is a Name; body (slot 2) is a Const with
+        # name = `Nat`.
+        binder_name = _lean.ctor_get(type_expr, 0)
+        if _lean.is_scalar(binder_name) and _lean.unbox(binder_name) != 0:
+            raise FFIError("deep self-test: forallE.binderName slot looks wrong")
+        body = _lean.ctor_get(type_expr, 2)
+        if _lean.is_scalar(body) or _lean.ptr_tag(body) != 4:
+            raise FFIError("deep self-test: Nat.succ.type body should be a "
+                           "Const (tag 4)")
+        self.release(opt)
 
     def _init_module(self, sym_name):
         sym = dlsym(self.leanshared, sym_name)
@@ -267,7 +321,11 @@ class FFI(object):
                 raise FFIError("import failed: " + _lean.string_cstr(_lean.ctor_get(err, 0)))
             raise FFIError("import failed (IO.Error tag=%d)" %
                            _lean.ptr_tag(err))
-        return _lean.ctor_get(result, 0)
+        env = _lean.ctor_get(result, 0)
+        if not self._deep_self_test_done:
+            self._deep_self_test_done = True
+            self._deep_self_test(env)
+        return env
 
     def find_constant(self, env, dotted_name):
         """
