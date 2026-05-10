@@ -1,5 +1,15 @@
 """
 An FFI to Real Lean.
+
+The basic flow:
+
+    with FFI.from_prefix(prefix) as ffi:
+        env = ffi.import_modules(["Init"])
+        ci = ffi.find_constant(env, "Nat")
+        ...
+
+`__enter__` initialises Lean's runtime, the Init/Lean modules, and the
+search path (rooted at `prefix` so we are not coupled to `$PATH`'s `lean`).
 """
 from __future__ import print_function
 from os.path import join
@@ -33,13 +43,16 @@ class FFI(object):
         """
         lib = join(prefix, "lib/lean")
         return FFI(
+            prefix=prefix,
             Init_shared=dlopen(join(lib, library("Init_shared")), RTLD_LAZY),
             leanshared=dlopen(join(lib, library("leanshared")), RTLD_LAZY),
             leanshared_1=dlopen(join(lib, library("leanshared_1")), RTLD_LAZY),
             close=True,
         )
 
-    def __init__(self, Init_shared, leanshared_1, leanshared, close=False):
+    def __init__(self, Init_shared, leanshared_1, leanshared, prefix=None,
+                 close=False):
+        self.prefix = prefix
         self.Init_shared = Init_shared
         self.leanshared = leanshared
         self.leanshared_1 = leanshared_1
@@ -47,24 +60,132 @@ class FFI(object):
 
     def __enter__(self):
         """
-        Initialize the Lean runtime environment.
+        Initialise the Lean runtime, load Init+Lean, and set the search path.
+
+        After this returns, `import_modules` is callable.
         """
-        sym = dlsym(self.leanshared, "lean_initialize_runtime_module")
-        rffi.cast(_lean.initialize_runtime_module, sym)()
+        rffi.cast(_lean.initialize_runtime_module,
+                  dlsym(self.leanshared, "lean_initialize_runtime_module"))()
+
+        # Module init: Init and Lean must be initialised before importModules.
+        # Each `initialize_<M>(builtin, world)` returns Except IO.Error Unit.
+        self._init_module("initialize_Init")
+        self._init_module("initialize_Lean")
+
+        rffi.cast(_lean.io_mark_end_initialization,
+                  dlsym(self.leanshared, "lean_io_mark_end_initialization"))()
+
+        if self.prefix is not None:
+            self._init_search_path(self.prefix)
+        self._layout_self_test()
         return self
 
     def __exit__(self, *args):
-        sym = dlsym(self.leanshared, "lean_io_mark_end_initialization")
-        rffi.cast(_lean.io_mark_end_initialization, sym)()
-
         if self._close:
             dlclose(self.Init_shared)
             dlclose(self.leanshared)
             dlclose(self.leanshared_1)
 
+    # ---- helpers --------------------------------------------------------
+
+    def _layout_self_test(self):
+        """
+        Probe a known-shape Lean object to confirm `lean.h`'s layout still
+        matches what `_lltypes` assumes. Cheap (a handful of FFI calls,
+        runs once per process) and fails loudly the day Lean shifts
+        something underneath us.
+
+        Verifies, via `Name.mkStr Name.anonymous "rpylean"`:
+        - ctor tag byte at header offset 7
+        - object slots starting at header offset 8
+        - string bytes starting at string-header offset 32
+        """
+        probe = self._build_name("rpylean")
+        if _lean.is_scalar(probe):
+            raise FFIError("layout self-test: Name unexpectedly scalar")
+        if _lean.ptr_tag(probe) != 1:
+            raise FFIError("layout self-test: Name.str tag should be 1")
+        parent = _lean.ctor_get(probe, 0)
+        if not _lean.is_scalar(parent) or _lean.unbox(parent) != 0:
+            raise FFIError("layout self-test: Name parent should be anonymous")
+        suffix = _lean.string_cstr(_lean.ctor_get(probe, 1))
+        if suffix != "rpylean":
+            raise FFIError("layout self-test: string roundtrip got " + suffix)
+
+    def _init_module(self, sym_name):
+        sym = dlsym(self.leanshared, sym_name)
+        init = rffi.cast(_lean.initialize_module, sym)
+        res = init(rffi.cast(rffi.UINT, 1), _lean.io_mk_world())
+        if _lean.obj_tag(res) != 0:
+            raise FFIError("Lean module init failed: %s" % sym_name)
+
+    def _init_search_path(self, prefix):
+        """
+        Set Lean's `searchPathRef` so importModules can find olean files.
+
+        We pass `prefix` directly rather than calling `findSysroot`, which
+        would shell out via $PATH and pick up a different toolchain than
+        the one we dlopen'd.
+        """
+        mk_string = rffi.cast(_lean.mk_string,
+                              dlsym(self.leanshared, "lean_mk_string"))
+        init_sp = rffi.cast(_lean.init_search_path,
+                            dlsym(self.leanshared, "l_Lean_initSearchPath"))
+        sysroot = mk_string(rffi.str2charp(prefix))
+        res = init_sp(sysroot, _lean.io_mk_world())
+        if _lean.obj_tag(res) != 0:
+            raise FFIError("initSearchPath failed for prefix " + prefix)
+
+    def _alloc_ctor(self, tag, num_objs, scalar_sz):
+        """
+        Allocate a fresh ctor object. m_rc=1; m_objs[] is uninitialised.
+        """
+        alloc = rffi.cast(_lean.alloc_object,
+                          dlsym(self.leanshared, "lean_alloc_object"))
+        sz = _lean.OBJ_HDR_SIZE + 8 * num_objs + scalar_sz
+        o = alloc(rffi.cast(rffi.SIZE_T, sz))
+        rffi.cast(rffi.INTP, o)[0] = rffi.cast(rffi.INT, 1)
+        b = rffi.cast(rffi.UCHARP, o)
+        b[4] = rffi.cast(rffi.UCHAR, 0)
+        b[5] = rffi.cast(rffi.UCHAR, 0)
+        b[6] = rffi.cast(rffi.UCHAR, num_objs & 0xff)
+        b[7] = rffi.cast(rffi.UCHAR, tag & 0xff)
+        return o
+
+    def _build_name(self, dotted):
+        """Build a Lean.Name from a dotted string like 'Lean.Expr'."""
+        name_mk = rffi.cast(_lean.name_mk_string,
+                            dlsym(self.leanshared, "lean_name_mk_string"))
+        mk_str = rffi.cast(_lean.mk_string,
+                           dlsym(self.leanshared, "lean_mk_string"))
+        n = _lean.box(0)  # Name.anonymous
+        for piece in dotted.split("."):
+            n = name_mk(n, mk_str(rffi.str2charp(piece)))
+        return n
+
+    def _build_import(self, module_name):
+        """
+        Build a `Lean.Import { module := <name>, isExported := true }`.
+
+        The Import struct is ctor-tag 0 with 1 obj field (module) and 8
+        scalar bytes (importAll, isExported, isMeta + padding).
+        """
+        imp = self._alloc_ctor(tag=0, num_objs=1, scalar_sz=8)
+        _lean.ctor_set_obj(imp, 0, self._build_name(module_name))
+        _lean.ctor_set_byte(imp, 1, 0, 0)  # importAll  = false
+        _lean.ctor_set_byte(imp, 1, 1, 1)  # isExported = true
+        _lean.ctor_set_byte(imp, 1, 2, 0)  # isMeta     = false
+        return imp
+
+    # ---- public API -----------------------------------------------------
+
     def initialize_module(self, name, builtin=True):
         """
-        Initialize a Lean module by name.
+        Initialise a Lean module by name (legacy: dlopen + initialize_<M>).
+
+        Mostly superseded by `import_modules`, which loads .olean files
+        from disk via Lean's importer rather than requiring the module's
+        compiled shared library to be on dyld's path.
         """
         handle = dlopen(None, RTLD_LAZY)
         sym = dlsym(handle, "initialize_" + name.replace(".", "_"))
@@ -75,3 +196,66 @@ class FFI(object):
         sym = dlsym(self.leanshared, "lean_is_private_name")
         func = rffi.cast(_lean.is_private_name, sym)
         return func(name)
+
+    def import_modules(self, modules):
+        """
+        Load `modules` (list of dotted module names) into a fresh
+        Lean.Environment via `Lean.importModules`. Returns the environment
+        as an opaque `lean_object *`.
+
+        Caller owns the returned reference. Pass it to `find_constant` to
+        look up declarations.
+        """
+        array_empty = rffi.cast(_lean.array_empty_fn,
+                                dlsym(self.leanshared, "l_Array_empty"))
+        push = rffi.cast(_lean.array_push,
+                         dlsym(self.leanshared, "lean_array_push"))
+        arr = array_empty()
+        for m in modules:
+            arr = push(arr, self._build_import(m))
+
+        # Default arguments. Empty Options is a static data symbol; empty
+        # NameMap ImportArtifacts is just box(1) (the leaf-tag scalar).
+        opts = rffi.cast(rffi.CArrayPtr(_lean.Object),
+                         dlsym(self.leanshared, "l_Lean_Options_empty"))[0]
+        plugins = array_empty()
+        arts = _lean.box(1)
+
+        run = rffi.cast(_lean.import_modules_fn,
+                        dlsym(self.leanshared, "l_Lean_importModules"))
+        result = run(
+            arr, opts,
+            rffi.cast(rffi.UINT, 1024),
+            plugins,
+            rffi.cast(rffi.UCHAR, 0),  # leakEnv
+            rffi.cast(rffi.UCHAR, 0),  # loadExts
+            rffi.cast(rffi.UCHAR, 2),  # OLeanLevel.private
+            arts,
+        )
+        if _lean.obj_tag(result) != 0:
+            err = _lean.ctor_get(result, 0)
+            if not _lean.is_scalar(err) and _lean.ptr_tag(err) == 18:
+                # IO.Error.userError(msg : String)
+                raise FFIError("import failed: " + _lean.string_cstr(_lean.ctor_get(err, 0)))
+            raise FFIError("import failed (IO.Error tag=%d)" %
+                           _lean.ptr_tag(err))
+        return _lean.ctor_get(result, 0)
+
+    def find_constant(self, env, dotted_name):
+        """
+        Look up a constant by name. Returns the `Option ConstantInfo` Lean
+        object: tag 0 means `none`, tag 1 means `some`, with the
+        ConstantInfo at field 0.
+
+        `find?` consumes its env argument; this method `inc`s env so the
+        caller can continue using it.
+        """
+        find = rffi.cast(_lean.environment_find,
+                         dlsym(self.leanshared, "l_Lean_Environment_find_x3f"))
+        _lean.inc(env)
+        return find(env, self._build_name(dotted_name),
+                    rffi.cast(rffi.UCHAR, 0))
+
+
+class FFIError(Exception):
+    """An error raised by the FFI when Lean returns a failure."""
