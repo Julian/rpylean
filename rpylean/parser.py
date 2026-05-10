@@ -774,7 +774,7 @@ def _register_recursor(builder, rec):
             objects.W_RecRule(
                 ctor_name=builder.names[r.ctor_nidx],
                 num_fields=r.num_fields,
-                val=builder.exprs[r.rhs_eidx],
+                rhs=builder.exprs[r.rhs_eidx],
             ) for r in rec.rules
         ],
         k=rec.k,

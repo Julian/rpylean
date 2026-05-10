@@ -45,11 +45,11 @@ from rpylean.objects import (
     HINT_OPAQUE,
     Name,
     W_BVar,
+    W_ForAll,
+    W_Lambda,
     W_LEVEL_ZERO,
     W_LitNat,
     W_LitStr,
-    forall,
-    fun,
 )
 
 
@@ -98,31 +98,37 @@ def read_level(o):
     raise RuntimeError("read_level: unexpected tag")
 
 
-def _read_list(o, read_elt):
-    """Walk a Lean `List α` (0=nil, 1=cons head tail) into a Python list.
+# `List α` walkers, specialised per element type. A single generic
+# `_read_list(o, read_elt)` makes RPython unify the return type to the
+# union of all callers, which then breaks function-pointer typing.
 
-    Currently called only with `read_name` and `read_level`, which return
-    distinct `_Item` subtypes. Adding a third caller whose element type
-    has a name-clashing attribute (e.g. `W_RecRule.val` vs `W_LitStr.val`)
-    will need this split into per-element-type specialisations to keep
-    RPython's annotator from unifying the return type to `_Item`.
-    """
+def _read_name_list(o):
     out = []
     while not _lean.is_scalar(o) and _lean.ptr_tag(o) == 1:
-        out.append(read_elt(_lean.ctor_get(o, 0)))
+        out.append(read_name(_lean.ctor_get(o, 0)))
         o = _lean.ctor_get(o, 1)
     return out
 
 
-def _read_binder_info(scalar_byte):
-    # BinderInfo: 0=default 1=implicit 2=strictImplicit 3=instImplicit
+def _read_level_list(o):
+    out = []
+    while not _lean.is_scalar(o) and _lean.ptr_tag(o) == 1:
+        out.append(read_level(_lean.ctor_get(o, 0)))
+        o = _lean.ctor_get(o, 1)
+    return out
+
+
+def _make_binder(scalar_byte, name, ty):
+    # BinderInfo: 0=default 1=implicit 2=strictImplicit 3=instImplicit.
+    # Inlined dispatch (rather than returning a function) so RPython
+    # doesn't try to type-unify the four static-method signatures.
     if scalar_byte == 1:
-        return Binder.implicit
+        return Binder.implicit(name, ty)
     if scalar_byte == 2:
-        return Binder.strict_implicit
+        return Binder.strict_implicit(name, ty)
     if scalar_byte == 3:
-        return Binder.instance
-    return Binder.default
+        return Binder.instance(name, ty)
+    return Binder.default(name, ty)
 
 
 def _ctor_byte(o, num_objs, byte_offset):
@@ -157,7 +163,7 @@ def read_expr(o):
         return read_level(_lean.ctor_get(o, 0)).sort()
     if tag == 4:  # const(name, us : List Level)
         name = read_name(_lean.ctor_get(o, 0))
-        levels = _read_list(_lean.ctor_get(o, 1), read_level)
+        levels = _read_level_list(_lean.ctor_get(o, 1))
         return name.const(levels=levels)
     if tag == 5:  # app(fn, arg)
         return read_expr(_lean.ctor_get(o, 0)).app(
@@ -166,9 +172,10 @@ def read_expr(o):
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))
         body = read_expr(_lean.ctor_get(o, 2))
-        bi = _read_binder_info(_ctor_byte(o, 3, 8))
-        binder = bi(name, ty)
-        return fun(binder)(body) if tag == 6 else forall(binder)(body)
+        binder = _make_binder(_ctor_byte(o, 3, 8), name, ty)
+        if tag == 6:
+            return W_Lambda(binder, body)
+        return W_ForAll(binder, body)
     if tag == 8:  # letE(name, type, value, body, nondep)
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))
@@ -210,7 +217,7 @@ def _read_hints(o):
 def _read_constant_val(cval):
     """Read a `ConstantVal`'s {name, levelParams, type} fields."""
     name = read_name(_lean.ctor_get(cval, 0))
-    levels = _read_list(_lean.ctor_get(cval, 1), read_name)
+    levels = _read_name_list(_lean.ctor_get(cval, 1))
     type_expr = read_expr(_lean.ctor_get(cval, 2))
     return name, levels, type_expr
 
@@ -245,7 +252,4 @@ def read_constant_info(ci):
         return name.opaque(type=type_expr, value=value, levels=levels)
     if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
         return name.axiom(type=type_expr, levels=levels)
-    # tags 5/6/7 (inductInfo/ctorInfo/recInfo): walker support pending a
-    # separate cleanup of rpylean.objects (RPython annotator can't yet
-    # type-check W_Constructor.constructor_tokens through the FFI path).
     raise RuntimeError("read_constant_info: variant not yet supported")

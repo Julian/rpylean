@@ -1391,6 +1391,7 @@ class W_FVar(W_Expr):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
 
     def def_eq(self, other, def_eq):
+        assert isinstance(other, W_FVar)
         return self.id == other.id
 
     def str(self):
@@ -1500,6 +1501,7 @@ class W_Sort(W_Expr):
         return "<%s>" % (self.str(),)
 
     def def_eq(self, other, def_eq):
+        assert isinstance(other, W_Sort)
         return self.level.eq(other.level)
 
     def tokens(self, constants, mark=None, span_holder=None):
@@ -1601,6 +1603,7 @@ class W_Const(W_Expr):
         return self.name.syntactic_eq(name)
 
     def def_eq(self, other, def_eq):
+        assert isinstance(other, W_Const)
         if len(self.levels) != len(other.levels):
             return False
         for i, level in enumerate(self.levels):
@@ -2038,6 +2041,7 @@ class W_Proj(W_Expr):
         return inductive._has_invalid_index_occurrence(self.struct_expr)
 
     def def_eq(self, other, def_eq):
+        assert isinstance(other, W_Proj)
         return (
             self.struct_name.syntactic_eq(other.struct_name)
             and self.field_index == other.field_index
@@ -2360,6 +2364,7 @@ class W_FunBase(W_Expr):
 
         (This is alpha equivalence.)
         """
+        assert isinstance(other, W_FunBase)
         if not def_eq(self.binder.type, other.binder.type):
             return False
 
@@ -2707,6 +2712,7 @@ class W_App(W_Expr):
         return "<W_App fn={!r} args={!r}>".format(current, args)
 
     def def_eq(self, other, def_eq):
+        assert isinstance(other, W_App)
         if isinstance(self.fn, W_FunBase):
             body = self.fn.body.instantiate(self.arg)
             if def_eq(body, other):
@@ -2991,7 +2997,7 @@ class W_App(W_Expr):
                 # #new_args.pop()
                 # Construct an application of the recursor rule, using all of the parameters except the major premise
                 # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
-                new_app = rec_rule.val
+                new_app = rec_rule.rhs
                 # The rec rule value uses the level parameters from the corresponding inductive type declaration,
                 # so apply the parameters from our recursor call
                 new_app = apply_const_level_params(target, new_app, env)
@@ -3188,10 +3194,10 @@ class W_Closure(W_Expr):
 
 
 class W_RecRule(_Item):
-    def __init__(self, ctor_name, num_fields, val):
+    def __init__(self, ctor_name, num_fields, rhs):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
-        self.val = val
+        self.rhs = rhs
 
 
 class W_Declaration(_Item):
@@ -3473,7 +3479,9 @@ class W_Inductive(W_DeclarationKind):
                 # expression for diagnostic span marking.
                 original = ctor.type
                 for _ in range(num_params + i):
+                    assert isinstance(original, W_FunBase)
                     original = original.body
+                assert isinstance(original, W_FunBase)
                 return W_NonPositiveOccurrence(
                     env, original.binder.type,
                     field_number=i + 1,
@@ -3678,6 +3686,7 @@ def _iter_instantiate(root, expr, depth):
                 continue
             cls = cur.__class__
             if cls is W_App:
+                assert isinstance(cur, W_App)
                 if (cur._inst_cache_expr is expr
                         and cur._inst_cache_depth == d):
                     values.append(cur._inst_cache_result)
@@ -3696,6 +3705,7 @@ def _iter_instantiate(root, expr, depth):
                 if not fn_static:
                     work.append(_InstVisit(fn, d))
             elif cls is W_Lambda:
+                assert isinstance(cur, W_FunBase)
                 if (cur._inst_cache_expr is expr
                         and cur._inst_cache_depth == d):
                     values.append(cur._inst_cache_result)
@@ -3705,6 +3715,7 @@ def _iter_instantiate(root, expr, depth):
                 work.append(_InstBuildLambda(new_binder))
                 work.append(_InstVisit(cur.body, d + 1))
             elif cls is W_ForAll:
+                assert isinstance(cur, W_FunBase)
                 if (cur._inst_cache_expr is expr
                         and cur._inst_cache_depth == d):
                     values.append(cur._inst_cache_result)
@@ -3830,6 +3841,7 @@ def _iter_infer(env, root):
                 values.append(env.infer(cur))
                 continue
             if cls is W_Lambda:
+                assert isinstance(cur, W_FunBase)
                 cur.binder.type.infer(env).whnf(env).expect_sort(env)
                 fvar = cur.binder.fvar()
                 body_with_fvar = cur.body.closure([fvar])
@@ -3837,6 +3849,7 @@ def _iter_infer(env, root):
                 work.append(_InferBindLambda(cur.binder, fvar))
                 work.append(_InferVisit(body_with_fvar))
             elif cls is W_ForAll:
+                assert isinstance(cur, W_FunBase)
                 binder_sort = cur.binder.type.infer(env).whnf(env).expect_sort(env)
                 fvar = cur.binder.fvar()
                 body_with_fvar = cur.body.closure([fvar])
@@ -3844,6 +3857,7 @@ def _iter_infer(env, root):
                 work.append(_InferBindForAll(binder_sort))
                 work.append(_InferVisit(body_with_fvar))
             elif cls is W_App:
+                assert isinstance(cur, W_App)
                 target, args = cur.unapp()
                 # Process: VISIT(target), then for each arg outermost-first,
                 # VISIT(arg) then APP_STEP. args is innermost-first; pushing
@@ -3857,10 +3871,12 @@ def _iter_infer(env, root):
                     k += 1
                 work.append(_InferVisit(target))
             elif cls is W_Closure:
+                assert isinstance(cur, W_Closure)
                 inner = cur.body
                 closure_env = cur.env
                 inner_cls = inner.__class__
                 if inner_cls is W_App:
+                    assert isinstance(inner, W_App)
                     # Push the closure through to the App's pieces.
                     new_app = inner.fn.closure(closure_env).app(
                         inner.arg.closure(closure_env),
@@ -3868,6 +3884,7 @@ def _iter_infer(env, root):
                     work.append(_InferStore(cur))
                     work.append(_InferVisit(new_app))
                 elif inner_cls is W_Lambda or inner_cls is W_ForAll:
+                    assert isinstance(inner, W_FunBase)
                     # Open the binder while keeping body shared. The
                     # new env extends the closure's env with a fresh
                     # fvar at position 0 (innermost).

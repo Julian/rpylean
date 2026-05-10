@@ -513,12 +513,12 @@ class TestIotaReduction(object):
                 W_RecRule(
                     ctor_name=MyBool_false,
                     num_fields=0,
-                    val=false_rule_val,
+                    rhs=false_rule_val,
                 ),
                 W_RecRule(
                     ctor_name=MyBool_true,
                     num_fields=0,
-                    val=true_rule_val,
+                    rhs=true_rule_val,
                 ),
             ],
             num_motives=1,
@@ -694,8 +694,8 @@ class TestIotaReduction(object):
         rec_decl = Nat_rec.recursor(
             type=rec_type,
             rules=[
-                W_RecRule(ctor_name=Nat_zero, num_fields=0, val=zero_rule_val),
-                W_RecRule(ctor_name=Nat_succ, num_fields=1, val=succ_rule_val),
+                W_RecRule(ctor_name=Nat_zero, num_fields=0, rhs=zero_rule_val),
+                W_RecRule(ctor_name=Nat_succ, num_fields=1, rhs=succ_rule_val),
             ],
             num_motives=1,
             num_params=0,

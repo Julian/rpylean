@@ -289,9 +289,9 @@ def ffi(self, args, stdin, stdout, stderr):
                 stdout.write("%s: not found\n" % probe)
                 continue
             ci = _lean.ctor_get(opt, 0)
-            ci_tag = _lean.ptr_tag(ci)
-            if ci_tag >= 5:
-                stdout.write("%s : %s (skipped)\n" % (probe, _ci_kind(ci_tag)))
+            if _lean.ptr_tag(ci) >= 5:
+                stdout.write("%s : %s (skipped)\n"
+                             % (probe, _ci_kind(_lean.ptr_tag(ci))))
                 continue
             decl = read_constant_info(ci)
             stdout.write("%s : %s\n" % (decl.name.str(),
