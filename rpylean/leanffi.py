@@ -16,7 +16,7 @@ from os.path import join
 import sys
 
 from rpython.rlib.rdynload import RTLD_LAZY, dlclose, dlopen, dlsym
-from rpython.rtyper.lltypesystem import rffi
+from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean import _lltypes as _lean
 
@@ -99,6 +99,8 @@ class FFI(object):
                                         dlsym(S, "l_Lean_Environment_constants"))
         self._options_empty = rffi.cast(rffi.CArrayPtr(_lean.Object),
                                         dlsym(S, "l_Lean_Options_empty"))[0]
+        self._dec_ref_cold = rffi.cast(_lean.dec_ref_cold,
+                                       dlsym(S, "lean_dec_ref_cold"))
 
         if self.prefix is not None:
             self._init_search_path(self.prefix)
@@ -257,6 +259,23 @@ class FFI(object):
         _lean.inc(env)
         return self._env_find(env, self._build_name(dotted_name),
                               rffi.cast(rffi.UCHAR, 0))
+
+    def release(self, o):
+        """Drop one strong reference to a Lean object.
+
+        Mirrors the inline `lean_dec_ref` from lean.h: skip scalars,
+        decrement m_rc, hand off to `lean_dec_ref_cold` when rc reaches 0.
+        """
+        if _lean.is_scalar(o):
+            return
+        p = rffi.cast(rffi.INTP, o)
+        rc = rffi.cast(lltype.Signed, p[0])
+        if rc > 1:
+            p[0] = rffi.cast(rffi.INT, rc - 1)
+        elif rc != 0:
+            # rc == 1: object becomes unreachable; let Lean's runtime
+            # free it (and any non-shared children) via the cold path.
+            self._dec_ref_cold(o)
 
     def each_constant(self, env, callback):
         """

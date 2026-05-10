@@ -352,11 +352,14 @@ def ffi_check(self, args, stdin, stdout, stderr):
                 if _lean.obj_tag(opt) == 0:
                     stderr.write("%s: not found\n" % fname.str())
                     continue
-                if collector.on_constant(_lean.box(0),
-                                          _lean.ctor_get(opt, 0)):
+                aborted = collector.on_constant(_lean.box(0),
+                                                _lean.ctor_get(opt, 0))
+                ffi_obj.release(opt)
+                if aborted:
                     break
         else:
             ffi_obj.each_constant(env_obj, collector)
+        ffi_obj.release(env_obj)
     if collector.skipped:
         stderr.write("[ffi-check] skipped %d unwalkable constants\n"
                      % collector.skipped)

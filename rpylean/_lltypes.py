@@ -147,3 +147,8 @@ def inc(o):
     """
     p = rffi.cast(rffi.INTP, o)
     p[0] = rffi.cast(rffi.INT, rffi.cast(lltype.Signed, p[0]) + 1)
+
+
+# Function pointer type for `lean_dec_ref_cold`, the cold-path runtime
+# entry called by inline `lean_dec_ref` when an object's rc reaches 0.
+dec_ref_cold = Ptr(FuncType([Object], Void))
