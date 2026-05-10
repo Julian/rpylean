@@ -256,6 +256,36 @@ class FFI(object):
         return find(env, self._build_name(dotted_name),
                     rffi.cast(rffi.UCHAR, 0))
 
+    def each_constant(self, env, callback):
+        """
+        Walk every imported (Name, ConstantInfo) pair, calling
+        ``callback.on_constant(name_obj, ci_obj)`` per entry.
+
+        Reads `Lean.Environment.constants : SMap Name ConstantInfo`
+        directly. The SMap's `map1 : Std.HashMap` holds imported
+        constants (everything we want after `importModules`); `map2 :
+        PHashMap` is for locally-added constants and is empty post-import.
+        """
+        env_constants = rffi.cast(
+            _lean.environment_constants,
+            dlsym(self.leanshared, "l_Lean_Environment_constants"),
+        )
+        _lean.inc(env)
+        smap = env_constants(env)
+        # SMap: ctor_get(0) = map₁ (Std.HashMap) — Lean inlines the
+        # HashMap → DHashMap → Raw chain so this single ctor has both
+        # `size` (field 0, ignored) and `buckets` (field 1) directly.
+        hashmap = _lean.ctor_get(smap, 0)
+        buckets = _lean.ctor_get(hashmap, 1)
+        n = _lean.array_size(buckets)
+        for i in range(n):
+            cur = _lean.array_get(buckets, i)
+            # AssocList: tag 0 = nil (scalar); tag 1 = cons(key, value, tail).
+            while not _lean.is_scalar(cur) and _lean.ptr_tag(cur) == 1:
+                callback.on_constant(_lean.ctor_get(cur, 0),
+                                     _lean.ctor_get(cur, 1))
+                cur = _lean.ctor_get(cur, 2)
+
 
 class FFIError(Exception):
     """An error raised by the FFI when Lean returns a failure."""

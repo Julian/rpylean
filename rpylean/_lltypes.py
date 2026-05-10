@@ -51,6 +51,7 @@ array_push = Ptr(FuncType([Object, Object], Object))
 init_search_path = Ptr(FuncType([Object, Object], Object))
 # `Lean.Environment.find?  (env : Environment) (n : Name) (skipRealize := false)`
 environment_find = Ptr(FuncType([Object, Object, rffi.UCHAR], Object))
+environment_constants = Ptr(FuncType([Object], Object))
 import_modules_fn = Ptr(FuncType(
     # imports, opts, trustLevel, plugins, leakEnv, loadExts, level, arts
     [Object, Object, rffi.UINT, Object, rffi.UCHAR, rffi.UCHAR, rffi.UCHAR, Object],
@@ -62,6 +63,7 @@ import_modules_fn = Ptr(FuncType(
 
 OBJ_HDR_SIZE = 8
 STRING_HDR_SIZE = 8 + 8 + 8 + 8  # header + size + capacity + length
+ARRAY_HDR_SIZE = 8 + 8 + 8       # header + m_size + m_capacity
 
 
 def box(n):
@@ -112,6 +114,20 @@ def ctor_set_byte(o, num_objs, byte_offset, value):
                   rffi.ptradd(rffi.cast(rffi.CCHARP, o),
                               OBJ_HDR_SIZE + 8 * num_objs))
     p[byte_offset] = rffi.cast(rffi.UCHAR, value)
+
+
+def array_size(o):
+    """The number of elements in a `lean_array_object`."""
+    p = rffi.cast(rffi.CArrayPtr(rffi.SIZE_T),
+                  rffi.ptradd(rffi.cast(rffi.CCHARP, o), OBJ_HDR_SIZE))
+    return rffi.cast(lltype.Signed, p[0])
+
+
+def array_get(o, i):
+    """The i-th element of a `lean_array_object`'s `m_data[]`."""
+    base = rffi.cast(rffi.CArrayPtr(Object),
+                     rffi.ptradd(rffi.cast(rffi.CCHARP, o), ARRAY_HDR_SIZE))
+    return base[i]
 
 
 def string_cstr(o):

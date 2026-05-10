@@ -302,8 +302,12 @@ def ffi(self, args, stdin, stdout, stderr):
             "path to the Lean prefix to link against",
         ),
         (
-            "names",
-            "comma-separated declaration names to walk + type-check",
+            "filter",
+            "only check the given declaration(s), separated by commas",
+        ),
+        (
+            "filter-match",
+            "only check declarations whose name contains this substring",
         ),
         COLOR,
     ],
@@ -315,31 +319,65 @@ def ffi_check(self, args, stdin, stdout, stderr):
     prefix = args.options["prefix"]
     if prefix is None:
         return 1
-    names_arg = args.options["names"]
-    if names_arg is None:
-        return 1
 
-    stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
 
+    filter_match = args.options["filter-match"]
+    filter_names = None
+    if filter_match is None and args.options["filter"] is not None:
+        filter_names = name_dict()
+        for each in args.options["filter"].split(","):
+            filter_names[Name.from_str(each)] = True
+
     builder = EnvironmentBuilder()
+    collector = _FFICollector(builder)
     with FFI.from_prefix(prefix) as ffi_obj:
         env_obj = ffi_obj.import_modules(modules)
-        for probe in names_arg.split(","):
-            opt = ffi_obj.find_constant(env_obj, probe)
-            if _lean.obj_tag(opt) == 0:
-                stderr.write("%s: not found\n" % probe)
-                continue
-            decl = read_constant_info(_lean.ctor_get(opt, 0))
-            builder.register_declaration(decl)
+        if filter_names is not None:
+            # Fast path: look up each filtered name individually rather
+            # than walking the entire SMap.
+            for fname in filter_names:
+                opt = ffi_obj.find_constant(env_obj, fname.str())
+                if _lean.obj_tag(opt) == 0:
+                    stderr.write("%s: not found\n" % fname.str())
+                    continue
+                collector.on_constant(_lean.box(0), _lean.ctor_get(opt, 0))
+        else:
+            ffi_obj.each_constant(env_obj, collector)
+    if collector.skipped:
+        stderr.write("[ffi-check] skipped %d unwalkable constants\n"
+                     % collector.skipped)
 
     environment = builder.finish()
     failures = 0
     for decl in builder.declarations:
+        if filter_match is not None and filter_match not in decl.name.str():
+            continue
         for w_error in environment.type_check_one(decl):
             w_error.write_to(stderrw)
             failures += 1
     return 1 if failures else 0
+
+
+class _FFICollector(object):
+    """Callback for `FFI.each_constant`; reads + registers each decl.
+
+    Constants whose representation we can't yet walk (e.g. literals
+    using `LeanMPZ`-encoded Nats) are counted and skipped rather than
+    aborting the whole enumeration.
+    """
+
+    def __init__(self, builder):
+        self.builder = builder
+        self.skipped = 0
+
+    def on_constant(self, name_obj, ci_obj):
+        try:
+            decl = read_constant_info(ci_obj)
+        except RuntimeError:
+            self.skipped += 1
+            return
+        self.builder.register_declaration(decl)
 
 
 def _open_export(path, stdin):
