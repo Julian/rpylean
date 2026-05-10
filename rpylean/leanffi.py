@@ -75,6 +75,31 @@ class FFI(object):
         rffi.cast(_lean.io_mark_end_initialization,
                   dlsym(self.leanshared, "lean_io_mark_end_initialization"))()
 
+        # Resolve and cache every function pointer we'll call repeatedly,
+        # so per-call methods avoid re-dlsym'ing on hot paths like
+        # `find_constant` and `each_constant`'s inner loop.
+        S = self.leanshared
+        self._alloc_object = rffi.cast(_lean.alloc_object,
+                                       dlsym(S, "lean_alloc_object"))
+        self._mk_string = rffi.cast(_lean.mk_string,
+                                    dlsym(S, "lean_mk_string"))
+        self._name_mk_string = rffi.cast(_lean.name_mk_string,
+                                         dlsym(S, "lean_name_mk_string"))
+        self._array_empty = rffi.cast(_lean.array_empty_fn,
+                                      dlsym(S, "l_Array_empty"))
+        self._array_push = rffi.cast(_lean.array_push,
+                                     dlsym(S, "lean_array_push"))
+        self._init_sp = rffi.cast(_lean.init_search_path,
+                                  dlsym(S, "l_Lean_initSearchPath"))
+        self._import_modules = rffi.cast(_lean.import_modules_fn,
+                                         dlsym(S, "l_Lean_importModules"))
+        self._env_find = rffi.cast(_lean.environment_find,
+                                   dlsym(S, "l_Lean_Environment_find_x3f"))
+        self._env_constants = rffi.cast(_lean.environment_constants,
+                                        dlsym(S, "l_Lean_Environment_constants"))
+        self._options_empty = rffi.cast(rffi.CArrayPtr(_lean.Object),
+                                        dlsym(S, "l_Lean_Options_empty"))[0]
+
         if self.prefix is not None:
             self._init_search_path(self.prefix)
         self._layout_self_test()
@@ -127,12 +152,8 @@ class FFI(object):
         would shell out via $PATH and pick up a different toolchain than
         the one we dlopen'd.
         """
-        mk_string = rffi.cast(_lean.mk_string,
-                              dlsym(self.leanshared, "lean_mk_string"))
-        init_sp = rffi.cast(_lean.init_search_path,
-                            dlsym(self.leanshared, "l_Lean_initSearchPath"))
-        sysroot = mk_string(rffi.str2charp(prefix))
-        res = init_sp(sysroot, _lean.io_mk_world())
+        sysroot = self._mk_string(rffi.str2charp(prefix))
+        res = self._init_sp(sysroot, _lean.io_mk_world())
         if _lean.obj_tag(res) != 0:
             raise FFIError("initSearchPath failed for prefix " + prefix)
 
@@ -140,10 +161,8 @@ class FFI(object):
         """
         Allocate a fresh ctor object. m_rc=1; m_objs[] is uninitialised.
         """
-        alloc = rffi.cast(_lean.alloc_object,
-                          dlsym(self.leanshared, "lean_alloc_object"))
         sz = _lean.OBJ_HDR_SIZE + 8 * num_objs + scalar_sz
-        o = alloc(rffi.cast(rffi.SIZE_T, sz))
+        o = self._alloc_object(rffi.cast(rffi.SIZE_T, sz))
         rffi.cast(rffi.INTP, o)[0] = rffi.cast(rffi.INT, 1)
         b = rffi.cast(rffi.UCHARP, o)
         b[4] = rffi.cast(rffi.UCHAR, 0)
@@ -154,13 +173,9 @@ class FFI(object):
 
     def _build_name(self, dotted):
         """Build a Lean.Name from a dotted string like 'Lean.Expr'."""
-        name_mk = rffi.cast(_lean.name_mk_string,
-                            dlsym(self.leanshared, "lean_name_mk_string"))
-        mk_str = rffi.cast(_lean.mk_string,
-                           dlsym(self.leanshared, "lean_mk_string"))
         n = _lean.box(0)  # Name.anonymous
         for piece in dotted.split("."):
-            n = name_mk(n, mk_str(rffi.str2charp(piece)))
+            n = self._name_mk_string(n, self._mk_string(rffi.str2charp(piece)))
         return n
 
     def _build_import(self, module_name):
@@ -206,31 +221,20 @@ class FFI(object):
         Caller owns the returned reference. Pass it to `find_constant` to
         look up declarations.
         """
-        array_empty = rffi.cast(_lean.array_empty_fn,
-                                dlsym(self.leanshared, "l_Array_empty"))
-        push = rffi.cast(_lean.array_push,
-                         dlsym(self.leanshared, "lean_array_push"))
-        arr = array_empty()
+        arr = self._array_empty()
         for m in modules:
-            arr = push(arr, self._build_import(m))
+            arr = self._array_push(arr, self._build_import(m))
 
-        # Default arguments. Empty Options is a static data symbol; empty
-        # NameMap ImportArtifacts is just box(1) (the leaf-tag scalar).
-        opts = rffi.cast(rffi.CArrayPtr(_lean.Object),
-                         dlsym(self.leanshared, "l_Lean_Options_empty"))[0]
-        plugins = array_empty()
-        arts = _lean.box(1)
-
-        run = rffi.cast(_lean.import_modules_fn,
-                        dlsym(self.leanshared, "l_Lean_importModules"))
-        result = run(
-            arr, opts,
+        # Empty NameMap ImportArtifacts is `box(1)` (the leaf-tag scalar);
+        # `self._options_empty` is dlsym'd once in __enter__.
+        result = self._import_modules(
+            arr, self._options_empty,
             rffi.cast(rffi.UINT, 1024),
-            plugins,
+            self._array_empty(),
             rffi.cast(rffi.UCHAR, 0),  # leakEnv
             rffi.cast(rffi.UCHAR, 0),  # loadExts
             rffi.cast(rffi.UCHAR, 2),  # OLeanLevel.private
-            arts,
+            _lean.box(1),
         )
         if _lean.obj_tag(result) != 0:
             err = _lean.ctor_get(result, 0)
@@ -250,28 +254,23 @@ class FFI(object):
         `find?` consumes its env argument; this method `inc`s env so the
         caller can continue using it.
         """
-        find = rffi.cast(_lean.environment_find,
-                         dlsym(self.leanshared, "l_Lean_Environment_find_x3f"))
         _lean.inc(env)
-        return find(env, self._build_name(dotted_name),
-                    rffi.cast(rffi.UCHAR, 0))
+        return self._env_find(env, self._build_name(dotted_name),
+                              rffi.cast(rffi.UCHAR, 0))
 
     def each_constant(self, env, callback):
         """
         Walk every imported (Name, ConstantInfo) pair, calling
-        ``callback.on_constant(name_obj, ci_obj)`` per entry.
+        ``callback.on_constant(name_obj, ci_obj)`` per entry. A truthy
+        return from the callback ends the walk early.
 
         Reads `Lean.Environment.constants : SMap Name ConstantInfo`
         directly. The SMap's `map1 : Std.HashMap` holds imported
         constants (everything we want after `importModules`); `map2 :
         PHashMap` is for locally-added constants and is empty post-import.
         """
-        env_constants = rffi.cast(
-            _lean.environment_constants,
-            dlsym(self.leanshared, "l_Lean_Environment_constants"),
-        )
         _lean.inc(env)
-        smap = env_constants(env)
+        smap = self._env_constants(env)
         # SMap: ctor_get(0) = map₁ (Std.HashMap) — Lean inlines the
         # HashMap → DHashMap → Raw chain so this single ctor has both
         # `size` (field 0, ignored) and `buckets` (field 1) directly.
@@ -282,8 +281,9 @@ class FFI(object):
             cur = _lean.array_get(buckets, i)
             # AssocList: tag 0 = nil (scalar); tag 1 = cons(key, value, tail).
             while not _lean.is_scalar(cur) and _lean.ptr_tag(cur) == 1:
-                callback.on_constant(_lean.ctor_get(cur, 0),
-                                     _lean.ctor_get(cur, 1))
+                if callback.on_constant(_lean.ctor_get(cur, 0),
+                                        _lean.ctor_get(cur, 1)):
+                    return
                 cur = _lean.ctor_get(cur, 2)
 
 

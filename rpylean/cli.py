@@ -309,6 +309,10 @@ def ffi(self, args, stdin, stdout, stderr):
             "filter-match",
             "only check declarations whose name contains this substring",
         ),
+        (
+            "max-fail",
+            "the maximum number of type errors to report before giving up",
+        ),
         COLOR,
     ],
 )
@@ -329,8 +333,15 @@ def ffi_check(self, args, stdin, stdout, stderr):
         for each in args.options["filter"].split(","):
             filter_names[Name.from_str(each)] = True
 
+    max_fail = int(args.options["max-fail"] or "0")
+
     builder = EnvironmentBuilder()
-    collector = _FFICollector(builder)
+    checker = _StreamingChecker(
+        env=builder.env, stderrw=stderrw, pp=None,
+        filter_match=filter_match, filter_names=filter_names,
+        abort_at=max_fail if max_fail > 0 else 0,
+    )
+    collector = _FFICollector(builder, checker)
     with FFI.from_prefix(prefix) as ffi_obj:
         env_obj = ffi_obj.import_modules(modules)
         if filter_names is not None:
@@ -341,34 +352,29 @@ def ffi_check(self, args, stdin, stdout, stderr):
                 if _lean.obj_tag(opt) == 0:
                     stderr.write("%s: not found\n" % fname.str())
                     continue
-                collector.on_constant(_lean.box(0), _lean.ctor_get(opt, 0))
+                if collector.on_constant(_lean.box(0),
+                                          _lean.ctor_get(opt, 0)):
+                    break
         else:
             ffi_obj.each_constant(env_obj, collector)
     if collector.skipped:
         stderr.write("[ffi-check] skipped %d unwalkable constants\n"
                      % collector.skipped)
-
-    environment = builder.finish()
-    failures = 0
-    for decl in builder.declarations:
-        if filter_match is not None and filter_match not in decl.name.str():
-            continue
-        for w_error in environment.type_check_one(decl):
-            w_error.write_to(stderrw)
-            failures += 1
-    return 1 if failures else 0
+    return 1 if checker.failures else 0
 
 
 class _FFICollector(object):
-    """Callback for `FFI.each_constant`; reads + registers each decl.
+    """Walk → register → stream-check, one declaration at a time.
 
-    Constants whose representation we can't yet walk (e.g. literals
-    using `LeanMPZ`-encoded Nats) are counted and skipped rather than
-    aborting the whole enumeration.
+    Constants whose representation we can't yet walk (e.g. `LeanMPZ`
+    Nats) are counted and skipped rather than aborting enumeration.
+    `on_constant` returns True when the checker has signalled an
+    early-abort (e.g. `--max-fail` reached).
     """
 
-    def __init__(self, builder):
+    def __init__(self, builder, checker):
         self.builder = builder
+        self.checker = checker
         self.skipped = 0
 
     def on_constant(self, name_obj, ci_obj):
@@ -376,8 +382,9 @@ class _FFICollector(object):
             decl = read_constant_info(ci_obj)
         except RuntimeError:
             self.skipped += 1
-            return
+            return False
         self.builder.register_declaration(decl)
+        return self.checker.on_declaration(decl)
 
 
 def _open_export(path, stdin):
