@@ -59,12 +59,22 @@ from rpylean.objects import (
 )
 
 
+class UnsupportedLeanMPZ(Exception):
+    """A Lean.Nat value uses the heap-allocated MPZ encoding that
+    rpylean's walker doesn't yet handle.
+
+    Callers may catch this specifically to skip a single declaration.
+    Don't broaden the catch — `RuntimeError` covers genuine
+    layout-drift / walker-bug cases, and silently treating those as
+    "skipped" hides real failures.
+    """
+
+
 def read_nat(o):
     """Decode a Lean.Nat (scalar small or LeanMPZ heap) into an rbigint."""
     if _lean.is_scalar(o):
         return rbigint.fromint(intmask(_lean.unbox(o)))
-    # MPZ path: not exercised by current tests; fail loudly so we notice.
-    raise RuntimeError("read_nat: large/MPZ Nat not yet supported")
+    raise UnsupportedLeanMPZ("read_nat: large/MPZ Nat not yet supported")
 
 
 def read_name(o):

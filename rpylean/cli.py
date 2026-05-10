@@ -13,7 +13,7 @@ from rpylean import parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
-from rpylean.ffi import FFI, read_constant_info
+from rpylean.ffi import FFI, UnsupportedLeanMPZ, read_constant_info
 from rpylean.ffi import _lltypes as _lean
 from rpylean.environment import (
     DeclarationHook,
@@ -337,8 +337,12 @@ def check(self, args, stdin, stdout, stderr):
 class _FFICollector(object):
     """Walk → register → stream-check, one declaration at a time.
 
-    Constants whose representation we can't yet walk (e.g. `LeanMPZ`
-    Nats) are counted and skipped rather than aborting enumeration.
+    Constants whose representation we can't yet walk (specifically
+    `LeanMPZ`-encoded `Nat` literals) are counted and skipped. Other
+    failures during walking — unexpected ctor tags, layout drift — are
+    left to propagate, because silently turning them into "skipped"
+    would mask real bugs as ordinary unsupported-encoding noise.
+
     `on_constant` returns True when the checker has signalled an
     early-abort (e.g. `--max-fail` reached).
     """
@@ -351,7 +355,7 @@ class _FFICollector(object):
     def on_constant(self, name_obj, ci_obj):
         try:
             decl = read_constant_info(ci_obj)
-        except RuntimeError:
+        except UnsupportedLeanMPZ:
             self.skipped += 1
             return False
         self.builder.register_declaration(decl)

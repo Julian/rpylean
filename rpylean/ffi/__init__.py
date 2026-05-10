@@ -11,6 +11,6 @@ Public surface:
 `rpylean.objects` declarations.
 """
 from rpylean.ffi._loader import FFI, FFIError
-from rpylean.ffi._runtime import read_constant_info
+from rpylean.ffi._runtime import UnsupportedLeanMPZ, read_constant_info
 
-__all__ = ["FFI", "FFIError", "read_constant_info"]
+__all__ = ["FFI", "FFIError", "UnsupportedLeanMPZ", "read_constant_info"]
