@@ -39,17 +39,24 @@ from rpython.rlib.rbigint import rbigint
 from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean import _lltypes as _lean
+from rpython.rlib.objectmodel import specialize
+
 from rpylean.objects import (
     Binder,
     HINT_ABBREV,
     HINT_OPAQUE,
     Name,
     W_BVar,
+    W_Constructor,
+    W_Declaration,
     W_ForAll,
+    W_Inductive,
     W_Lambda,
     W_LEVEL_ZERO,
     W_LitNat,
     W_LitStr,
+    W_RecRule,
+    W_Recursor,
 )
 
 
@@ -98,10 +105,12 @@ def read_level(o):
     raise RuntimeError("read_level: unexpected tag")
 
 
-# `List α` walkers, specialised per element type. A single generic
-# `_read_list(o, read_elt)` makes RPython unify the return type to the
-# union of all callers, which then breaks function-pointer typing.
+# `List α` walkers, specialised per element type and per call location.
+# Without `@specialize.call_location`, RPython unifies the return type
+# across callers — which makes the resulting list's element type wider
+# than each caller actually needs, breaking downstream specialization.
 
+@specialize.call_location()
 def _read_name_list(o):
     out = []
     while not _lean.is_scalar(o) and _lean.ptr_tag(o) == 1:
@@ -110,6 +119,7 @@ def _read_name_list(o):
     return out
 
 
+@specialize.call_location()
 def _read_level_list(o):
     out = []
     while not _lean.is_scalar(o) and _lean.ptr_tag(o) == 1:
@@ -252,4 +262,58 @@ def read_constant_info(ci):
         return name.opaque(type=type_expr, value=value, levels=levels)
     if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
         return name.axiom(type=type_expr, levels=levels)
+    if tag == 5:  # inductInfo
+        all_names = _read_name_list(_lean.ctor_get(val, 3))
+        num_params = read_nat(_lean.ctor_get(val, 1)).toint()
+        num_indices = read_nat(_lean.ctor_get(val, 2)).toint()
+        num_nested = read_nat(_lean.ctor_get(val, 5)).toint()
+        is_rec = _ctor_byte(val, 6, 0) != 0
+        # scalar 1 = isUnsafe (rpylean ignores), scalar 2 = isReflexive.
+        is_reflexive = _ctor_byte(val, 6, 2) != 0
+        kind = W_Inductive(
+            names=all_names if all_names else [name],
+            constructors=[],
+            recursors=[],
+            num_params=num_params,
+            num_indices=num_indices,
+            num_nested=num_nested,
+            is_recursive=is_rec,
+            is_reflexive=is_reflexive,
+        )
+        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+    if tag == 6:  # ctorInfo
+        num_params = read_nat(_lean.ctor_get(val, 3)).toint()
+        num_fields = read_nat(_lean.ctor_get(val, 4)).toint()
+        kind = W_Constructor(num_params=num_params, num_fields=num_fields)
+        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+    if tag == 7:  # recInfo
+        all_names = _read_name_list(_lean.ctor_get(val, 1))
+        num_params = read_nat(_lean.ctor_get(val, 2)).toint()
+        num_indices = read_nat(_lean.ctor_get(val, 3)).toint()
+        num_motives = read_nat(_lean.ctor_get(val, 4)).toint()
+        num_minors = read_nat(_lean.ctor_get(val, 5)).toint()
+        # Read the rules list inline (specialised per call location like
+        # _read_name_list, but easier to inline given it's the only caller).
+        rules_obj = _lean.ctor_get(val, 6)
+        rules = []
+        while not _lean.is_scalar(rules_obj) and _lean.ptr_tag(rules_obj) == 1:
+            rule = _lean.ctor_get(rules_obj, 0)
+            rules.append(W_RecRule(
+                ctor_name=read_name(_lean.ctor_get(rule, 0)),
+                num_fields=read_nat(_lean.ctor_get(rule, 1)).toint(),
+                rhs=read_expr(_lean.ctor_get(rule, 2)),
+            ))
+            rules_obj = _lean.ctor_get(rules_obj, 1)
+        k = _ctor_byte(val, 7, 0) != 0
+        kind = W_Recursor(
+            names=all_names if all_names else [name],
+            rules=rules,
+            k=k,
+            num_params=num_params,
+            num_indices=num_indices,
+            num_motives=num_motives,
+            num_minors=num_minors,
+        )
+        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+    raise RuntimeError("read_constant_info: unexpected tag")
     raise RuntimeError("read_constant_info: variant not yet supported")

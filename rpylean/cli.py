@@ -23,7 +23,7 @@ from rpylean.environment import (
     StreamTracer,
     from_export,
 )
-from rpylean.objects import Name, name_eq
+from rpylean.objects import Name, name_eq, name_hash
 
 
 cli = CLI(
@@ -88,7 +88,7 @@ def check(self, args, stdin, stdout, stderr):
     filter_match = args.options["filter-match"]
     filter_names = None
     if filter_match is None and args.options["filter"] is not None:
-        filter_names = r_dict(name_eq, Name.hash)
+        filter_names = r_dict(name_eq, name_hash)
         for each in args.options["filter"].split(","):
             filter_names[Name.from_str(each)] = True
 
@@ -288,27 +288,10 @@ def ffi(self, args, stdin, stdout, stderr):
             if _lean.obj_tag(opt) == 0:
                 stdout.write("%s: not found\n" % probe)
                 continue
-            ci = _lean.ctor_get(opt, 0)
-            if _lean.ptr_tag(ci) >= 5:
-                stdout.write("%s : %s (skipped)\n"
-                             % (probe, _ci_kind(_lean.ptr_tag(ci))))
-                continue
-            decl = read_constant_info(ci)
+            decl = read_constant_info(_lean.ctor_get(opt, 0))
             stdout.write("%s : %s\n" % (decl.name.str(),
                                          decl.w_kind.__class__.__name__))
     return 0
-
-
-def _ci_kind(tag):
-    if tag == 0: return "axiom"
-    if tag == 1: return "defn"
-    if tag == 2: return "thm"
-    if tag == 3: return "opaque"
-    if tag == 4: return "quot"
-    if tag == 5: return "induct"
-    if tag == 6: return "ctor"
-    if tag == 7: return "recursor"
-    return "?"
 
 
 def _open_export(path, stdin):

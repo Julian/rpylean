@@ -439,6 +439,13 @@ def name_with_levels_tokens(name, levels, constants):
 
 
 @elidable
+def name_hash(name):
+    # See `name_eq` for why this lives at module level rather than
+    # being passed as the unbound `Name.hash` method.
+    return name.hash()
+
+
+@elidable
 def name_eq(name, other):
     # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
     #        that directly, RPython seems unable to be convinced that name and
