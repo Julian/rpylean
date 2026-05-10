@@ -293,6 +293,55 @@ def ffi(self, args, stdin, stdout, stderr):
     return 0
 
 
+@cli.subcommand(
+    ["*MODULES"],
+    help="Type-check declarations from a Lean toolchain via FFI.",
+    options=[
+        (
+            "prefix",
+            "path to the Lean prefix to link against",
+        ),
+        (
+            "names",
+            "comma-separated declaration names to walk + type-check",
+        ),
+        COLOR,
+    ],
+)
+def ffi_check(self, args, stdin, stdout, stderr):
+    modules = args.varargs
+    if not modules:
+        return 1
+    prefix = args.options["prefix"]
+    if prefix is None:
+        return 1
+    names_arg = args.options["names"]
+    if names_arg is None:
+        return 1
+
+    stdoutw = writer_from_arg(args.options["color"], stdout)
+    stderrw = writer_from_arg(args.options["color"], stderr)
+
+    builder = EnvironmentBuilder()
+    with FFI.from_prefix(prefix) as ffi_obj:
+        env_obj = ffi_obj.import_modules(modules)
+        for probe in names_arg.split(","):
+            opt = ffi_obj.find_constant(env_obj, probe)
+            if _lean.obj_tag(opt) == 0:
+                stderr.write("%s: not found\n" % probe)
+                continue
+            decl = read_constant_info(_lean.ctor_get(opt, 0))
+            builder.register_declaration(decl)
+
+    environment = builder.finish()
+    failures = 0
+    for decl in builder.declarations:
+        for w_error in environment.type_check_one(decl):
+            w_error.write_to(stderrw)
+            failures += 1
+    return 1 if failures else 0
+
+
 def _open_export(path, stdin):
     if path == "-":
         return fdopen_as_stream(stdin.fileno(), "r")
