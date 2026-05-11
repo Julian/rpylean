@@ -207,6 +207,27 @@ class W_ConstructorFieldCountMismatch(W_CheckError):
         )
 
 
+class W_InvalidRecursorRule(W_CheckError):
+    """
+    A recursor's rule doesn't match its inductive's structure: missing
+    or extra rules, a rule whose `ctor` isn't a constructor of the
+    inductive, or a mismatched `nfields`.
+    """
+
+    def __init__(self, environment, summary, name=None):
+        self.environment = environment
+        self.summary = summary
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit("\n" + self.summary)]
+        return _error_diagnostic(
+            self.declaration, self.name, None,
+            "Invalid recursor ", message, declarations,
+        )
+
+
 class W_NonPositiveOccurrence(W_CheckError):
     """
     A constructor field type has the inductive in a non-positive position.
@@ -3864,8 +3885,65 @@ class W_Recursor(W_DeclarationKind):
                 exporter.dump_constant(exporter.decls[ind])
 
     def type_check(self, type, env):
-        # TODO - implement type checking
-        pass
+        # Shape-level validation: every rule must correspond to a real
+        # constructor of one of the mutual-block inductives, with
+        # matching `num_fields`, and the rule set must cover every
+        # constructor exactly once. This catches malformed exports
+        # where the rec rules don't align with the inductive's ctors
+        # (extra/missing rules, ctor name typos, wrong nfields).
+        # *Doesn't* catch wrong-rhs bugs (e.g. arena's `nat-rec-rules`);
+        # that needs a structural rhs comparison against the canonically
+        # derived rule, which is its own piece of work.
+        #
+        # Skip validation entirely if the parent inductive isn't yet in
+        # scope — for the streaming FFI checker, recursors can arrive
+        # before their inductive is registered. The check will fire
+        # later when the whole env exists.
+        all_ctors = []
+        for ind_name in self.names:
+            if ind_name not in env.declarations:
+                return None
+            ind_decl = env.declarations[ind_name]
+            ind_kind = ind_decl.w_kind
+            if not isinstance(ind_kind, W_Inductive):
+                return W_InvalidRecursorRule(
+                    env,
+                    "recursor refers to %s which is not an inductive"
+                    % ind_name.str(),
+                )
+            for ctor in ind_kind.constructors:
+                all_ctors.append(ctor)
+        if len(self.rules) != len(all_ctors):
+            return W_InvalidRecursorRule(
+                env,
+                "recursor has %d rule(s) but its inductive%s has %d "
+                "constructor(s)" % (
+                    len(self.rules),
+                    "s" if len(self.names) > 1 else "",
+                    len(all_ctors),
+                ),
+            )
+        ctor_by_name = name_dict()
+        for ctor in all_ctors:
+            ctor_by_name[ctor.name] = ctor
+        for rule in self.rules:
+            ctor = ctor_by_name.get(rule.ctor_name, None)
+            if ctor is None:
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule's ctor %s is not a constructor of "
+                    "the inductive" % rule.ctor_name.str(),
+                )
+            ctor_kind = ctor.w_kind
+            assert isinstance(ctor_kind, W_Constructor)
+            if rule.num_fields != ctor_kind.num_fields:
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule for %s claims %d fields but the ctor has %d"
+                    % (rule.ctor_name.str(),
+                       rule.num_fields,
+                       ctor_kind.num_fields),
+                )
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]

@@ -626,6 +626,70 @@ class TestTypeError(object):
         )
 
 
+class TestRecursorRuleShape(object):
+    """`W_Recursor.type_check`'s shape-level validation: rule count,
+    ctor membership, and `num_fields` consistency."""
+
+    def _build_unit_ind(self):
+        """A trivial 1-ctor inductive `U` with `U.mk : U`."""
+        U = Name.simple("U")
+        mk = U.child("mk").constructor(
+            type=U.const(), num_params=0, num_fields=0,
+        )
+        ind = U.inductive(type=TYPE, constructors=[mk])
+        return U, mk, ind
+
+    def test_rule_count_mismatch_rejected(self):
+        from rpylean.objects import W_RecRule, W_InvalidRecursorRule
+        U, mk, ind = self._build_unit_ind()
+        # Recursor with zero rules but inductive has one ctor.
+        bad_rec = U.child("rec").recursor(type=U.const(), rules=[], names=[U])
+        env = Environment.having([ind, mk, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_rule_for_unknown_ctor_rejected(self):
+        from rpylean.objects import W_RecRule, W_InvalidRecursorRule
+        U, mk, ind = self._build_unit_ind()
+        ghost = Name(["U", "ghost"])
+        bad_rec = U.child("rec").recursor(
+            type=U.const(),
+            rules=[W_RecRule(ctor_name=ghost, num_fields=0, rhs=U.const())],
+            names=[U],
+        )
+        env = Environment.having([ind, mk, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_rule_nfields_mismatch_rejected(self):
+        from rpylean.objects import W_RecRule, W_InvalidRecursorRule
+        U, mk, ind = self._build_unit_ind()
+        # mk has 0 fields, but the rule claims 1.
+        bad_rec = U.child("rec").recursor(
+            type=U.const(),
+            rules=[W_RecRule(ctor_name=mk.name, num_fields=1, rhs=U.const())],
+            names=[U],
+        )
+        env = Environment.having([ind, mk, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_well_shaped_rule_accepted(self):
+        from rpylean.objects import W_RecRule
+        U, mk, ind = self._build_unit_ind()
+        good_rec = U.child("rec").recursor(
+            type=U.const(),
+            rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=U.const())],
+            names=[U],
+        )
+        env = Environment.having([ind, mk, good_rec])
+        errors = list(env.type_check([good_rec]))
+        assert errors == []
+
+
 class TestDiagnosticTokens(object):
     def test_type_error_diagnostic(self):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
