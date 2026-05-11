@@ -14,7 +14,7 @@ from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
 from rpylean.ffi import (
-    FFI, UnsupportedLeanMPZ, detect_prefix, read_constant_info,
+    Exporter, FFI, UnsupportedLeanMPZ, detect_prefix, read_constant_info,
 )
 from rpylean.ffi import _lltypes as _lean
 from rpylean.environment import (
@@ -341,7 +341,68 @@ def check(self, args, stdin, stdout, stderr):
     return 1 if checker.failures else 0
 
 
-class _FFICollector(object):
+@ffi.subcommand(
+    ["*MODULES"],
+    help="Emit lean4export-format NDJSON for a Lean toolchain via FFI.",
+    options=[],
+)
+def export(self, args, stdin, stdout, stderr):
+    modules = args.varargs
+    if not modules:
+        return 1
+    prefix = args.options["prefix"]
+    if prefix is None:
+        prefix = detect_prefix()
+    if prefix is None:
+        stderr.write(
+            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
+        )
+        return 1
+
+    exporter = Exporter(stdout)
+    with FFI.from_prefix(prefix) as ffi_obj:
+        env_obj = ffi_obj.import_modules(modules)
+        collector = _ExportCollector(exporter)
+        ffi_obj.each_constant(env_obj, collector)
+        ffi_obj.release(env_obj)
+    exporter.emit_meta()
+    exporter.dump_all()
+    if collector.skipped:
+        stderr.write("[ffi export] skipped %d unwalkable constants\n"
+                     % collector.skipped)
+    return 0
+
+
+class _FFICollectorBase(object):
+    """Common base for `FFI.each_constant` callbacks so RPython can
+    keep both in the same call-site annotation."""
+
+    skipped = 0
+
+    def on_constant(self, name_obj, ci_obj):
+        raise NotImplementedError
+
+
+class _ExportCollector(_FFICollectorBase):
+    """Walk every constant, register it with the Exporter, then let
+    `dump_all` emit them all in dependency order. Same MPZ-skip
+    discipline as `_FFICollector`."""
+
+    def __init__(self, exporter):
+        self.exporter = exporter
+        self.skipped = 0
+
+    def on_constant(self, name_obj, ci_obj):
+        try:
+            decl = read_constant_info(ci_obj)
+        except UnsupportedLeanMPZ:
+            self.skipped += 1
+            return False
+        self.exporter.register(decl)
+        return False
+
+
+class _FFICollector(_FFICollectorBase):
     """Walk → register → stream-check, one declaration at a time.
 
     Constants whose representation we can't yet walk (specifically

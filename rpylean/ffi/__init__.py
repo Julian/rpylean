@@ -12,8 +12,10 @@ Public surface:
 """
 from rpylean.ffi._loader import FFI, FFIError, detect_prefix
 from rpylean.ffi._runtime import UnsupportedLeanMPZ, read_constant_info
+from rpylean.ffi.exporter import Exporter
 
 __all__ = [
+    "Exporter",
     "FFI",
     "FFIError",
     "UnsupportedLeanMPZ",
