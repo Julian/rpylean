@@ -63,8 +63,8 @@ and letE's is `[data:8 bytes, nondep:1 byte]`. The `data` doesn't
 matter for walking but it shifts the offset to the byte we do read.
 
 `Nat` is small-encoded as a scalar when it fits in a word; larger
-Nats use `LeanMPZ`. `read_nat` raises `UnsupportedLeanMPZ` for the
-MPZ path (caller decides whether to skip or abort).
+Nats use `LeanMPZ`, which we decode by reading the GMP `mpz_t`
+limbs directly out of the heap object — see `_read_mpz`.
 """
 from __future__ import print_function
 
@@ -132,22 +132,52 @@ def _ptr_key(o):
     return rffi.cast(lltype.Signed, o)
 
 
-class UnsupportedLeanMPZ(Exception):
-    """A Lean.Nat value uses the heap-allocated MPZ encoding that
-    rpylean's walker doesn't yet handle.
-
-    Callers may catch this specifically to skip a single declaration.
-    Don't broaden the catch — `RuntimeError` covers genuine
-    layout-drift / walker-bug cases, and silently treating those as
-    "skipped" hides real failures.
-    """
-
-
 def read_nat(o):
     """Decode a Lean.Nat (scalar small or LeanMPZ heap) into an rbigint."""
     if _lean.is_scalar(o):
         return rbigint.fromint(intmask(_lean.unbox(o)))
-    raise UnsupportedLeanMPZ("read_nat: large/MPZ Nat not yet supported")
+    # Big nat: decode the GMP `mpz_t` payload directly. We can't go
+    # through Lean's `Nat.reprFast` because it dereferences the
+    # statically-allocated `Nat.reprArray`, which isn't reliably
+    # set up when we call into the runtime from FFI (the access
+    # SIGBUSes on macOS arm64 even with `lean_io_mark_end_initialization`
+    # done).
+    return _read_mpz(o)
+
+
+def _read_mpz(o):
+    # `mpz_object`: lean_object header (8 bytes), then `mpz` wrapping
+    # `mpz_t` = `__mpz_struct[1]`:
+    #   int _mp_alloc;   // 4 bytes
+    #   int _mp_size;    // 4 bytes, signed: |size| = #limbs, sign = sign
+    #   mp_limb_t *_mp_d;  // 8 bytes pointer; each limb is 8 bytes on
+    #                         a 64-bit target
+    base = rffi.cast(rffi.CCHARP, o)
+    size_p = rffi.cast(rffi.INTP,
+                       rffi.ptradd(base, _lean.OBJ_HDR_SIZE + 4))
+    n_limbs = intmask(size_p[0])
+    if n_limbs == 0:
+        return rbigint.fromint(0)
+    if n_limbs < 0:
+        # `Nat` is non-negative; a negative mpz would be a kernel bug.
+        raise RuntimeError("read_nat: negative LeanMPZ")
+    limbs_pp = rffi.cast(rffi.CArrayPtr(rffi.ULONGP),
+                         rffi.ptradd(base, _lean.OBJ_HDR_SIZE + 8))
+    limbs = limbs_pp[0]
+    # Accumulate most-significant first: result = sum(limb[i] << 64*i).
+    # We split each 64-bit limb into two 32-bit halves so rbigint
+    # stays on its native 31-bit digit machinery without unsigned
+    # 64-bit gymnastics.
+    result = rbigint.fromint(0)
+    for i in range(n_limbs - 1, -1, -1):
+        limb = limbs[i]
+        # Split into hi/lo 32-bit halves.
+        lo = intmask(rffi.cast(rffi.UINT, limb))
+        hi = intmask(rffi.cast(rffi.UINT,
+                               rffi.cast(rffi.ULONG, limb) >> 32))
+        result = result.lshift(32).add(rbigint.fromint(hi))
+        result = result.lshift(32).add(rbigint.fromint(lo))
+    return result
 
 
 def read_name(o):

@@ -14,7 +14,7 @@ from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
 from rpylean.ffi import (
-    Exporter, FFI, UnsupportedLeanMPZ, detect_prefix, read_constant_info,
+    Exporter, FFI, detect_prefix, read_constant_info,
 )
 from rpylean.ffi import _lltypes as _lean
 from rpylean.environment import (
@@ -344,9 +344,6 @@ def check(self, args, stdin, stdout, stderr):
         else:
             ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
-    if collector.skipped:
-        stderr.write("[ffi check] skipped %d unwalkable constants\n"
-                     % collector.skipped)
     return 1 if checker.failures else 0
 
 
@@ -374,9 +371,6 @@ def repl(self, args, stdin, stdout, stderr):
         env_obj = ffi_obj.import_modules(modules)
         ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
-    if collector.skipped:
-        stderr.write("[ffi repl] skipped %d unwalkable constants\n"
-                     % collector.skipped)
 
     from rpylean import repl
 
@@ -426,35 +420,20 @@ def export(self, args, stdin, stdout, stderr):
         exporter.dump_all()
     else:
         exporter.dump_named(filter_names)
-    if collector.skipped:
-        stderr.write("[ffi export] skipped %d unwalkable constants\n"
-                     % collector.skipped)
     return 0
 
 
 class _FFICollectorBase(object):
     """Common base for `FFI.each_constant` callbacks.
 
-    Handles the shared MPZ-skip discipline: constants whose
-    representation we can't yet walk (specifically `LeanMPZ`-encoded
-    `Nat` literals) are counted and skipped. Other walker failures —
-    unexpected ctor tags, layout drift — are left to propagate, because
-    silently treating them as "skipped" would mask real bugs.
-
     Subclasses override `_handle` to do something with each walked
     declaration. Returning `True` signals an early-abort and ends the
-    walk.
-    """
-
-    skipped = 0
+    walk. Walker failures (unexpected ctor tags, layout drift) are left
+    to propagate so they show up loudly instead of as silent "skipped"
+    noise."""
 
     def on_constant(self, name_obj, ci_obj):
-        try:
-            decl = read_constant_info(ci_obj)
-        except UnsupportedLeanMPZ:
-            self.skipped += 1
-            return False
-        return self._handle(decl)
+        return self._handle(read_constant_info(ci_obj))
 
     def _handle(self, decl):
         raise NotImplementedError

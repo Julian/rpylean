@@ -150,6 +150,22 @@ def test_ffi_export_roundtrips_through_check(tmpdir):
     assert "Eq.refl" in names, names
 
 
+def test_ffi_export_decodes_big_nat_literals():
+    """`UInt64.size = 2^64` — a literal that overflows a 63-bit word
+    and lives in Lean's runtime as a `LeanMPZ` heap object. Exercises
+    the GMP-limb decode path in `_read_mpz`."""
+    if not _lean_on_path():
+        import pytest
+        pytest.skip("`lean` not on PATH")
+
+    process = rpylean(
+        "ffi", "export", "--filter", "UInt64.size", "Init",
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, (stdout, stderr)
+    assert '"natVal":"18446744073709551616"' in stdout, stdout
+
+
 def test_ffi_repl_loads_env_via_command():
     """`ffi repl --command "print Nat.succ" Init` starts the REPL with
     Init imported, runs the one command, and exits. Smoke-tests that
