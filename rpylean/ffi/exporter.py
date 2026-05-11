@@ -11,7 +11,7 @@ Level.zero has id 0 reserved.
 The traversal strategy follows lean4export's `Export.lean`:
 
 * Walk each constant in two phases — first emit every transitive
-  `W_Const` reference it uses (`_dump_deps`), then emit the constant
+  `W_Const` reference it uses (`dump_deps`), then emit the constant
   itself. This produces a dependency-ordered file.
 * When the constant is part of an inductive mutual block, emit the
   whole `{"inductive": {types, ctors, recs}}` record in place, after
@@ -124,8 +124,41 @@ class Exporter(object):
 
     def quote(self, s):
         """JSON-quote `s` for embedding inside an export record. Used
-        by `W_LitStr.emit_to` / `W_LitNat.emit_to` (and `_name_id`)."""
+        by `W_LitStr.emit_to` / `W_LitNat.emit_to`."""
         return _json_string(s)
+
+    # ---- visitor-facing API -------------------------------------------
+    # The following methods form the contract that `W_*.dump_to` /
+    # `W_*.emit_to` rely on. Public on purpose: the visitor classes
+    # live in `rpylean.objects` and must be able to call into here
+    # without poking underscored internals.
+
+    def begin_decl(self, decl):
+        """Mark `decl` visited and dump its type's transitive deps.
+
+        Common preamble for every value-bearing declaration (axiom,
+        def, thm, opaque) and the constructor-without-parent fallback.
+        `W_Inductive` bypasses this — its block emit marks every
+        mutual member at once."""
+        self._visited[decl.name] = True
+        self.dump_deps(decl.type)
+
+    def parent_inductive(self, ctor_name):
+        """The inductive name a registered constructor belongs to, or
+        `None` if the parent wasn't part of the export pool."""
+        return self._induct_for_ctor.get(ctor_name, None)
+
+    def next_expr_id(self):
+        """Allocate the next sequential expression id."""
+        eid = self._next_expr
+        self._next_expr += 1
+        return eid
+
+    def next_level_id(self):
+        """Allocate the next sequential level id."""
+        lid = self._next_level
+        self._next_level += 1
+        return lid
 
     def dump_all(self):
         """Emit every registered declaration in dependency order."""
@@ -175,7 +208,7 @@ class Exporter(object):
             return
         decl.w_kind.dump_to(self, decl)
 
-    def _dump_deps(self, expr):
+    def dump_deps(self, expr):
         names = []
         seen = name_dict()
         expr.collect_consts_into(names, seen)
@@ -232,7 +265,7 @@ class Exporter(object):
     def _ids_list(self, ids):
         return "[" + ",".join([str(i) for i in ids]) + "]"
 
-    def _emit_axiom(self, decl):
+    def emit_axiom(self, decl):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
@@ -242,7 +275,7 @@ class Exporter(object):
             % (nid, self._ids_list(levels), tid),
         )
 
-    def _emit_def(self, decl, value, hint):
+    def emit_def(self, decl, value, hint):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
@@ -254,7 +287,7 @@ class Exporter(object):
                self._hint_json(hint), nid),
         )
 
-    def _emit_thm(self, decl, value):
+    def emit_thm(self, decl, value):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
@@ -265,7 +298,7 @@ class Exporter(object):
             % (nid, self._ids_list(levels), tid, vid, nid),
         )
 
-    def _emit_opaque(self, decl, value):
+    def emit_opaque(self, decl, value):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
@@ -285,7 +318,7 @@ class Exporter(object):
 
     # ---- inductive blocks ---------------------------------------------
 
-    def _dump_inductive_group(self, ind_decl):
+    def emit_inductive_group(self, ind_decl):
         kind = ind_decl.w_kind
         assert isinstance(kind, W_Inductive)
 
@@ -312,15 +345,15 @@ class Exporter(object):
         for n in kind.names:
             d = self.decls.get(n, None)
             if d is not None:
-                self._dump_deps(d.type)
+                self.dump_deps(d.type)
         for (_n, cd) in ctor_pairs:
-            self._dump_deps(cd.type)
+            self.dump_deps(cd.type)
         for rd in rec_decls:
-            self._dump_deps(rd.type)
+            self.dump_deps(rd.type)
             rkind = rd.w_kind
             assert isinstance(rkind, W_Recursor)
             for rule in rkind.rules:
-                self._dump_deps(rule.rhs)
+                self.dump_deps(rule.rhs)
 
         type_records = []
         for n in kind.names:

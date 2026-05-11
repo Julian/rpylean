@@ -452,7 +452,6 @@ class _ExportCollector(_FFICollectorBase):
 
     def __init__(self, exporter):
         self.exporter = exporter
-        self.skipped = 0
 
     def _handle(self, decl):
         self.exporter.register(decl)
@@ -465,7 +464,6 @@ class _FFILoader(_FFICollectorBase):
 
     def __init__(self, builder):
         self.builder = builder
-        self.skipped = 0
 
     def _handle(self, decl):
         self.builder.register_declaration(decl)
@@ -480,7 +478,6 @@ class _FFICollector(_FFICollectorBase):
     def __init__(self, builder, checker):
         self.builder = builder
         self.checker = checker
-        self.skipped = 0
 
     def _handle(self, decl):
         self.builder.register_declaration(decl)

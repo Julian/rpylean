@@ -1055,8 +1055,7 @@ class W_LevelSucc(W_Level):
 
     def emit_to(self, exporter):
         parent = exporter.level_id(self.parent)
-        lid = exporter._next_level
-        exporter._next_level += 1
+        lid = exporter.next_level_id()
         exporter.stream.write('{"il":%d,"succ":%d}\n' % (lid, parent))
         return lid
 
@@ -1099,8 +1098,7 @@ class W_LevelMax(W_Level):
     def emit_to(self, exporter):
         l = exporter.level_id(self.lhs)
         r = exporter.level_id(self.rhs)
-        lid = exporter._next_level
-        exporter._next_level += 1
+        lid = exporter.next_level_id()
         exporter.stream.write('{"il":%d,"max":[%d,%d]}\n' % (lid, l, r))
         return lid
 
@@ -1150,8 +1148,7 @@ class W_LevelIMax(W_Level):
     def emit_to(self, exporter):
         l = exporter.level_id(self.lhs)
         r = exporter.level_id(self.rhs)
-        lid = exporter._next_level
-        exporter._next_level += 1
+        lid = exporter.next_level_id()
         exporter.stream.write('{"il":%d,"imax":[%d,%d]}\n' % (lid, l, r))
         return lid
 
@@ -1185,8 +1182,7 @@ class W_LevelParam(W_Level):
 
     def emit_to(self, exporter):
         nid = exporter.name_id(self.name)
-        lid = exporter._next_level
-        exporter._next_level += 1
+        lid = exporter.next_level_id()
         exporter.stream.write('{"il":%d,"param":%d}\n' % (lid, nid))
         return lid
 
@@ -1433,8 +1429,7 @@ class W_BVar(W_Expr):
         return [BINDER_NAME.emit(self.str())]
 
     def emit_to(self, exporter):
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write('{"ie":%d,"bvar":%d}\n' % (eid, self.id))
         return eid
 
@@ -1532,8 +1527,7 @@ class W_LitStr(W_Expr):
         return repr(self.val)
 
     def emit_to(self, exporter):
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write(
             '{"ie":%d,"strVal":%s}\n' % (eid, exporter.quote(self.val)),
         )
@@ -1614,8 +1608,7 @@ class W_Sort(W_Expr):
 
     def emit_to(self, exporter):
         lid = exporter.level_id(self.level)
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write('{"ie":%d,"sort":%d}\n' % (eid, lid))
         return eid
 
@@ -1713,8 +1706,7 @@ class W_Const(W_Expr):
     def emit_to(self, exporter):
         nid = exporter.name_id(self.name)
         level_ids = [exporter.level_id(l) for l in self.levels]
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         us = "[" + ",".join([str(l) for l in level_ids]) + "]"
         exporter.stream.write(
             '{"ie":%d,"const":{"name":%d,"us":%s}}\n' % (eid, nid, us),
@@ -1901,8 +1893,7 @@ class W_LitNat(W_Expr):
         return self.val.eq(other.val)
 
     def emit_to(self, exporter):
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write(
             '{"ie":%d,"natVal":%s}\n'
             % (eid, exporter.quote(self.val.str())),
@@ -2183,8 +2174,7 @@ class W_Proj(W_Expr):
     def emit_to(self, exporter):
         sid = exporter.expr_id(self.struct_expr)
         tid = exporter.name_id(self.struct_name)
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write(
             '{"ie":%d,"proj":{"typeName":%d,"idx":%d,"struct":%d}}\n'
             % (eid, tid, self.field_index, sid),
@@ -2511,8 +2501,7 @@ class W_FunBase(W_Expr):
         bnid = exporter.name_id(self.binder.name)
         tid = exporter.expr_id(self.binder.type)
         bid = exporter.expr_id(self.body)
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         bi = self.binder.export_info_name()
         exporter.stream.write(
             '{"ie":%d,"%s":{"name":%d,"type":%d,"body":%d,"binderInfo":"%s"}}\n'
@@ -2796,8 +2785,7 @@ class W_Let(W_Expr):
         tid = exporter.expr_id(self.type)
         vid = exporter.expr_id(self.value)
         bid = exporter.expr_id(self.body)
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write(
             '{"ie":%d,"letE":{"name":%d,"type":%d,"value":%d,"body":%d,'
             '"nondep":false}}\n' % (eid, nid, tid, vid, bid),
@@ -2914,8 +2902,7 @@ class W_App(W_Expr):
     def emit_to(self, exporter):
         fn = exporter.expr_id(self.fn)
         arg = exporter.expr_id(self.arg)
-        eid = exporter._next_expr
-        exporter._next_expr += 1
+        eid = exporter.next_expr_id()
         exporter.stream.write(
             '{"ie":%d,"app":{"fn":%d,"arg":%d}}\n' % (eid, fn, arg),
         )
@@ -3518,9 +3505,8 @@ class W_DeclarationKind(_Item):
         walker's `quotInfo`-as-axiom collapse). Subclasses that need a
         different record shape override.
         """
-        exporter._visited[decl.name] = True
-        exporter._dump_deps(decl.type)
-        exporter._emit_axiom(decl)
+        exporter.begin_decl(decl)
+        exporter.emit_axiom(decl)
 
 
 #: Reducibility hints. For regular we use positive ints.
@@ -3534,10 +3520,9 @@ class W_Definition(W_DeclarationKind):
         self.hint = hint
 
     def dump_to(self, exporter, decl):
-        exporter._visited[decl.name] = True
-        exporter._dump_deps(decl.type)
-        exporter._dump_deps(self.value)
-        exporter._emit_def(decl, self.value, self.hint)
+        exporter.begin_decl(decl)
+        exporter.dump_deps(self.value)
+        exporter.emit_def(decl, self.value, self.hint)
 
     def type_check(self, type, env):
         type_type = type.infer(env)
@@ -3580,10 +3565,9 @@ class W_Opaque(W_Definition):
         self.hint = HINT_OPAQUE
 
     def dump_to(self, exporter, decl):
-        exporter._visited[decl.name] = True
-        exporter._dump_deps(decl.type)
-        exporter._dump_deps(self.value)
-        exporter._emit_opaque(decl, self.value)
+        exporter.begin_decl(decl)
+        exporter.dump_deps(self.value)
+        exporter.emit_opaque(decl, self.value)
 
     def get_delta_reduce_target(self):
         return None
@@ -3594,10 +3578,9 @@ class W_Theorem(W_DeclarationKind):
         self.value = value
 
     def dump_to(self, exporter, decl):
-        exporter._visited[decl.name] = True
-        exporter._dump_deps(decl.type)
-        exporter._dump_deps(self.value)
-        exporter._emit_thm(decl, self.value)
+        exporter.begin_decl(decl)
+        exporter.dump_deps(self.value)
+        exporter.emit_thm(decl, self.value)
 
     def type_check(self, type, env):
         type_type = type.infer(env)
@@ -3656,7 +3639,7 @@ class W_Inductive(W_DeclarationKind):
         self.is_recursive = is_recursive
 
     def dump_to(self, exporter, decl):
-        exporter._dump_inductive_group(decl)
+        exporter.emit_inductive_group(decl)
 
     def field_name(self, index):
         if len(self.constructors) != 1:
@@ -3820,15 +3803,14 @@ class W_Constructor(W_DeclarationKind):
         self.num_fields = num_fields
 
     def dump_to(self, exporter, decl):
-        induct_name = exporter._induct_for_ctor.get(decl.name, None)
+        induct_name = exporter.parent_inductive(decl.name)
         if induct_name is not None and induct_name in exporter.decls:
             exporter.dump_constant(exporter.decls[induct_name])
             return
         # Unattached ctor (parent inductive wasn't registered) — emit
         # as an axiom so the output stays self-contained.
-        exporter._visited[decl.name] = True
-        exporter._dump_deps(decl.type)
-        exporter._emit_axiom(decl)
+        exporter.begin_decl(decl)
+        exporter.emit_axiom(decl)
 
     def type_check(self, type, env):
         # TODO - implement type checking
