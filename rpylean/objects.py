@@ -658,13 +658,15 @@ class Name(_Item):
             w_kind=w_kind,
         )
 
-    def constructor(self, type, num_params=0, num_fields=0, levels=None):
+    def constructor(self, type, num_params=0, num_fields=0, cidx=0,
+                    levels=None):
         """
         Make a constructor declaration with this name.
         """
         constructor = W_Constructor(
             num_params=num_params,
             num_fields=num_fields,
+            cidx=cidx,
         )
         return self.declaration(type=type, w_kind=constructor, levels=levels)
 
@@ -1453,7 +1455,7 @@ class W_BVar(W_Expr):
 
     def emit_to(self, exporter):
         eid = exporter.next_expr_id()
-        exporter.stream.write('{"ie":%d,"bvar":%d}\n' % (eid, self.id))
+        exporter.stream.write('{"bvar":%d,"ie":%d}\n' % (self.id, eid))
         return eid
 
     def syntactic_eq(self, other):
@@ -1732,7 +1734,7 @@ class W_Const(W_Expr):
         eid = exporter.next_expr_id()
         us = "[" + ",".join([str(l) for l in level_ids]) + "]"
         exporter.stream.write(
-            '{"ie":%d,"const":{"name":%d,"us":%s}}\n' % (eid, nid, us),
+            '{"const":{"name":%d,"us":%s},"ie":%d}\n' % (nid, us, eid),
         )
         return eid
 
@@ -2199,8 +2201,8 @@ class W_Proj(W_Expr):
         tid = exporter.name_id(self.struct_name)
         eid = exporter.next_expr_id()
         exporter.stream.write(
-            '{"ie":%d,"proj":{"typeName":%d,"idx":%d,"struct":%d}}\n'
-            % (eid, tid, self.field_index, sid),
+            '{"ie":%d,"proj":{"idx":%d,"struct":%d,"typeName":%d}}\n'
+            % (eid, self.field_index, sid, tid),
         )
         return eid
 
@@ -2527,8 +2529,8 @@ class W_FunBase(W_Expr):
         eid = exporter.next_expr_id()
         bi = self.binder.export_info_name()
         exporter.stream.write(
-            '{"ie":%d,"%s":{"name":%d,"type":%d,"body":%d,"binderInfo":"%s"}}\n'
-            % (eid, self._export_tag, bnid, tid, bid, bi),
+            '{"%s":{"binderInfo":"%s","body":%d,"name":%d,"type":%d},"ie":%d}\n'
+            % (self._export_tag, bi, bid, bnid, tid, eid),
         )
         return eid
 
@@ -2810,8 +2812,8 @@ class W_Let(W_Expr):
         bid = exporter.expr_id(self.body)
         eid = exporter.next_expr_id()
         exporter.stream.write(
-            '{"ie":%d,"letE":{"name":%d,"type":%d,"value":%d,"body":%d,'
-            '"nondep":false}}\n' % (eid, nid, tid, vid, bid),
+            '{"ie":%d,"letE":{"body":%d,"name":%d,"nondep":false,'
+            '"type":%d,"value":%d}}\n' % (eid, bid, nid, tid, vid),
         )
         return eid
 
@@ -2927,7 +2929,7 @@ class W_App(W_Expr):
         arg = exporter.expr_id(self.arg)
         eid = exporter.next_expr_id()
         exporter.stream.write(
-            '{"ie":%d,"app":{"fn":%d,"arg":%d}}\n' % (eid, fn, arg),
+            '{"app":{"arg":%d,"fn":%d},"ie":%d}\n' % (arg, fn, eid),
         )
         return eid
 
@@ -3864,9 +3866,12 @@ class W_Inductive(W_DeclarationKind):
 
 
 class W_Constructor(W_DeclarationKind):
-    def __init__(self, num_params, num_fields):
+    def __init__(self, num_params, num_fields, cidx=0):
         self.num_params = num_params
         self.num_fields = num_fields
+        #: This constructor's index within its parent inductive's
+        #: source-order ctor list. From `ConstructorVal.cidx`.
+        self.cidx = cidx
 
     def dump_to(self, exporter, decl):
         induct_name = exporter.parent_inductive(decl.name)

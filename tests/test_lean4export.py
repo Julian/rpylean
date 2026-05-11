@@ -324,6 +324,7 @@ def test_dump_constant_list():
         levels=[Name.simple("u")],
         num_params=1,
         num_fields=2,
+        cidx=1,
     )
     env = from_str(
         # eval run <| dumpConstant `List

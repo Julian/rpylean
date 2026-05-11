@@ -648,6 +648,7 @@ class _IndCtor(object):
         self.type_idx = 0
         self.num_params = 0
         self.num_fields = 0
+        self.cidx = 0
         self.levels = []
 
 
@@ -774,6 +775,7 @@ def _register_constructor(builder, ctor):
         type=builder.exprs[ctor.type_idx],
         num_params=ctor.num_params,
         num_fields=ctor.num_fields,
+        cidx=ctor.cidx,
     )
     builder.register_declaration(decl)
     return decl
@@ -863,7 +865,7 @@ def _parse_constructor(cursor):
     while True:
         key = cursor.read_key()
         if key == "cidx":
-            cursor.read_int()  # not used
+            ctor.cidx = cursor.read_int()
         elif key == "induct":
             ctor.induct_nidx = cursor.read_int()
         elif key == "levelParams":

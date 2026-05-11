@@ -419,9 +419,16 @@ def read_constant_info(ci):
         )
         return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
     if tag == 6:  # ctorInfo
+        # ConstructorVal layout (nested ConstantVal at field 0):
+        #   1: induct : Name
+        #   2: cidx : Nat (this ctor's index in the inductive's ctors)
+        #   3: numParams : Nat
+        #   4: numFields : Nat
+        cidx = read_nat(_lean.ctor_get(val, 2)).toint()
         num_params = read_nat(_lean.ctor_get(val, 3)).toint()
         num_fields = read_nat(_lean.ctor_get(val, 4)).toint()
-        kind = W_Constructor(num_params=num_params, num_fields=num_fields)
+        kind = W_Constructor(num_params=num_params, num_fields=num_fields,
+                             cidx=cidx)
         return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
     if tag == 7:  # recInfo
         all_names = _read_name_list(_lean.ctor_get(val, 1))

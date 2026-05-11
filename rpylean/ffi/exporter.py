@@ -247,7 +247,7 @@ class Exporter(object):
         self._names[name] = nid
         last = parts[-1]
         if isinstance(last, int):
-            payload = '{"pre":%d,"i":%d}' % (parent_id, last)
+            payload = '{"i":%d,"pre":%d}' % (last, parent_id)
             self.stream.write('{"in":%d,"num":%s}\n' % (nid, payload))
         else:
             payload = '{"pre":%d,"str":%s}' % (parent_id, _json_string(last))
@@ -287,9 +287,9 @@ class Exporter(object):
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
         self.stream.write(
-            '{"axiom":{"name":%d,"levelParams":%s,"type":%d,'
-            '"isUnsafe":false}}\n'
-            % (nid, self._ids_list(levels), tid),
+            '{"axiom":{"isUnsafe":false,"levelParams":%s,'
+            '"name":%d,"type":%d}}\n'
+            % (self._ids_list(levels), nid, tid),
         )
 
     def emit_def(self, decl, value, hint):
@@ -298,10 +298,10 @@ class Exporter(object):
         tid = self.expr_id(decl.type)
         vid = self.expr_id(value)
         self.stream.write(
-            '{"def":{"name":%d,"levelParams":%s,"type":%d,'
-            '"value":%d,"hints":%s,"safety":"safe","all":[%d]}}\n'
-            % (nid, self._ids_list(levels), tid, vid,
-               self._hint_json(hint), nid),
+            '{"def":{"all":[%d],"hints":%s,"levelParams":%s,'
+            '"name":%d,"safety":"safe","type":%d,"value":%d}}\n'
+            % (nid, self._hint_json(hint), self._ids_list(levels),
+               nid, tid, vid),
         )
 
     def emit_thm(self, decl, value):
@@ -310,9 +310,9 @@ class Exporter(object):
         tid = self.expr_id(decl.type)
         vid = self.expr_id(value)
         self.stream.write(
-            '{"thm":{"name":%d,"levelParams":%s,"type":%d,'
-            '"value":%d,"all":[%d]}}\n'
-            % (nid, self._ids_list(levels), tid, vid, nid),
+            '{"thm":{"all":[%d],"levelParams":%s,"name":%d,'
+            '"type":%d,"value":%d}}\n'
+            % (nid, self._ids_list(levels), nid, tid, vid),
         )
 
     def emit_opaque(self, decl, value):
@@ -321,9 +321,9 @@ class Exporter(object):
         tid = self.expr_id(decl.type)
         vid = self.expr_id(value)
         self.stream.write(
-            '{"opaque":{"name":%d,"levelParams":%s,"type":%d,'
-            '"value":%d,"isUnsafe":false,"all":[%d]}}\n'
-            % (nid, self._ids_list(levels), tid, vid, nid),
+            '{"opaque":{"all":[%d],"isUnsafe":false,"levelParams":%s,'
+            '"name":%d,"type":%d,"value":%d}}\n'
+            % (nid, self._ids_list(levels), nid, tid, vid),
         )
 
     def _hint_json(self, hint):
@@ -359,9 +359,9 @@ class Exporter(object):
             rec_records.append(self._recursor_val_json(rd))
 
         self.stream.write(
-            '{"inductive":{"types":[%s],"ctors":[%s],"recs":[%s]}}\n'
-            % (",".join(type_records), ",".join(ctor_records),
-               ",".join(rec_records)),
+            '{"inductive":{"ctors":[%s],"recs":[%s],"types":[%s]}}\n'
+            % (",".join(ctor_records), ",".join(rec_records),
+               ",".join(type_records)),
         )
 
     def _ctor_names_for(self, ind_name):
@@ -379,15 +379,14 @@ class Exporter(object):
         all_ids = self._ids_list([self.name_id(n) for n in kind.names])
         ctor_ids = self._ids_list(self._ctor_names_for(decl.name))
         return (
-            '{"name":%d,"levelParams":%s,"type":%d,'
-            '"numParams":%d,"numIndices":%d,"all":%s,"ctors":%s,'
-            '"numNested":%d,"isRec":%s,"isUnsafe":false,'
-            '"isReflexive":%s}'
-            % (nid, self._ids_list(levels), tid,
-               kind.num_params, kind.num_indices, all_ids, ctor_ids,
-               kind.num_nested,
+            '{"all":%s,"ctors":%s,"isRec":%s,"isReflexive":%s,'
+            '"isUnsafe":false,"levelParams":%s,"name":%d,'
+            '"numIndices":%d,"numNested":%d,"numParams":%d,"type":%d}'
+            % (all_ids, ctor_ids,
                "true" if kind.is_recursive else "false",
-               "true" if kind.is_reflexive else "false")
+               "true" if kind.is_reflexive else "false",
+               self._ids_list(levels), nid,
+               kind.num_indices, kind.num_nested, kind.num_params, tid)
         )
 
     def _constructor_val_json(self, decl, induct_name):
@@ -398,11 +397,10 @@ class Exporter(object):
         tid = self.expr_id(decl.type)
         induct_id = self.name_id(induct_name)
         return (
-            '{"name":%d,"levelParams":%s,"type":%d,'
-            '"induct":%d,"cidx":0,"numParams":%d,"numFields":%d,'
-            '"isUnsafe":false}'
-            % (nid, self._ids_list(levels), tid, induct_id,
-               kind.num_params, kind.num_fields)
+            '{"cidx":%d,"induct":%d,"isUnsafe":false,"levelParams":%s,'
+            '"name":%d,"numFields":%d,"numParams":%d,"type":%d}'
+            % (kind.cidx, induct_id, self._ids_list(levels),
+               nid, kind.num_fields, kind.num_params, tid)
         )
 
     def _recursor_val_json(self, decl):
@@ -421,13 +419,12 @@ class Exporter(object):
                 % (ctor_id, rule.num_fields, rhs_id),
             )
         return (
-            '{"name":%d,"levelParams":%s,"type":%d,'
-            '"all":%s,"numParams":%d,"numIndices":%d,'
-            '"numMotives":%d,"numMinors":%d,'
-            '"rules":[%s],"k":%s,"isUnsafe":false}'
-            % (nid, self._ids_list(levels), tid, all_ids,
-               kind.num_params, kind.num_indices,
-               kind.num_motives, kind.num_minors,
-               ",".join(rule_parts),
-               "true" if kind.k else "false")
+            '{"all":%s,"isUnsafe":false,"k":%s,"levelParams":%s,'
+            '"name":%d,"numIndices":%d,"numMinors":%d,"numMotives":%d,'
+            '"numParams":%d,"rules":[%s],"type":%d}'
+            % (all_ids,
+               "true" if kind.k else "false",
+               self._ids_list(levels), nid,
+               kind.num_indices, kind.num_minors, kind.num_motives,
+               kind.num_params, ",".join(rule_parts), tid)
         )
