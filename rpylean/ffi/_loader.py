@@ -48,6 +48,7 @@ from rpython.rlib.rfile import create_popen_file
 from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean.ffi import _lltypes as _lean
+from rpylean.ffi import _runtime
 
 
 def detect_prefix():
@@ -362,6 +363,9 @@ class FFI(object):
         Caller owns the returned reference. Pass it to `find_constant` to
         look up declarations.
         """
+        # Any Expr/Level pointers cached from a previous env are now
+        # invalid; their addresses may be reused by this fresh env.
+        _runtime.reset_walk_caches()
         arr = self._array_empty()
         for m in modules:
             arr = self._array_push(arr, self._build_import(m))

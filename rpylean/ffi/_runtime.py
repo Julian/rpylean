@@ -93,6 +93,45 @@ from rpylean.objects import (
 )
 
 
+# Pointer-keyed hash-cons caches for the Lean `lean_object *`
+# Expr/Level subtrees. Lean's runtime shares Expr/Level structure
+# across occurrences via pointer equality, but the recursive walkers
+# below build a fresh rpylean object at every visit; without dedup,
+# every downstream consumer's output is exponential in the source
+# tree's sharing factor.
+#
+# The cache is valid for as long as the underlying lean_object pointers
+# are: from `FFI.import_modules` through `FFI.release(env_obj)`. The
+# CLI is expected to call `reset_walk_caches()` at session entry. Held
+# on a small singleton because RPython forbids rebinding module
+# globals at runtime — `.clear()` on dict attributes is fine.
+
+class _WalkState(object):
+    def __init__(self):
+        self.exprs = {}    # int (ptr addr) → W_Expr
+        self.levels = {}   # int (ptr addr) → W_Level
+
+    def reset(self):
+        self.exprs.clear()
+        self.levels.clear()
+
+
+_WALK = _WalkState()
+
+
+def reset_walk_caches():
+    """Clear the pointer-keyed Expr/Level dedup caches.
+
+    Call this when a new FFI session begins (the previous env's
+    pointers are no longer valid and their addresses may be reused)
+    or to bound memory growth between independent walks."""
+    _WALK.reset()
+
+
+def _ptr_key(o):
+    return rffi.cast(lltype.Signed, o)
+
+
 class UnsupportedLeanMPZ(Exception):
     """A Lean.Nat value uses the heap-allocated MPZ encoding that
     rpylean's walker doesn't yet handle.
@@ -132,6 +171,16 @@ def read_level(o):
     if _lean.is_scalar(o):
         # Level.zero is the only scalar we expect.
         return W_LEVEL_ZERO
+    key = _ptr_key(o)
+    cached = _WALK.levels.get(key, None)
+    if cached is not None:
+        return cached
+    result = _read_level_uncached(o)
+    _WALK.levels[key] = result
+    return result
+
+
+def _read_level_uncached(o):
     tag = _lean.ptr_tag(o)
     if tag == 0:
         return W_LEVEL_ZERO
@@ -208,6 +257,16 @@ def _ctor_uint32(o, num_objs, byte_offset):
 def read_expr(o):
     if _lean.is_scalar(o):
         raise RuntimeError("read_expr: unexpected scalar")
+    key = _ptr_key(o)
+    cached = _WALK.exprs.get(key, None)
+    if cached is not None:
+        return cached
+    result = _read_expr_uncached(o)
+    _WALK.exprs[key] = result
+    return result
+
+
+def _read_expr_uncached(o):
     tag = _lean.ptr_tag(o)
     if tag == 0:  # bvar(deBruijnIndex)
         idx = read_nat(_lean.ctor_get(o, 0))
