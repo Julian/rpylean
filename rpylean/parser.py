@@ -635,6 +635,7 @@ class _IndType(object):
         self.num_params = 0
         self.num_indices = 0
         self.name_idxs = []
+        self.ctor_nidxs = []
         self.levels = []
 
 
@@ -751,6 +752,7 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
             num_indices=type_data.num_indices,
             is_reflexive=type_data.is_reflexive,
             is_recursive=type_data.is_recursive,
+            ctor_names=[builder.names[i] for i in type_data.ctor_nidxs],
         )
         builder.register_declaration(inductive)
         induct_by_name[name] = inductive
@@ -818,6 +820,8 @@ def _parse_inductive_type(cursor):
         key = cursor.read_key()
         if key == "all":
             type_data.name_idxs = cursor.read_int_array()
+        elif key == "ctors":
+            type_data.ctor_nidxs = cursor.read_int_array()
         elif key == "isRec":
             type_data.is_recursive = cursor.read_bool()
         elif key == "isReflexive":

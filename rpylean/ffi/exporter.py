@@ -200,34 +200,23 @@ class Exporter(object):
         if self._indexed:
             return
         self._indexed = True
-        # The walker doesn't yet store `induct` on ctors or the ctors
-        # list on inductives, so we recover the mapping here by routing
-        # each ctor to the inductive (in the registered pool) whose
-        # mutual `names` list contains the ctor's dotted-name parent.
+        # Authoritative source-order ctors come from each inductive's
+        # `ctor_names` field; the reverse ctor→induct map falls out of
+        # that. Recursors don't store reverse links on the inductive,
+        # so we still scan all recursors and append to `_recs_of`.
         for name in self.decls:
             decl = self.decls[name]
             kind = decl.w_kind
-            if isinstance(kind, W_Constructor):
-                induct = self._infer_ctor_induct(name)
-                if induct is not None and induct in self.decls:
-                    ind_decl = self.decls[induct]
-                    if isinstance(ind_decl.w_kind, W_Inductive):
-                        self._induct_for_ctor[name] = induct
-                        if induct not in self._ctors_of:
-                            self._ctors_of[induct] = []
-                        self._ctors_of[induct].append(name)
+            if isinstance(kind, W_Inductive):
+                self._ctors_of[name] = list(kind.ctor_names)
+                for cname in kind.ctor_names:
+                    self._induct_for_ctor[cname] = name
             elif isinstance(kind, W_Recursor):
                 for induct in kind.names:
                     if induct in self.decls:
                         if induct not in self._recs_of:
                             self._recs_of[induct] = []
                         self._recs_of[induct].append(name)
-
-    def _infer_ctor_induct(self, ctor_name):
-        parts = ctor_name.components
-        if len(parts) <= 1:
-            return None
-        return Name(parts[:-1])
 
     # ---- dump_constant: dispatch + dep walk ----------------------------
 

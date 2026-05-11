@@ -219,11 +219,15 @@ class TestName(object):
     def test_structure(self):
         Point = Name.simple("Point")
         x_nat, y_nat = x.binder(type=NAT), y.binder(type=NAT)
-        constructor = forall(x_nat, y_nat)(Point.const())
-        struct = Point.structure(type=TYPE, constructor=constructor)
+        mk = Point.child("mk").constructor(
+            type=forall(x_nat, y_nat)(Point.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        struct = Point.structure(type=TYPE, constructor=mk)
         assert struct == Point.inductive(
             type=TYPE,
-            constructors=[constructor],
+            constructors=[mk],
         )
 
     def test_constructor(self):

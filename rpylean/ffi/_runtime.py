@@ -396,6 +396,10 @@ def read_constant_info(ci):
         return name.axiom(type=type_expr, levels=levels)
     if tag == 5:  # inductInfo
         all_names = _read_name_list(_lean.ctor_get(val, 3))
+        # InductiveVal.ctors lives at field 4 — list of ctor names in
+        # source-declaration order. Authoritative for "what ctors does
+        # this inductive have, in what order?".
+        ctor_names = _read_name_list(_lean.ctor_get(val, 4))
         num_params = read_nat(_lean.ctor_get(val, 1)).toint()
         num_indices = read_nat(_lean.ctor_get(val, 2)).toint()
         num_nested = read_nat(_lean.ctor_get(val, 5)).toint()
@@ -411,6 +415,7 @@ def read_constant_info(ci):
             num_nested=num_nested,
             is_recursive=is_rec,
             is_reflexive=is_reflexive,
+            ctor_names=ctor_names,
         )
         return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
     if tag == 6:  # ctorInfo

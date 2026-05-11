@@ -680,6 +680,7 @@ class Name(_Item):
         is_reflexive=False,
         is_recursive=False,
         levels=None,
+        ctor_names=None,
     ):
         """
         Make an inductive type declaration with this name.
@@ -693,6 +694,7 @@ class Name(_Item):
             num_indices=num_indices,
             is_reflexive=is_reflexive,
             is_recursive=is_recursive,
+            ctor_names=ctor_names,
         )
         return self.declaration(type=type, w_kind=inductive, levels=levels)
 
@@ -3649,6 +3651,7 @@ class W_Inductive(W_DeclarationKind):
         num_indices,
         is_reflexive,
         is_recursive,
+        ctor_names=None,
     ):
         self.names = names
         self.constructors = constructors
@@ -3658,6 +3661,15 @@ class W_Inductive(W_DeclarationKind):
         self.num_indices = num_indices
         self.is_reflexive = is_reflexive
         self.is_recursive = is_recursive
+        #: The constructor names in their source-declaration order, as
+        #: stored on Lean's `InductiveVal.ctors`. This is authoritative
+        #: for "what constructors does this inductive have, in what
+        #: order?". `self.constructors` is the same set but as walked
+        #: `W_Declaration`s (and is sometimes empty for the FFI walker
+        #: path, since ctors arrive as separate `each_constant` items).
+        if ctor_names is None:
+            ctor_names = [c.name for c in constructors]
+        self.ctor_names = ctor_names
 
     def dump_to(self, exporter, decl):
         # Mark every mutual-block member visited up front so dep walks
