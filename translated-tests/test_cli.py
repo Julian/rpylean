@@ -102,6 +102,71 @@ def test_ffi_check_against_pinned_toolchain():
     assert process.returncode == 0, (stdout, stderr)
 
 
+def test_ffi_export_emits_valid_meta_and_decls():
+    """`ffi export --filter ... Init` writes a valid lean4export-format
+    NDJSON header, contains the requested constants, and round-trips
+    through the parser side (`check --print=names`) without errors."""
+    if not _lean_on_path():
+        import pytest
+        pytest.skip("`lean` not on PATH")
+
+    process = rpylean(
+        "ffi", "export", "--filter", "Nat.succ", "Init",
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, (stdout, stderr)
+    lines = stdout.splitlines()
+    assert lines, stdout
+    assert lines[0].startswith('{"meta"'), lines[0]
+    assert any('"inductive"' in line for line in lines), stdout
+    assert any('"str":"succ"' in line for line in lines), stdout
+
+
+def test_ffi_export_roundtrips_through_check(tmpdir):
+    """The two halves of rpylean agree: the names the FFI walker emits
+    are the names the NDJSON parser reads back. Pulls a tiny, stable
+    slice of Init so this stays fast and not coupled to iota gaps."""
+    if not _lean_on_path():
+        import pytest
+        pytest.skip("`lean` not on PATH")
+
+    process = rpylean(
+        "ffi", "export", "--filter", "Nat.succ,Eq.refl", "Init",
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, (stdout, stderr)
+
+    exported = tmpdir.join("nat-eq.ndjson")
+    # `tmpdir.write` is text-mode and chokes on non-ASCII bytes from
+    # Init names like `α`; write raw bytes through.
+    with open(str(exported), "wb") as f:
+        f.write(stdout)
+
+    check = rpylean("check", "--print=names", str(exported))
+    out, err = check.communicate()
+    assert check.returncode == 0, (out, err)
+    names = out.splitlines()
+    assert "Nat.succ" in names, names
+    assert "Eq.refl" in names, names
+
+
+def test_ffi_repl_loads_env_via_command():
+    """`ffi repl --command "print Nat.succ" Init` starts the REPL with
+    Init imported, runs the one command, and exits. Smoke-tests that
+    the FFI-loaded env behaves like the export-loaded one for the
+    existing REPL commands."""
+    if not _lean_on_path():
+        import pytest
+        pytest.skip("`lean` not on PATH")
+
+    process = rpylean(
+        "ffi", "repl", "--command", "print Nat.succ", "Init",
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, (stdout, stderr)
+    assert "constructor Nat.succ" in stdout, stdout
+
+
 def test_export_error_does_not_skip_remaining_files(tmpdir):
     invalid = tmpdir.join("invalid.ndjson")
     invalid.write(INVALID_EXPORT)

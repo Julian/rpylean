@@ -168,6 +168,18 @@ class Exporter(object):
         for name in self.decls:
             self.dump_constant(self.decls[name])
 
+    def dump_named(self, names):
+        """Emit only the named declarations (and their transitive deps).
+
+        The topological dep walk in `dump_constant` pulls in every
+        referenced constant, so the output stays self-contained as long
+        as those deps were registered."""
+        self._index_inductive_members()
+        for name in names:
+            d = self.decls.get(name, None)
+            if d is not None:
+                self.dump_constant(d)
+
     def _index_inductive_members(self):
         if self._indexed:
             return

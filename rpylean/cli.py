@@ -394,7 +394,13 @@ def repl(self, args, stdin, stdout, stderr):
 @ffi.subcommand(
     ["*MODULES"],
     help="Emit lean4export-format NDJSON for a Lean toolchain via FFI.",
-    options=[],
+    options=[
+        (
+            "filter",
+            "only emit the given declaration(s) (plus their transitive "
+            "dependencies), separated by commas",
+        ),
+    ],
 )
 def export(self, args, stdin, stdout, stderr):
     modules = args.varargs
@@ -404,6 +410,11 @@ def export(self, args, stdin, stdout, stderr):
     if prefix is None:
         return 1
 
+    filter_names = None
+    if args.options["filter"] is not None:
+        filter_names = [Name.from_str(each)
+                        for each in args.options["filter"].split(",")]
+
     exporter = Exporter(stdout)
     with FFI.from_prefix(prefix) as ffi_obj:
         env_obj = ffi_obj.import_modules(modules)
@@ -411,7 +422,10 @@ def export(self, args, stdin, stdout, stderr):
         ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
     exporter.emit_meta()
-    exporter.dump_all()
+    if filter_names is None:
+        exporter.dump_all()
+    else:
+        exporter.dump_named(filter_names)
     if collector.skipped:
         stderr.write("[ffi export] skipped %d unwalkable constants\n"
                      % collector.skipped)
