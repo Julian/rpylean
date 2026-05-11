@@ -54,9 +54,6 @@ _CASES = _arena_cases()
 # Tests known to fail today — see commit message / arena yaml description.
 # Removing an entry here means the bug is fixed.
 _XFAIL = {
-    "constlevels": "crashes via W_Let.infer AssertionError "
-                   "instead of cleanly rejecting "
-                   "(arena: kernel UB regression test)",
     "nat-rec-rules": "wrongly accepts a proof of False built from a "
                      "fabricated Nat.rec succ rule "
                      "(arena: soundness — recursor-rule validation gap)",

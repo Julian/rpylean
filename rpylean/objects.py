@@ -2655,7 +2655,16 @@ class W_Let(W_Expr):
 
     def infer(self, env):
         self.type.infer(env).whnf(env).expect_sort(env)
-        assert env.def_eq(self.value.infer(env), self.type)
+        # The let's value must match the declared type. Surface a real
+        # W_TypeError instead of asserting so malformed exports (like
+        # the arena's `constlevels` regression) get cleanly rejected
+        # rather than crashing the process.
+        inferred_value_type = self.value.infer(env)
+        if not env.def_eq(inferred_value_type, self.type):
+            raise W_TypeError(
+                env, self.value, self.type,
+                inferred_type=inferred_value_type,
+            )
         body_type = self.body.instantiate(self.value)
         return body_type.infer(env)
 
