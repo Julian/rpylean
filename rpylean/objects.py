@@ -819,6 +819,17 @@ class Binder(_Item):
     def __repr__(self):
         return "<Binder %s>" % (self.name.str())
 
+    def export_info_name(self):
+        """The `binderInfo` discriminator string used in `lean4export`'s
+        NDJSON encoding of lambda/forall binders."""
+        if self.left == "{":
+            return "implicit"
+        if self.left == "[":
+            return "instImplicit"
+        if self.left == "⦃":
+            return "strictImplicit"
+        return "default"
+
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
@@ -919,6 +930,15 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
+    def emit_to(self, exporter):
+        """
+        Emit this level as a `lean4export`-format record, returning the
+        assigned id. Each non-zero subclass implements; `W_LevelZero`
+        is handled directly by `Exporter.level_id` (reserved id 0) and
+        never reaches this hook.
+        """
+        raise NotImplementedError
+
     def str(self):
         parts = []
         text, balance = self.pretty_parts()
@@ -1033,6 +1053,13 @@ class W_LevelSucc(W_Level):
         joined = " + ".join(str(part) for part in self.pretty_parts() if part)
         return "<Level {}>".format(joined)
 
+    def emit_to(self, exporter):
+        parent = exporter.level_id(self.parent)
+        lid = exporter._next_level
+        exporter._next_level += 1
+        exporter.stream.write('{"il":%d,"succ":%d}\n' % (lid, parent))
+        return lid
+
     @leq
     def leq(self, other, balance):
         return self.parent.leq(other, balance - 1)
@@ -1068,6 +1095,14 @@ class W_LevelMax(W_Level):
 
     def __repr__(self):
         return "<Level max({!r} {!r})>".format(self.lhs, self.rhs)
+
+    def emit_to(self, exporter):
+        l = exporter.level_id(self.lhs)
+        r = exporter.level_id(self.rhs)
+        lid = exporter._next_level
+        exporter._next_level += 1
+        exporter.stream.write('{"il":%d,"max":[%d,%d]}\n' % (lid, l, r))
+        return lid
 
     @leq
     def leq(self, other, balance):
@@ -1112,6 +1147,14 @@ class W_LevelIMax(W_Level):
     def __repr__(self):
         return "<Level imax({!r} {!r})>".format(self.lhs, self.rhs)
 
+    def emit_to(self, exporter):
+        l = exporter.level_id(self.lhs)
+        r = exporter.level_id(self.rhs)
+        lid = exporter._next_level
+        exporter._next_level += 1
+        exporter.stream.write('{"il":%d,"imax":[%d,%d]}\n' % (lid, l, r))
+        return lid
+
     @leq
     def leq(self, other, balance):
         return self.rhs.imax_leq(self, other, balance)
@@ -1139,6 +1182,13 @@ class W_LevelParam(W_Level):
 
     def __repr__(self):
         return "<Level {}>".format(self.name.str())
+
+    def emit_to(self, exporter):
+        nid = exporter.name_id(self.name)
+        lid = exporter._next_level
+        exporter._next_level += 1
+        exporter.stream.write('{"il":%d,"param":%d}\n' % (lid, nid))
+        return lid
 
     @leq
     def leq(self, other, balance):
@@ -1199,6 +1249,23 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
+    def collect_consts_into(self, out, seen):
+        """
+        Append every `W_Const` name reachable from this expression
+        into ``out``, using ``seen`` (a name-keyed dict) to dedup.
+        Base case: nothing to collect. Subclasses that hold sub-exprs
+        override this to recurse; `W_Const` is the only leaf that adds.
+        """
+
+    def emit_to(self, exporter):
+        """
+        Emit this expression as a `lean4export`-format record, returning
+        the assigned id. Each concrete W_Expr subclass implements its
+        own record shape; the default raises so that an unimplemented
+        variant fails loudly rather than silently producing nothing.
+        """
+        raise RuntimeError("emit_to: unsupported expression")
+
     def head(self):
         """
         The head of an application spine.
@@ -1365,6 +1432,12 @@ class W_BVar(W_Expr):
     def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]
 
+    def emit_to(self, exporter):
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write('{"ie":%d,"bvar":%d}\n' % (eid, self.id))
+        return eid
+
     def syntactic_eq(self, other):
         return self.id == other.id
 
@@ -1458,6 +1531,14 @@ class W_LitStr(W_Expr):
     def __repr__(self):
         return repr(self.val)
 
+    def emit_to(self, exporter):
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write(
+            '{"ie":%d,"strVal":%s}\n' % (eid, exporter.quote(self.val)),
+        )
+        return eid
+
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
@@ -1530,6 +1611,13 @@ class W_Sort(W_Expr):
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_Sort)
         return self.level.eq(other.level)
+
+    def emit_to(self, exporter):
+        lid = exporter.level_id(self.level)
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write('{"ie":%d,"sort":%d}\n' % (eid, lid))
+        return eid
 
     def tokens(self, constants, mark=None, span_holder=None):
         """Return a token list for this Sort, tagged as a sort."""
@@ -1616,6 +1704,22 @@ class W_Const(W_Expr):
 
     def __repr__(self):
         return "`%s" % self.str()
+
+    def collect_consts_into(self, out, seen):
+        if self.name not in seen:
+            seen[self.name] = True
+            out.append(self.name)
+
+    def emit_to(self, exporter):
+        nid = exporter.name_id(self.name)
+        level_ids = [exporter.level_id(l) for l in self.levels]
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        us = "[" + ",".join([str(l) for l in level_ids]) + "]"
+        exporter.stream.write(
+            '{"ie":%d,"const":{"name":%d,"us":%s}}\n' % (eid, nid, us),
+        )
+        return eid
 
     def child(self, part):
         """
@@ -1795,6 +1899,15 @@ class W_LitNat(W_Expr):
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
+
+    def emit_to(self, exporter):
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write(
+            '{"ie":%d,"natVal":%s}\n'
+            % (eid, exporter.quote(self.val.str())),
+        )
+        return eid
 
     def str(self):
         return self.val.str()
@@ -2063,6 +2176,20 @@ class W_Proj(W_Expr):
 
     def contains_const(self, name):
         return self.struct_expr.contains_const(name)
+
+    def collect_consts_into(self, out, seen):
+        self.struct_expr.collect_consts_into(out, seen)
+
+    def emit_to(self, exporter):
+        sid = exporter.expr_id(self.struct_expr)
+        tid = exporter.name_id(self.struct_name)
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write(
+            '{"ie":%d,"proj":{"typeName":%d,"idx":%d,"struct":%d}}\n'
+            % (eid, tid, self.field_index, sid),
+        )
+        return eid
 
     def _any_subexpr_invalid_index(self, inductive):
         return inductive._has_invalid_index_occurrence(self.struct_expr)
@@ -2373,6 +2500,26 @@ class W_FunBase(W_Expr):
         return (self.binder.type.contains_const(name)
                 or self.body.contains_const(name))
 
+    def collect_consts_into(self, out, seen):
+        self.binder.type.collect_consts_into(out, seen)
+        self.body.collect_consts_into(out, seen)
+
+    # Subclasses (W_Lambda, W_ForAll) set this to their lean4export tag.
+    _export_tag = ""
+
+    def emit_to(self, exporter):
+        bnid = exporter.name_id(self.binder.name)
+        tid = exporter.expr_id(self.binder.type)
+        bid = exporter.expr_id(self.body)
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        bi = self.binder.export_info_name()
+        exporter.stream.write(
+            '{"ie":%d,"%s":{"name":%d,"type":%d,"body":%d,"binderInfo":"%s"}}\n'
+            % (eid, self._export_tag, bnid, tid, bid, bi),
+        )
+        return eid
+
     def _any_subexpr_invalid_index(self, inductive):
         return (inductive._has_invalid_index_occurrence(self.binder.type)
                 or inductive._has_invalid_index_occurrence(self.body))
@@ -2407,6 +2554,8 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
+    _export_tag = "forallE"
+
     def infer(self, env):
         return _iter_infer(env, self)
 
@@ -2534,6 +2683,8 @@ def _binder_group_tokens(group, constants):
 
 
 class W_Lambda(W_FunBase):
+    _export_tag = "lam"
+
     def tokens(self, constants, mark=None, span_holder=None):
         binders = []
         binder_used = []
@@ -2634,6 +2785,24 @@ class W_Let(W_Expr):
         return (self.type.contains_const(name)
                 or self.value.contains_const(name)
                 or self.body.contains_const(name))
+
+    def collect_consts_into(self, out, seen):
+        self.type.collect_consts_into(out, seen)
+        self.value.collect_consts_into(out, seen)
+        self.body.collect_consts_into(out, seen)
+
+    def emit_to(self, exporter):
+        nid = exporter.name_id(self.name)
+        tid = exporter.expr_id(self.type)
+        vid = exporter.expr_id(self.value)
+        bid = exporter.expr_id(self.body)
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write(
+            '{"ie":%d,"letE":{"name":%d,"type":%d,"value":%d,"body":%d,'
+            '"nondep":false}}\n' % (eid, nid, tid, vid, bid),
+        )
+        return eid
 
     def _any_subexpr_invalid_index(self, inductive):
         return (inductive._has_invalid_index_occurrence(self.type)
@@ -2737,6 +2906,20 @@ class W_App(W_Expr):
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
+
+    def collect_consts_into(self, out, seen):
+        self.fn.collect_consts_into(out, seen)
+        self.arg.collect_consts_into(out, seen)
+
+    def emit_to(self, exporter):
+        fn = exporter.expr_id(self.fn)
+        arg = exporter.expr_id(self.arg)
+        eid = exporter._next_expr
+        exporter._next_expr += 1
+        exporter.stream.write(
+            '{"ie":%d,"app":{"fn":%d,"arg":%d}}\n' % (eid, fn, arg),
+        )
+        return eid
 
     def _any_subexpr_invalid_index(self, inductive):
         return (inductive._has_invalid_index_occurrence(self.fn)
@@ -3328,6 +3511,17 @@ class W_DeclarationKind(_Item):
         """The name of the field at ``index``, or None."""
         return None
 
+    def dump_to(self, exporter, decl):
+        """Emit ``decl`` as a `lean4export`-format record.
+
+        Default behaviour: emit as an axiom (covers `W_Axiom` and the
+        walker's `quotInfo`-as-axiom collapse). Subclasses that need a
+        different record shape override.
+        """
+        exporter._visited[decl.name] = True
+        exporter._dump_deps(decl.type)
+        exporter._emit_axiom(decl)
+
 
 #: Reducibility hints. For regular we use positive ints.
 HINT_OPAQUE = -2
@@ -3338,6 +3532,12 @@ class W_Definition(W_DeclarationKind):
     def __init__(self, value, hint):
         self.value = value
         self.hint = hint
+
+    def dump_to(self, exporter, decl):
+        exporter._visited[decl.name] = True
+        exporter._dump_deps(decl.type)
+        exporter._dump_deps(self.value)
+        exporter._emit_def(decl, self.value, self.hint)
 
     def type_check(self, type, env):
         type_type = type.infer(env)
@@ -3379,6 +3579,12 @@ class W_Opaque(W_Definition):
         self.value = value
         self.hint = HINT_OPAQUE
 
+    def dump_to(self, exporter, decl):
+        exporter._visited[decl.name] = True
+        exporter._dump_deps(decl.type)
+        exporter._dump_deps(self.value)
+        exporter._emit_opaque(decl, self.value)
+
     def get_delta_reduce_target(self):
         return None
 
@@ -3386,6 +3592,12 @@ class W_Opaque(W_Definition):
 class W_Theorem(W_DeclarationKind):
     def __init__(self, value):
         self.value = value
+
+    def dump_to(self, exporter, decl):
+        exporter._visited[decl.name] = True
+        exporter._dump_deps(decl.type)
+        exporter._dump_deps(self.value)
+        exporter._emit_thm(decl, self.value)
 
     def type_check(self, type, env):
         type_type = type.infer(env)
@@ -3442,6 +3654,9 @@ class W_Inductive(W_DeclarationKind):
         self.num_indices = num_indices
         self.is_reflexive = is_reflexive
         self.is_recursive = is_recursive
+
+    def dump_to(self, exporter, decl):
+        exporter._dump_inductive_group(decl)
 
     def field_name(self, index):
         if len(self.constructors) != 1:
@@ -3604,6 +3819,17 @@ class W_Constructor(W_DeclarationKind):
         self.num_params = num_params
         self.num_fields = num_fields
 
+    def dump_to(self, exporter, decl):
+        induct_name = exporter._induct_for_ctor.get(decl.name, None)
+        if induct_name is not None and induct_name in exporter.decls:
+            exporter.dump_constant(exporter.decls[induct_name])
+            return
+        # Unattached ctor (parent inductive wasn't registered) — emit
+        # as an axiom so the output stays self-contained.
+        exporter._visited[decl.name] = True
+        exporter._dump_deps(decl.type)
+        exporter._emit_axiom(decl)
+
     def type_check(self, type, env):
         # TODO - implement type checking
         # This includes checking that num_params and num_fields match the declared ctype
@@ -3646,6 +3872,14 @@ class W_Recursor(W_DeclarationKind):
         self.num_minors = num_minors
         self.names = names
         self.rules = rules
+
+    def dump_to(self, exporter, decl):
+        # Each mutual-block inductive's `dump_to` emits the whole
+        # group (types + ctors + recs). Recursors come back via that
+        # path; the standalone recursor visit just routes there.
+        for ind in self.names:
+            if ind in exporter.decls:
+                exporter.dump_constant(exporter.decls[ind])
 
     def type_check(self, type, env):
         # TODO - implement type checking

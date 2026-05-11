@@ -34,27 +34,10 @@ from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,
     Name,
-    W_App,
-    W_BVar,
-    W_Const,
     W_Constructor,
-    W_Definition,
-    W_ForAll,
     W_Inductive,
-    W_Lambda,
-    W_LevelIMax,
-    W_LevelMax,
-    W_LevelParam,
-    W_LevelSucc,
     W_LevelZero,
-    W_Let,
-    W_LitNat,
-    W_LitStr,
-    W_Opaque,
-    W_Proj,
     W_Recursor,
-    W_Sort,
-    W_Theorem,
     name_dict,
 )
 from rpylean.parser import EXPORT_VERSION
@@ -65,16 +48,6 @@ META_LINE = (
     '{"meta":{"exporter":{"name":"rpylean","version":"0"},'
     '"format":{"version":"%s"}}}\n' % EXPORT_VERSION
 )
-
-
-_BINDER_INFO_NAME = {
-    "(": "default", "{": "implicit",
-    "[": "instImplicit", "\xe2\xa6\x83": "strictImplicit",
-}
-
-
-def _binder_info(binder):
-    return _BINDER_INFO_NAME.get(binder.left, "default")
 
 
 def _json_string(s):
@@ -149,6 +122,11 @@ class Exporter(object):
     def emit_meta(self):
         self.stream.write(META_LINE)
 
+    def quote(self, s):
+        """JSON-quote `s` for embedding inside an export record. Used
+        by `W_LitStr.emit_to` / `W_LitNat.emit_to` (and `_name_id`)."""
+        return _json_string(s)
+
     def dump_all(self):
         """Emit every registered declaration in dependency order."""
         self._index_inductive_members()
@@ -195,93 +173,25 @@ class Exporter(object):
     def dump_constant(self, decl):
         if decl.name in self._visited:
             return
-        kind = decl.w_kind
-        if isinstance(kind, W_Inductive):
-            self._dump_inductive_group(decl)
-            return
-        if isinstance(kind, W_Constructor):
-            induct_name = self._induct_for_ctor.get(decl.name, None)
-            if induct_name is not None and induct_name in self.decls:
-                self.dump_constant(self.decls[induct_name])
-            else:
-                # Unattached ctor (parent inductive wasn't registered).
-                # Fall back to emitting as an axiom so the output stays
-                # self-contained.
-                self._visited[decl.name] = True
-                self._dump_deps(decl.type)
-                self._emit_axiom(decl)
-            return
-        if isinstance(kind, W_Recursor):
-            for ind in kind.names:
-                if ind in self.decls:
-                    self.dump_constant(self.decls[ind])
-            # If none of the mutual inductives were registered, the
-            # recursor goes nowhere — drop it. (lean4export panics; we
-            # prefer to keep going so the rest of the export survives.)
-            return
-
-        self._visited[decl.name] = True
-        self._dump_deps(decl.type)
-        if isinstance(kind, W_Definition):
-            self._dump_deps(kind.value)
-            self._emit_simple(decl, "def", kind.value, hint=kind.hint)
-            return
-        if isinstance(kind, W_Theorem):
-            self._dump_deps(kind.value)
-            self._emit_simple(decl, "thm", kind.value)
-            return
-        if isinstance(kind, W_Opaque):
-            self._dump_deps(kind.value)
-            self._emit_simple(decl, "opaque", kind.value)
-            return
-        # axiomInfo (and quotInfo, which the walker collapses into axiom).
-        self._emit_axiom(decl)
+        decl.w_kind.dump_to(self, decl)
 
     def _dump_deps(self, expr):
         names = []
         seen = name_dict()
-        self._collect_consts(expr, names, seen)
+        expr.collect_consts_into(names, seen)
         for n in names:
             d = self.decls.get(n, None)
             if d is not None:
                 self.dump_constant(d)
 
-    def _collect_consts(self, expr, out, seen):
-        if isinstance(expr, W_Const):
-            if expr.name not in seen:
-                seen[expr.name] = True
-                out.append(expr.name)
-            return
-        if isinstance(expr, W_App):
-            self._collect_consts(expr.fn, out, seen)
-            self._collect_consts(expr.arg, out, seen)
-            return
-        if isinstance(expr, W_Lambda):
-            self._collect_consts(expr.binder.type, out, seen)
-            self._collect_consts(expr.body, out, seen)
-            return
-        if isinstance(expr, W_ForAll):
-            self._collect_consts(expr.binder.type, out, seen)
-            self._collect_consts(expr.body, out, seen)
-            return
-        if isinstance(expr, W_Let):
-            self._collect_consts(expr.type, out, seen)
-            self._collect_consts(expr.value, out, seen)
-            self._collect_consts(expr.body, out, seen)
-            return
-        if isinstance(expr, W_Proj):
-            self._collect_consts(expr.struct_expr, out, seen)
-            return
-        # BVar / Sort / LitNat / LitStr: nothing to chase.
-
     # ---- primitives ---------------------------------------------------
 
-    def _name_id(self, name):
+    def name_id(self, name):
         if name in self._names:
             return self._names[name]
         parts = name.components
         parent = Name(parts[:-1]) if parts else Name.ANONYMOUS
-        parent_id = self._name_id(parent)
+        parent_id = self.name_id(parent)
         nid = self._next_name
         self._next_name += 1
         self._names[name] = nid
@@ -294,183 +204,72 @@ class Exporter(object):
             self.stream.write('{"in":%d,"str":%s}\n' % (nid, payload))
         return nid
 
-    def _level_id(self, level):
+    def level_id(self, level):
         if isinstance(level, W_LevelZero):
             return 0
         uid = compute_unique_id(level)
         cached = self._level_ids.get(uid, -1)
         if cached != -1:
             return cached
-        lid = self._emit_level(level)
+        lid = level.emit_to(self)
         self._level_ids[uid] = lid
         return lid
 
-    def _emit_level(self, level):
-        if isinstance(level, W_LevelSucc):
-            parent = self._level_id(level.parent)
-            lid = self._next_level
-            self._next_level += 1
-            self.stream.write('{"il":%d,"succ":%d}\n' % (lid, parent))
-            return lid
-        if isinstance(level, W_LevelMax):
-            l = self._level_id(level.lhs)
-            r = self._level_id(level.rhs)
-            lid = self._next_level
-            self._next_level += 1
-            self.stream.write('{"il":%d,"max":[%d,%d]}\n' % (lid, l, r))
-            return lid
-        if isinstance(level, W_LevelIMax):
-            l = self._level_id(level.lhs)
-            r = self._level_id(level.rhs)
-            lid = self._next_level
-            self._next_level += 1
-            self.stream.write('{"il":%d,"imax":[%d,%d]}\n' % (lid, l, r))
-            return lid
-        if isinstance(level, W_LevelParam):
-            nid = self._name_id(level.name)
-            lid = self._next_level
-            self._next_level += 1
-            self.stream.write('{"il":%d,"param":%d}\n' % (lid, nid))
-            return lid
-        raise RuntimeError("emit: unknown level kind")
-
-    def _expr_id(self, expr):
+    def expr_id(self, expr):
         uid = compute_unique_id(expr)
         cached = self._expr_ids.get(uid, -1)
         if cached != -1:
             return cached
-        eid = self._emit_expr(expr)
+        eid = expr.emit_to(self)
         self._expr_ids[uid] = eid
-        return eid
-
-    def _emit_expr(self, expr):
-        if isinstance(expr, W_BVar):
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write('{"ie":%d,"bvar":%d}\n' % (eid, expr.id))
-            return eid
-        if isinstance(expr, W_Sort):
-            lid = self._level_id(expr.level)
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write('{"ie":%d,"sort":%d}\n' % (eid, lid))
-            return eid
-        if isinstance(expr, W_Const):
-            nid = self._name_id(expr.name)
-            level_ids = [self._level_id(l) for l in expr.levels]
-            eid = self._next_expr
-            self._next_expr += 1
-            us = "[" + ",".join([str(l) for l in level_ids]) + "]"
-            self.stream.write(
-                '{"ie":%d,"const":{"name":%d,"us":%s}}\n' % (eid, nid, us),
-            )
-            return eid
-        if isinstance(expr, W_App):
-            fn = self._expr_id(expr.fn)
-            arg = self._expr_id(expr.arg)
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write(
-                '{"ie":%d,"app":{"fn":%d,"arg":%d}}\n' % (eid, fn, arg),
-            )
-            return eid
-        if isinstance(expr, W_Lambda):
-            return self._emit_binder(expr, "lam")
-        if isinstance(expr, W_ForAll):
-            return self._emit_binder(expr, "forallE")
-        if isinstance(expr, W_Let):
-            return self._emit_let(expr)
-        if isinstance(expr, W_LitNat):
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write(
-                '{"ie":%d,"natVal":%s}\n' % (eid, _json_string(expr.val.str())),
-            )
-            return eid
-        if isinstance(expr, W_LitStr):
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write(
-                '{"ie":%d,"strVal":%s}\n' % (eid, _json_string(expr.val)),
-            )
-            return eid
-        if isinstance(expr, W_Proj):
-            sid = self._expr_id(expr.struct_expr)
-            tid = self._name_id(expr.struct_name)
-            eid = self._next_expr
-            self._next_expr += 1
-            self.stream.write(
-                '{"ie":%d,"proj":{"typeName":%d,"idx":%d,"struct":%d}}\n'
-                % (eid, tid, expr.field_index, sid),
-            )
-            return eid
-        raise RuntimeError("emit_expr: unsupported expression")
-
-    def _emit_binder(self, expr, tag):
-        bnid = self._name_id(expr.binder.name)
-        tid = self._expr_id(expr.binder.type)
-        bid = self._expr_id(expr.body)
-        eid = self._next_expr
-        self._next_expr += 1
-        bi = _binder_info(expr.binder)
-        self.stream.write(
-            '{"ie":%d,"%s":{"name":%d,"type":%d,"body":%d,"binderInfo":"%s"}}\n'
-            % (eid, tag, bnid, tid, bid, bi),
-        )
-        return eid
-
-    def _emit_let(self, expr):
-        nid = self._name_id(expr.name)
-        tid = self._expr_id(expr.type)
-        vid = self._expr_id(expr.value)
-        bid = self._expr_id(expr.body)
-        eid = self._next_expr
-        self._next_expr += 1
-        self.stream.write(
-            '{"ie":%d,"letE":{"name":%d,"type":%d,"value":%d,"body":%d,'
-            '"nondep":false}}\n' % (eid, nid, tid, vid, bid),
-        )
         return eid
 
     # ---- declaration emit ---------------------------------------------
 
     def _level_param_ids(self, names):
-        return [self._name_id(n) for n in names]
+        return [self.name_id(n) for n in names]
 
     def _ids_list(self, ids):
         return "[" + ",".join([str(i) for i in ids]) + "]"
 
     def _emit_axiom(self, decl):
-        nid = self._name_id(decl.name)
+        nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
-        tid = self._expr_id(decl.type)
+        tid = self.expr_id(decl.type)
         self.stream.write(
             '{"axiom":{"name":%d,"levelParams":%s,"type":%d,'
             '"isUnsafe":false}}\n'
             % (nid, self._ids_list(levels), tid),
         )
 
-    def _emit_simple(self, decl, tag, value, hint=0):
-        nid = self._name_id(decl.name)
+    def _emit_def(self, decl, value, hint):
+        nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
-        tid = self._expr_id(decl.type)
-        vid = self._expr_id(value)
-        if tag == "def":
-            hint_json = self._hint_json(hint)
-            self.stream.write(
-                '{"def":{"name":%d,"levelParams":%s,"type":%d,'
-                '"value":%d,"hints":%s,"safety":"safe","all":[%d]}}\n'
-                % (nid, self._ids_list(levels), tid, vid, hint_json, nid),
-            )
-            return
-        if tag == "thm":
-            self.stream.write(
-                '{"thm":{"name":%d,"levelParams":%s,"type":%d,'
-                '"value":%d,"all":[%d]}}\n'
-                % (nid, self._ids_list(levels), tid, vid, nid),
-            )
-            return
-        # opaque
+        tid = self.expr_id(decl.type)
+        vid = self.expr_id(value)
+        self.stream.write(
+            '{"def":{"name":%d,"levelParams":%s,"type":%d,'
+            '"value":%d,"hints":%s,"safety":"safe","all":[%d]}}\n'
+            % (nid, self._ids_list(levels), tid, vid,
+               self._hint_json(hint), nid),
+        )
+
+    def _emit_thm(self, decl, value):
+        nid = self.name_id(decl.name)
+        levels = self._level_param_ids(decl.levels)
+        tid = self.expr_id(decl.type)
+        vid = self.expr_id(value)
+        self.stream.write(
+            '{"thm":{"name":%d,"levelParams":%s,"type":%d,'
+            '"value":%d,"all":[%d]}}\n'
+            % (nid, self._ids_list(levels), tid, vid, nid),
+        )
+
+    def _emit_opaque(self, decl, value):
+        nid = self.name_id(decl.name)
+        levels = self._level_param_ids(decl.levels)
+        tid = self.expr_id(decl.type)
+        vid = self.expr_id(value)
         self.stream.write(
             '{"opaque":{"name":%d,"levelParams":%s,"type":%d,'
             '"value":%d,"isUnsafe":false,"all":[%d]}}\n'
@@ -545,16 +344,16 @@ class Exporter(object):
     def _ctor_names_for(self, ind_name):
         out = []
         for cn in self._ctors_of.get(ind_name, []):
-            out.append(self._name_id(cn))
+            out.append(self.name_id(cn))
         return out
 
     def _inductive_val_json(self, decl):
         kind = decl.w_kind
         assert isinstance(kind, W_Inductive)
-        nid = self._name_id(decl.name)
+        nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
-        tid = self._expr_id(decl.type)
-        all_ids = self._ids_list([self._name_id(n) for n in kind.names])
+        tid = self.expr_id(decl.type)
+        all_ids = self._ids_list([self.name_id(n) for n in kind.names])
         ctor_ids = self._ids_list(self._ctor_names_for(decl.name))
         return (
             '{"name":%d,"levelParams":%s,"type":%d,'
@@ -571,10 +370,10 @@ class Exporter(object):
     def _constructor_val_json(self, decl, induct_name):
         kind = decl.w_kind
         assert isinstance(kind, W_Constructor)
-        nid = self._name_id(decl.name)
+        nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
-        tid = self._expr_id(decl.type)
-        induct_id = self._name_id(induct_name)
+        tid = self.expr_id(decl.type)
+        induct_id = self.name_id(induct_name)
         return (
             '{"name":%d,"levelParams":%s,"type":%d,'
             '"induct":%d,"cidx":0,"numParams":%d,"numFields":%d,'
@@ -586,14 +385,14 @@ class Exporter(object):
     def _recursor_val_json(self, decl):
         kind = decl.w_kind
         assert isinstance(kind, W_Recursor)
-        nid = self._name_id(decl.name)
+        nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
-        tid = self._expr_id(decl.type)
-        all_ids = self._ids_list([self._name_id(n) for n in kind.names])
+        tid = self.expr_id(decl.type)
+        all_ids = self._ids_list([self.name_id(n) for n in kind.names])
         rule_parts = []
         for rule in kind.rules:
-            ctor_id = self._name_id(rule.ctor_name)
-            rhs_id = self._expr_id(rule.rhs)
+            ctor_id = self.name_id(rule.ctor_name)
+            rhs_id = self.expr_id(rule.rhs)
             rule_parts.append(
                 '{"ctor":%d,"nfields":%d,"rhs":%d}'
                 % (ctor_id, rule.num_fields, rhs_id),
