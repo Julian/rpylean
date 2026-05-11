@@ -39,6 +39,18 @@ just rpylean <any CLI args>
 
 The argument you pass should be a file exported via [`lean4export`](https://github.com/leanprover/lean4export/).
 
+#### Directly against a Lean toolchain
+
+The `ffi` subcommand talks to a real Lean toolchain via FFI, skipping the `lean4export` round trip:
+
+```sh
+rpylean ffi check Init                     # type-check every constant in `Init`
+rpylean ffi check --filter Nat.succ Init   # only specific declarations
+rpylean ffi export Init                    # emit lean4export-format NDJSON
+```
+
+The Lean prefix is auto-detected from `$LEAN_PREFIX` or `lean --print-prefix`. Pass `--prefix /path/to/lean` to override.
+
 ### Translating
 
 To translate `rpylean` *without* a JIT and build a binary run:
