@@ -143,6 +143,22 @@ class Exporter(object):
         self._visited[decl.name] = True
         self.dump_deps(decl.type)
 
+    def mark_emitted(self, name):
+        """Record `name` as already emitted, so subsequent
+        `dump_constant` calls for it short-circuit. Used by
+        `W_Inductive.dump_to` to mark every member of a mutual block
+        (the inductives themselves plus their ctors and recursors)
+        before recurring into dep walks that may cycle back."""
+        self._visited[name] = True
+
+    def ctors_of(self, ind_name):
+        """The constructor names registered as belonging to `ind_name`."""
+        return self._ctors_of.get(ind_name, [])
+
+    def recs_of(self, ind_name):
+        """The recursor names registered as targeting `ind_name`."""
+        return self._recs_of.get(ind_name, [])
+
     def parent_inductive(self, ctor_name):
         """The inductive name a registered constructor belongs to, or
         `None` if the parent wasn't part of the export pool."""
@@ -330,42 +346,15 @@ class Exporter(object):
 
     # ---- inductive blocks ---------------------------------------------
 
-    def emit_inductive_group(self, ind_decl):
+    def emit_inductive_block(self, ind_decl, ctor_pairs, rec_decls):
+        """Format a single `{"inductive": {types, ctors, recs}}` record.
+
+        Coordination — gathering ctor_pairs and rec_decls, marking
+        mutual members visited, dumping deps — lives in
+        `W_Inductive.dump_to`. This method only handles the JSON
+        formatting."""
         kind = ind_decl.w_kind
         assert isinstance(kind, W_Inductive)
-
-        # Mark all mutual block members visited up front so deps cycling
-        # back through any of them short-circuit.
-        for n in kind.names:
-            self._visited[n] = True
-
-        ctor_pairs = []  # list of (induct_name, decl)
-        rec_decls = []
-        for n in kind.names:
-            for cname in self._ctors_of.get(n, []):
-                cd = self.decls.get(cname, None)
-                if cd is not None:
-                    self._visited[cname] = True
-                    ctor_pairs.append((n, cd))
-        for n in kind.names:
-            for rname in self._recs_of.get(n, []):
-                rd = self.decls.get(rname, None)
-                if rd is not None:
-                    self._visited[rname] = True
-                    rec_decls.append(rd)
-
-        for n in kind.names:
-            d = self.decls.get(n, None)
-            if d is not None:
-                self.dump_deps(d.type)
-        for (_n, cd) in ctor_pairs:
-            self.dump_deps(cd.type)
-        for rd in rec_decls:
-            self.dump_deps(rd.type)
-            rkind = rd.w_kind
-            assert isinstance(rkind, W_Recursor)
-            for rule in rkind.rules:
-                self.dump_deps(rule.rhs)
 
         type_records = []
         for n in kind.names:

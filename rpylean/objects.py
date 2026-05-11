@@ -3660,7 +3660,40 @@ class W_Inductive(W_DeclarationKind):
         self.is_recursive = is_recursive
 
     def dump_to(self, exporter, decl):
-        exporter.emit_inductive_group(decl)
+        # Mark every mutual-block member visited up front so dep walks
+        # cycling back through any of them short-circuit before the
+        # block emit completes.
+        for n in self.names:
+            exporter.mark_emitted(n)
+        ctor_pairs = []   # [(induct_name, ctor_decl)]
+        rec_decls = []
+        for n in self.names:
+            for cname in exporter.ctors_of(n):
+                cd = exporter.decls.get(cname, None)
+                if cd is not None:
+                    exporter.mark_emitted(cname)
+                    ctor_pairs.append((n, cd))
+            for rname in exporter.recs_of(n):
+                rd = exporter.decls.get(rname, None)
+                if rd is not None:
+                    exporter.mark_emitted(rname)
+                    rec_decls.append(rd)
+        # Dep walks in the order lean4export uses: every member's type,
+        # then every ctor's type, then every recursor's type plus the
+        # rhs of each of its rules.
+        for n in self.names:
+            d = exporter.decls.get(n, None)
+            if d is not None:
+                exporter.dump_deps(d.type)
+        for (_n, cd) in ctor_pairs:
+            exporter.dump_deps(cd.type)
+        for rd in rec_decls:
+            exporter.dump_deps(rd.type)
+            rkind = rd.w_kind
+            assert isinstance(rkind, W_Recursor)
+            for rule in rkind.rules:
+                exporter.dump_deps(rule.rhs)
+        exporter.emit_inductive_block(decl, ctor_pairs, rec_decls)
 
     def field_name(self, index):
         if len(self.constructors) != 1:
