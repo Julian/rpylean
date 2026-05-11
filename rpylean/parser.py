@@ -643,6 +643,7 @@ class _IndCtor(object):
 
     def __init__(self):
         self.nidx = 0
+        self.induct_nidx = 0
         self.type_idx = 0
         self.num_params = 0
         self.num_fields = 0
@@ -728,6 +729,11 @@ def _register_single_inductive(builder, type_data, ctor_records, rec_records):
 
 
 def _register_mutual_inductive(builder, types, ctor_records, rec_records):
+    # Track each block-member's W_Inductive by name so we can wire each
+    # constructor back to its parent below — `_iota_reduce` / W_Proj
+    # both index into `inductive_decl.w_kind.constructors` and crash if
+    # we leave it empty for mutual blocks.
+    induct_by_name = objects.name_dict()
     for type_data in types:
         name = builder.names[type_data.nidx]
         if type_data.is_reflexive:
@@ -747,9 +753,15 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
             is_recursive=type_data.is_recursive,
         )
         builder.register_declaration(inductive)
+        induct_by_name[name] = inductive
 
     for ctor in ctor_records:
-        _register_constructor(builder, ctor)
+        ctor_decl = _register_constructor(builder, ctor)
+        induct_name = builder.names[ctor.induct_nidx]
+        parent = induct_by_name.get(induct_name, None)
+        if parent is not None:
+            assert isinstance(parent.w_kind, objects.W_Inductive)
+            parent.w_kind.constructors.append(ctor_decl)
     for rec in rec_records:
         _register_recursor(builder, rec)
 
@@ -849,7 +861,7 @@ def _parse_constructor(cursor):
         if key == "cidx":
             cursor.read_int()  # not used
         elif key == "induct":
-            cursor.read_int()  # not used
+            ctor.induct_nidx = cursor.read_int()
         elif key == "levelParams":
             ctor.levels = cursor.read_int_array()
         elif key == "name":
