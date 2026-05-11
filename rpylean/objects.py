@@ -3885,20 +3885,25 @@ class W_Recursor(W_DeclarationKind):
                 exporter.dump_constant(exporter.decls[ind])
 
     def type_check(self, type, env):
-        # Shape-level validation: every rule must correspond to a real
-        # constructor of one of the mutual-block inductives, with
-        # matching `num_fields`, and the rule set must cover every
-        # constructor exactly once. This catches malformed exports
-        # where the rec rules don't align with the inductive's ctors
-        # (extra/missing rules, ctor name typos, wrong nfields).
-        # *Doesn't* catch wrong-rhs bugs (e.g. arena's `nat-rec-rules`);
-        # that needs a structural rhs comparison against the canonically
-        # derived rule, which is its own piece of work.
+        # Shape-level + rhs-head validation. Catches malformed exports
+        # where:
+        #   - the rec rules don't align with the inductive's ctors
+        #     (extra/missing rules, ctor name typos, wrong nfields)
+        #   - the rhs body's head isn't the minor for the rule's
+        #     constructor (e.g. arena's `nat-rec-rules`: a fabricated
+        #     `Nat.rec` succ rule whose body returns the zero-case
+        #     minor instead of the succ-case minor).
+        #
+        # Doesn't catch every wrong-rhs class: a body using the right
+        # minor with the wrong args still slips through. Full canonical
+        # rhs derivation + def-eq comparison would be a separate piece
+        # of work.
         #
         # Skip validation entirely if the parent inductive isn't yet in
         # scope — for the streaming FFI checker, recursors can arrive
         # before their inductive is registered. The check will fire
-        # later when the whole env exists.
+        # later under the standard (parser-based) flow where inductives
+        # are registered in their block before their recursors.
         all_ctors = []
         for ind_name in self.names:
             if ind_name not in env.declarations:
@@ -3923,17 +3928,19 @@ class W_Recursor(W_DeclarationKind):
                     len(all_ctors),
                 ),
             )
+        # ctor_name → ctor decl, for looking up `num_fields` per rule.
         ctor_by_name = name_dict()
         for ctor in all_ctors:
             ctor_by_name[ctor.name] = ctor
-        for rule in self.rules:
-            ctor = ctor_by_name.get(rule.ctor_name, None)
-            if ctor is None:
+        for rule_idx in range(len(self.rules)):
+            rule = self.rules[rule_idx]
+            if rule.ctor_name not in ctor_by_name:
                 return W_InvalidRecursorRule(
                     env,
                     "rule's ctor %s is not a constructor of "
                     "the inductive" % rule.ctor_name.str(),
                 )
+            ctor = ctor_by_name[rule.ctor_name]
             ctor_kind = ctor.w_kind
             assert isinstance(ctor_kind, W_Constructor)
             if rule.num_fields != ctor_kind.num_fields:
@@ -3944,6 +3951,53 @@ class W_Recursor(W_DeclarationKind):
                        rule.num_fields,
                        ctor_kind.num_fields),
                 )
+            # The minor for this rule is bound at position `rule_idx`
+            # in the recursor's minor lambda chain — minor lambdas
+            # appear in the same order as `rules`, since both reflect
+            # the constructors' source-declaration order.
+            error = self._check_rule_rhs_head(env, rule, rule_idx)
+            if error is not None:
+                return error
+
+    def _check_rule_rhs_head(self, env, rule, ctor_idx):
+        """Verify the rule's rhs is `λ params... motives... minors...
+        fields... ⇒ minor_c args` — i.e. peeled to its body, its head
+        spine is the minor for the corresponding constructor.
+
+        The recursor's iota reduction expects this layout: when the
+        rec is applied to `params, motives, minors, c fields`, the
+        rhs beta-reduces by feeding those into its outer lambdas,
+        leaving the body to apply the right minor to the c-fields
+        and the appropriate IHs.
+        """
+        num_lambdas = (self.num_params + self.num_motives
+                       + self.num_minors + rule.num_fields)
+        body = rule.rhs
+        for _ in range(num_lambdas):
+            if not isinstance(body, W_Lambda):
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule for %s rhs has fewer than %d outer "
+                    "lambdas (expected one each for params, motives, "
+                    "minors, and the ctor's fields)"
+                    % (rule.ctor_name.str(), num_lambdas),
+                )
+            body = body.body
+        # Inside the body, after wrapping `fun params, motives, minors,
+        # fields ⇒ body`, the minor for ctor at index `ctor_idx` is at
+        # bvar position `num_fields + (num_minors - 1 - ctor_idx)` —
+        # innermost-binds-lowest puts fields at 0..num_fields-1, then
+        # the minors (last minor at num_fields, first at num_fields +
+        # num_minors - 1).
+        expected_bvar = rule.num_fields + self.num_minors - 1 - ctor_idx
+        head = body.head()
+        if not isinstance(head, W_BVar) or head.id != expected_bvar:
+            return W_InvalidRecursorRule(
+                env,
+                "rule for %s rhs head is not the corresponding minor "
+                "(expected bvar #%d)"
+                % (rule.ctor_name.str(), expected_bvar),
+            )
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]

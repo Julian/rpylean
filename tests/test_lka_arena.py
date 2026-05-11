@@ -53,11 +53,7 @@ _CASES = _arena_cases()
 
 # Tests known to fail today — see commit message / arena yaml description.
 # Removing an entry here means the bug is fixed.
-_XFAIL = {
-    "nat-rec-rules": "wrongly accepts a proof of False built from a "
-                     "fabricated Nat.rec succ rule "
-                     "(arena: soundness — recursor-rule validation gap)",
-}
+_XFAIL = {}
 
 
 def _id(case):

@@ -680,14 +680,60 @@ class TestRecursorRuleShape(object):
     def test_well_shaped_rule_accepted(self):
         from rpylean.objects import W_RecRule
         U, mk, ind = self._build_unit_ind()
+        # Canonical rhs for the only ctor of a 1-ctor inductive with
+        # num_params=0, num_motives=1, num_minors=1, num_fields=0:
+        # `fun motive minor_mk => minor_mk` — bvar 0 inside two
+        # lambdas. The binder types don't matter for the head check.
+        motive_binder = Name.simple("motive").binder(type=TYPE)
+        minor_binder = Name.simple("minor_mk").binder(type=U.const())
+        good_rhs = fun(motive_binder, minor_binder)(b0)
         good_rec = U.child("rec").recursor(
             type=U.const(),
-            rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=U.const())],
+            num_motives=1,
+            num_minors=1,
+            rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=good_rhs)],
             names=[U],
         )
         env = Environment.having([ind, mk, good_rec])
         errors = list(env.type_check([good_rec]))
         assert errors == []
+
+    def test_rhs_head_uses_wrong_minor_rejected(self):
+        """The arena `nat-rec-rules` shape: rule has correct count/
+        ctor/nfields but its body returns the wrong minor (Nat.succ's
+        rule returns `zero_case` instead of `succ_case`)."""
+        from rpylean.objects import W_RecRule, W_InvalidRecursorRule
+        # Two-ctor inductive, recursor with num_minors=2.
+        B = Name.simple("B")
+        ff = B.child("false").constructor(
+            type=B.const(), num_params=0, num_fields=0,
+        )
+        tt = B.child("true").constructor(
+            type=B.const(), num_params=0, num_fields=0,
+        )
+        ind = B.inductive(type=PROP, constructors=[ff, tt])
+        motive_binder = Name.simple("motive").binder(type=PROP)
+        m_false = Name.simple("m_false").binder(type=B.const())
+        m_true = Name.simple("m_true").binder(type=B.const())
+        # The rule for `B.true` (ctor_idx=1) should return `m_true`
+        # (bvar 0). Build it returning `m_false` (bvar 1) instead.
+        bad_rhs = fun(motive_binder, m_false, m_true)(b1)
+        good_false_rhs = fun(motive_binder, m_false, m_true)(b1)
+        bad_rec = B.child("rec").recursor(
+            type=B.const(),
+            num_motives=1,
+            num_minors=2,
+            rules=[
+                W_RecRule(ctor_name=ff.name, num_fields=0,
+                          rhs=good_false_rhs),
+                W_RecRule(ctor_name=tt.name, num_fields=0, rhs=bad_rhs),
+            ],
+            names=[B],
+        )
+        env = Environment.having([ind, ff, tt, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
 
 
 class TestDiagnosticTokens(object):
