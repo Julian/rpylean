@@ -47,6 +47,7 @@ The `ffi` subcommand talks to a real Lean toolchain via FFI, skipping the `lean4
 rpylean ffi check Init                     # type-check every constant in `Init`
 rpylean ffi check --filter Nat.succ Init   # only specific declarations
 rpylean ffi export Init                    # emit lean4export-format NDJSON
+rpylean ffi repl Init                      # REPL with `Init` loaded
 ```
 
 The Lean prefix is auto-detected from `$LEAN_PREFIX` or `lean --print-prefix`. Pass `--prefix /path/to/lean` to override.

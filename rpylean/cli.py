@@ -343,6 +343,52 @@ def check(self, args, stdin, stdout, stderr):
 
 @ffi.subcommand(
     ["*MODULES"],
+    help="Open a REPL with a Lean toolchain's environment loaded via FFI.",
+    options=[
+        (
+            "command",
+            "run a single REPL command and exit instead of starting an interactive session",
+        ),
+    ],
+)
+def repl(self, args, stdin, stdout, stderr):
+    modules = args.varargs
+    if not modules:
+        return 1
+    prefix = args.options["prefix"]
+    if prefix is None:
+        prefix = detect_prefix()
+    if prefix is None:
+        stderr.write(
+            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
+        )
+        return 1
+
+    builder = EnvironmentBuilder()
+    collector = _FFILoader(builder)
+    with FFI.from_prefix(prefix) as ffi_obj:
+        env_obj = ffi_obj.import_modules(modules)
+        ffi_obj.each_constant(env_obj, collector)
+        ffi_obj.release(env_obj)
+    if collector.skipped:
+        stderr.write("[ffi repl] skipped %d unwalkable constants\n"
+                     % collector.skipped)
+
+    from rpylean import repl
+
+    command = args.options["command"]
+    if command is not None:
+        stdoutw = writer_from_arg("auto", stdout)
+        stderrw = writer_from_arg("auto", stderr)
+        ok = repl.dispatch(builder.env, command, stdin, stdoutw, stderrw)
+        return 0 if ok else 1
+
+    repl.interact(builder.env)
+    return 0
+
+
+@ffi.subcommand(
+    ["*MODULES"],
     help="Emit lean4export-format NDJSON for a Lean toolchain via FFI.",
     options=[],
 )
@@ -399,6 +445,24 @@ class _ExportCollector(_FFICollectorBase):
             self.skipped += 1
             return False
         self.exporter.register(decl)
+        return False
+
+
+class _FFILoader(_FFICollectorBase):
+    """Walk → register, no type-checking. Used by `ffi repl` to populate
+    a builder with the full env before dropping into interactive mode."""
+
+    def __init__(self, builder):
+        self.builder = builder
+        self.skipped = 0
+
+    def on_constant(self, name_obj, ci_obj):
+        try:
+            decl = read_constant_info(ci_obj)
+        except UnsupportedLeanMPZ:
+            self.skipped += 1
+            return False
+        self.builder.register_declaration(decl)
         return False
 
 
