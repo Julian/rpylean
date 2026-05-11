@@ -267,6 +267,20 @@ ffi = cli.subcli(
 )
 
 
+def _resolve_prefix(args, stderr):
+    """Resolve the `--prefix` option, falling back to `$LEAN_PREFIX` /
+    `lean --print-prefix`. Returns `None` (after writing a usage hint to
+    `stderr`) if nothing turns up; otherwise returns the path."""
+    prefix = args.options["prefix"]
+    if prefix is None:
+        prefix = detect_prefix()
+    if prefix is None:
+        stderr.write(
+            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
+        )
+    return prefix
+
+
 @ffi.subcommand(
     ["*MODULES"],
     help="Type-check declarations from a Lean toolchain via FFI.",
@@ -290,13 +304,8 @@ def check(self, args, stdin, stdout, stderr):
     modules = args.varargs
     if not modules:
         return 1
-    prefix = args.options["prefix"]
+    prefix = _resolve_prefix(args, stderr)
     if prefix is None:
-        prefix = detect_prefix()
-    if prefix is None:
-        stderr.write(
-            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
-        )
         return 1
 
     stderrw = writer_from_arg(args.options["color"], stderr)
@@ -355,13 +364,8 @@ def repl(self, args, stdin, stdout, stderr):
     modules = args.varargs
     if not modules:
         return 1
-    prefix = args.options["prefix"]
+    prefix = _resolve_prefix(args, stderr)
     if prefix is None:
-        prefix = detect_prefix()
-    if prefix is None:
-        stderr.write(
-            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
-        )
         return 1
 
     builder = EnvironmentBuilder()
@@ -396,13 +400,8 @@ def export(self, args, stdin, stdout, stderr):
     modules = args.varargs
     if not modules:
         return 1
-    prefix = args.options["prefix"]
+    prefix = _resolve_prefix(args, stderr)
     if prefix is None:
-        prefix = detect_prefix()
-    if prefix is None:
-        stderr.write(
-            "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
-        )
         return 1
 
     exporter = Exporter(stdout)
@@ -420,76 +419,70 @@ def export(self, args, stdin, stdout, stderr):
 
 
 class _FFICollectorBase(object):
-    """Common base for `FFI.each_constant` callbacks so RPython can
-    keep both in the same call-site annotation."""
+    """Common base for `FFI.each_constant` callbacks.
+
+    Handles the shared MPZ-skip discipline: constants whose
+    representation we can't yet walk (specifically `LeanMPZ`-encoded
+    `Nat` literals) are counted and skipped. Other walker failures —
+    unexpected ctor tags, layout drift — are left to propagate, because
+    silently treating them as "skipped" would mask real bugs.
+
+    Subclasses override `_handle` to do something with each walked
+    declaration. Returning `True` signals an early-abort and ends the
+    walk.
+    """
 
     skipped = 0
 
     def on_constant(self, name_obj, ci_obj):
+        try:
+            decl = read_constant_info(ci_obj)
+        except UnsupportedLeanMPZ:
+            self.skipped += 1
+            return False
+        return self._handle(decl)
+
+    def _handle(self, decl):
         raise NotImplementedError
 
 
 class _ExportCollector(_FFICollectorBase):
-    """Walk every constant, register it with the Exporter, then let
-    `dump_all` emit them all in dependency order. Same MPZ-skip
-    discipline as `_FFICollector`."""
+    """Register every walked constant with the Exporter; `dump_all`
+    emits them all in dependency order afterwards."""
 
     def __init__(self, exporter):
         self.exporter = exporter
         self.skipped = 0
 
-    def on_constant(self, name_obj, ci_obj):
-        try:
-            decl = read_constant_info(ci_obj)
-        except UnsupportedLeanMPZ:
-            self.skipped += 1
-            return False
+    def _handle(self, decl):
         self.exporter.register(decl)
         return False
 
 
 class _FFILoader(_FFICollectorBase):
-    """Walk → register, no type-checking. Used by `ffi repl` to populate
-    a builder with the full env before dropping into interactive mode."""
+    """Register every walked constant into a builder; used by `ffi
+    repl` to populate the env before dropping into interactive mode."""
 
     def __init__(self, builder):
         self.builder = builder
         self.skipped = 0
 
-    def on_constant(self, name_obj, ci_obj):
-        try:
-            decl = read_constant_info(ci_obj)
-        except UnsupportedLeanMPZ:
-            self.skipped += 1
-            return False
+    def _handle(self, decl):
         self.builder.register_declaration(decl)
         return False
 
 
 class _FFICollector(_FFICollectorBase):
-    """Walk → register → stream-check, one declaration at a time.
-
-    Constants whose representation we can't yet walk (specifically
-    `LeanMPZ`-encoded `Nat` literals) are counted and skipped. Other
-    failures during walking — unexpected ctor tags, layout drift — are
-    left to propagate, because silently turning them into "skipped"
-    would mask real bugs as ordinary unsupported-encoding noise.
-
-    `on_constant` returns True when the checker has signalled an
-    early-abort (e.g. `--max-fail` reached).
-    """
+    """Register → stream-check, one declaration at a time. Returns
+    `True` when the checker has signalled an early-abort (e.g.
+    `--max-fail` reached)."""
 
     def __init__(self, builder, checker):
         self.builder = builder
         self.checker = checker
         self.skipped = 0
 
-    def on_constant(self, name_obj, ci_obj):
-        try:
-            decl = read_constant_info(ci_obj)
-        except UnsupportedLeanMPZ:
-            self.skipped += 1
-            return False
+    def _handle(self, decl):
         self.builder.register_declaration(decl)
         return self.checker.on_declaration(decl)
 
