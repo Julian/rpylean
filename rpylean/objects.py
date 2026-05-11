@@ -452,23 +452,29 @@ def name_eq(name, other):
     return name.components == other.components
 
 
-@elidable
-def _name_hash(name):
-    # See `name_eq` for why this lives at module level rather than
-    # being passed as the unbound `Name.hash` method.
-    return name.hash()
-
-
 @specialize.call_location()
 def name_dict():
     """A fresh empty `r_dict` keyed by `Name`.
 
-    Specialised per call site so each dict gets its own value-type
-    annotation (otherwise RPython unifies, e.g., the `Name → bool`
-    filter dict with the `Name → W_Declaration` env dict).
+    Both the value annotation AND the hash function need to be
+    specialised per call site. RPython merges the arg type of any
+    function shared across r_dict instances; if we used a single
+    module-level ``_name_hash``, the annotator would widen its arg to
+    `_Item` once we had multiple `name_dict()` sites with differing
+    value types, and r_dict's hlinvoke would mismatch its callers
+    (which always pass `Name`). Defining the eq/hash funcs *inside*
+    this call_location-specialised helper gives each call site its
+    own pair of function PBCs, breaking the merge.
     """
     from rpython.rlib.objectmodel import r_dict
-    return r_dict(name_eq, _name_hash)
+
+    def _eq(a, b):
+        return a.components == b.components
+
+    def _hash(name):
+        return name.hash()
+
+    return r_dict(_eq, _hash)
 
 
 class Name(_Item):
