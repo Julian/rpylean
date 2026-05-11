@@ -2933,13 +2933,30 @@ class W_App(W_Expr):
 
             old_ty = major_premise.infer(env)
             old_ty_base = old_ty.head()
-            assert isinstance(old_ty_base, W_Const)
+            # The major premise's inferred-type head can be non-W_Const
+            # when iota is invoked inside an unfinished def-eq probe
+            # against a still-stuck term — observed for `Eq.rec` while
+            # checking some Init theorems whose proofs run congruence
+            # through chains of `Eq.mpr`. Bail rather than asserting:
+            # the caller will treat this app as irreducible, the
+            # def-eq attempt fails up the stack, and a real type error
+            # surfaces in a context where we can report it.
+            if not isinstance(old_ty_base, W_Const):
+                return False, self
 
-            assert len(decl.w_kind.names) == 1
+            # Mutual-inductive blocks legitimately have len(names) > 1;
+            # k-like reduction can only operate on a single-inductive
+            # context. Same bail-out reasoning.
+            if len(decl.w_kind.names) != 1:
+                return False, self
             inductive_decl = get_decl(env.declarations, decl.w_kind.names[0])
             assert isinstance(inductive_decl.w_kind, W_Inductive)
 
-            assert len(inductive_decl.w_kind.constructors) == 1
+            # `_register_mutual_inductive` leaves `constructors=[]`,
+            # so k-like for a mutual block's inductive would index out
+            # of range. Stay safe.
+            if len(inductive_decl.w_kind.constructors) != 1:
+                return False, self
             ctor_decl = inductive_decl.w_kind.constructors[0]
             assert isinstance(ctor_decl.w_kind, W_Constructor)
 
