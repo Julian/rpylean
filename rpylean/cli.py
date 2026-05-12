@@ -411,6 +411,7 @@ def export(self, args, stdin, stdout, stderr):
 
     exporter = Exporter(stdout)
     with FFI.from_prefix(prefix) as ffi_obj:
+        exporter.set_lean_meta(ffi_obj.lean_version, ffi_obj.lean_githash)
         env_obj = ffi_obj.import_modules(modules)
         collector = _ExportCollector(exporter)
         ffi_obj.each_constant(env_obj, collector)

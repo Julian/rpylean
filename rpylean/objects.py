@@ -599,6 +599,23 @@ class Name(_Item):
                 return True
         return False
 
+    @property
+    def is_internal(self):
+        """
+        Is any string component of this name internally-generated?
+
+        Mirrors `Lean.Name.isInternal`: a name is internal if any
+        string component starts with `_` (e.g., `_private`, `_hyg`,
+        `_uniq`). Numeric components don't trigger, but they don't
+        block either — internality propagates through the parent
+        chain. `lean4export` uses this to skip internal names as
+        export *roots*; they still appear when reachable via deps.
+        """
+        for part in self.components:
+            if isinstance(part, str) and len(part) > 0 and part[0] == "_":
+                return True
+        return False
+
     def in_namespace(self, base):
         """
         Calculate what this name looks like inside the given base namespace.
@@ -2519,8 +2536,12 @@ class W_FunBase(W_Expr):
         self.binder.type.collect_consts_into(out, seen)
         self.body.collect_consts_into(out, seen)
 
-    # Subclasses (W_Lambda, W_ForAll) set this to their lean4export tag.
+    # Subclasses (W_Lambda, W_ForAll) set this to their lean4export tag
+    # and `_ie_first_tag` to whether `"ie"` precedes the discriminator
+    # alphabetically (true for `"lam"` since `'i' < 'l'`, false for
+    # `"forallE"` since `'f' < 'i'`).
     _export_tag = ""
+    _ie_first_tag = False
 
     def emit_to(self, exporter):
         bnid = exporter.name_id(self.binder.name)
@@ -2528,10 +2549,16 @@ class W_FunBase(W_Expr):
         bid = exporter.expr_id(self.body)
         eid = exporter.next_expr_id()
         bi = self.binder.export_info_name()
-        exporter.stream.write(
-            '{"%s":{"binderInfo":"%s","body":%d,"name":%d,"type":%d},"ie":%d}\n'
-            % (self._export_tag, bi, bid, bnid, tid, eid),
-        )
+        if self._ie_first_tag:
+            exporter.stream.write(
+                '{"ie":%d,"%s":{"binderInfo":"%s","body":%d,"name":%d,"type":%d}}\n'
+                % (eid, self._export_tag, bi, bid, bnid, tid),
+            )
+        else:
+            exporter.stream.write(
+                '{"%s":{"binderInfo":"%s","body":%d,"name":%d,"type":%d},"ie":%d}\n'
+                % (self._export_tag, bi, bid, bnid, tid, eid),
+            )
         return eid
 
     def _any_subexpr_invalid_index(self, inductive):
@@ -2569,6 +2596,7 @@ class W_FunBase(W_Expr):
 
 class W_ForAll(W_FunBase):
     _export_tag = "forallE"
+    _ie_first_tag = False  # `'f' < 'i'`
 
     def infer(self, env):
         return _iter_infer(env, self)
@@ -2698,6 +2726,7 @@ def _binder_group_tokens(group, constants):
 
 class W_Lambda(W_FunBase):
     _export_tag = "lam"
+    _ie_first_tag = True  # `'i' < 'l'`
 
     def tokens(self, constants, mark=None, span_holder=None):
         binders = []

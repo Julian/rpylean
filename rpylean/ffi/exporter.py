@@ -44,10 +44,22 @@ from rpylean.parser import EXPORT_VERSION
 from rpython.rlib.objectmodel import compute_unique_id
 
 
-META_LINE = (
-    '{"meta":{"exporter":{"name":"rpylean","version":"0"},'
-    '"format":{"version":"%s"}}}\n' % EXPORT_VERSION
-)
+try:
+    from rpylean._version import __version__ as _RPYLEAN_VERSION
+except ImportError:
+    _RPYLEAN_VERSION = "unknown"
+
+
+def _meta_line(lean_version, lean_githash):
+    # Keys in `meta` go in alphabetical order to match `lean4export`'s
+    # output (which inherits Lean's `Json.compress` key sort): exporter,
+    # format, lean.
+    return (
+        '{"meta":{"exporter":{"name":"rpylean","version":"%s"},'
+        '"format":{"version":"%s"},'
+        '"lean":{"githash":"%s","version":"%s"}}}\n'
+        % (_RPYLEAN_VERSION, EXPORT_VERSION, lean_githash, lean_version)
+    )
 
 
 def _json_string(s):
@@ -110,6 +122,10 @@ class Exporter(object):
         self._ctors_of = name_dict()            # induct_name → [ctor_name]
         self._recs_of = name_dict()             # induct_name → [rec_name]
         self._indexed = False
+        # Set by the CLI via `set_lean_meta` before `emit_meta` so we
+        # can include the Lean toolchain's own version + git hash.
+        self._lean_version = ""
+        self._lean_githash = ""
 
     # ---- registration -------------------------------------------------
 
@@ -119,8 +135,14 @@ class Exporter(object):
         Must be called for every constant before `dump_all`."""
         self.decls[decl.name] = decl
 
+    def set_lean_meta(self, version, githash):
+        """Record the Lean toolchain's version + git hash, to be
+        included on the `"lean"` field of the meta line."""
+        self._lean_version = version
+        self._lean_githash = githash
+
     def emit_meta(self):
-        self.stream.write(META_LINE)
+        self.stream.write(_meta_line(self._lean_version, self._lean_githash))
 
     def quote(self, s):
         """JSON-quote `s` for embedding inside an export record. Used
@@ -177,12 +199,16 @@ class Exporter(object):
         return lid
 
     def dump_all(self):
-        """Emit every registered declaration in dependency order."""
+        """Emit every registered declaration in dependency order.
+
+        Internal names (`Name.is_internal`: any component starts with
+        `_`) aren't used as export roots — `lean4export` does the same
+        — but they still come out when reachable from a non-internal
+        root via `dump_deps`."""
         self._index_inductive_members()
-        # Drive emission in registration order so the choice of "root"
-        # constants is deterministic; deps come out before each root.
         for name in self.decls:
-            self.dump_constant(self.decls[name])
+            if not name.is_internal:
+                self.dump_constant(self.decls[name])
 
     def dump_named(self, names):
         """Emit only the named declarations (and their transitive deps).

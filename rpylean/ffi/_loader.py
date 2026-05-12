@@ -189,6 +189,20 @@ class FFI(object):
         self._dec_ref_cold = rffi.cast(_lean.dec_ref_cold,
                                        dlsym(S, "lean_dec_ref_cold"))
 
+        # `l_Lean_versionString` and `l_Lean_githash` are static data
+        # symbols holding `lean_object*` pointers to interned Strings.
+        # dlsym returns the address of the slot; deref once to get the
+        # String, then read its C string. They're initialised by
+        # `initialize_Lean` which we've already called.
+        self.lean_version = _lean.string_cstr(
+            rffi.cast(rffi.CArrayPtr(_lean.Object),
+                      dlsym(S, "l_Lean_versionString"))[0],
+        )
+        self.lean_githash = _lean.string_cstr(
+            rffi.cast(rffi.CArrayPtr(_lean.Object),
+                      dlsym(S, "l_Lean_githash"))[0],
+        )
+
         if self.prefix is not None:
             self._init_search_path(self.prefix)
         self._layout_self_test()
