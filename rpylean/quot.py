@@ -4,7 +4,7 @@ Definitions of Lean's quotient type.
 from rpylean.objects import Name, W_BVar, forall
 
 
-u, v = Name.simple("u").level(), Name.simple("v").level()
+u, v = Name.simple("u").as_level_param(), Name.simple("v").as_level_param()
 alpha = Name.simple("α").implicit_binder(type=u.sort())
 Quot = Name.simple("Quot")
 r = Name.simple("r")

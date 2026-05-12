@@ -110,10 +110,12 @@ class _WalkState(object):
     def __init__(self):
         self.exprs = {}    # int (ptr addr) → W_Expr
         self.levels = {}   # int (ptr addr) → W_Level
+        self.names = {}    # int (ptr addr) → Name
 
     def reset(self):
         self.exprs.clear()
         self.levels.clear()
+        self.names.clear()
 
 
 _WALK = _WalkState()
@@ -183,6 +185,16 @@ def _read_mpz(o):
 def read_name(o):
     if _lean.is_scalar(o):
         return Name.ANONYMOUS
+    key = _ptr_key(o)
+    cached = _WALK.names.get(key, None)
+    if cached is not None:
+        return cached
+    result = _read_name_uncached(o)
+    _WALK.names[key] = result
+    return result
+
+
+def _read_name_uncached(o):
     tag = _lean.ptr_tag(o)
     if tag == 1:  # str
         parent = read_name(_lean.ctor_get(o, 0))
@@ -223,7 +235,7 @@ def _read_level_uncached(o):
         return read_level(_lean.ctor_get(o, 0)).imax(
             read_level(_lean.ctor_get(o, 1)))
     if tag == 4:  # param
-        return read_name(_lean.ctor_get(o, 0)).level()
+        return read_name(_lean.ctor_get(o, 0)).as_level_param()
     raise RuntimeError("read_level: unexpected tag")
 
 

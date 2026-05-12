@@ -303,7 +303,18 @@ class Exporter(object):
     # ---- declaration emit ---------------------------------------------
 
     def _level_param_ids(self, names):
-        return [self.name_id(n) for n in names]
+        # Match `lean4export`'s `dumpUparams`: register each name, then
+        # also emit each as a `Level.param` record up front, so the
+        # output reads "name, param, name, param, ..." before any expr
+        # starts referencing them. `Name.as_level_param()` is cached so the
+        # `W_LevelParam` we materialise here is `is`-identical to the
+        # one the walker handed `read_level` for `Lean.Level.param`;
+        # the existing `compute_unique_id`-keyed dedup then handles
+        # any later references for free.
+        out = [self.name_id(n) for n in names]
+        for n in names:
+            self.level_id(n.as_level_param())
+        return out
 
     def _ids_list(self, ids):
         return "[" + ",".join([str(i) for i in ids]) + "]"

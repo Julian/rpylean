@@ -202,7 +202,7 @@ def _parse_universe(cursor, builder):
     elif disc == "param":
         nidx = cursor.read_int()
         cursor.expect('}')
-        builder.register_level(uidx, builder.names[nidx].level())
+        builder.register_level(uidx, builder.names[nidx].as_level_param())
     else:
         raise ValueError("unknown universe discriminator: %s" % disc)
 

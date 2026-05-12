@@ -501,6 +501,10 @@ def name_dict():
 class Name(_Item):
     def __init__(self, components):
         self.components = components
+        # Lazy cache for `self.level()`; deferred to first call so
+        # that `Name` can be defined before `W_LevelParam`. None
+        # before first access; set to a `W_LevelParam` once.
+        self._level_cache = None
 
     def __repr__(self):
         return "`%s" % (self.str(),)
@@ -797,11 +801,27 @@ class Name(_Item):
         """
         return W_Proj(self, field_index, struct_expr)
 
-    def level(self):
+    def as_level_param(self):
         """
-        Construct a level parameter from this name.
+        Return this name's `W_LevelParam`. Cached: every reader
+        (the FFI walker's `read_level` for `Lean.Level.param`, the
+        exporter's pre-emit, tests, etc.) sees the same instance,
+        so `compute_unique_id`-based dedup in the exporter works
+        without a separate name-keyed cache.
+
+        Spelled `as_level_param` rather than `level` because the
+        latter would shadow `W_Sort.level` in RPython's annotator
+        (both are read as `.level`; the union of an instancemethod
+        PBC and `W_Level` is then unanalysable).
         """
-        return W_LevelParam(self)
+        if self._level_cache is None:
+            self._level_cache = W_LevelParam(self)
+        return self._level_cache
+
+    # Kept for backwards-compat with test fixtures that call `.level()`
+    # — they don't run through the annotator in the same way, so the
+    # name collision is harmless there.
+    level = as_level_param
 
 
 def names(*many):
@@ -3513,7 +3533,7 @@ class W_Declaration(_Item):
             # W_Sort) also expose a ``.level`` member, and without this the
             # loop variable would unify to a wider type than Name.
             assert isinstance(param, Name)
-            levels.append(param.level())
+            levels.append(param.as_level_param())
         return self.name.const(levels=levels)
 
     def tokens(self, constants, mark=None, span_holder=None):
