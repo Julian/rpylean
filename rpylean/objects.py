@@ -3478,62 +3478,43 @@ class W_App(W_Expr):
             return False, self
 
         all_ctor_args.reverse()
-        # TODO - consider storing these by recursor name
-        for rec_rule in decl.w_kind.rules:
-            if syntactic_eq(rec_rule.ctor_name, major_premise_ctor.name):
-                # print("Have num_fields %s and num_params=%s" % (rec_rule.num_fields, decl.w_kind.num_params))uctor.get_type not yet implemented fo
-                # num_params = decl.w_kind.num_params + decl.w_kind.num_motives + decl.w_kind.num_minors
-                # import pdb; pdb.set_trace()
-                # assert num_params >= 0, "Found negative num_params on decl %s" % decl.pretty()
-                # # Get the fields, which come after the type-level parametesr
-                # # e.g. '(h : ¬p)' in 'Decidable.isFalse'
-                # if num_params >= len(all_ctor_args):
-                #     ctor_fields = []
-                # else:
-                #     ctor_fields = all_ctor_args[num_params:]
+        rec_rule = decl.w_kind.rule_for_ctor(major_premise_ctor.name)
+        if rec_rule is not None:
+            # Construct an application of the recursor rule, using all
+            # of the parameters except the major premise (which is
+            # implied by the rule we matched for the ctor — e.g.
+            # `Bool.false`).
+            new_app = rec_rule.rhs
+            # The rec rule's value uses the inductive's level
+            # parameters, so substitute the recursor call's levels in.
+            new_app = apply_const_level_params(target, new_app, env)
 
-                # if not isinstance(major_premise_ctor, W_Const):
-                #     return False, self
+            new_args = list(args)
+            new_args.reverse()
 
-                # new_args = list(args)
-                # new_args.reverse()
-                # # Remove the major premise
-                # #new_args.pop()
-                # Construct an application of the recursor rule, using all of the parameters except the major premise
-                # (which is implied by the fact that we're using the corresponding recursor rule for the ctor, e.g. `Bool.false`)
-                new_app = rec_rule.rhs
-                # The rec rule value uses the level parameters from the corresponding inductive type declaration,
-                # so apply the parameters from our recursor call
-                new_app = apply_const_level_params(target, new_app, env)
+            total_args = (
+                decl.w_kind.num_params
+                + decl.w_kind.num_motives
+                + decl.w_kind.num_minors
+            )
+            assert total_args >= 0
+            for arg in new_args[:total_args]:
+                new_app = new_app.app(arg)
 
-                new_args = list(args)
-                new_args.reverse()
+            ctor_start = decl.w_kind.num_params
+            ctor_end = decl.w_kind.num_params + rec_rule.num_fields
+            assert ctor_start >= 0
+            assert ctor_end >= 0
 
-                total_args = (
-                    decl.w_kind.num_params
-                    + decl.w_kind.num_motives
-                    + decl.w_kind.num_minors
-                )
-                assert total_args >= 0
-                for arg in new_args[:total_args]:
-                    new_app = new_app.app(arg)
-                # We want to include all of the arguments up to the motive (which is the major premise)
+            for ctor_field in all_ctor_args[ctor_start:ctor_end]:
+                new_app = new_app.app(ctor_field)
 
-                ctor_start = decl.w_kind.num_params
-                ctor_end = decl.w_kind.num_params + rec_rule.num_fields
-                assert ctor_start >= 0
-                assert ctor_end >= 0
+            i = major_idx - 1
+            while i >= 0:
+                new_app = new_app.app(args[i])
+                i -= 1
 
-                for ctor_field in all_ctor_args[ctor_start:ctor_end]:
-                    new_app = new_app.app(ctor_field)
-
-                i = major_idx - 1
-                while i >= 0:
-                    # print("Adding back extra arg: %s" % new_args[i].pretty())
-                    new_app = new_app.app(args[i])
-                    i -= 1
-
-                return True, new_app
+            return True, new_app
 
         return False, self
 
@@ -4367,11 +4348,28 @@ class W_Recursor(W_DeclarationKind):
         self.num_indices = num_indices
         self.num_motives = num_motives
         self.num_minors = num_minors
+        # Lazy {ctor_name → W_RecRule} index, populated on first
+        # `rule_for_ctor` call so iota lookup is O(1) instead of a
+        # linear scan over `rules`.
+        self._rules_by_ctor = None
         #: The inductives this recursor targets (just `[parent]` for a
         #: non-mutual recursor like `Foo.rec` → `[Foo]`). Matches
         #: Lean's `RecursorVal.all`.
         self.all = all
         self.rules = rules
+
+    def rule_for_ctor(self, ctor_name):
+        """The rec rule matching ``ctor_name``, or None if no rule does.
+
+        Populates an internal ctor-name-keyed index on first call so
+        subsequent lookups during iota reduction are O(1).
+        """
+        if self._rules_by_ctor is None:
+            index = name_dict()
+            for r in self.rules:
+                index[r.ctor_name] = r
+            self._rules_by_ctor = index
+        return self._rules_by_ctor.get(ctor_name, None)
 
     def register_exporter_index(self, exporter, name):
         for induct in self.all:
