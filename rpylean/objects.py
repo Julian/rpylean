@@ -1130,6 +1130,15 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
+    @elidable
+    def hash(self):
+        """
+        A content hash. Subclasses set ``self._hash`` eagerly in
+        ``__init__`` (mixing parent / lhs+rhs / name hashes), so this
+        is O(1) and JIT-foldable.
+        """
+        return self._hash
+
     def emit_to(self, exporter):
         """
         Emit this level as a `lean4export`-format record, returning the
@@ -1215,6 +1224,9 @@ class W_Level(_Item):
 
 
 class W_LevelZero(W_Level):
+    def __init__(self):
+        self._hash = 0x4C5A  # arbitrary distinct from other level kinds
+
     def __repr__(self):
         return "<Level 0>"
 
@@ -1248,6 +1260,7 @@ W_LEVEL_ZERO = W_LevelZero()
 class W_LevelSucc(W_Level):
     def __init__(self, parent):
         self.parent = parent
+        self._hash = ((parent.hash() * 1000003) ^ 0x53C7) & 0xFFFFFFFF
 
     def __repr__(self):
         joined = " + ".join(str(part) for part in self.pretty_parts() if part)
@@ -1291,6 +1304,8 @@ class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+        h = (lhs.hash() * 1000003) ^ rhs.hash()
+        self._hash = ((h * 1000003) ^ 0x6D4A) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<Level max({!r} {!r})>".format(self.lhs, self.rhs)
@@ -1341,6 +1356,8 @@ class W_LevelIMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+        h = (lhs.hash() * 1000003) ^ rhs.hash()
+        self._hash = ((h * 1000003) ^ 0x694D) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<Level imax({!r} {!r})>".format(self.lhs, self.rhs)
@@ -1376,6 +1393,7 @@ class W_LevelIMax(W_Level):
 class W_LevelParam(W_Level):
     def __init__(self, name):
         self.name = name
+        self._hash = ((name.hash() * 1000003) ^ 0x5041) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<Level {}>".format(self.name.str())
@@ -1445,6 +1463,17 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
+    @elidable
+    def hash(self):
+        """
+        A content hash. Subclasses set ``self._hash`` eagerly in
+        ``__init__``, mixing the hashes of their sub-expressions /
+        levels / names — so this is O(1) and JIT-foldable. Used by
+        the exporter's content-keyed dedup to match `lean4export`'s
+        `HashMap Expr Nat`.
+        """
+        return self._hash
+
     def collect_consts_into(self, out, seen):
         """
         Append every `W_Const` name reachable from this expression
@@ -1618,6 +1647,7 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = id
         self.loose_bvar_range = id + 1
+        self._hash = ((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
@@ -1681,6 +1711,8 @@ class W_FVar(W_Expr):
         assert isinstance(binder, Binder)
         self.binder = binder
         self.loose_bvar_range = 0
+        # FVars are unique by id, so hashing on id alone is fine.
+        self._hash = ((self.id * 1000003) ^ 0xF7A8) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
@@ -1722,6 +1754,7 @@ class W_LitStr(W_Expr):
         assert isinstance(val, str)
         self.val = val
         self.loose_bvar_range = 0
+        self._hash = ((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF
 
     def __repr__(self):
         return repr(self.val)
@@ -1797,6 +1830,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
         self.loose_bvar_range = 0
+        self._hash = ((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
@@ -1894,6 +1928,10 @@ class W_Const(W_Expr):
         # to one ``W_Const``), so caching on identity is effectively a
         # per-name cache.
         self._infer_cache_result = None
+        h = name.hash()
+        for lvl in levels:
+            h = (h * 1000003) ^ lvl.hash()
+        self._hash = ((h * 1000003) ^ 0xC057) & 0xFFFFFFFF
 
     def __repr__(self):
         return "`%s" % self.str()
@@ -2072,6 +2110,7 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
         self.loose_bvar_range = 0
+        self._hash = ((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF
 
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
@@ -2364,6 +2403,9 @@ class W_Proj(W_Expr):
         self.field_index = field_index
         self.struct_expr = struct_expr
         self.loose_bvar_range = struct_expr.loose_bvar_range
+        h = (struct_name.hash() * 1000003) ^ field_index
+        h = (h * 1000003) ^ struct_expr.hash()
+        self._hash = ((h * 1000003) ^ 0x9709) & 0xFFFFFFFF
 
     def contains_const(self, name):
         return self.struct_expr.contains_const(name)
@@ -2646,6 +2688,10 @@ def _is_prop_type(expr, constants):
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
+    # Subclasses set this to a distinct tag so structurally-equal
+    # lambdas and foralls don't collide in the content hash.
+    _hash_tag = 0
+
     def __init__(self, binder, body):
         assert body is not None
         assert isinstance(binder, Binder)
@@ -2673,6 +2719,10 @@ class W_FunBase(W_Expr):
         # references and avoiding exponential blowup.
         self._closure_cache_env = None
         self._closure_cache_result = None
+        # Content hash: mix binder's name + type + binder-info + body.
+        h = (binder.name.hash() * 1000003) ^ binder.type.hash()
+        h = (h * 1000003) ^ body.hash()
+        self._hash = ((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF
 
     def closure(self, env):
         if not env:
@@ -2755,6 +2805,7 @@ class W_FunBase(W_Expr):
 class W_ForAll(W_FunBase):
     _export_tag = "forallE"
     _ie_first_tag = False  # `'f' < 'i'`
+    _hash_tag = 0xF0A1
 
     def infer(self, env):
         return _iter_infer(env, self)
@@ -2885,6 +2936,7 @@ def _binder_group_tokens(group, constants):
 class W_Lambda(W_FunBase):
     _export_tag = "lam"
     _ie_first_tag = True  # `'i' < 'l'`
+    _hash_tag = 0x1A3B
 
     def tokens(self, constants, mark=None, span_holder=None):
         binders = []
@@ -2981,6 +3033,10 @@ class W_Let(W_Expr):
         if body_range > r:
             r = body_range
         self.loose_bvar_range = r
+        h = (name.hash() * 1000003) ^ type.hash()
+        h = (h * 1000003) ^ value.hash()
+        h = (h * 1000003) ^ body.hash()
+        self._hash = ((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF
 
     def contains_const(self, name):
         return (self.type.contains_const(name)
@@ -3103,6 +3159,8 @@ class W_App(W_Expr):
         self._infer_cache_result = None
         # Inline whnf cache.
         self._whnf_cache_result = None
+        h = (fn.hash() * 1000003) ^ arg.hash()
+        self._hash = ((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -3553,6 +3611,10 @@ class W_Closure(W_Expr):
         self.loose_bvar_range = max_loose
         self._whnf_cache_result = None
         self._infer_cache_result = None
+        # Closures shouldn't reach the exporter (they're produced during
+        # reduction, not by the walker), but give them an identity-based
+        # hash so the RPython annotator sees `_hash` set on every W_Expr.
+        self._hash = compute_identity_hash(self)
 
     def whnf(self, env):
         cached = self._whnf_cache_result

@@ -40,9 +40,42 @@ from rpylean.objects import (
     W_LevelZero,
     W_Recursor,
     name_dict,
+    syntactic_eq,
 )
 from rpylean.parser import EXPORT_VERSION
-from rpython.rlib.objectmodel import compute_unique_id
+from rpython.rlib.objectmodel import compute_unique_id, r_dict
+
+
+def _level_dict():
+    """A content-keyed `r_dict` mapping `W_Level` → int (level id).
+
+    Matches `lean4export`'s `HashMap Level Nat`: structurally-equal
+    levels collapse to one cache entry, even when they came from
+    distinct Lean pointers.
+    """
+    def _eq(a, b):
+        return syntactic_eq(a, b)
+
+    def _hash(level):
+        return level.hash()
+
+    return r_dict(_eq, _hash)
+
+
+def _expr_dict():
+    """Same idea as `_level_dict`, but for `W_Expr` → int (expr id).
+
+    Matches `lean4export`'s `HashMap Expr Nat`. Each W_Expr subclass
+    sets a content-mixing `_hash` in its constructor; structurally-equal
+    exprs from different Lean pointers collapse here.
+    """
+    def _eq(a, b):
+        return syntactic_eq(a, b)
+
+    def _hash(expr):
+        return expr.hash()
+
+    return r_dict(_eq, _hash)
 
 
 try:
@@ -112,11 +145,11 @@ class Exporter(object):
         self._next_name = 1
         self._next_level = 1
         self._next_expr = 0
-        # Identity-keyed dedup. The FFI walker hash-cons Expr/Level
-        # subtrees by Lean pointer; compute_unique_id is stable for
-        # the whole export.
-        self._level_ids = {}    # compute_unique_id(level) → level_id
-        self._expr_ids = {}     # compute_unique_id(expr) → expr_id
+        # Content-keyed (`lean4export`-style): structurally-equal
+        # levels and exprs share an id even when they came from
+        # distinct Lean pointers.
+        self._level_ids = _level_dict()    # W_Level → level_id
+        self._expr_ids = _expr_dict()      # W_Expr → expr_id
         # Filled in by `_index_inductive_members` before the first
         # `dump_constant` call.
         self._induct_for_ctor = name_dict()     # ctor_name → induct_name
@@ -293,21 +326,19 @@ class Exporter(object):
     def level_id(self, level):
         if isinstance(level, W_LevelZero):
             return 0
-        uid = compute_unique_id(level)
-        cached = self._level_ids.get(uid, -1)
+        cached = self._level_ids.get(level, -1)
         if cached != -1:
             return cached
         lid = level.emit_to(self)
-        self._level_ids[uid] = lid
+        self._level_ids[level] = lid
         return lid
 
     def expr_id(self, expr):
-        uid = compute_unique_id(expr)
-        cached = self._expr_ids.get(uid, -1)
+        cached = self._expr_ids.get(expr, -1)
         if cached != -1:
             return cached
         eid = expr.emit_to(self)
-        self._expr_ids[uid] = eid
+        self._expr_ids[expr] = eid
         return eid
 
     # ---- declaration emit ---------------------------------------------
