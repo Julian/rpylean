@@ -1119,7 +1119,6 @@ def test_struct_eta_reduction_on_stuck_major():
         num_params=0,
         num_indices=0,
         num_minors=1,
-        names=[Pair],  # `RecursorVal.all`: the inductives this rec is for.
         levels=[u_name],
     )
 

@@ -408,7 +408,7 @@ def test_dump_constant_list():
     rec = Name.of(["List", "rec"]).recursor(
         type=env["List.rec"].type,
         rules=env["List.rec"].w_kind.rules,
-        names=env["List.rec"].w_kind.names,
+        all=env["List.rec"].w_kind.all,
         levels=[u_1.name, u.name],
         num_params=1,
         num_motives=1,

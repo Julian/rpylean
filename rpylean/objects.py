@@ -745,7 +745,7 @@ class Name(_Item):
     def inductive(
         self,
         type,
-        names=None,
+        all=None,
         constructors=None,
         recursors=None,
         num_nested=0,
@@ -758,9 +758,13 @@ class Name(_Item):
     ):
         """
         Make an inductive type declaration with this name.
+
+        ``all`` is the list of inductives in the mutual block; defaults
+        to ``[self]`` for a non-mutual inductive. Matches Lean's
+        ``InductiveVal.all``.
         """
         inductive = W_Inductive(
-            names=[self] if names is None else names,
+            all=[self] if all is None else all,
             constructors=[] if constructors is None else constructors,
             recursors=[] if recursors is None else recursors,
             num_nested=num_nested,
@@ -835,14 +839,21 @@ class Name(_Item):
         num_indices=0,
         num_minors=0,
         k=False,
-        names=None,
+        all=None,
         levels=None,
     ):
         """
         Make a recursor with this name.
+
+        ``all`` is the list of inductives this recursor is for (Lean's
+        ``RecursorVal.all``). For a non-mutual recursor named
+        ``Foo.rec``, the default is ``[Foo]`` — the recursor's parent
+        name. Mutual recursors must pass ``all`` explicitly.
         """
+        if all is None:
+            all = [self.parent]
         recursor = W_Recursor(
-            names=[self] if names is None else names,
+            all=all,
             rules=[] if rules is None else rules,
             k=k,
             num_params=num_params,
@@ -3393,12 +3404,12 @@ class W_App(W_Expr):
             if not isinstance(old_ty_base, W_Const):
                 return False, self
 
-            # Mutual-inductive blocks legitimately have len(names) > 1;
+            # Mutual-inductive blocks legitimately have `len(all) > 1`;
             # k-like reduction can only operate on a single-inductive
             # context. Same bail-out reasoning.
-            if len(decl.w_kind.names) != 1:
+            if len(decl.w_kind.all) != 1:
                 return False, self
-            inductive_decl = get_decl(env.declarations, decl.w_kind.names[0])
+            inductive_decl = get_decl(env.declarations, decl.w_kind.all[0])
             assert isinstance(inductive_decl.w_kind, W_Inductive)
 
             # `_register_mutual_inductive` leaves `constructors=[]`,
@@ -3555,9 +3566,9 @@ class W_App(W_Expr):
         # exactly one motive + one minor (the single ctor's branch).
         if recursor.num_motives != 1 or recursor.num_minors != 1:
             return None
-        if len(recursor.names) != 1:
+        if len(recursor.all) != 1:
             return None
-        inductive_decl = get_decl(env.declarations, recursor.names[0])
+        inductive_decl = get_decl(env.declarations, recursor.all[0])
         if not isinstance(inductive_decl.w_kind, W_Inductive):
             return None
         inductive = inductive_decl.w_kind
@@ -3590,7 +3601,7 @@ class W_App(W_Expr):
 
         # Apply the minor to projections of the major.
         minor = args[major_idx + 1]
-        struct_name = recursor.names[0]
+        struct_name = recursor.all[0]
         new_app = minor
         for i in range(ctor.num_fields):
             new_app = new_app.app(struct_name.proj(i, major))
@@ -3798,13 +3809,6 @@ class W_Declaration(_Item):
         #: `--export-unsafe` is passed; we follow the same convention
         #: by default.
         self.is_unsafe = is_unsafe
-
-    @property
-    def is_private(self):
-        """
-        Is this a private declaration?
-        """
-        return self.name.is_private
 
     def const(self, levels=None):
         """
@@ -4046,7 +4050,7 @@ class W_Quotient(W_DeclarationKind):
 class W_Inductive(W_DeclarationKind):
     def __init__(
         self,
-        names,
+        all,
         constructors,
         recursors,
         num_nested,
@@ -4056,7 +4060,9 @@ class W_Inductive(W_DeclarationKind):
         is_recursive,
         ctor_names=None,
     ):
-        self.names = names
+        #: All inductives in this mutual block (just `[self]` for a
+        #: non-mutual inductive). Matches Lean's `InductiveVal.all`.
+        self.all = all
         self.constructors = constructors
         self.recursors = recursors
         self.num_nested = num_nested
@@ -4090,11 +4096,11 @@ class W_Inductive(W_DeclarationKind):
         # Mark every mutual-block member visited up front so dep walks
         # cycling back through any of them short-circuit before the
         # block emit completes.
-        for n in self.names:
+        for n in self.all:
             exporter.mark_emitted(n)
         ctor_pairs = []   # [(induct_name, ctor_decl)]
         rec_decls = []
-        for n in self.names:
+        for n in self.all:
             for cname in exporter.ctors_of(n):
                 cd = exporter.decls.get(cname, None)
                 if cd is not None:
@@ -4108,7 +4114,7 @@ class W_Inductive(W_DeclarationKind):
         # Dep walks in the order lean4export uses: every member's type,
         # then every ctor's type, then every recursor's type plus the
         # rhs of each of its rules.
-        for n in self.names:
+        for n in self.all:
             d = exporter.decls.get(n, None)
             if d is not None:
                 exporter.dump_deps(d.type)
@@ -4152,7 +4158,7 @@ class W_Inductive(W_DeclarationKind):
         """
         num_params = ctor.w_kind.num_params
         assert num_params >= 0
-        ind_name = self.names[0]
+        ind_name = self.all[0]
         error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
         all_fvars, ctor_type = ctor.type.open_all_binders()
         if len(all_fvars) < num_params:
@@ -4225,7 +4231,7 @@ class W_Inductive(W_DeclarationKind):
         Whether *expr* contains an application of this inductive whose
         index arguments themselves contain this inductive.
         """
-        ind_name = self.names[0]
+        ind_name = self.all[0]
         head, rev_args = expr.unapp()
         if head.is_named(ind_name):
             # Check index args (those after the params) for occurrences.
@@ -4242,7 +4248,7 @@ class W_Inductive(W_DeclarationKind):
 
     def _contains_any_inductive(self, expr):
         """Whether *expr* mentions any of the inductives in this block."""
-        for name in self.names:
+        for name in self.all:
             if expr.contains_const(name):
                 return True
         return False
@@ -4316,12 +4322,12 @@ class W_Constructor(W_DeclarationKind):
         # inductive's name in Lean (e.g., `List.cons` inside `List`),
         # so display just the leaf part. Fall back to the full name
         # if the invariant doesn't hold.
-        if constructor_name.parent.syntactic_eq(inductive.names[0]):
+        if constructor_name.parent.syntactic_eq(inductive.all[0]):
             short = constructor_name._part_str()
         else:
             short = constructor_name.str()
         result = [PUNCT.emit("| "), DECL_NAME.emit(short)]
-        if type not in [each.const() for each in inductive.names]:
+        if type not in [each.const() for each in inductive.all]:
             result.append(PUNCT.emit(" : "))
             _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
@@ -4330,7 +4336,7 @@ class W_Constructor(W_DeclarationKind):
 class W_Recursor(W_DeclarationKind):
     def __init__(
         self,
-        names,
+        all,
         rules,
         num_motives,
         num_params,
@@ -4343,14 +4349,17 @@ class W_Recursor(W_DeclarationKind):
         self.num_indices = num_indices
         self.num_motives = num_motives
         self.num_minors = num_minors
-        self.names = names
+        #: The inductives this recursor targets (just `[parent]` for a
+        #: non-mutual recursor like `Foo.rec` → `[Foo]`). Matches
+        #: Lean's `RecursorVal.all`.
+        self.all = all
         self.rules = rules
 
     def dump_to(self, exporter, decl):
         # Each mutual-block inductive's `dump_to` emits the whole
         # group (types + ctors + recs). Recursors come back via that
         # path; the standalone recursor visit just routes there.
-        for ind in self.names:
+        for ind in self.all:
             if ind in exporter.decls:
                 exporter.dump_constant(exporter.decls[ind])
 
@@ -4375,7 +4384,7 @@ class W_Recursor(W_DeclarationKind):
         # later under the standard (parser-based) flow where inductives
         # are registered in their block before their recursors.
         all_ctors = []
-        for ind_name in self.names:
+        for ind_name in self.all:
             if ind_name not in env.declarations:
                 return None
             ind_decl = env.declarations[ind_name]
@@ -4394,7 +4403,7 @@ class W_Recursor(W_DeclarationKind):
                 "recursor has %d rule(s) but its inductive%s has %d "
                 "constructor(s)" % (
                     len(self.rules),
-                    "s" if len(self.names) > 1 else "",
+                    "s" if len(self.all) > 1 else "",
                     len(all_ctors),
                 ),
             )

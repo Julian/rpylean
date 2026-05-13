@@ -159,7 +159,7 @@ class TestName(object):
             type=TYPE,
             levels=[],
             w_kind=W_Inductive(
-                names=[Empty],
+                all=[Empty],
                 constructors=[],
                 recursors=[],
                 num_nested=0,
@@ -201,7 +201,7 @@ class TestName(object):
             type=Empty.const(),
             levels=[],
             w_kind=W_Recursor(
-                names=[rec],
+                all=[Empty],
                 rules=[],
                 num_motives=1,
                 num_params=0,

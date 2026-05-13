@@ -444,7 +444,7 @@ def read_constant_info(ci):
         is_unsafe = _ctor_byte(val, 6, 1) != 0
         is_reflexive = _ctor_byte(val, 6, 2) != 0
         kind = W_Inductive(
-            names=all_names if all_names else [name],
+            all=all_names if all_names else [name],
             constructors=[],
             recursors=[],
             num_params=num_params,
@@ -492,7 +492,7 @@ def read_constant_info(ci):
         k = _ctor_byte(val, 7, 0) != 0
         is_unsafe = _ctor_byte(val, 7, 1) != 0
         kind = W_Recursor(
-            names=all_names if all_names else [name],
+            all=all_names if all_names else [name],
             rules=rules,
             k=k,
             num_params=num_params,

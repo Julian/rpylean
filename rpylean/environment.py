@@ -715,6 +715,6 @@ class _PublicDeclarations(_Declarations):
 
     def next(self):
         for declaration in self.iter:
-            if declaration.is_private:
+            if declaration.name.is_private:
                 continue
             return declaration

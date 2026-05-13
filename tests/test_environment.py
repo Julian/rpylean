@@ -643,7 +643,7 @@ class TestRecursorRuleShape(object):
         from rpylean.objects import W_RecRule, W_InvalidRecursorRule
         U, mk, ind = self._build_unit_ind()
         # Recursor with zero rules but inductive has one ctor.
-        bad_rec = U.child("rec").recursor(type=U.const(), rules=[], names=[U])
+        bad_rec = U.child("rec").recursor(type=U.const(), rules=[], all=[U])
         env = Environment.having([ind, mk, bad_rec])
         errors = list(env.type_check([bad_rec]))
         assert len(errors) == 1
@@ -656,7 +656,7 @@ class TestRecursorRuleShape(object):
         bad_rec = U.child("rec").recursor(
             type=U.const(),
             rules=[W_RecRule(ctor_name=ghost, num_fields=0, rhs=U.const())],
-            names=[U],
+            all=[U],
         )
         env = Environment.having([ind, mk, bad_rec])
         errors = list(env.type_check([bad_rec]))
@@ -670,7 +670,7 @@ class TestRecursorRuleShape(object):
         bad_rec = U.child("rec").recursor(
             type=U.const(),
             rules=[W_RecRule(ctor_name=mk.name, num_fields=1, rhs=U.const())],
-            names=[U],
+            all=[U],
         )
         env = Environment.having([ind, mk, bad_rec])
         errors = list(env.type_check([bad_rec]))
@@ -692,7 +692,7 @@ class TestRecursorRuleShape(object):
             num_motives=1,
             num_minors=1,
             rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=good_rhs)],
-            names=[U],
+            all=[U],
         )
         env = Environment.having([ind, mk, good_rec])
         errors = list(env.type_check([good_rec]))
@@ -728,7 +728,7 @@ class TestRecursorRuleShape(object):
                           rhs=good_false_rhs),
                 W_RecRule(ctor_name=tt.name, num_fields=0, rhs=bad_rhs),
             ],
-            names=[B],
+            all=[B],
         )
         env = Environment.having([ind, ff, tt, bad_rec])
         errors = list(env.type_check([bad_rec]))

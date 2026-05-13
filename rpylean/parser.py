@@ -724,7 +724,7 @@ def _register_single_inductive(builder, type_data, ctor_records, rec_records):
     inductive = name.inductive(
         levels=[builder.names[i] for i in type_data.levels],
         type=builder.exprs[type_data.type_idx],
-        names=[builder.names[i] for i in type_data.name_idxs],
+        all=[builder.names[i] for i in type_data.name_idxs],
         constructors=ctor_decls,
         recursors=rec_decls,
         num_nested=type_data.num_nested,
@@ -751,7 +751,7 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
         inductive = name.inductive(
             levels=[builder.names[i] for i in type_data.levels],
             type=builder.exprs[type_data.type_idx],
-            names=[builder.names[i] for i in type_data.name_idxs],
+            all=[builder.names[i] for i in type_data.name_idxs],
             constructors=[],
             recursors=[],
             num_nested=type_data.num_nested,
@@ -791,7 +791,7 @@ def _register_recursor(builder, rec):
     decl = builder.names[rec.nidx].recursor(
         levels=[builder.names[i] for i in rec.levels],
         type=builder.exprs[rec.type_idx],
-        names=[builder.names[i] for i in rec.ind_name_idxs],
+        all=[builder.names[i] for i in rec.ind_name_idxs],
         rules=[
             objects.W_RecRule(
                 ctor_name=builder.names[r.ctor_nidx],

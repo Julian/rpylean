@@ -280,7 +280,7 @@ class Exporter(object):
                 for cname in kind.ctor_names:
                     self._induct_for_ctor[cname] = name
             elif isinstance(kind, W_Recursor):
-                for induct in kind.names:
+                for induct in kind.all:
                     if induct in self.decls:
                         if induct not in self._recs_of:
                             self._recs_of[induct] = []
@@ -433,7 +433,7 @@ class Exporter(object):
         assert isinstance(kind, W_Inductive)
 
         type_records = []
-        for n in kind.names:
+        for n in kind.all:
             d = self.decls.get(n, ind_decl)
             type_records.append(self._inductive_val_json(d))
 
@@ -463,7 +463,7 @@ class Exporter(object):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
-        all_ids = self._ids_list([self.name_id(n) for n in kind.names])
+        all_ids = self._ids_list([self.name_id(n) for n in kind.all])
         ctor_ids = self._ids_list(self._ctor_names_for(decl.name))
         return (
             '{"all":%s,"ctors":%s,"isRec":%s,"isReflexive":%s,'
@@ -496,7 +496,7 @@ class Exporter(object):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
-        all_ids = self._ids_list([self.name_id(n) for n in kind.names])
+        all_ids = self._ids_list([self.name_id(n) for n in kind.all])
         rule_parts = []
         for rule in kind.rules:
             ctor_id = self.name_id(rule.ctor_name)
