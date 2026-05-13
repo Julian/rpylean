@@ -111,11 +111,19 @@ class _WalkState(object):
         self.exprs = {}    # int (ptr addr) → W_Expr
         self.levels = {}   # int (ptr addr) → W_Level
         self.names = {}    # int (ptr addr) → Name
+        # bvars are content-keyed by de Bruijn index, not by Lean
+        # pointer — Lean's `Expr.bvar` ctors aren't hash-consed by
+        # pointer so the same bvar index appears at many distinct
+        # addresses across an export. Sharing them here lets the
+        # exporter emit one `{"bvar":N,"ie":I}` record per index
+        # (matching lean4export, which sees bvars as cheap value types).
+        self.bvars = {}    # int (de Bruijn index) → W_BVar
 
     def reset(self):
         self.exprs.clear()
         self.levels.clear()
         self.names.clear()
+        self.bvars.clear()
 
 
 _WALK = _WalkState()
@@ -309,8 +317,13 @@ def read_expr(o):
 def _read_expr_uncached(o):
     tag = _lean.ptr_tag(o)
     if tag == 0:  # bvar(deBruijnIndex)
-        idx = read_nat(_lean.ctor_get(o, 0))
-        return W_BVar(idx.toint())
+        idx_int = read_nat(_lean.ctor_get(o, 0)).toint()
+        cached = _WALK.bvars.get(idx_int, None)
+        if cached is not None:
+            return cached
+        bv = W_BVar(idx_int)
+        _WALK.bvars[idx_int] = bv
+        return bv
     if tag == 3:  # sort(u)
         return read_level(_lean.ctor_get(o, 0)).sort()
     if tag == 4:  # const(name, us : List Level)
@@ -412,8 +425,12 @@ def read_constant_info(ci):
         is_unsafe = _ctor_byte(val, 3, 0) != 0
         return name.opaque(type=type_expr, value=value, levels=levels,
                            is_unsafe=is_unsafe)
-    if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
-        return name.axiom(type=type_expr, levels=levels)
+    if tag == 4:  # quotInfo
+        # QuotVal: extends ConstantVal (1 obj ref) + `kind` byte. The byte
+        # value matches Lean's `QuotKind` ctor tags 0..3, which is also
+        # what `W_Quotient.KIND_*` uses.
+        kind = _ctor_byte(val, 1, 0)
+        return name.quotient(type=type_expr, kind=kind, levels=levels)
     if tag == 5:  # inductInfo
         all_names = _read_name_list(_lean.ctor_get(val, 3))
         # InductiveVal.ctors lives at field 4 — list of ctor names in

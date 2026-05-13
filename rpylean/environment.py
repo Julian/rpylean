@@ -129,7 +129,7 @@ class EnvironmentBuilder(object):
             raise IndexGapError("level", len(self.levels), uidx)
         self.levels.append(level)
 
-    def register_quotient(self, name, type, levels):
+    def register_quotient(self, name, type, levels, kind):
         # Allowed: Quot, Quot.mk, Quot.ind, Quot.lift (all `Name.str` chains
         # rooted at the anonymous name).
         if not isinstance(name, StrName):
@@ -147,7 +147,9 @@ class EnvironmentBuilder(object):
             pass
         else:
             raise UnknownQuotient(name, type)
-        self.register_declaration(name.axiom(type=type, levels=levels))
+        self.register_declaration(
+            name.quotient(type=type, kind=kind, levels=levels),
+        )
 
     def register_declaration(self, decl):
         env_decls = self.env.declarations

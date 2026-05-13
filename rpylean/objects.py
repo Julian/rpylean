@@ -810,6 +810,15 @@ class Name(_Item):
         return self.declaration(type=type, w_kind=W_Axiom(), levels=levels,
                                 is_unsafe=is_unsafe)
 
+    def quotient(self, type, kind, levels=None):
+        """
+        Make a Quot kernel-axiom declaration with this name.
+        ``kind`` is one of the ``W_Quotient.KIND_*`` constants
+        (type/ctor/lift/ind).
+        """
+        return self.declaration(type=type, w_kind=W_Quotient(kind=kind),
+                                levels=levels)
+
     def theorem(self, type, value, levels=None):
         """
         Make a theorem with this name.
@@ -3823,6 +3832,65 @@ class W_Axiom(W_DeclarationKind):
         type_type = type.infer(env)
         if not isinstance(type_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=type_type, name=None)
+
+
+class W_Quotient(W_DeclarationKind):
+    """
+    A Quot kernel axiom. Lean's `Quot`, `Quot.mk`, `Quot.lift`, `Quot.ind`
+    are kernel-builtin constants; the kernel treats them specially for
+    `Quot.lift` reduction. ``kind`` distinguishes which of the four.
+    """
+
+    KIND_TYPE = 0  # `Quot`
+    KIND_CTOR = 1  # `Quot.mk`
+    KIND_LIFT = 2  # `Quot.lift`
+    KIND_IND = 3   # `Quot.ind`
+
+    def __init__(self, kind):
+        # `kind` is one of the `KIND_*` constants above; the integer values
+        # match Lean's `QuotKind` ctor tags so the FFI walker can pass the
+        # raw byte through.
+        self.kind = kind
+
+    def kind_str(self):
+        if self.kind == W_Quotient.KIND_TYPE:
+            return "type"
+        if self.kind == W_Quotient.KIND_CTOR:
+            return "ctor"
+        if self.kind == W_Quotient.KIND_LIFT:
+            return "lift"
+        if self.kind == W_Quotient.KIND_IND:
+            return "ind"
+        raise ValueError("unknown quot kind: %d" % self.kind)
+
+    @staticmethod
+    def kind_from_str(s):
+        if s == "type":
+            return W_Quotient.KIND_TYPE
+        if s == "ctor":
+            return W_Quotient.KIND_CTOR
+        if s == "lift":
+            return W_Quotient.KIND_LIFT
+        if s == "ind":
+            return W_Quotient.KIND_IND
+        raise ValueError("unknown quot kind: %s" % s)
+
+    def dump_to(self, exporter, decl):
+        exporter.begin_decl(decl)
+        exporter.emit_quot(decl, self.kind_str())
+
+    def type_check(self, type, env):
+        type_type = type.infer(env)
+        if not isinstance(type_type.whnf(env), W_Sort):
+            return W_NotASort(env, type, inferred_type=type_type, name=None)
+
+    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
+        # rpylean displays quot decls as ordinary axioms.
+        result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
+        result += name_with_levels_tokens(name, levels, constants)
+        result.append(PUNCT.emit(" : "))
+        _append_marked_tokens(result, span_holder, type, constants, mark)
+        return result
 
 
 class W_Inductive(W_DeclarationKind):

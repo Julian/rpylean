@@ -466,9 +466,12 @@ def _parse_quot(cursor, builder):
     levels = None
     name_idx = 0
     type_eidx = 0
+    kind = -1
     while True:
         key = cursor.read_key()
-        if key == "levelParams":
+        if key == "kind":
+            kind = objects.W_Quotient.kind_from_str(cursor.read_string())
+        elif key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
             name_idx = cursor.read_int()
@@ -480,10 +483,13 @@ def _parse_quot(cursor, builder):
             cursor.expect('}')
             if levels is None:
                 levels = []
+            if kind < 0:
+                raise ValueError("quot record missing `kind`")
             builder.register_quotient(
                 builder.names[name_idx],
                 builder.exprs[type_eidx],
                 [builder.names[i] for i in levels],
+                kind,
             )
             return
         cursor.expect(',')

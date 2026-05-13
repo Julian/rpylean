@@ -339,6 +339,15 @@ class Exporter(object):
             % (self._ids_list(levels), nid, tid),
         )
 
+    def emit_quot(self, decl, kind):
+        nid = self.name_id(decl.name)
+        levels = self._level_param_ids(decl.levels)
+        tid = self.expr_id(decl.type)
+        self.stream.write(
+            '{"quot":{"kind":"%s","levelParams":%s,"name":%d,"type":%d}}\n'
+            % (kind, self._ids_list(levels), nid, tid),
+        )
+
     def emit_def(self, decl, value, hint):
         nid = self.name_id(decl.name)
         levels = self._level_param_ids(decl.levels)
