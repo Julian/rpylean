@@ -268,23 +268,28 @@ class Exporter(object):
         if self._indexed:
             return
         self._indexed = True
-        # Authoritative source-order ctors come from each inductive's
-        # `ctor_names` field; the reverse ctor→induct map falls out of
-        # that. Recursors don't store reverse links on the inductive,
-        # so we still scan all recursors and append to `_recs_of`.
+        # Each declaration kind contributes its own indexing via
+        # `register_exporter_index`. Inductives populate ctors_of /
+        # parent_inductive; recursors populate recs_of; others no-op.
         for name in self.decls:
             decl = self.decls[name]
-            kind = decl.w_kind
-            if isinstance(kind, W_Inductive):
-                self._ctors_of[name] = list(kind.ctor_names)
-                for cname in kind.ctor_names:
-                    self._induct_for_ctor[cname] = name
-            elif isinstance(kind, W_Recursor):
-                for induct in kind.all:
-                    if induct in self.decls:
-                        if induct not in self._recs_of:
-                            self._recs_of[induct] = []
-                        self._recs_of[induct].append(name)
+            decl.w_kind.register_exporter_index(self, name)
+
+    def register_inductive_ctors(self, induct_name, ctor_names):
+        """Hook for `W_Inductive.register_exporter_index`."""
+        self._ctors_of[induct_name] = list(ctor_names)
+        for cname in ctor_names:
+            self._induct_for_ctor[cname] = induct_name
+
+    def register_inductive_recursor(self, induct_name, rec_name):
+        """Hook for `W_Recursor.register_exporter_index`."""
+        if induct_name not in self.decls:
+            return
+        bucket = self._recs_of.get(induct_name, None)
+        if bucket is None:
+            bucket = []
+            self._recs_of[induct_name] = bucket
+        bucket.append(rec_name)
 
     # ---- dump_constant: dispatch + dep walk ----------------------------
 

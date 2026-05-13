@@ -492,7 +492,10 @@ def read_constant_info(ci):
         k = _ctor_byte(val, 7, 0) != 0
         is_unsafe = _ctor_byte(val, 7, 1) != 0
         kind = W_Recursor(
-            all=all_names if all_names else [name],
+            # `RecursorVal.all` lists the inductives this recursor is
+            # for; fall back to the recursor's parent (`Foo.rec` → `Foo`)
+            # if Lean's list is empty. Matches `Name.recursor`'s default.
+            all=all_names if all_names else [name.parent],
             rules=rules,
             k=k,
             num_params=num_params,

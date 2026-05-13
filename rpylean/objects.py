@@ -3596,7 +3596,7 @@ class W_App(W_Expr):
         major_head, _ = major.unapp()
         if isinstance(major_head, W_Const):
             head_decl = get_decl(env.declarations, major_head.name)
-            if isinstance(head_decl.w_kind, W_Constructor):
+            if head_decl.w_kind.is_constructor():
                 return None
 
         # Apply the minor to projections of the major.
@@ -3865,9 +3865,21 @@ class W_DeclarationKind(_Item):
     def get_delta_reduce_target(self):
         return None
 
+    def is_constructor(self):
+        """Polymorphic predicate: `W_Constructor` overrides to True."""
+        return False
+
     def field_name(self, index):
         """The name of the field at ``index``, or None."""
         return None
+
+    def register_exporter_index(self, exporter, name):
+        """Hook called once per registered decl before `dump_all`.
+
+        Inductives populate ``ctors_of`` / ``parent_inductive`` lookups
+        here; recursors populate ``recs_of``. Other kinds don't need
+        anything indexed.
+        """
 
     def dump_to(self, exporter, decl):
         """Emit ``decl`` as a `lean4export`-format record.
@@ -4092,6 +4104,9 @@ class W_Inductive(W_DeclarationKind):
             and not self.is_recursive
         )
 
+    def register_exporter_index(self, exporter, name):
+        exporter.register_inductive_ctors(name, self.ctor_names)
+
     def dump_to(self, exporter, decl):
         # Mark every mutual-block member visited up front so dep walks
         # cycling back through any of them short-circuit before the
@@ -4292,6 +4307,9 @@ class W_Constructor(W_DeclarationKind):
         #: source-order ctor list. From `ConstructorVal.cidx`.
         self.cidx = cidx
 
+    def is_constructor(self):
+        return True
+
     def dump_to(self, exporter, decl):
         induct_name = exporter.parent_inductive(decl.name)
         if induct_name is not None and induct_name in exporter.decls:
@@ -4354,6 +4372,10 @@ class W_Recursor(W_DeclarationKind):
         #: Lean's `RecursorVal.all`.
         self.all = all
         self.rules = rules
+
+    def register_exporter_index(self, exporter, name):
+        for induct in self.all:
+            exporter.register_inductive_recursor(induct, name)
 
     def dump_to(self, exporter, decl):
         # Each mutual-block inductive's `dump_to` emits the whole
