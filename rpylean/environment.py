@@ -580,7 +580,7 @@ class Environment(object):
         if not isinstance(decl.w_kind, W_Inductive):
             return False
         ind = decl.w_kind
-        if len(ind.constructors) != 1 or ind.num_indices != 0 or ind.is_recursive:
+        if not ind.is_non_recursive_structure():
             return False
         struct_name = head.name
         num_fields = ind.constructors[0].w_kind.num_fields
@@ -645,7 +645,7 @@ class Environment(object):
         if not isinstance(inductive_decl.w_kind, W_Inductive):
             return False
         ind = inductive_decl.w_kind
-        if len(ind.constructors) != 1 or ind.num_indices != 0 or ind.is_recursive:
+        if not ind.is_non_recursive_structure():
             return False
 
         # Check that inferred types are def-eq
