@@ -3526,6 +3526,84 @@ class W_App(W_Expr):
 
         return False, self
 
+    def try_struct_eta_reduce(self, env):
+        """
+        Struct-eta on the casesOn side. If this is a fully-applied
+        recursor for a single-ctor non-recursive inductive (a
+        structure) and the major is stuck (not a constructor app),
+        reduce by replacing the would-be ctor fields with projections
+        of the major::
+
+            S.rec.{u} M m_1 stuck_major  ≡  m_1 (proj_0 stuck_major) … (proj_{k-1} stuck_major)
+
+        Returns the reduced expression, or `None` if struct-eta
+        doesn't apply. Lean's kernel uses this rule to unstick chains
+        like `(toNormPoly e).fst` where `toNormPoly` expands to a
+        casesOn over `Prod` whose major (a `Poly.cancel` call) is a
+        giant `Nat.brecOn` that won't reduce.
+        """
+        target, args = self.unapp()
+        if not isinstance(target, W_Const):
+            return None
+        decl = get_decl(env.declarations, target.name)
+        if not isinstance(decl.w_kind, W_Recursor):
+            return None
+        recursor = decl.w_kind
+
+        # Non-recursive structure: one inductive in the block, one
+        # ctor, no indices, no recursive args. The recursor must take
+        # exactly one motive + one minor (the single ctor's branch).
+        if recursor.num_motives != 1 or recursor.num_minors != 1:
+            return None
+        if len(recursor.names) != 1:
+            return None
+        inductive_decl = get_decl(env.declarations, recursor.names[0])
+        if not isinstance(inductive_decl.w_kind, W_Inductive):
+            return None
+        inductive = inductive_decl.w_kind
+        if not inductive.is_non_recursive_structure():
+            return None
+        ctor_decl = inductive.constructors[0]
+        if not isinstance(ctor_decl.w_kind, W_Constructor):
+            return None
+        ctor = ctor_decl.w_kind
+
+        # Need params + motive + minor + major all present.
+        skip_count = (
+            recursor.num_params
+            + recursor.num_indices
+            + recursor.num_motives
+            + recursor.num_minors
+        )
+        major_idx = len(args) - 1 - skip_count
+        if major_idx < 0:
+            return None
+        major = args[major_idx]
+
+        # Only fire on a genuinely stuck major. If the major heads with
+        # a constructor, regular iota handles it.
+        major_head, _ = major.unapp()
+        if isinstance(major_head, W_Const):
+            head_decl = get_decl(env.declarations, major_head.name)
+            if isinstance(head_decl.w_kind, W_Constructor):
+                return None
+
+        # Apply the minor to projections of the major.
+        minor = args[major_idx + 1]
+        struct_name = recursor.names[0]
+        new_app = minor
+        for i in range(ctor.num_fields):
+            new_app = new_app.app(struct_name.proj(i, major))
+
+        # Re-apply any args after the major (the recursor's own extra
+        # applications, peeled outermost-first by `unapp`).
+        i = major_idx - 1
+        while i >= 0:
+            new_app = new_app.app(args[i])
+            i -= 1
+
+        return new_app
+
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def _whnf_core(self, env):
         # Try native nat reduction before any WHNF on subexpressions.
@@ -3555,6 +3633,16 @@ class W_App(W_Expr):
         # Handle recursor in head position
         iota_progress, reduced = self.try_iota_reduce(env)
         if iota_progress:
+            return reduced
+
+        # Struct-eta on the casesOn side: when the major is stuck but
+        # the inductive is a single-ctor non-recursive structure, push
+        # projections of the major into the single minor. This unsticks
+        # reductions like `Prod.casesOn STUCK (fun l r => mk l r)`,
+        # turning them into `mk STUCK.fst STUCK.snd` so iota can fire
+        # on a surrounding casesOn over the same structure.
+        reduced = self.try_struct_eta_reduce(env)
+        if reduced is not None:
             return reduced
 
         # Quot.lift reduction: Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
@@ -3985,6 +4073,18 @@ class W_Inductive(W_DeclarationKind):
         if ctor_names is None:
             ctor_names = [c.name for c in constructors]
         self.ctor_names = ctor_names
+
+    def is_non_recursive_structure(self):
+        """
+        Whether this inductive is a *structure* whose recursor admits
+        struct-eta reduction on a stuck major: exactly one constructor,
+        no indices, and not (mutually) recursive.
+        """
+        return (
+            len(self.constructors) == 1
+            and self.num_indices == 0
+            and not self.is_recursive
+        )
 
     def dump_to(self, exporter, decl):
         # Mark every mutual-block member visited up front so dep walks

@@ -1060,6 +1060,94 @@ def test_quot_lift_reduction():
     assert syntactic_eq(reduced, f.const().app(a.const()))
 
 
+def test_struct_eta_reduction_on_stuck_major():
+    """
+    `S.rec motive minor stuck` reduces to `minor (S.proj_0 stuck) ...`
+    when `S` is a single-ctor non-recursive inductive (a structure) and
+    `stuck` is not a constructor application — Lean's struct-eta-on-
+    casesOn rule. Mirrors the `Prod.casesOn (Poly.cancel ...)` shape
+    that stalls in `Nat.Linear.ExprCnstr.denote_toNormPoly`.
+    """
+    Pair = Name.simple("Pair")
+    Pair_mk = Pair.child("mk")
+    Pair_rec = Pair.child("rec")
+    u_name = Name.simple("u")
+    u_level = u_name.level()
+
+    fst_name = Name.simple("fst")
+    snd_name = Name.simple("snd")
+    mk_decl = Pair_mk.constructor(
+        type=forall(
+            fst_name.binder(type=NAT),
+            snd_name.binder(type=NAT),
+        )(Pair.const()),
+        num_params=0,
+        num_fields=2,
+    )
+    pair_decl = Pair.inductive(type=TYPE, constructors=[mk_decl])
+
+    # Pair.rec.{u} :
+    #   {motive : Pair → Sort u} →
+    #   ((fst snd : Nat) → motive (Pair.mk fst snd)) →
+    #   (s : Pair) → motive s
+    motive = Name.simple("motive")
+    s_name = Name.simple("s")
+    motive_type = forall(s_name.binder(type=Pair.const()))(u_level.sort())
+    mk_case_type = forall(
+        fst_name.binder(type=NAT),
+        snd_name.binder(type=NAT),
+    )(W_BVar(2).app(Pair_mk.const().app(W_BVar(1), W_BVar(0))))
+    rec_type = forall(
+        motive.binder(type=motive_type),
+        Name.simple("mk_case").binder(type=mk_case_type),
+        s_name.binder(type=Pair.const()),
+    )(W_BVar(2).app(W_BVar(0)))
+
+    # Rec rule for mk: fun motive mk_case fst snd => mk_case fst snd
+    mk_rule_val = fun(
+        motive.binder(type=motive_type),
+        Name.simple("mk_case").binder(type=mk_case_type),
+        fst_name.binder(type=NAT),
+        snd_name.binder(type=NAT),
+    )(W_BVar(2).app(W_BVar(1), W_BVar(0)))
+    rec_decl = Pair_rec.recursor(
+        type=rec_type,
+        rules=[
+            W_RecRule(ctor_name=Pair_mk, num_fields=2, rhs=mk_rule_val),
+        ],
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=1,
+        names=[Pair],  # `RecursorVal.all`: the inductives this rec is for.
+        levels=[u_name],
+    )
+
+    Nat_decl = Name.simple("Nat").inductive(type=TYPE)
+    stuck = Name.simple("stuck").axiom(type=Pair.const())
+    env = Environment.having(
+        [pair_decl, mk_decl, rec_decl, Nat_decl, stuck],
+    )
+
+    # Pair.rec.{1} (fun _ => Nat) (fun fst snd => fst) stuck
+    one = u.succ()
+    motive_lam = fun(Name.simple("_t").binder(type=Pair.const()))(NAT)
+    fst_minor = fun(
+        fst_name.binder(type=NAT),
+        snd_name.binder(type=NAT),
+    )(W_BVar(1))  # returns fst
+    rec_app = (
+        Pair_rec.const(levels=[one])
+        .app(motive_lam)
+        .app(fst_minor)
+        .app(stuck.const())
+    )
+
+    # After struct-eta + beta: stuck.fst (Pair's first projection).
+    expected = Pair.proj(0, stuck.const())
+    assert syntactic_eq(rec_app.whnf(env), expected)
+
+
 class TestTracer(object):
     """The tracer is invoked with each intermediate expression during WHNF."""
 
