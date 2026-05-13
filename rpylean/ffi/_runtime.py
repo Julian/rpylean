@@ -393,17 +393,27 @@ def read_constant_info(ci):
     name, levels, type_expr = _read_constant_val(cval)
 
     if tag == 0:  # axiomInfo
-        return name.axiom(type=type_expr, levels=levels)
+        # AxiomVal: scalar byte 0 = isUnsafe (no obj fields beyond
+        # `toConstantVal`, so num_objs = 1).
+        is_unsafe = _ctor_byte(val, 1, 0) != 0
+        return name.axiom(type=type_expr, levels=levels, is_unsafe=is_unsafe)
     if tag == 1:  # defnInfo
         value = read_expr(_lean.ctor_get(val, 1))
         hint = _read_hints(_lean.ctor_get(val, 2))
-        return name.definition(type=type_expr, value=value, hint=hint, levels=levels)
-    if tag == 2:  # thmInfo
+        # DefinitionVal: scalar byte 0 = safety enum
+        # (0=unsafe, 1=safe, 2=partial). 4 obj fields preceding.
+        is_unsafe = _ctor_byte(val, 4, 0) == 0
+        return name.definition(type=type_expr, value=value, hint=hint,
+                               levels=levels, is_unsafe=is_unsafe)
+    if tag == 2:  # thmInfo — always safe.
         value = read_expr(_lean.ctor_get(val, 1))
         return name.theorem(type=type_expr, value=value, levels=levels)
     if tag == 3:  # opaqueInfo
         value = read_expr(_lean.ctor_get(val, 1))
-        return name.opaque(type=type_expr, value=value, levels=levels)
+        # OpaqueVal: scalar byte 0 = isUnsafe. 3 obj fields.
+        is_unsafe = _ctor_byte(val, 3, 0) != 0
+        return name.opaque(type=type_expr, value=value, levels=levels,
+                           is_unsafe=is_unsafe)
     if tag == 4:  # quotInfo — rpylean models Quot.{mk,lift,ind} as axioms.
         return name.axiom(type=type_expr, levels=levels)
     if tag == 5:  # inductInfo
@@ -416,7 +426,7 @@ def read_constant_info(ci):
         num_indices = read_nat(_lean.ctor_get(val, 2)).toint()
         num_nested = read_nat(_lean.ctor_get(val, 5)).toint()
         is_rec = _ctor_byte(val, 6, 0) != 0
-        # scalar 1 = isUnsafe (rpylean ignores), scalar 2 = isReflexive.
+        is_unsafe = _ctor_byte(val, 6, 1) != 0
         is_reflexive = _ctor_byte(val, 6, 2) != 0
         kind = W_Inductive(
             names=all_names if all_names else [name],
@@ -429,19 +439,23 @@ def read_constant_info(ci):
             is_reflexive=is_reflexive,
             ctor_names=ctor_names,
         )
-        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+        return W_Declaration(name=name, type=type_expr, w_kind=kind,
+                             levels=levels, is_unsafe=is_unsafe)
     if tag == 6:  # ctorInfo
         # ConstructorVal layout (nested ConstantVal at field 0):
         #   1: induct : Name
-        #   2: cidx : Nat (this ctor's index in the inductive's ctors)
+        #   2: cidx : Nat
         #   3: numParams : Nat
         #   4: numFields : Nat
+        # + scalar byte 0 = isUnsafe (5 obj fields).
         cidx = read_nat(_lean.ctor_get(val, 2)).toint()
         num_params = read_nat(_lean.ctor_get(val, 3)).toint()
         num_fields = read_nat(_lean.ctor_get(val, 4)).toint()
+        is_unsafe = _ctor_byte(val, 5, 0) != 0
         kind = W_Constructor(num_params=num_params, num_fields=num_fields,
                              cidx=cidx)
-        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+        return W_Declaration(name=name, type=type_expr, w_kind=kind,
+                             levels=levels, is_unsafe=is_unsafe)
     if tag == 7:  # recInfo
         all_names = _read_name_list(_lean.ctor_get(val, 1))
         num_params = read_nat(_lean.ctor_get(val, 2)).toint()
@@ -461,6 +475,7 @@ def read_constant_info(ci):
             ))
             rules_obj = _lean.ctor_get(rules_obj, 1)
         k = _ctor_byte(val, 7, 0) != 0
+        is_unsafe = _ctor_byte(val, 7, 1) != 0
         kind = W_Recursor(
             names=all_names if all_names else [name],
             rules=rules,
@@ -470,6 +485,7 @@ def read_constant_info(ci):
             num_motives=num_motives,
             num_minors=num_minors,
         )
-        return W_Declaration(name=name, type=type_expr, w_kind=kind, levels=levels)
+        return W_Declaration(name=name, type=type_expr, w_kind=kind,
+                             levels=levels, is_unsafe=is_unsafe)
     raise RuntimeError("read_constant_info: unexpected tag")
     raise RuntimeError("read_constant_info: variant not yet supported")

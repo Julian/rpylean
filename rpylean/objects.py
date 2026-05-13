@@ -668,7 +668,7 @@ class Name(_Item):
         """
         return W_Const(name=self, levels=[] if levels is None else levels)
 
-    def declaration(self, type, w_kind, levels=None):
+    def declaration(self, type, w_kind, levels=None, is_unsafe=False):
         """
         Make a declaration with this name.
         """
@@ -677,6 +677,7 @@ class Name(_Item):
             type=type,
             levels=[] if levels is None else levels,
             w_kind=w_kind,
+            is_unsafe=is_unsafe,
         )
 
     def constructor(self, type, num_params=0, num_fields=0, cidx=0,
@@ -736,25 +737,28 @@ class Name(_Item):
             levels=levels,
         )
 
-    def definition(self, type, value, hint=1, levels=None):
+    def definition(self, type, value, hint=1, levels=None, is_unsafe=False):
         """
         Make a definition of the given type and value with this name.
         """
         definition = W_Definition(value=value, hint=hint)
-        return self.declaration(type=type, w_kind=definition, levels=levels)
+        return self.declaration(type=type, w_kind=definition, levels=levels,
+                                is_unsafe=is_unsafe)
 
-    def opaque(self, type, value, levels=None):
+    def opaque(self, type, value, levels=None, is_unsafe=False):
         """
         Make an opaque declaration with this name.
         """
         opaque = W_Opaque(value=value)
-        return self.declaration(type=type, w_kind=opaque, levels=levels)
+        return self.declaration(type=type, w_kind=opaque, levels=levels,
+                                is_unsafe=is_unsafe)
 
-    def axiom(self, type, levels=None):
+    def axiom(self, type, levels=None, is_unsafe=False):
         """
         Make an axiom with this name.
         """
-        return self.declaration(type=type, w_kind=W_Axiom(), levels=levels)
+        return self.declaration(type=type, w_kind=W_Axiom(), levels=levels,
+                                is_unsafe=is_unsafe)
 
     def theorem(self, type, value, levels=None):
         """
@@ -3498,13 +3502,18 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
-    def __init__(self, name, type, w_kind, levels):
+    def __init__(self, name, type, w_kind, levels, is_unsafe=False):
         self.name = name
         self.type = type
         self.w_kind = w_kind
         for each in levels:
             assert isinstance(each, Name), "%s is not a level name" % (each,)
         self.levels = levels
+        #: Mirrors Lean's `ConstantInfo.isUnsafe` (or `DefinitionVal.safety
+        #: == .unsafe`). `lean4export` skips unsafe constants unless
+        #: `--export-unsafe` is passed; we follow the same convention
+        #: by default.
+        self.is_unsafe = is_unsafe
 
     @property
     def is_private(self):

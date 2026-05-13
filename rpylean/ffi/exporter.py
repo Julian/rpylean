@@ -201,14 +201,22 @@ class Exporter(object):
     def dump_all(self):
         """Emit every registered declaration in dependency order.
 
-        Internal names (`Name.is_internal`: any component starts with
-        `_`) aren't used as export roots — `lean4export` does the same
-        — but they still come out when reachable from a non-internal
-        root via `dump_deps`."""
+        Skips two kinds of roots, matching `lean4export`'s defaults:
+
+        * Internal names (`Name.is_internal`: any component starts
+          with `_`) aren't used as roots, though they still appear
+          when reachable from a non-internal root.
+        * Unsafe-flagged declarations are skipped entirely;
+          `lean4export` only includes them with `--export-unsafe`.
+        """
         self._index_inductive_members()
         for name in self.decls:
-            if not name.is_internal:
-                self.dump_constant(self.decls[name])
+            decl = self.decls[name]
+            if name.is_internal:
+                continue
+            if decl.is_unsafe:
+                continue
+            self.dump_constant(decl)
 
     def dump_named(self, names):
         """Emit only the named declarations (and their transitive deps).
