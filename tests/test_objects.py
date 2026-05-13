@@ -61,52 +61,6 @@ class TestName(object):
     def test_child_anonymous(self):
         assert Name.ANONYMOUS.child("foo") == Name.simple("foo")
 
-    @pytest.mark.parametrize(
-        "base, name, expected",
-        [
-            (
-                Name.simple("foo"),
-                Name.of(["foo", "bar"]),
-                Name.simple("bar"),
-            ),
-            (
-                Name.simple("foo"),
-                Name.of(["foo", "bar", "baz"]),
-                Name.of(["bar", "baz"]),
-            ),
-            (
-                Name.of(["foo", "bar"]),
-                Name.of(["foo", "spam", "eggs"]),
-                Name.of(["spam", "eggs"]),
-            ),
-            (
-                Name.simple("foo"),
-                Name.simple("bar"),
-                Name.simple("bar"),
-            ),
-            (
-                Name.ANONYMOUS,
-                Name.simple("foo"),
-                Name.simple("foo"),
-            ),
-            (
-                Name.simple("foo"),
-                Name.ANONYMOUS,
-                Name.ANONYMOUS,
-            ),
-        ],
-        ids=[
-            "child_simple",
-            "child_nested",
-            "cousin",
-            "unrelated",
-            "in_anonymous",
-            "anonymous",
-        ],
-    )
-    def test_in_namespace(self, base, name, expected):
-        assert name.in_namespace(base) == expected
-
     def test_is_private_via_prefix(self):
         assert Name.of(["_private", "foo"]).is_private
 

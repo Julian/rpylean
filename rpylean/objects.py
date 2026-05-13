@@ -673,35 +673,6 @@ class Name(_Item):
         parts.reverse()
         return ".".join(parts)
 
-    def in_namespace(self, base):
-        """
-        Strip the longest prefix of ``self`` that matches a prefix of
-        ``base``. Returns ``self`` with those leading parts removed.
-        """
-        self_texts = []
-        self_is_num = []
-        self._materialize_into(self_texts, self_is_num)
-        base_texts = []
-        base_is_num = []
-        base._materialize_into(base_texts, base_is_num)
-        i = 0
-        n = len(self_texts)
-        m = len(base_texts)
-        while i < n and i < m:
-            if self_is_num[i] != base_is_num[i]:
-                break
-            if self_texts[i] != base_texts[i]:
-                break
-            i += 1
-        result = Name.ANONYMOUS
-        while i < n:
-            if self_is_num[i]:
-                result = result.num_child(rbigint.fromdecimalstr(self_texts[i]))
-            else:
-                result = result.child(self_texts[i])
-            i += 1
-        return result
-
     def depth(self):
         """Number of components in this name (0 for anonymous)."""
         n = 0
@@ -928,9 +899,6 @@ class _AnonymousName(Name):
     def has_macro_scopes(self):
         return False
 
-    def _materialize_into(self, texts, is_num):
-        pass
-
     def _part_str(self):
         # Anonymous never contributes a part to `str()` — the iterative
         # walk in `Name.str()` stops before calling this.
@@ -959,11 +927,6 @@ class StrName(Name):
 
     def is_at_marker(self):
         return self.suffix == "_@"
-
-    def _materialize_into(self, texts, is_num):
-        self.parent._materialize_into(texts, is_num)
-        texts.append(self.suffix)
-        is_num.append(False)
 
     def _part_str(self):
         # Lean's `escapePart`: wrap suffix in `«»` if any non-identifier
@@ -999,11 +962,6 @@ class NumName(Name):
     def has_macro_scopes(self):
         # Lean: `.num n _ => hasMacroScopes n`
         return self.parent.has_macro_scopes()
-
-    def _materialize_into(self, texts, is_num):
-        self.parent._materialize_into(texts, is_num)
-        texts.append(self.idx.str())
-        is_num.append(True)
 
     def _part_str(self):
         return self.idx.str()
@@ -4124,8 +4082,15 @@ class W_Constructor(W_DeclarationKind):
         self, constructor_name, type, inductive, constants,
         mark=None, span_holder=None,
     ):
-        name = constructor_name.in_namespace(inductive.names[0])
-        result = [PUNCT.emit("| "), DECL_NAME.emit(name.str())]
+        # Constructor names are always a single-part child of their
+        # inductive's name in Lean (e.g., `List.cons` inside `List`),
+        # so display just the leaf part. Fall back to the full name
+        # if the invariant doesn't hold.
+        if constructor_name.parent.syntactic_eq(inductive.names[0]):
+            short = constructor_name._part_str()
+        else:
+            short = constructor_name.str()
+        result = [PUNCT.emit("| "), DECL_NAME.emit(short)]
         if type not in [each.const() for each in inductive.names]:
             result.append(PUNCT.emit(" : "))
             _append_marked_tokens(result, span_holder, type, constants, mark)
