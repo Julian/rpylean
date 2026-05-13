@@ -34,6 +34,7 @@ from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,
     Name,
+    NumName,
     W_Constructor,
     W_Inductive,
     W_LevelZero,
@@ -273,18 +274,19 @@ class Exporter(object):
     def name_id(self, name):
         if name in self._names:
             return self._names[name]
-        parts = name.components
-        parent = Name(parts[:-1]) if parts else Name.ANONYMOUS
-        parent_id = self.name_id(parent)
+        # Anonymous is pre-seeded at id 0 in __init__; getting here means
+        # `name` is a StrName or NumName with a parent we need to emit first.
+        parent_id = self.name_id(name.parent)
         nid = self._next_name
         self._next_name += 1
         self._names[name] = nid
-        last = parts[-1]
-        if isinstance(last, int):
-            payload = '{"i":%d,"pre":%d}' % (last, parent_id)
+        if isinstance(name, NumName):
+            payload = '{"i":%s,"pre":%d}' % (name.idx.str(), parent_id)
             self.stream.write('{"in":%d,"num":%s}\n' % (nid, payload))
         else:
-            payload = '{"pre":%d,"str":%s}' % (parent_id, _json_string(last))
+            payload = '{"pre":%d,"str":%s}' % (
+                parent_id, _json_string(name.suffix),
+            )
             self.stream.write('{"in":%d,"str":%s}\n' % (nid, payload))
         return nid
 

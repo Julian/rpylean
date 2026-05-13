@@ -32,10 +32,10 @@ def test_dump_name():
         """,
     ) == EnvironmentBuilder(
         names=[
-            Name(["foo"]),
-            Name(["foo", "bla"]),
-            Name(["foo", "bla", "1"]),
-            Name(["foo", "bla", "1", "boo"]),
+            Name.of(["foo"]),
+            Name.of(["foo", "bla"]),
+            Name.of(["foo", "bla", 1]),
+            Name.of(["foo", "bla", 1, "boo"]),
         ],
     )
 
@@ -310,12 +310,12 @@ def test_dump_constant_list():
     head, tail, motive = names("head", "tail", "motive")
 
     ListFn = Name.simple("List").const(levels=[u])
-    nil = Name(["List", "nil"]).constructor(
+    nil = Name.of(["List", "nil"]).constructor(
         type=forall(alpha.to_implicit())(ListFn.app(b0)),
         levels=[Name.simple("u")],
         num_params=1,
     )
-    cons = Name(["List", "cons"]).constructor(
+    cons = Name.of(["List", "cons"]).constructor(
         type=forall(
             alpha.to_implicit(),
             head.binder(type=b0),
@@ -405,7 +405,7 @@ def test_dump_constant_list():
         {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":4,"numFields":0,"numParams":1,"type":5},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[2],"name":5,"numFields":2,"numParams":1,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[9,2],"name":8,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":1,"rules":[{"ctor":4,"nfields":0,"rhs":39},{"ctor":5,"nfields":2,"rhs":55}],"type":35}],"types":[{"all":[1],"ctors":[4,5],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":0,"numNested":0,"numParams":1,"type":1}]}}
         """,
     ).finish()
-    rec = Name(["List", "rec"]).recursor(
+    rec = Name.of(["List", "rec"]).recursor(
         type=env["List.rec"].type,
         rules=env["List.rec"].w_kind.rules,
         names=env["List.rec"].w_kind.names,

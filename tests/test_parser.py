@@ -30,8 +30,8 @@ def test_names():
     )
     assert builder.names == [
         Name.ANONYMOUS,
-        Name(["MyTrue"]),
-        Name(["MyTrue", "intro"]),
+        Name.of(["MyTrue"]),
+        Name.of(["MyTrue", "intro"]),
     ]
 
 
@@ -54,7 +54,7 @@ def test_lambda_strict_implicit():
         {"ie":1,"lam":{"binderInfo":"strictImplicit","body":0,"name":1,"type":0}}
         """,
     )
-    assert builder.names[1] == Name(["a"])
+    assert builder.names[1] == Name.of(["a"])
     assert len(builder.exprs) == 2
     assert builder.exprs[0] == W_BVar(id=0)
 
@@ -70,7 +70,7 @@ def test_axiom():
     )
     assert len(builder.declarations) == 1
     decl = builder.declarations[0]
-    assert decl.name == Name(["ax"])
+    assert decl.name == Name.of(["ax"])
 
 
 def test_opaque():
@@ -84,7 +84,7 @@ def test_opaque():
         """,
     )
     assert len(builder.declarations) == 1
-    assert builder.declarations[0].name == Name(["foo"])
+    assert builder.declarations[0].name == Name.of(["foo"])
 
 
 def test_large_litnat():

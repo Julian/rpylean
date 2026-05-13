@@ -203,9 +203,7 @@ def _read_name_uncached(o):
     if tag == 2:  # num
         parent = read_name(_lean.ctor_get(o, 0))
         idx = read_nat(_lean.ctor_get(o, 1))
-        # Name.components is a list of str (stringify the numeric component
-        # to match the existing parser's convention).
-        return parent.child(idx.str())
+        return parent.num_child(idx)
     raise RuntimeError("read_name: unexpected tag")
 
 

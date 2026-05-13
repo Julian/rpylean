@@ -44,19 +44,19 @@ u, v = Name.simple("u").level(), Name.simple("v").level()
 
 class TestName(object):
     def test_simple(self):
-        assert Name.simple("foo") == Name(["foo"])
+        assert Name.simple("foo") == Name.of(["foo"])
 
     def test_simple_hierarchical(self):
-        assert Name.simple("foo.bar") == Name(["foo.bar"])
+        assert Name.simple("foo.bar") == Name.of(["foo.bar"])
 
     def test_from_str(self):
-        assert Name.from_str("foo") == Name(["foo"])
+        assert Name.from_str("foo") == Name.of(["foo"])
 
     def test_from_str_multipart(self):
-        assert Name.from_str("foo.bar") == Name(["foo", "bar"])
+        assert Name.from_str("foo.bar") == Name.of(["foo", "bar"])
 
     def test_child(self):
-        assert Name.simple("foo").child("bar") == Name(["foo", "bar"])
+        assert Name.simple("foo").child("bar") == Name.of(["foo", "bar"])
 
     def test_child_anonymous(self):
         assert Name.ANONYMOUS.child("foo") == Name.simple("foo")
@@ -66,18 +66,18 @@ class TestName(object):
         [
             (
                 Name.simple("foo"),
-                Name(["foo", "bar"]),
+                Name.of(["foo", "bar"]),
                 Name.simple("bar"),
             ),
             (
                 Name.simple("foo"),
-                Name(["foo", "bar", "baz"]),
-                Name(["bar", "baz"]),
+                Name.of(["foo", "bar", "baz"]),
+                Name.of(["bar", "baz"]),
             ),
             (
-                Name(["foo", "bar"]),
-                Name(["foo", "spam", "eggs"]),
-                Name(["spam", "eggs"]),
+                Name.of(["foo", "bar"]),
+                Name.of(["foo", "spam", "eggs"]),
+                Name.of(["spam", "eggs"]),
             ),
             (
                 Name.simple("foo"),
@@ -108,16 +108,16 @@ class TestName(object):
         assert name.in_namespace(base) == expected
 
     def test_is_private_via_prefix(self):
-        assert Name(["_private", "foo"]).is_private
+        assert Name.of(["_private", "foo"]).is_private
 
     def test_is_private_via_nested(self):
         assert Name.from_str("foo._private.bar.0.baz").is_private
 
     def test_not_private(self):
-        assert not Name(["foo"]).is_private
+        assert not Name.of(["foo"]).is_private
 
     def test_not_private_nested(self):
-        assert not Name(["foo", "bar"]).is_private
+        assert not Name.of(["foo", "bar"]).is_private
 
     def test_eq_different_identity(self):
         """Names with equal components but different identity are equal."""
@@ -134,16 +134,16 @@ class TestName(object):
         assert not (n1 != n2)
 
     def test_app(self):
-        bar = Name(["foo", "bar"])
+        bar = Name.of(["foo", "bar"])
         bvar = W_BVar(0)
         assert bar.app(bvar) == W_App(bar.const(), bvar)
 
     def test_const_no_levels(self):
-        bar = Name(["foo", "bar"])
+        bar = Name.of(["foo", "bar"])
         assert bar.const() == W_Const(bar, [])
 
     def test_const_with_levels(self):
-        bar = Name(["foo", "bar"])
+        bar = Name.of(["foo", "bar"])
         assert bar.const([u, v]) == W_Const(bar, [u, v])
 
     def test_let(self):
@@ -163,7 +163,7 @@ class TestName(object):
         )
 
     def test_level(self):
-        assert Name.simple("foo").level() == W_LevelParam(Name(["foo"]))
+        assert Name.simple("foo").level() == W_LevelParam(Name.of(["foo"]))
 
     def test_definition(self):
         foo = Name.simple("foo")
@@ -311,11 +311,11 @@ class TestName(object):
         )
 
     def test_hash_is_order_sensitive(self):
-        assert Name(["foo", "bar"]).hash() != Name(["bar", "foo"]).hash()
+        assert Name.of(["foo", "bar"]).hash() != Name.of(["bar", "foo"]).hash()
 
 
 def test_names():
-    assert names("foo", "A.b") == [Name.simple("foo"), Name(["A", "b"])]
+    assert names("foo", "A.b") == [Name.simple("foo"), Name.of(["A", "b"])]
 
 
 class TestBinder(object):
@@ -557,7 +557,7 @@ class TestLevel(object):
         assert not u.gt(W_LEVEL_ZERO, -1)
 
     def test_succ(self):
-        assert u.succ() == W_LevelSucc(W_LevelParam(Name(["u"])))
+        assert u.succ() == W_LevelSucc(W_LevelParam(Name.of(["u"])))
 
     def test_succ_level_zero(self):
         assert W_LEVEL_ZERO.succ() == W_LevelSucc(W_LEVEL_ZERO)

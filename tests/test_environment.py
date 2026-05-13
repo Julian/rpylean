@@ -652,7 +652,7 @@ class TestRecursorRuleShape(object):
     def test_rule_for_unknown_ctor_rejected(self):
         from rpylean.objects import W_RecRule, W_InvalidRecursorRule
         U, mk, ind = self._build_unit_ind()
-        ghost = Name(["U", "ghost"])
+        ghost = Name.of(["U", "ghost"])
         bad_rec = U.child("rec").recursor(
             type=U.const(),
             rules=[W_RecRule(ctor_name=ghost, num_fields=0, rhs=U.const())],
@@ -1092,12 +1092,12 @@ class TestNotRPython:
         assert env["Foo"] is Foo
 
     def test_getitem_multipart(self):
-        bar = Name(["Foo", "bar"]).definition(type=TYPE, value=PROP)
+        bar = Name.of(["Foo", "bar"]).definition(type=TYPE, value=PROP)
         env = Environment.having([bar])
         assert env["Foo.bar"] is bar
 
     def test_getitem_name(self):
-        Foobar = Name(["Foo.bar"])
+        Foobar = Name.of(["Foo.bar"])
         decl = Foobar.definition(type=TYPE, value=PROP)
         env = Environment.having([decl])
         assert env[Foobar] is decl

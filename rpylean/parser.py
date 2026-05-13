@@ -129,7 +129,7 @@ def _parse_name(cursor, builder):
         parent_nidx, id_val = _parse_name_num_inner(cursor)
         cursor.expect('}')
         parent = builder.names[parent_nidx]
-        builder.register_name(nidx, parent.child(str(id_val)))
+        builder.register_name(nidx, parent.num_child(rbigint.fromint(id_val)))
     else:
         raise ValueError("unknown name discriminator: %s" % second_key)
 

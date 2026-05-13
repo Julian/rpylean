@@ -470,7 +470,7 @@ def name_eq(name, other):
     # Marked @elidable so the JIT can fold calls to this function at
     # trace-compile time when both arguments are promoted.  This collapses
     # all 14 sequential nat-op comparisons in _try_reduce_nat into constants.
-    return name.components == other.components
+    return name.syntactic_eq(other)
 
 
 @specialize.call_location()
@@ -490,7 +490,7 @@ def name_dict():
     from rpython.rlib.objectmodel import r_dict
 
     def _eq(a, b):
-        return a.components == b.components
+        return a.syntactic_eq(b)
 
     def _hash(name):
         return name.hash()
@@ -499,138 +499,217 @@ def name_dict():
 
 
 class Name(_Item):
-    def __init__(self, components):
-        self.components = components
-        # Lazy cache for `self.level()`; deferred to first call so
-        # that `Name` can be defined before `W_LevelParam`. None
-        # before first access; set to a `W_LevelParam` once.
+    """
+    Lean's ``Name`` inductive type — a linked structure mirroring::
+
+        inductive Name | anonymous | str (p : Name) (s : String) | num (p : Name) (n : Nat)
+
+    Use the ``Name.ANONYMOUS`` singleton for the anonymous case, then
+    build up via ``.child(suffix)`` for ``Name.str`` parts and
+    ``.num_child(idx)`` for ``Name.num`` parts. Build from a flat list
+    of string parts via ``Name.of([...])``.
+
+    Subclasses ``_AnonymousName``, ``StrName``, and ``NumName`` provide
+    the actual data; this base class is abstract-in-spirit (don't
+    construct it directly).
+    """
+
+    def __init__(self):
+        # Lazy cache for `as_level_param()`; populated on first call.
+        # Subclasses set their own `parent` / `_hash` / `is_internal` /
+        # `is_private` fields after calling this.
         self._level_cache = None
+
+    @staticmethod
+    def simple(part):
+        """A name with one (string) part."""
+        return Name.ANONYMOUS.child(part)
+
+    @staticmethod
+    def from_str(s):
+        """Construct a name by splitting a string on ``.`` (all str parts)."""
+        name = Name.ANONYMOUS
+        for p in s.split("."):
+            name = name.child(p)
+        return name
+
+    @staticmethod
+    @not_rpython
+    def of(parts):
+        """
+        Test helper: build a name from a flat list of parts. ``str``
+        parts become ``Name.str``; ``int`` parts become ``Name.num``.
+
+        Not used in translated code — call ``.child(s)`` / ``.num_child(idx)``
+        directly there.
+        """
+        name = Name.ANONYMOUS
+        for p in parts:
+            if isinstance(p, int):
+                name = name.num_child(rbigint.fromint(p))
+            else:
+                name = name.child(p)
+        return name
+
+    def child(self, suffix):
+        """Construct a ``Name.str`` child of this name."""
+        return StrName(self, suffix)
+
+    def num_child(self, idx):
+        """
+        Construct a ``Name.num`` child of this name. ``idx`` is the
+        integer index (an ``rbigint`` since Lean's ``Nat`` is unbounded).
+        """
+        return NumName(self, idx)
 
     def __repr__(self):
         return "`%s" % (self.str(),)
 
-    @staticmethod
-    def simple(part):
-        """
-        A name with one part.
-        """
-        return Name([part])
-
-    @staticmethod
-    def from_str(s):
-        """
-        Construct a name by splitting a string on ``.``.
-        """
-        return Name(s.split("."))
-
-    def child(self, part):
-        """
-        Construct a name nested inside this one.
-        """
-        return Name(self.components + [part])
-
-    def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list for this name, tagged as a declaration name."""
-        return [DECL_NAME.emit(self.str())]
-
-    def has_macro_scopes(self):
-        """
-        Does this name have hygienic macro scopes?
-
-        A name has macro scopes iff, stripping any trailing numeric components,
-        its last component is the string ``_hyg``.
-
-        See ``Lean.Name.hasMacroScopes`` in ``Init.Prelude``.
-        """
-        for part in reversed(self.components):
-            if part == "_hyg":
-                return True
-            if isinstance(part, int) or (isinstance(part, str) and part.isdigit()):
-                continue
-            return False
-        return False
-
-    def erase_macro_scopes(self):
-        """
-        Erase macro scopes from this name.
-
-        A hygienic name is encoded as ``<actual-name>._@.<context-and-scopes>._hyg.<scopes>``.
-        This method returns everything before the first ``_@`` component.
-
-        See ``Lean.Name.eraseMacroScopes`` in ``Init.Prelude``.
-        """
-        parts = []
-        for part in self.components:
-            if part == "_@":
-                return Name(parts) if parts else Name.ANONYMOUS
-            parts.append(part)
-        return self
-
-    def str(self):
-        parts = []
-        for part in self.components:
-            if part == "_@":
-                break
-            parts.append(part)
-        if not parts:
-            return "[anonymous]"
-        return ".".join([pretty_part(each) for each in parts])
-
     @elidable
     def hash(self):
-        hash_val = 0x345678
-        for each in self.components:
-            hash_val = (hash_val * 1000003) ^ compute_hash(each)
-        return hash_val & 0xFFFFFFFF
+        return self._hash
 
     @not_rpython
     def __hash__(self):
         return self.hash()
 
+    @not_rpython
+    def __eq__(self, other):
+        # Override `_Item.__eq__`: that compares `__dict__` items, which
+        # would recurse infinitely through the self-link in
+        # `_AnonymousName.parent`. We have `syntactic_eq` already
+        # implemented per-subclass — use it.
+        if not isinstance(other, Name):
+            return NotImplemented
+        return self.syntactic_eq(other)
+
+    @not_rpython
+    def __ne__(self, other):
+        if not isinstance(other, Name):
+            return NotImplemented
+        return not self.syntactic_eq(other)
+
+    def is_anonymous(self):
+        # Default for `StrName` / `NumName`; `_AnonymousName` overrides.
+        return False
+
+    def tokens(self, constants, mark=None, span_holder=None):
+        """
+        Display tokens for this name. We display the user-facing name
+        (the ``MacroScopesView.name`` recovered from any hygienic
+        encoding), not the raw Lean-canonical string — so a hygienic
+        ``a._@.M._hyg.1`` shows as just ``a``.
+        """
+        return [DECL_NAME.emit(self.user_name().str())]
+
     def syntactic_eq(self, other):
-        return self.components == other.components
-
-    @property
-    def is_private(self):
         """
-        Is this a private name?
-
-        See `Lean.PrivateName` for Lean's "real" implementation which we try to
-        follow here.
+        Lean's ``Name.beq``: structural equality, walked iteratively
+        leaf-to-root so deep names don't blow the C stack on translated
+        builds.
         """
-        for part in self.components:
-            if part == "_private":
+        a = self
+        b = other
+        while True:
+            if a is b:
                 return True
-        return False
+            if a.is_anonymous() or b.is_anonymous():
+                return a.is_anonymous() and b.is_anonymous()
+            if isinstance(a, NumName):
+                if not isinstance(b, NumName):
+                    return False
+                if not a.idx.eq(b.idx):
+                    return False
+            else:
+                assert isinstance(a, StrName)
+                if not isinstance(b, StrName):
+                    return False
+                if a.suffix != b.suffix:
+                    return False
+            a = a.parent
+            b = b.parent
 
-    @property
-    def is_internal(self):
+    def user_name(self):
         """
-        Is any string component of this name internally-generated?
+        The user-facing prefix of this name — everything before the
+        ``_@`` macro-scope marker introduced by Lean's ``MacroScopesView``
+        encoding. If there is no ``_@`` marker, returns ``self`` unchanged.
 
-        Mirrors `Lean.Name.isInternal`: a name is internal if any
-        string component starts with `_` (e.g., `_private`, `_hyg`,
-        `_uniq`). Numeric components don't trigger, but they don't
-        block either — internality propagates through the parent
-        chain. `lean4export` uses this to skip internal names as
-        export *roots*; they still appear when reachable via deps.
+        This is the inverse of ``MacroScopesView.review``: given a
+        hygienic name like ``a._@.M._hygCtx._hyg.7``, returns ``a``.
         """
-        for part in self.components:
-            if isinstance(part, str) and len(part) > 0 and part[0] == "_":
-                return True
-        return False
+        # Walk leaf-to-root, tracking the root-most `_@` we encounter
+        # (the boundary between the user-typed name and the macro
+        # context). Per-subclass `is_at_marker()` keeps the loop free
+        # of isinstance checks.
+        last_marker = None
+        cur = self
+        while not cur.is_anonymous():
+            if cur.is_at_marker():
+                last_marker = cur
+            cur = cur.parent
+        if last_marker is None:
+            return self
+        return last_marker.parent
+
+    def is_at_marker(self):
+        """True if this is the ``_@`` macro-scope-boundary marker."""
+        return False  # only StrName overrides
+
+    def str(self):
+        """
+        Lean's ``Name.toString``: dot-joined parts, with non-identifier
+        suffixes wrapped in ``«»``. Walked leaf-to-root so deep names
+        don't blow the C stack on translated builds.
+        """
+        if self.is_anonymous():
+            return "[anonymous]"
+        parts = []
+        cur = self
+        while not cur.is_anonymous():
+            parts.append(cur._part_str())
+            cur = cur.parent
+        # parts is leaf-first; reverse to render root-first.
+        parts.reverse()
+        return ".".join(parts)
 
     def in_namespace(self, base):
         """
-        Calculate what this name looks like inside the given base namespace.
-
-        Essentially, remove common parts from this name which match the base.
+        Strip the longest prefix of ``self`` that matches a prefix of
+        ``base``. Returns ``self`` with those leading parts removed.
         """
+        self_texts = []
+        self_is_num = []
+        self._materialize_into(self_texts, self_is_num)
+        base_texts = []
+        base_is_num = []
+        base._materialize_into(base_texts, base_is_num)
         i = 0
-        for i, part in enumerate(self.components):
-            if i >= len(base.components) or base.components[i] != part:
+        n = len(self_texts)
+        m = len(base_texts)
+        while i < n and i < m:
+            if self_is_num[i] != base_is_num[i]:
                 break
-        return Name(self.components[i:])
+            if self_texts[i] != base_texts[i]:
+                break
+            i += 1
+        result = Name.ANONYMOUS
+        while i < n:
+            if self_is_num[i]:
+                result = result.num_child(rbigint.fromdecimalstr(self_texts[i]))
+            else:
+                result = result.child(self_texts[i])
+            i += 1
+        return result
+
+    def depth(self):
+        """Number of components in this name (0 for anonymous)."""
+        n = 0
+        cur = self
+        while not cur.is_anonymous():
+            n += 1
+            cur = cur.parent
+        return n
 
     def app(self, *args):
         """
@@ -828,6 +907,108 @@ class Name(_Item):
     level = as_level_param
 
 
+class _AnonymousName(Name):
+    """
+    Lean's ``Name.anonymous``. Singleton — use ``Name.ANONYMOUS``.
+
+    Self-links ``parent`` to itself so generic walkers don't have to
+    null-check; callers gate on ``is_anonymous()`` before recursing.
+    """
+
+    def __init__(self):
+        Name.__init__(self)
+        self.parent = self
+        self._hash = 0x345678
+        self.is_internal = False
+        self.is_private = False
+
+    def is_anonymous(self):
+        return True
+
+    def has_macro_scopes(self):
+        return False
+
+    def _materialize_into(self, texts, is_num):
+        pass
+
+    def _part_str(self):
+        # Anonymous never contributes a part to `str()` — the iterative
+        # walk in `Name.str()` stops before calling this.
+        return ""
+
+
+class StrName(Name):
+    """Lean's ``Name.str p s``: a string-suffixed name nested in ``p``."""
+
+    def __init__(self, parent, suffix):
+        Name.__init__(self)
+        self.parent = parent
+        self.suffix = suffix
+        self._hash = (
+            (parent._hash * 1000003) ^ compute_hash(suffix)
+        ) & 0xFFFFFFFF
+        self.is_internal = (
+            parent.is_internal
+            or (len(suffix) > 0 and suffix[0] == "_")
+        )
+        self.is_private = parent.is_private or suffix == "_private"
+
+    def has_macro_scopes(self):
+        # Lean: `.str _ s => s == "_hyg"`
+        return self.suffix == "_hyg"
+
+    def is_at_marker(self):
+        return self.suffix == "_@"
+
+    def _materialize_into(self, texts, is_num):
+        self.parent._materialize_into(texts, is_num)
+        texts.append(self.suffix)
+        is_num.append(False)
+
+    def _part_str(self):
+        # Lean's `escapePart`: wrap suffix in `«»` if any non-identifier
+        # character is present.
+        s = self.suffix
+        for c in s:
+            if ord(c) > 127 or c.isalnum() or c in "'_":
+                continue
+            return "\xc2\xab" + s + "\xc2\xbb"
+        return s
+
+
+class NumName(Name):
+    """
+    Lean's ``Name.num p n``: a numerically-indexed name nested in ``p``.
+    ``idx`` is an ``rbigint`` since Lean's ``Nat`` is unbounded.
+    """
+
+    def __init__(self, parent, idx):
+        Name.__init__(self)
+        self.parent = parent
+        self.idx = idx
+        # XOR with a marker bit so a `Name.num n` and a `Name.str (str n)`
+        # don't collide in the hash table; `syntactic_eq` also distinguishes
+        # via subclass identity.
+        h = compute_hash(idx.str()) ^ 0x5A5A5A5A
+        self._hash = ((parent._hash * 1000003) ^ h) & 0xFFFFFFFF
+        # Lean's `isInternal` / private-name checks: num parts don't
+        # trigger themselves but they don't block parent propagation.
+        self.is_internal = parent.is_internal
+        self.is_private = parent.is_private
+
+    def has_macro_scopes(self):
+        # Lean: `.num n _ => hasMacroScopes n`
+        return self.parent.has_macro_scopes()
+
+    def _materialize_into(self, texts, is_num):
+        self.parent._materialize_into(texts, is_num)
+        texts.append(self.idx.str())
+        is_num.append(True)
+
+    def _part_str(self):
+        return self.idx.str()
+
+
 def names(*many):
     """
     Create a bunch of names at once.
@@ -836,7 +1017,7 @@ def names(*many):
 
 
 #: The anonymous name.
-Name.ANONYMOUS = Name([])
+Name.ANONYMOUS = _AnonymousName()
 
 
 class Binder(_Item):
@@ -901,7 +1082,7 @@ class Binder(_Item):
 
     def tokens(self, constants, mark=None, span_holder=None):
         result = [PUNCT.emit(self.left)]
-        result.append(BINDER_NAME.emit(self.name.str()))
+        result.append(BINDER_NAME.emit(self.name.user_name().str()))
         result.append(PUNCT.emit(" : "))
         _append_marked_tokens(result, span_holder, self.type, constants, mark)
         result.append(PUNCT.emit(self.right))
@@ -969,20 +1150,6 @@ class Binder(_Item):
             left=self.left,
             right=self.right,
         )
-
-
-def pretty_part(part):
-    """
-    Pretty print a single component of a Name.
-    """
-    if isinstance(part, int):
-        return str(part)
-
-    for c in part:
-        if ord(c) > 127 or c.isalnum() or c in "'_":
-            continue
-        return "«%s»" % (part,)
-    return part
 
 
 def leq(fn):
@@ -1470,7 +1637,7 @@ class W_Expr(_Item):
         i = 0
         while isinstance(expr, W_ForAll):
             if i == index:
-                return expr.binder.name.str()
+                return expr.binder.name.user_name().str()
             i += 1
             expr = expr.body
         return None
@@ -1556,7 +1723,7 @@ class W_FVar(W_Expr):
         return self.id == other.id
 
     def str(self):
-        return self.binder.name.str()
+        return self.binder.name.user_name().str()
 
     def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]
@@ -1629,12 +1796,12 @@ class W_LitStr(W_Expr):
         if len(self.val) > 5:
             print("Building large str expr for %s" % self.val[:10])
         Char = Name.simple("Char").const()
-        cons = Name(["List", "cons"]).const([W_LEVEL_ZERO]).app(Char)
-        expr = Name(["List", "nil"]).const([W_LEVEL_ZERO]).app(Char)
+        cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app(Char)
+        expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app(Char)
         for i in range(len(self.val) - 1, -1, -1):
-            char_expr = Name(["Char", "ofNat"]).app(W_LitNat.char(self.val[i]))
+            char_expr = Name.from_str("Char.ofNat").app(W_LitNat.char(self.val[i]))
             expr = cons.app(char_expr, expr)
-        return Name(["String", "mk"]).app(expr)
+        return Name.from_str("String.mk").app(expr)
 
     def infer(self, env):
         """
@@ -1844,7 +2011,7 @@ class W_Const(W_Expr):
         declarations = promote(env.declarations)
         decl = get_decl(declarations, name)
         if decl is None:
-            print("Missing decl: %s" % self.name.components)
+            print("Missing decl: %s" % self.name.str())
             raise RuntimeError("Missing decl: %s" % self.str())
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_delta_reduce_target()
@@ -2727,7 +2894,7 @@ class W_ForAll(W_FunBase):
 def group_to_str(group):
     assert not group[-1].is_instance()
 
-    names = " ".join([each.name.str() for each in group])
+    names = " ".join([each.name.user_name().str() for each in group])
     if group[-1].is_default():
         return names
 
@@ -2735,7 +2902,7 @@ def group_to_str(group):
 
 
 def _binder_group_tokens(group, constants):
-    names = " ".join([binder.name.str() for binder in group])
+    names = " ".join([binder.name.user_name().str() for binder in group])
     if group[-1].is_default():
         return [BINDER_NAME.emit(names)]
     else:
@@ -2743,7 +2910,7 @@ def _binder_group_tokens(group, constants):
         for i, binder in enumerate(group):
             if i > 0:
                 result.append(PLAIN.emit(" "))
-            result.append(BINDER_NAME.emit(binder.name.str()))
+            result.append(BINDER_NAME.emit(binder.name.user_name().str()))
         result.append(PUNCT.emit(group[-1].right))
         return result
 
@@ -3115,8 +3282,8 @@ class W_App(W_Expr):
             rhs = rhs.fn
         return syntactic_eq(lhs, rhs)
 
-    _QUOT_LIFT = Name(["Quot", "lift"])
-    _QUOT_MK = Name(["Quot", "mk"])
+    _QUOT_LIFT = Name.from_str("Quot.lift")
+    _QUOT_MK = Name.from_str("Quot.mk")
 
     def try_quot_lift_reduce(self, env):
         """

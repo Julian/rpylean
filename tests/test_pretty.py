@@ -73,18 +73,21 @@ class TestName(object):
         ],
     )
     def test_str(self, parts, expected):
-        name = Name(parts)
+        name = Name.of(parts)
         assert FORMAT_PLAIN(name.tokens({})) == expected
 
     def test_tokens(self):
         assert Name.simple("foo").tokens({}) == [DECL_NAME.emit("foo")]
 
     def test_tokens_erases_simple_macro_scope(self):
-        name = Name(["a", "_@", "_internal", "_hyg", "0"])
+        # Hygienic encoding: trailing scope index is a `Name.num`.
+        name = Name.of(["a", "_@", "_internal", "_hyg", 0])
         assert FORMAT_PLAIN(name.tokens({})) == "a"
 
     def test_tokens_erases_complex_macro_scope(self):
-        name = Name(["inst", "_@", "Init", "Prelude", "3805852345", "_hygCtx", "_hyg", "9"])
+        name = Name.of(
+            ["inst", "_@", "Init", "Prelude", 3805852345, "_hygCtx", "_hyg", 9],
+        )
         assert FORMAT_PLAIN(name.tokens({})) == "inst"
 
 
@@ -229,24 +232,24 @@ constants = {
             "(Nat → Nat) → Nat",
         ),
         (
-            Name(["x"]).binder(type=W_LEVEL_ZERO.sort()),
+            Name.of(["x"]).binder(type=W_LEVEL_ZERO.sort()),
             W_LEVEL_ZERO.sort(),
             "Prop → Prop",
         ),
         (
-            Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=PROP),
+            Name.of(["a", "_@", "_internal", "_hyg", 1]).binder(type=PROP),
             PROP,
             "Prop → Prop",
         ),
         (
-            Name(["inst", "_@", "_internal", "_hyg", "1"]).instance_binder(
+            Name.of(["inst", "_@", "_internal", "_hyg", 1]).instance_binder(
                 type=Name.simple("Ord").app(NAT),
             ),
             NAT,
             "[Ord Nat] → Nat",
         ),
         (
-            Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=PROP),
+            Name.of(["a", "_@", "_internal", "_hyg", 1]).binder(type=PROP),
             b0,
             "∀ (a : Prop), a",
         ),
@@ -649,7 +652,7 @@ class TestLambda(object):
         assert FORMAT_PLAIN(fun(binder(type=NAT))(NAT_ZERO).tokens({})) == expected
 
     def test_hygienic_binder_name_erased(self):
-        lam = fun(Name(["a", "_@", "_internal", "_hyg", "1"]).binder(type=NAT))(b0)
+        lam = fun(Name.of(["a", "_@", "_internal", "_hyg", 1]).binder(type=NAT))(b0)
         assert FORMAT_PLAIN(lam.tokens({})) == "fun a ↦ a"
 
     def test_mapsto_uses_operator_token(self):

@@ -28,6 +28,7 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     PROP,
     Name,
+    StrName,
     W_App,
     W_BVar,
     W_Closure,
@@ -129,10 +130,22 @@ class EnvironmentBuilder(object):
         self.levels.append(level)
 
     def register_quotient(self, name, type, levels):
-        n = len(name.components)
-        if n == 0 or n > 2 or name.components[0] != "Quot":
+        # Allowed: Quot, Quot.mk, Quot.ind, Quot.lift (all `Name.str` chains
+        # rooted at the anonymous name).
+        if not isinstance(name, StrName):
             raise UnknownQuotient(name, type)
-        if n == 2 and name.components[1] not in ("mk", "ind", "lift"):
+        parent = name.parent
+        if parent.is_anonymous():
+            if name.suffix != "Quot":
+                raise UnknownQuotient(name, type)
+        elif (
+            isinstance(parent, StrName)
+            and parent.parent.is_anonymous()
+            and parent.suffix == "Quot"
+            and name.suffix in ("mk", "ind", "lift")
+        ):
+            pass
+        else:
             raise UnknownQuotient(name, type)
         self.register_declaration(name.axiom(type=type, levels=levels))
 

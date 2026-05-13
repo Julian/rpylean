@@ -178,7 +178,7 @@ def names(env, args, stdin, stdoutw, stderrw):
         arg = args[0].strip()
         if arg.isdigit():  # all names with at most `n` components
             n = int(arg)
-            names = [name for name in names if len(name.components) <= n]
+            names = [name for name in names if name.depth() <= n]
         else:  # all names starting with the given prefix
             names = [name for name in names if name.str().startswith(arg)]
 
