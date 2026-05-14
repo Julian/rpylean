@@ -601,8 +601,14 @@ class Environment(object):
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self)
+            # WHNF can leave a `W_Closure` at the head — force it so
+            # the `isinstance(W_ForAll)` check below isn't dodged by
+            # a deferred substitution. Funext's proof routes through
+            # `congrArg` and stalls here without this; see
+            # `arena/perf/grind-ring-5`.
+            if isinstance(expr2_ty, W_Closure):
+                expr2_ty = expr2_ty.force()
             if isinstance(expr2_ty, W_ForAll):
-                # print("Eta-expanding %s" % expr2.pretty())
                 # Turn 'f' into 'fun x => f x'
                 return fun(expr2_ty.binder)(
                     expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
