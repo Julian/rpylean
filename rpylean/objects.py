@@ -3494,8 +3494,19 @@ class W_App(W_Expr):
             for arg in new_args[:total_args]:
                 new_app = new_app.app(arg)
 
-            ctor_start = decl.w_kind.num_params
-            ctor_end = decl.w_kind.num_params + rec_rule.num_fields
+            # For nested-inductive recursors the ctor whose iota we're
+            # firing can belong to a *different* inductive than the
+            # recursor's (e.g. `Lean.Syntax.rec_*` has a rule for
+            # `Array.mk`, whose parent has its own param count). Slice
+            # the ctor's args using the *ctor's* num_params, not the
+            # recursor's. For non-nested cases the two coincide.
+            ctor_decl = env.declarations.get(rec_rule.ctor_name, None)
+            if ctor_decl is None or not ctor_decl.w_kind.is_constructor():
+                return False, self
+            ctor_kind = ctor_decl.w_kind
+            assert isinstance(ctor_kind, W_Constructor)
+            ctor_start = ctor_kind.num_params
+            ctor_end = ctor_kind.num_params + rec_rule.num_fields
             assert ctor_start >= 0
             assert ctor_end >= 0
 
