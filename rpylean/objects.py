@@ -4425,18 +4425,25 @@ class W_Recursor(W_DeclarationKind):
                 ),
             )
         # ctor_name → ctor decl, for looking up `num_fields` per rule.
+        # For *nested* inductives the recursor's rules may reference
+        # ctors of other types woven into the mutual block (e.g.
+        # `Lean.Syntax.rec_*` has rules for `Array.mk` and `List.nil`
+        # / `List.cons`); fall back to the global env when the ctor
+        # isn't one of the immediate inductives'.
         ctor_by_name = name_dict()
         for ctor in all_ctors:
             ctor_by_name[ctor.name] = ctor
-        for rule_idx in range(len(self.rules)):
-            rule = self.rules[rule_idx]
-            if rule.ctor_name not in ctor_by_name:
-                return W_InvalidRecursorRule(
-                    env,
-                    "rule's ctor %s is not a constructor of "
-                    "the inductive" % rule.ctor_name.str(),
-                )
-            ctor = ctor_by_name[rule.ctor_name]
+        for rule_idx, rule in enumerate(self.rules):
+            ctor = ctor_by_name.get(rule.ctor_name, None)
+            if ctor is None:
+                env_decl = env.declarations.get(rule.ctor_name, None)
+                if env_decl is None or not env_decl.w_kind.is_constructor():
+                    return W_InvalidRecursorRule(
+                        env,
+                        "rule's ctor %s is not a constructor"
+                        % rule.ctor_name.str(),
+                    )
+                ctor = env_decl
             ctor_kind = ctor.w_kind
             assert isinstance(ctor_kind, W_Constructor)
             if rule.num_fields != ctor_kind.num_fields:
