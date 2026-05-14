@@ -4417,7 +4417,11 @@ class W_Recursor(W_DeclarationKind):
                 )
             for ctor in ind_kind.constructors:
                 all_ctors.append(ctor)
-        if len(self.rules) != len(all_ctors):
+        # Split recursors (one per motive in a mutual or nested-inductive
+        # block) only have rules for ctors whose return matches *their*
+        # motive's type — so `len(rules) != len(ctors_of(all))` is fine
+        # for them. Only enforce the count for single-motive recursors.
+        if self.num_motives == 1 and len(self.rules) != len(all_ctors):
             return W_InvalidRecursorRule(
                 env,
                 "recursor has %d rule(s) but its inductive%s has %d "
@@ -4453,10 +4457,15 @@ class W_Recursor(W_DeclarationKind):
             # The minor for this rule is bound at position `rule_idx`
             # in the recursor's minor lambda chain — minor lambdas
             # appear in the same order as `rules`, since both reflect
-            # the constructors' source-declaration order.
-            error = self._check_rule_rhs_head(env, rule, rule_idx)
-            if error is not None:
-                return error
+            # the constructors' source-declaration order. For split
+            # mutual / nested recursors (num_motives > 1) the minors
+            # are interleaved across the whole block, so `rule_idx`
+            # isn't the right global minor offset and this check would
+            # false-reject; skip it there.
+            if self.num_motives == 1:
+                error = self._check_rule_rhs_head(env, rule, rule_idx)
+                if error is not None:
+                    return error
 
     def _check_rule_rhs_head(self, env, rule, ctor_idx):
         """Verify the rule's rhs is `λ params... motives... minors...
