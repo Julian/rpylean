@@ -3360,13 +3360,6 @@ class W_App(W_Expr):
         if not isinstance(decl.w_kind, W_Recursor):
             return False, self
 
-        if decl.w_kind.num_motives != 1:
-            warn(
-                "W_App.try_iota_reduce: unimplemented case num_motives != 1 for %s"
-                % target.name
-            )
-            return False, self
-
         skip_count = (
             decl.w_kind.num_params
             + decl.w_kind.num_indices
