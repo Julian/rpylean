@@ -2167,16 +2167,6 @@ class W_LitNat(W_Expr):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
 
-    def build_nat_expr(self):
-        if rbigint.fromint(100).lt(self.val):
-            print("Building large nat expr for %s" % self.val)
-        expr = NAT_ZERO
-        i = rbigint.fromint(0)
-        while i.lt(self.val):
-            expr = NAT_SUCC.app(expr)
-            i = i.add(rbigint.fromint(1))
-        return expr
-
     def one_step_constructor(self):
         """
         Expose one Nat constructor: ``Nat.zero`` if the value is zero,
@@ -2230,7 +2220,7 @@ def _try_reduce_nat(expr, env):
     if nargs == 1:
         # Nat.succ is handled via _to_nat_val instead of here,
         # to avoid converting constructor applications to W_LitNat
-        # which would then need build_nat_expr in iota reduction.
+        # which would then need re-expanding in iota reduction.
         return None
 
     if nargs != 2:

@@ -545,15 +545,18 @@ class Environment(object):
         if self.try_struct_eta(expr2, expr1):
             return True
 
-        # As the *very* last step, try converting NatLit exprs
-        # In order to be able to type check things like 'UInt32.size',
-        # we need to try everything else before actually calling 'build_nat_expr'
-        # (so that checks like syntactic equality can succeed and prevent us from
-        # building up ~4 billion `Nat` expressions)
+        # As the *very* last step, expose a single Nat constructor from
+        # any remaining `W_LitNat`. We only peel one `Nat.succ` per
+        # def-eq call: if the other side is `Nat.succ Y`, the recursive
+        # def-eq descends into `(W_LitNat (val-1), Y)` and we loop only
+        # as deep as the other side's actual `Nat.succ` nesting. If the
+        # other side is anything else, def-eq bails immediately. This
+        # keeps `UInt32.size`-sized literals (2^32) from materialising
+        # ~4 billion `Nat.succ` nodes the way `build_nat_expr` did.
         if cls1 is W_LitNat:
-            return self.def_eq(expr1.build_nat_expr(), expr2)
+            return self.def_eq(expr1.one_step_constructor(), expr2)
         elif isinstance(expr2, W_LitNat):
-            return self.def_eq(expr1, expr2.build_nat_expr())
+            return self.def_eq(expr1, expr2.one_step_constructor())
 
         if cls1 is W_LitStr:
             return self.def_eq(expr1.build_str_expr(self), expr2)
