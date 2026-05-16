@@ -5,6 +5,7 @@ from time import clock
 from traceback import print_exc
 import pdb
 
+from rpython.rlib import rgc
 from rpython.rlib.jit import promote
 from rpython.rlib.objectmodel import (
     compute_identity_hash,
@@ -286,15 +287,28 @@ class CheckResult(object):
     """
     The outcome of type-checking a single declaration.
 
+    `elapsed` is wall/CPU clock; `gc_elapsed` is the time the runtime
+    spent in GC during this check (subtract for "real work" time).
     `heartbeats` is meaningful only when the environment has heartbeat
     counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
     `0` otherwise.
     """
 
-    def __init__(self, elapsed, heartbeats, error):
+    def __init__(self, elapsed, gc_elapsed, heartbeats, error):
         self.elapsed = elapsed
+        self.gc_elapsed = gc_elapsed
         self.heartbeats = heartbeats
         self.error = error
+
+
+def _gc_time_seconds():
+    """
+    Total GC time so far in seconds. Returns 0.0 in untranslated mode
+    where `rgc.get_stats` is unavailable.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.TOTAL_GC_TIME) * 0.001
+    return 0.0
 
 
 class Environment(object):
@@ -409,6 +423,7 @@ class Environment(object):
         self._def_eq_cache = {}
         self._infer_cache = {}
         error = None
+        gc_start = _gc_time_seconds()
         start = clock()
         try:
             error = decl.type_check(self)
@@ -433,7 +448,8 @@ class Environment(object):
                 pdb.post_mortem()
             raise
         elapsed = clock() - start
-        return CheckResult(elapsed, self.heartbeat, error)
+        gc_elapsed = _gc_time_seconds() - gc_start
+        return CheckResult(elapsed, gc_elapsed, self.heartbeat, error)
 
     def all(self):
         """
