@@ -1824,7 +1824,7 @@ class W_LitStr(W_Expr):
         for i in range(len(self.val) - 1, -1, -1):
             char_expr = Name.from_str("Char.ofNat").app(W_LitNat.char(self.val[i]))
             expr = cons.app(char_expr, expr)
-        return Name.from_str("String.mk").app(expr)
+        return Name.from_str("String.ofList").app(expr)
 
     def infer(self, env):
         """

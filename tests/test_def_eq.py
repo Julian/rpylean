@@ -69,7 +69,7 @@ class TestLitStr(object):
 
     def test_eq_expanded(self):
         """
-        "ok" = String.mk (List.nil.cons (Char.ofNat 107) |>.cons <| Char.ofNat 111)
+        "ok" = String.ofList (List.nil.cons (Char.ofNat 107) |>.cons <| Char.ofNat 111)
         """
         alpha = Name.simple("α").binder(type=u.succ().sort())
         b0, b1, b2 = [W_BVar(i) for i in range(3)]
@@ -100,7 +100,7 @@ class TestLitStr(object):
             is_recursive=True,
         )
 
-        Char, ofNat, String_mk = names("Char", "Char.ofNat", "String.mk")
+        Char, ofNat, String_mk = names("Char", "Char.ofNat", "String.ofList")
 
         # List.{0} Char = List Char
         List_Char = Name.simple("List").const([W_LEVEL_ZERO]).app(Char.const())
