@@ -173,8 +173,11 @@ class _StreamingChecker(DeclarationHook):
         slow_by_hb = self.slow_hb >= 0 and result.heartbeats > self.slow_hb
         if slow_by_time or slow_by_hb:
             self.stdoutw.write_plain(
-                "%f\t%f\t%d\t" % (
-                    result.elapsed, result.gc_elapsed, result.heartbeats,
+                "%f\t%f\t%d\t%d\t" % (
+                    result.elapsed,
+                    result.gc_elapsed,
+                    result.bytes_allocated,
+                    result.heartbeats,
                 ),
             )
             self.stdoutw.writeline(decl.name.tokens(self.env.declarations))

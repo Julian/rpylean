@@ -1068,6 +1068,7 @@ class TestCheckResult(object):
         assert result.error is None
         assert result.elapsed >= 0.0
         assert result.gc_elapsed >= 0.0
+        assert result.bytes_allocated >= 0
 
     def test_failure_carries_error(self):
         bad = Name.simple("Bad").definition(type=PROP, value=PROP)

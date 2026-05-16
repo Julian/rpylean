@@ -288,15 +288,19 @@ class CheckResult(object):
     The outcome of type-checking a single declaration.
 
     `elapsed` is wall/CPU clock; `gc_elapsed` is the time the runtime
-    spent in GC during this check (subtract for "real work" time).
+    spent in GC during this check (subtract for "real work" time);
+    `bytes_allocated` is the cumulative bytes allocated by the runtime
+    during the check (most of which are short-lived and reclaimed by GC).
     `heartbeats` is meaningful only when the environment has heartbeat
     counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
     `0` otherwise.
     """
 
-    def __init__(self, elapsed, gc_elapsed, heartbeats, error):
+    def __init__(self, elapsed, gc_elapsed, bytes_allocated, heartbeats,
+                 error):
         self.elapsed = elapsed
         self.gc_elapsed = gc_elapsed
+        self.bytes_allocated = bytes_allocated
         self.heartbeats = heartbeats
         self.error = error
 
@@ -309,6 +313,15 @@ def _gc_time_seconds():
     if we_are_translated():
         return rgc.get_stats(rgc.TOTAL_GC_TIME) * 0.001
     return 0.0
+
+
+def _bytes_allocated():
+    """
+    Cumulative bytes allocated so far. Returns 0 in untranslated mode.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.TOTAL_ALLOCATED_MEMORY)
+    return 0
 
 
 class Environment(object):
@@ -424,6 +437,7 @@ class Environment(object):
         self._infer_cache = {}
         error = None
         gc_start = _gc_time_seconds()
+        bytes_start = _bytes_allocated()
         start = clock()
         try:
             error = decl.type_check(self)
@@ -449,7 +463,10 @@ class Environment(object):
             raise
         elapsed = clock() - start
         gc_elapsed = _gc_time_seconds() - gc_start
-        return CheckResult(elapsed, gc_elapsed, self.heartbeat, error)
+        bytes_allocated = _bytes_allocated() - bytes_start
+        return CheckResult(
+            elapsed, gc_elapsed, bytes_allocated, self.heartbeat, error,
+        )
 
     def all(self):
         """
