@@ -3407,6 +3407,10 @@ class W_App(W_Expr):
             return fn_next.app(self.arg)
         fn = self.fn
         if isinstance(fn, W_Closure):
+            inner = fn.body
+            if isinstance(inner, W_Lambda):
+                new_env = [self.arg] + list(fn.env)
+                return inner.body.closure(new_env)
             fn = fn.force()
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg)
@@ -3684,11 +3688,16 @@ class W_App(W_Expr):
         # self.fn is now in WHNF.
         fn = self.fn
 
-        # Beta reduction. Force a closure first so that an inner W_Lambda
-        # (which `_whnf_under_closure` treats as already-WHNF) still
-        # beta-reduces against our arg instead of leaving the application
-        # stuck.
+        # Beta reduction. If `fn` is a closure around a lambda
+        # (`_whnf_under_closure` treats those as already-WHNF), do
+        # the beta step *inside* the closure: extend the closure
+        # environment with the arg instead of materializing the whole
+        # substitution via `force`.
         if isinstance(fn, W_Closure):
+            inner = fn.body
+            if isinstance(inner, W_Lambda):
+                new_env = [self.arg] + list(fn.env)
+                return inner.body.closure(new_env)
             fn = fn.force()
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg)
