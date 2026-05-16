@@ -2497,6 +2497,12 @@ class W_Proj(W_Expr):
     def _whnf_core(self, env):
         reduced_struct = self.struct_expr.whnf(env)
 
+        # String literals carry their constructor form implicitly. To
+        # project a field out of one, materialize the constructor app
+        # and whnf again so the field-extract below sees the spine.
+        if isinstance(reduced_struct, W_LitStr):
+            reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
+
         # Try to perform projection reduction (structural iota reduction).
         # If the struct expression reduces to a constructor application,
         # extract the field at the appropriate index.
