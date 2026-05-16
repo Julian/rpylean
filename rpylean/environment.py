@@ -651,7 +651,7 @@ class Environment(object):
         ):
             if expr1.def_eq(expr2, self.def_eq):
                 return True
-            return self.try_struct_eta_fields(expr1, expr2)
+            return self.def_eq_unit(expr1, expr2)
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
@@ -667,6 +667,9 @@ class Environment(object):
         if self.try_struct_eta(expr1, expr2):
             return True
         if self.try_struct_eta(expr2, expr1):
+            return True
+
+        if self.def_eq_unit(expr1, expr2):
             return True
 
         # As the *very* last step, expose a single Nat constructor from
@@ -827,18 +830,15 @@ class Environment(object):
             return None
         return kind
 
-    def try_struct_eta_fields(self, expr1, expr2):
+    def def_eq_unit(self, expr1, expr2):
         """
-        Structure eta when neither side is a constructor application.
-
-        Compares field-by-field: S.proj i expr1 ≟ S.proj i expr2.
-
-        Only called from the same-class fallback path where the
-        projection comparisons cannot cycle back here (projections
-        have the field type, not the structure type).
+        Unit-like definitional equality: any two values of a
+        non-recursive structure with zero indices and a zero-field
+        constructor are def-eq — there are no fields to disagree on,
+        so equality follows from the types matching.
         """
-        ty = expr1.infer(self).whnf(self)
-        head = ty.head()
+        expr1_ty = expr1.infer(self).whnf(self)
+        head = expr1_ty.head()
         if not isinstance(head, W_Const):
             return False
         decl = get_decl(self.declarations, head.name)
@@ -847,21 +847,12 @@ class Environment(object):
         ind = decl.w_kind
         if not ind.is_non_recursive_structure():
             return False
-        struct_name = head.name
-        num_fields = ind.constructors[0].w_kind.num_fields
-
-        if not self.def_eq(ty, expr2.infer(self).whnf(self)):
+        if ind.num_indices != 0:
             return False
-
-        i = 0
-        while i < num_fields:
-            if not self.def_eq(
-                struct_name.proj(i, expr1),
-                struct_name.proj(i, expr2),
-            ):
-                return False
-            i += 1
-        return True
+        if ind.constructors[0].w_kind.num_fields != 0:
+            return False
+        expr2_ty = expr2.infer(self)
+        return self.def_eq(expr1_ty, expr2_ty)
 
     def try_eta_expand(self, expr1, expr2):
         if isinstance(expr1, W_Lambda):
