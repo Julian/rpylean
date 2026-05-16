@@ -3243,21 +3243,13 @@ class W_App(W_Expr):
 
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_App)
-        self_fn = self.fn
-        if isinstance(self_fn, W_Closure) and isinstance(self_fn.body, W_Lambda):
-            new_env = [self.arg] + list(self_fn.env)
-            if def_eq(self_fn.body.body.closure(new_env), other):
+        if isinstance(self.fn, W_FunBase):
+            body = self.fn.body.instantiate(self.arg)
+            if def_eq(body, other):
                 return True
-        elif isinstance(self_fn, W_FunBase):
-            if def_eq(self_fn.body.instantiate(self.arg), other):
-                return True
-        other_fn = other.fn
-        if isinstance(other_fn, W_Closure) and isinstance(other_fn.body, W_Lambda):
-            new_env = [other.arg] + list(other_fn.env)
-            if def_eq(self, other_fn.body.body.closure(new_env)):
-                return True
-        elif isinstance(other_fn, W_FunBase):
-            if def_eq(self, other_fn.body.instantiate(other.arg)):
+        if isinstance(other.fn, W_FunBase):
+            body = other.fn.body.instantiate(other.arg)
+            if def_eq(self, body):
                 return True
         # Iterative spine walk to avoid stack overflow on deep W_App trees.
         # Collect args from both sides while both fns are W_App, then
