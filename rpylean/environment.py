@@ -362,7 +362,8 @@ class Environment(object):
             expr._infer_cache_result = result
             return result
 
-        entries = self._infer_cache.get(expr, None)
+        key = compute_identity_hash(expr)
+        entries = self._infer_cache.get(key, None)
         if entries is not None:
             i = 0
             while i < len(entries):
@@ -375,7 +376,7 @@ class Environment(object):
         if entries is not None:
             entries.append(new_entry)
         else:
-            self._infer_cache[expr] = [new_entry]
+            self._infer_cache[key] = [new_entry]
         return result
 
     @not_rpython
