@@ -6,7 +6,6 @@ Tests for definitional equality of Lean objects.
 import pytest
 
 from io import BytesIO
-from textwrap import dedent
 
 from rpylean.environment import Environment, StreamTracer
 from rpylean.objects import (
@@ -689,19 +688,33 @@ def test_trace_def_eq_records_whnf_of_each_side():
     trace = BytesIO()
     from rpylean._tokens import TokenWriter, FORMAT_PLAIN
 
+    # Use a beta-redex on one side and a bare constant on the other:
+    # they're def-equal but not syntactically equal, so def_eq has to
+    # actually WHNF rather than short-circuit on either pointer- or
+    # syntactic-equality. Binder type is `Type` (= `Nat`'s sort) so
+    # the redex itself type-checks: `(fun x : Type => x) Nat`.
+    beta = fun(Name.simple("x").binder(type=TYPE))(W_BVar(0)).app(NAT)
+    traced_env = Environment.having(
+        [Name.simple("Nat").axiom(type=TYPE)],
+    )
+    traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
+    traced_env.def_eq(beta, NAT)
+    output = trace.getvalue().decode("utf-8")
+    assert u"whnf" in output
+    assert output.rstrip().endswith(u"✓")
+
+
+def test_trace_def_eq_short_circuits_on_identity():
+    """When both sides are the same instance, def_eq skips WHNF."""
+    trace = BytesIO()
+    from rpylean._tokens import TokenWriter, FORMAT_PLAIN
+
     traced_env = Environment.having(
         [Name.simple("Nat").axiom(type=TYPE)],
     )
     traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
     traced_env.def_eq(NAT, NAT)
-    assert trace.getvalue().decode("utf-8") == dedent(
-        u"""\
-        def_eq Nat ≟ Nat
-          whnf Nat
-          whnf Nat
-        ✓
-        """,
-    )
+    assert trace.getvalue().decode("utf-8") == u"def_eq Nat ≟ Nat ✓\n"
 
 
 def test_trace_uses_check_and_cross_marks():
@@ -723,12 +736,18 @@ def test_trace_nested_result_on_own_line():
     trace = BytesIO()
     from rpylean._tokens import TokenWriter, FORMAT_PLAIN
 
-    pi = forall(Name.simple("x").binder(type=NAT))(NAT)
+    # A forall whose binder type is a beta-redex def-equal but not
+    # syntactically equal to its reduct on the other side. Forces
+    # def_eq to recurse into the binder so the parent's ✓ lands on
+    # its own line below the children.
+    redex_nat = fun(Name.simple("x").binder(type=TYPE))(W_BVar(0)).app(NAT)
+    pi_lhs = forall(Name.simple("x").binder(type=redex_nat))(NAT)
+    pi_rhs = forall(Name.simple("x").binder(type=NAT))(NAT)
     traced_env = Environment.having([
         Name.simple("Nat").axiom(type=TYPE),
     ])
     traced_env.tracer = StreamTracer(TokenWriter(trace, FORMAT_PLAIN))
-    traced_env.def_eq(pi, pi)
+    traced_env.def_eq(pi_lhs, pi_rhs)
     output = trace.getvalue().decode("utf-8")
     lines = output.strip().split(u"\n")
     assert lines[-1] == u"✓"
