@@ -3393,6 +3393,23 @@ class W_App(W_Expr):
         a = mk_args[0]
         return f.app(a)
 
+    def _whnf_core_no_iota(self, env):
+        """W_App._whnf_core minus the iota/struct-eta/quot-lift steps.
+
+        Used inside the iterative iota driver to drive WHNF of a major
+        premise without triggering recursive `try_iota_reduce` calls.
+        """
+        reduced = _try_reduce_nat(self, env)
+        if reduced is not None:
+            return reduced
+        fn_next = self.fn._whnf_core(env)
+        if fn_next is not None:
+            return fn_next.app(self.arg)
+        fn = self.fn
+        if isinstance(fn, W_FunBase):
+            return fn.body.instantiate(self.arg)
+        return None
+
     def try_iota_reduce(self, env):
         target, args = self.unapp()
 
@@ -3418,7 +3435,7 @@ class W_App(W_Expr):
         # to pick the recursor rule to apply
         if major_idx < 0:
             return False, self
-        major_premise = args[major_idx].whnf(env)
+        major_premise = _whnf_iota_chain(env, args[major_idx])
 
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
@@ -3717,6 +3734,88 @@ class W_App(W_Expr):
 
     def _whnf_under_closure(self, closure_env):
         return self.fn.closure(closure_env).app(self.arg.closure(closure_env))
+
+
+def _whnf_iota_chain(env, expr):
+    """
+    WHNF ``expr``, walking through chains of nested recursor-iota
+    applications iteratively via an explicit work stack.
+
+    Each frame is a ``W_App`` we're trying to iota-reduce. Descending
+    happens by pushing the frame and continuing with its major
+    premise. When the deepest expression is reduced as far as
+    non-iota steps allow, we walk the stack back up applying iota at
+    each level — pre-populating the ``_whnf_cache_result`` of each
+    frame's major so a re-entry through `try_iota_reduce` (which
+    routes its `args[major_idx].whnf(env)` back into us) short-
+    circuits on the cache check below.
+    """
+    if isinstance(expr, W_App):
+        cached = expr._whnf_cache_result
+        if cached is not None:
+            return cached
+    elif isinstance(expr, W_Closure):
+        cached = expr._whnf_cache_result
+        if cached is not None:
+            return cached
+
+    chain = []
+    cur = expr
+
+    while True:
+        # Reduce `cur` as far as possible without firing iota itself
+        # (so we don't recurse through `try_iota_reduce`).
+        while True:
+            if isinstance(cur, W_App):
+                next_ = cur._whnf_core_no_iota(env)
+            else:
+                next_ = cur._whnf_core(env)
+            if next_ is None:
+                break
+            cur = next_
+
+        # If `cur` is a recursor application, descend into its major.
+        if isinstance(cur, W_App):
+            target, args = cur.unapp()
+            if isinstance(target, W_Const):
+                decl = env.declarations.get(target.name, None)
+                if decl is not None and isinstance(decl.w_kind, W_Recursor):
+                    rec = decl.w_kind
+                    skip = (
+                        rec.num_params
+                        + rec.num_indices
+                        + rec.num_minors
+                        + rec.num_motives
+                    )
+                    major_idx = len(args) - 1 - skip
+                    if major_idx >= 0:
+                        chain.append((cur, args, major_idx))
+                        cur = args[major_idx]
+                        continue
+
+        # No further descent. Walk back up applying iota.
+        if not chain:
+            return cur
+
+        parent, p_args, p_mi = chain.pop()
+        major_arg = p_args[p_mi]
+        # Cache the descent's result as the major's WHNF so the
+        # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
+        # returns immediately instead of recursing.
+        if isinstance(major_arg, W_App) or isinstance(major_arg, W_Closure):
+            major_arg._whnf_cache_result = cur
+
+        progress, reduced = parent.try_iota_reduce(env)
+        if not progress:
+            # Iota didn't fire at this level. Leave `parent` un-iota'd
+            # and propagate it up; any frame above us has `parent` as
+            # part of its major-chain, so they can't iota either.
+            cur = parent
+            while chain:
+                higher, _, _ = chain.pop()
+                cur = higher
+            return cur
+        cur = reduced
 
 
 class W_Closure(W_Expr):
