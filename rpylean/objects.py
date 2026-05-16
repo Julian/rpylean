@@ -3406,6 +3406,8 @@ class W_App(W_Expr):
         if fn_next is not None:
             return fn_next.app(self.arg)
         fn = self.fn
+        if isinstance(fn, W_Closure):
+            fn = fn.force()
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg)
         return None
@@ -3682,7 +3684,12 @@ class W_App(W_Expr):
         # self.fn is now in WHNF.
         fn = self.fn
 
-        # Beta reduction
+        # Beta reduction. Force a closure first so that an inner W_Lambda
+        # (which `_whnf_under_closure` treats as already-WHNF) still
+        # beta-reduces against our arg instead of leaving the application
+        # stuck.
+        if isinstance(fn, W_Closure):
+            fn = fn.force()
         if isinstance(fn, W_FunBase):
             return fn.body.instantiate(self.arg)
 
