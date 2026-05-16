@@ -2,6 +2,7 @@
 A mini-framework for CLIs in RPython.
 """
 
+from rpython.rlib import jit
 from rpython.rlib.rfile import create_stdio
 
 
@@ -22,11 +23,64 @@ USAGE
 OPTIONS
 
   --help: Show this help message
+  --jit OPTS: Configure the JIT (`off`, `default`, `help`, or `name=value,...`)
   --version: Show version information
 
 COMMANDS
 
 """
+
+
+def _build_jit_help():
+    lines = [
+        "Configure the JIT via `--jit name=value,name=value`,",
+        "or `--jit off` to disable, or `--jit default` to reset.",
+        "",
+        "PARAMETERS",
+        "",
+    ]
+    for k in sorted(jit.PARAMETER_DOCS):
+        lines.append("  %s: %s" % (k, jit.PARAMETER_DOCS[k]))
+    return "\n".join(lines)
+
+
+_JIT_HELP = _build_jit_help()
+
+
+def _apply_jit(optstring):
+    if optstring == "help":
+        raise UsageError(_JIT_HELP, exit_code=0)
+    try:
+        jit.set_user_param(None, optstring)
+    except ValueError:
+        raise UsageError("Invalid --jit options: %s" % (optstring,))
+
+
+def _extract_jit(argv):
+    """Strip and apply any `--jit OPTS` / `--jit=OPTS` from argv.
+
+    JIT params have to be set before any JIT-driven code runs, so we
+    pull these out at the top level rather than threading them through
+    per-subcommand options.
+    """
+    result = [argv[0]]
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--jit":
+            if i + 1 >= len(argv):
+                raise UsageError("Option --jit requires an argument")
+            _apply_jit(argv[i + 1])
+            i += 2
+        elif a.startswith("--jit="):
+            _apply_jit(a[len("--jit="):])
+            i += 1
+        else:
+            result.append(a)
+            i += 1
+    return result
+
+
 COMMAND_USAGE = """\
 %s
 
@@ -218,6 +272,8 @@ class CLI(object):
         return sub
 
     def parse(self, argv):
+        argv = _extract_jit(argv)
+
         if len(argv) == 1 or argv[1] == "--help":
             raise self.with_tagline(argv[0])
 

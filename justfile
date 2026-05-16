@@ -54,12 +54,8 @@ export-simple path:
     rm "$olean_output_dir/JustfileTemporary.olean"; \
     rmdir "$olean_output_dir"
 
-# Translate (compile) rpylean into an rpylean-c binary (no JIT).
+# Translate (compile) rpylean into an rpylean-c binary (with JIT).
 translate *ARGS:
-    "{{ pypy }}" "{{ rpython }}" --output="{{ translated }}-nojit" {{ ARGS }} "{{ target }}"
-
-# Translate with JIT enabled.
-jit *ARGS:
     "{{ pypy }}" "{{ rpython }}" --opt=jit --output="{{ translated }}" {{ ARGS }} "{{ target }}"
 
 # Run rpylean's (untranslated) tests.
@@ -77,5 +73,5 @@ bench file:
         --command-name 'translated (no JIT)' \
         --command-name 'translated (JIT)' \
         "PYTHONPATH='{{ pypy_checkout }}/' '{{ pypy }}' -m rpylean check '{{ file }}'" \
-        "'{{ translated }}-nojit' check '{{ file }}'" \
+        "'{{ translated }}' --jit off check '{{ file }}'" \
         "'{{ translated }}' check '{{ file }}'"

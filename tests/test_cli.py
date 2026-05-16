@@ -272,6 +272,36 @@ class TestFlag(object):
         assert "A test flag." in err
 
 
+class TestJitOption(object):
+    cli = CLI()
+
+    @cli.subcommand(["A"], help="Echoing command.")
+    def echo(self, args, stdin, stdout, stderr):
+        stdout.write("ran with %s\n" % args.args[0])
+        return 0
+
+    def test_strips_jit_space_form(self):
+        out, _ = run(self.cli, ["prog", "--jit", "off", "echo", "x"])
+        assert "ran with x" in out
+
+    def test_strips_jit_equals_form(self):
+        out, _ = run(self.cli, ["prog", "--jit=off", "echo", "x"])
+        assert "ran with x" in out
+
+    def test_jit_help_exits_zero(self):
+        _, err = run(self.cli, ["prog", "--jit", "help"], exit=0)
+        assert "PARAMETERS" in err
+        assert "threshold" in err
+
+    def test_jit_missing_argument(self):
+        _, err = run(self.cli, ["prog", "--jit"], exit=1)
+        assert "--jit requires an argument" in err
+
+    def test_jit_invalid_optstring(self):
+        _, err = run(self.cli, ["prog", "--jit", "nopesuchparam=1", "echo", "x"], exit=1)
+        assert "Invalid --jit options" in err
+
+
 class TestPrinter(object):
     decl = Name.simple("Foo").axiom(type=TYPE)
     env = Environment.having([decl])
