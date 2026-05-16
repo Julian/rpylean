@@ -13,10 +13,13 @@ from rpylean.objects import (
     W_BVar,
     W_ConstructorFieldCountMismatch,
     W_InvalidConstructorResult,
+    W_LEVEL_ZERO,
     W_LevelParam,
+    W_LitNat,
     W_NonPositiveOccurrence,
     W_NotAFunction,
     W_NotAProp,
+    W_RecRule,
     W_UniverseTooHigh,
     W_Sort,
     W_TypeError,
@@ -1139,6 +1142,221 @@ class TestNotRPython:
     def test_getitem_no_such_declaration(self):
         with pytest.raises(KeyError):
             Environment.EMPTY["DoesNotExist"]
+
+
+class TestRecursorRuleValidation(object):
+    """
+    Recursor rules provided in the export data must be validated against
+    independently constructed rules.
+
+    A checker that compares the imported rules against themselves (instead of
+    against independently constructed ones) will accept arbitrary recursor
+    reduction behavior, leading to inconsistency.
+
+    See https://arena.lean-lang.org/checker/official-nightly/#test-nat-rec-rules
+    """
+
+    @pytest.mark.xfail(reason="recursor rule validation not yet implemented")
+    def test_wrong_succ_rec_rule_proves_false(self):
+        """
+        Nat with a wrong Nat.rec succ rule that always returns h_zero
+        (ignoring the induction hypothesis) should be rejected.
+
+        The exploit works because rpylean has native nat kernel extensions
+        (Nat.beq) that compute correctly for concrete NatLit values,
+        but symbolic arguments fall back to the wrong Nat.rec rules.
+
+        With correct rules:  Nat.beq 1 0 = false, motive 1 = False
+        With wrong rules:    Nat.beq (succ n) 0 = true for symbolic n
+
+        The h_succ minor (fun n ih => True.intro) type-checks because
+        motive (succ n) = True (via wrong rec rule), but the overall
+        proof_of_false : False type-checks because motive 1 = False
+        (via native Nat.beq). This inconsistency is unsound.
+
+        See https://arena.lean-lang.org/checker/official-nightly/#test-nat-rec-rules
+        """
+        # -- Names --
+        Nat = Name.simple("Nat")
+        Nat_zero = Nat.child("zero")
+        Nat_succ = Nat.child("succ")
+        Nat_rec = Nat.child("rec")
+        Nat_beq = Nat.child("beq")
+
+        Bool = Name.simple("Bool")
+        Bool_false = Bool.child("false")
+        Bool_true = Bool.child("true")
+        Bool_rec = Bool.child("rec")
+
+        True_ = Name.simple("True")
+        True_intro = True_.child("intro")
+        False_ = Name.simple("False")
+
+        u = Name.simple("u")
+        u_level = u.level()
+        n = Name.simple("n")
+        t = Name.simple("t")
+        x = Name.simple("x")
+
+        # -- False and True as axioms (their recursors aren't needed) --
+        false_ax = False_.axiom(type=PROP)
+        true_ax = True_.axiom(type=PROP)
+        true_intro_ax = True_intro.axiom(type=True_.const())
+
+        # -- Bool (inductive, needed for Bool.rec iota reduction) --
+        bool_false_ctor = Bool_false.constructor(type=Bool.const())
+        bool_true_ctor = Bool_true.constructor(type=Bool.const())
+        bool_decl = Bool.inductive(
+            type=TYPE,
+            constructors=[bool_false_ctor, bool_true_ctor],
+        )
+
+        bmotive = forall(t.binder(type=Bool.const()))(u_level.sort())
+        hf_ty = W_BVar(0).app(Bool_false.const())
+        ht_ty = W_BVar(1).app(Bool_true.const())
+        bool_rec_decl = Bool_rec.recursor(
+            type=forall(
+                Name.simple("motive").implicit_binder(type=bmotive),
+                Name.simple("hf").binder(type=hf_ty),
+                Name.simple("ht").binder(type=ht_ty),
+                t.binder(type=Bool.const()),
+            )(W_BVar(3).app(W_BVar(0))),
+            rules=[
+                W_RecRule(
+                    ctor_name=Bool_false, num_fields=0,
+                    val=fun(
+                        Name.simple("motive").binder(type=bmotive),
+                        Name.simple("hf").binder(type=hf_ty),
+                        Name.simple("ht").binder(type=ht_ty),
+                    )(W_BVar(1)),  # hf
+                ),
+                W_RecRule(
+                    ctor_name=Bool_true, num_fields=0,
+                    val=fun(
+                        Name.simple("motive").binder(type=bmotive),
+                        Name.simple("hf").binder(type=hf_ty),
+                        Name.simple("ht").binder(type=ht_ty),
+                    )(W_BVar(0)),  # ht
+                ),
+            ],
+            num_motives=1, num_minors=2, levels=[u],
+        )
+
+        # -- Nat (inductive with WRONG rec rule) --
+        nat_zero_ctor = Nat_zero.constructor(type=Nat.const())
+        nat_succ_ctor = Nat_succ.constructor(
+            type=forall(n.binder(type=Nat.const()))(Nat.const()),
+            num_fields=1,
+        )
+        nat_decl = Nat.inductive(
+            type=TYPE,
+            constructors=[nat_zero_ctor, nat_succ_ctor],
+            is_recursive=True,
+        )
+
+        nmotive = forall(t.binder(type=Nat.const()))(u_level.sort())
+        hz_ty = W_BVar(0).app(Nat_zero.const())
+        hs_ty = forall(
+            n.binder(type=Nat.const()),
+            Name.simple("ih").binder(type=W_BVar(1).app(W_BVar(0))),
+        )(W_BVar(2).app(Nat_succ.const().app(W_BVar(1))))
+
+        nat_rec_decl = Nat_rec.recursor(
+            type=forall(
+                Name.simple("motive").implicit_binder(type=nmotive),
+                Name.simple("hz").binder(type=hz_ty),
+                Name.simple("hs").binder(type=hs_ty),
+                t.binder(type=Nat.const()),
+            )(W_BVar(3).app(W_BVar(0))),
+            rules=[
+                # zero rule (correct): fun motive hz hs => hz
+                W_RecRule(
+                    ctor_name=Nat_zero, num_fields=0,
+                    val=fun(
+                        Name.simple("motive").binder(type=nmotive),
+                        Name.simple("hz").binder(type=hz_ty),
+                        Name.simple("hs").binder(type=hs_ty),
+                    )(W_BVar(1)),
+                ),
+                # succ rule (WRONG): fun motive hz hs n => hz
+                # Should be: fun motive hz hs n => hs n (rec motive hz hs n)
+                W_RecRule(
+                    ctor_name=Nat_succ, num_fields=1,
+                    val=fun(
+                        Name.simple("motive").binder(type=nmotive),
+                        Name.simple("hz").binder(type=hz_ty),
+                        Name.simple("hs").binder(type=hs_ty),
+                        n.binder(type=Nat.const()),
+                    )(W_BVar(2)),  # hz, ignoring hs and n
+                ),
+            ],
+            num_motives=1, num_minors=2, levels=[u],
+            is_recursive=True,
+        )
+
+        # -- Nat.beq (definition using Nat.rec, but natively reduced) --
+        # Nat.beq a b = Nat.rec (fun _ => Bool) true (fun n _ => false) a
+        # Native reduction: beq 1 0 = false (correct).
+        # Wrong rec rule:   beq (succ n) 0 = true (wrong).
+        nat_beq_decl = Nat_beq.definition(
+            type=forall(
+                Name.simple("a").binder(type=Nat.const()),
+                Name.simple("b").binder(type=Nat.const()),
+            )(Bool.const()),
+            value=fun(
+                Name.simple("a").binder(type=Nat.const()),
+                Name.simple("b").binder(type=Nat.const()),
+            )(
+                Nat_rec.const(levels=[TYPE.level]).app(
+                    fun(x.binder(type=Nat.const()))(Bool.const()),
+                ).app(Bool_true.const()).app(
+                    fun(
+                        n.binder(type=Nat.const()),
+                        x.binder(type=Bool.const()),
+                    )(Bool_false.const()),
+                ).app(W_BVar(1)),
+            ),
+        )
+
+        # -- proof_of_false --
+        # motive n = Bool.rec (fun _ => Prop) False True (Nat.beq n 0)
+        #   correct:  motive 0 = True,  motive 1 = False
+        #   wrong:    motive (succ n) = True  (for symbolic n)
+        motive_body = (
+            Bool_rec.const(levels=[TYPE.level])
+            .app(fun(x.binder(type=Bool.const()))(PROP))
+            .app(False_.const())
+            .app(True_.const())
+            .app(Nat_beq.const().app(W_BVar(0)).app(W_LitNat.int(0)))
+        )
+        proof_motive = fun(n.binder(type=Nat.const()))(motive_body)
+
+        proof_of_false = Name.simple("proof_of_false").definition(
+            type=False_.const(),
+            value=(
+                Nat_rec.const(levels=[W_LEVEL_ZERO])
+                .app(proof_motive)
+                .app(True_intro.const())
+                .app(fun(
+                    n.binder(type=Nat.const()),
+                    Name.simple("ih").binder(type=motive_body),
+                )(True_intro.const()))
+                .app(W_LitNat.int(1))
+            ),
+        )
+
+        env = Environment.having([
+            false_ax, true_ax, true_intro_ax,
+            bool_decl, bool_false_ctor, bool_true_ctor, bool_rec_decl,
+            nat_decl, nat_zero_ctor, nat_succ_ctor, nat_rec_decl,
+            nat_beq_decl,
+            proof_of_false,
+        ])
+        errors = type_check(env=env)
+        assert errors, (
+            "proof_of_false should not type check: "
+            "a wrong Nat.rec succ rule must be rejected"
+        )
 
 
 class TestAlreadyDeclared(object):
