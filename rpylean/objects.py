@@ -1092,7 +1092,10 @@ class Binder(_Item):
         return fvar
 
     def bind_fvar(self, fvar, depth):
-        return self.with_type(type=self.type.bind_fvar(fvar, depth))
+        new_type = self.type.bind_fvar(fvar, depth)
+        if new_type is self.type:
+            return self
+        return self.with_type(type=new_type)
 
     def incr_free_bvars(self, expr, depth):
         if self.type.loose_bvar_range <= depth:
@@ -2526,7 +2529,10 @@ class W_Proj(W_Expr):
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
-        return self.with_expr(self.struct_expr.bind_fvar(fvar, depth))
+        new_expr = self.struct_expr.bind_fvar(fvar, depth)
+        if new_expr is self.struct_expr:
+            return self
+        return self.with_expr(new_expr)
 
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range <= depth:
@@ -2857,9 +2863,11 @@ class W_ForAll(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
-        return forall(self.binder.bind_fvar(fvar, depth))(
-            self.body.bind_fvar(fvar, depth + 1),
-        )
+        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
+        if new_binder is self.binder and new_body is self.body:
+            return self
+        return forall(new_binder)(new_body)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -3020,9 +3028,11 @@ class W_Lambda(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
-        return fun(self.binder.bind_fvar(fvar, depth))(
-            self.body.bind_fvar(fvar, depth + 1),
-        )
+        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
+        if new_binder is self.binder and new_body is self.body:
+            return self
+        return fun(new_binder)(new_body)
 
     def instantiate(self, expr, depth=0):
         return _iter_instantiate(self, expr, depth)
@@ -3140,10 +3150,15 @@ class W_Let(W_Expr):
         )
 
     def bind_fvar(self, fvar, depth):
+        new_type = self.type.bind_fvar(fvar, depth)
+        new_value = self.value.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
+        if (new_type is self.type
+                and new_value is self.value
+                and new_body is self.body):
+            return self
         return self.name.let(
-            type=self.type.bind_fvar(fvar, depth),
-            value=self.value.bind_fvar(fvar, depth),
-            body=self.body.bind_fvar(fvar, depth + 1),
+            type=new_type, value=new_value, body=new_body,
         )
 
     def syntactic_eq(self, other):
@@ -3671,9 +3686,11 @@ class W_App(W_Expr):
         return None
 
     def bind_fvar(self, fvar, depth):
-        return self.fn.bind_fvar(fvar, depth).app(
-            self.arg.bind_fvar(fvar, depth),
-        )
+        new_fn = self.fn.bind_fvar(fvar, depth)
+        new_arg = self.arg.bind_fvar(fvar, depth)
+        if new_fn is self.fn and new_arg is self.arg:
+            return self
+        return new_fn.app(new_arg)
 
     def instantiate(self, expr, depth=0):
         return _iter_instantiate(self, expr, depth)
