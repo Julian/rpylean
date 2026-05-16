@@ -140,6 +140,13 @@ class _StreamingChecker(DeclarationHook):
     Per-declaration filter + type-check, accumulating errors and failure count.
     """
 
+    _attrs_ = [
+        'env', 'stdoutw', 'stderrw', 'pp',
+        'slow_secs', 'slow_hb',
+        'filter_match', 'filter_names',
+        'abort_at', 'failures',
+    ]
+
     def __init__(
         self,
         env,
@@ -493,6 +500,8 @@ class _FFICollectorBase(object):
     to propagate so they show up loudly instead of as silent "skipped"
     noise."""
 
+    _attrs_ = []
+
     def on_constant(self, name_obj, ci_obj):
         return self._handle(read_constant_info(ci_obj))
 
@@ -503,6 +512,8 @@ class _FFICollectorBase(object):
 class _ExportCollector(_FFICollectorBase):
     """Register every walked constant with the Exporter; `dump_all`
     emits them all in dependency order afterwards."""
+
+    _attrs_ = ['exporter']
 
     def __init__(self, exporter):
         self.exporter = exporter
@@ -516,6 +527,8 @@ class _FFILoader(_FFICollectorBase):
     """Register every walked constant into a builder; used by `ffi
     repl` to populate the env before dropping into interactive mode."""
 
+    _attrs_ = ['builder']
+
     def __init__(self, builder):
         self.builder = builder
 
@@ -528,6 +541,8 @@ class _FFICollector(_FFICollectorBase):
     """Register → stream-check, one declaration at a time. Returns
     `True` when the checker has signalled an early-abort (e.g.
     `--max-fail` reached)."""
+
+    _attrs_ = ['builder', 'checker']
 
     def __init__(self, builder, checker):
         self.builder = builder
@@ -602,6 +617,8 @@ class Printer(object):
     A pretty-printer for declarations.
     """
 
+    _attrs_ = ['writer']
+
     def __init__(self, writer):
         self.writer = writer
 
@@ -625,16 +642,22 @@ class Printer(object):
 
 
 class _DeclPrinter(Printer):
+    _attrs_ = []
+
     def show(self, env, decl):
         self.writer.writeline(decl.tokens(env.declarations))
 
 
 class _NamePrinter(Printer):
+    _attrs_ = []
+
     def show(self, env, decl):
         self.writer.writeline(decl.name.tokens(env.declarations))
 
 
 class _DotPrinter(Printer):
+    _attrs_ = []
+
     def show(self, env, decl):
         self.writer.write([PLAIN.emit(".")])
 

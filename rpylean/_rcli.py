@@ -7,6 +7,8 @@ from rpython.rlib.rfile import create_stdio
 
 
 class UsageError(Exception):
+    _attrs_ = ['message', 'exit_code']
+
     def __init__(self, message, exit_code=1):
         self.message = message
         self.exit_code = exit_code
@@ -105,6 +107,8 @@ class _CommandLike(object):
     `CLI._commands` dict without RPython complaining about
     can't-unify instances."""
 
+    _attrs_ = ['name', 'short_help']
+
     name = ""
     short_help = ""
 
@@ -113,6 +117,8 @@ class _CommandLike(object):
 
 
 class Command(_CommandLike):
+    _attrs_ = ['_help', '_metavars', '_options', '_run', '_flags']
+
     def __init__(
         self,
         name,
@@ -231,6 +237,8 @@ class Command(_CommandLike):
 
 
 class CLI(object):
+    _attrs_ = ['executable', 'tagline', '_default', '_commands']
+
     def __init__(self, tagline="", default=None, executable="rpylean"):
         self.executable = executable
         self.tagline = tagline
@@ -335,6 +343,8 @@ class SubCLI(_CommandLike):
     parent's shared options merged into its own option set.
     """
 
+    _attrs_ = ['_help', '_options', '_commands']
+
     def __init__(self, name, help, options):
         self.name = name
         self._help = help
@@ -411,6 +421,8 @@ class SubCLI(_CommandLike):
 
 
 class Args(object):
+    _attrs_ = ['args', 'varargs', 'options']
+
     def __init__(self, args=None, varargs=None, options=None):
         self.args = args if args is not None else []
         self.varargs = varargs if varargs is not None else []

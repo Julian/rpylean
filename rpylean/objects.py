@@ -65,6 +65,8 @@ class W_CheckError(W_Error):
     Base class for type-checking errors returned by type_check.
     """
 
+    _attrs_ = ['name', 'declaration']
+
     name = None
     declaration = None
 
@@ -141,6 +143,8 @@ class W_TypeError(W_CheckError):
     A term does not type check.
     """
 
+    _attrs_ = ['environment', 'term', 'expected_type', 'inferred_type']
+
     def __init__(self, environment, term, expected_type, inferred_type, name=None):
         self.environment = environment
         self.term = term
@@ -165,6 +169,8 @@ class W_InvalidConstructorResult(W_CheckError):
     A constructor's result type is not a valid application of its inductive.
     """
 
+    _attrs_ = ['environment', 'ctor_type']
+
     def __init__(self, environment, ctor_type, name=None):
         self.environment = environment
         self.ctor_type = ctor_type
@@ -183,6 +189,8 @@ class W_ConstructorFieldCountMismatch(W_CheckError):
     """
     A constructor's declared num_fields does not match its type's binders.
     """
+
+    _attrs_ = ['environment', 'ctor_type', 'declared', 'actual']
 
     def __init__(self, environment, ctor_type, declared, actual, name=None):
         self.environment = environment
@@ -214,6 +222,8 @@ class W_InvalidRecursorRule(W_CheckError):
     inductive, or a mismatched `nfields`.
     """
 
+    _attrs_ = ['environment', 'summary']
+
     def __init__(self, environment, summary, name=None):
         self.environment = environment
         self.summary = summary
@@ -232,6 +242,8 @@ class W_NonPositiveOccurrence(W_CheckError):
     """
     A constructor field type has the inductive in a non-positive position.
     """
+
+    _attrs_ = ['environment', 'field_type', 'field_number']
 
     def __init__(self, environment, field_type, field_number, name=None):
         self.environment = environment
@@ -258,6 +270,8 @@ class W_NotASort(W_CheckError):
     An expression does not have a Sort (Type or Prop) as its type.
     """
 
+    _attrs_ = ['environment', 'expr', 'inferred_type']
+
     def __init__(self, environment, expr, inferred_type, name=None):
         self.environment = environment
         self.expr = expr
@@ -279,6 +293,8 @@ class W_NotAProp(W_CheckError):
     """
     The type of a theorem is not a proposition (Sort 0).
     """
+
+    _attrs_ = ['environment', 'expr', 'inferred_sort']
 
     def __init__(self, environment, expr, inferred_sort, name=None):
         self.environment = environment
@@ -304,6 +320,8 @@ class W_NotAFunction(W_CheckError):
     A non-function expression is being applied to an argument.
     """
 
+    _attrs_ = ['environment', 'expr', 'inferred_type']
+
     def __init__(self, environment, expr, inferred_type, name=None):
         self.environment = environment
         self.expr = expr
@@ -324,6 +342,8 @@ class W_HeartbeatError(W_CheckError):
     """
     The heartbeat limit was exceeded while checking a declaration.
     """
+
+    _attrs_ = ['heartbeats', 'max_heartbeat']
 
     def __init__(self, name, heartbeats, max_heartbeat):
         self.name = name
@@ -346,6 +366,11 @@ class W_UniverseTooHigh(W_CheckError):
     """
     A constructor field's type lives in a universe too high for the inductive.
     """
+
+    _attrs_ = [
+        'environment', 'ctor_type', 'field_type',
+        'field_level', 'inductive_level',
+    ]
 
     def __init__(
         self, environment, ctor_type, field_type,
@@ -400,6 +425,8 @@ class _Item(object):
     (by making sure all Lean objects have the same base class) and to give Lean
     objects some sane default Python behavior for tests.
     """
+
+    _attrs_ = []
 
     @not_rpython
     def __eq__(self, other):
@@ -513,6 +540,8 @@ class Name(_Item):
     the actual data; this base class is abstract-in-spirit (don't
     construct it directly).
     """
+
+    _attrs_ = ['_level_cache', 'parent', '_hash', 'is_internal', 'is_private']
 
     def __init__(self):
         # Lazy cache for `as_level_param()`; populated on first call.
@@ -906,6 +935,8 @@ class _AnonymousName(Name):
     null-check; callers gate on ``is_anonymous()`` before recursing.
     """
 
+    _attrs_ = []
+
     def __init__(self):
         Name.__init__(self)
         self.parent = self
@@ -927,6 +958,8 @@ class _AnonymousName(Name):
 
 class StrName(Name):
     """Lean's ``Name.str p s``: a string-suffixed name nested in ``p``."""
+
+    _attrs_ = ['suffix']
 
     def __init__(self, parent, suffix):
         Name.__init__(self)
@@ -964,6 +997,8 @@ class NumName(Name):
     Lean's ``Name.num p n``: a numerically-indexed name nested in ``p``.
     ``idx`` is an ``rbigint`` since Lean's ``Nat`` is unbounded.
     """
+
+    _attrs_ = ['idx']
 
     def __init__(self, parent, idx):
         Name.__init__(self)
@@ -1005,6 +1040,8 @@ class Binder(_Item):
     Only `type` is really functionally important, the other attributes are
     strictly for pretty printing.
     """
+
+    _attrs_ = ['name', 'type', 'left', 'right', '_fvar']
 
     @staticmethod
     def default(name, type):
@@ -1117,6 +1154,7 @@ class Binder(_Item):
         """
         Check if this binder is syntactically equal to another.
         """
+        assert isinstance(other, Binder)
         # TODO - does syntactic equality really care about binder info/name?
         return (
             self.left == other.left
@@ -1147,6 +1185,8 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
+    _attrs_ = ['_hash']
+
     @elidable
     def hash(self):
         """
@@ -1214,7 +1254,10 @@ class W_Level(_Item):
             return other
         if isinstance(other, W_LevelZero):
             return self
-        if isinstance(other, W_LevelIMax) or isinstance(other, W_LevelMax):
+        if isinstance(other, W_LevelIMax):
+            if self.leq(other.lhs) or self.leq(other.rhs):
+                return other
+        elif isinstance(other, W_LevelMax):
             if self.leq(other.lhs) or self.leq(other.rhs):
                 return other
         return W_LevelMax(self, other)
@@ -1230,17 +1273,18 @@ class W_Level(_Item):
             return W_LEVEL_ZERO
         if syntactic_eq(self, W_LEVEL_ZERO.succ()):
             return other
-        if isinstance(other, W_LevelSucc) or (
-            isinstance(other, W_LevelMax)
-            and (
-                isinstance(other.lhs, W_LevelSucc) or isinstance(other.rhs, W_LevelSucc)
-            )
+        if isinstance(other, W_LevelSucc):
+            return self.max(other)
+        if isinstance(other, W_LevelMax) and (
+            isinstance(other.lhs, W_LevelSucc) or isinstance(other.rhs, W_LevelSucc)
         ):
             return self.max(other)
         return W_LevelIMax(self, other)
 
 
 class W_LevelZero(W_Level):
+    _attrs_ = []
+
     def __init__(self):
         self._hash = 0x4C5A  # arbitrary distinct from other level kinds
 
@@ -1275,6 +1319,8 @@ W_LEVEL_ZERO = W_LevelZero()
 
 
 class W_LevelSucc(W_Level):
+    _attrs_ = ['parent']
+
     def __init__(self, parent):
         self.parent = parent
         self._hash = ((parent.hash() * 1000003) ^ 0x53C7) & 0xFFFFFFFF
@@ -1307,6 +1353,7 @@ class W_LevelSucc(W_Level):
         return new_parent.succ()
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_LevelSucc)
         return syntactic_eq(self.parent, other.parent)
 
     def max(self, other):
@@ -1320,6 +1367,8 @@ class W_LevelSucc(W_Level):
 
 
 class W_LevelMax(W_Level):
+    _attrs_ = ['lhs', 'rhs']
+
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
@@ -1370,10 +1419,13 @@ class W_LevelMax(W_Level):
         return new_lhs.max(new_rhs)
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_LevelMax)
         return syntactic_eq(self.lhs, other.lhs) and syntactic_eq(self.rhs, other.rhs)
 
 
 class W_LevelIMax(W_Level):
+    _attrs_ = ['lhs', 'rhs']
+
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
@@ -1410,10 +1462,13 @@ class W_LevelIMax(W_Level):
         return new_lhs.imax(new_rhs)
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_LevelIMax)
         return syntactic_eq(self.lhs, other.lhs) and syntactic_eq(self.rhs, other.rhs)
 
 
 class W_LevelParam(W_Level):
+    _attrs_ = ['name']
+
     def __init__(self, name):
         self.name = name
         self._hash = ((name.hash() * 1000003) ^ 0x5041) & 0xFFFFFFFF
@@ -1450,6 +1505,7 @@ class W_LevelParam(W_Level):
         return self.name.str(), 0
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_LevelParam)
         return syntactic_eq(self.name, other.name)
 
     def is_named(self, name):
@@ -1486,6 +1542,8 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
+    _attrs_ = ['_hash', 'loose_bvar_range']
+
     @elidable
     def hash(self):
         """
@@ -1667,6 +1725,8 @@ class W_Expr(_Item):
 
 
 class W_BVar(W_Expr):
+    _attrs_ = ['id']
+
     def __init__(self, id):
         self.id = id
         self.loose_bvar_range = id + 1
@@ -1687,6 +1747,7 @@ class W_BVar(W_Expr):
         return eid
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_BVar)
         return self.id == other.id
 
     def bind_fvar(self, fvar, depth):
@@ -1726,6 +1787,8 @@ class W_BVar(W_Expr):
 
 class W_FVar(W_Expr):
     """An FVar which refers to its binder by identity."""
+
+    _attrs_ = ['id', 'binder']
 
     _counter = count()
 
@@ -1773,6 +1836,8 @@ class W_FVar(W_Expr):
 
 
 class W_LitStr(W_Expr):
+    _attrs_ = ['val']
+
     def __init__(self, val):
         assert isinstance(val, str)
         self.val = val
@@ -1850,6 +1915,8 @@ class W_LitStr(W_Expr):
 
 
 class W_Sort(W_Expr):
+    _attrs_ = ['level']
+
     def __init__(self, level):
         self.level = level
         self.loose_bvar_range = 0
@@ -1943,6 +2010,8 @@ def apply_const_level_params(const, target, env):
 
 
 class W_Const(W_Expr):
+    _attrs_ = ['name', 'levels', '_infer_cache_result']
+
     def __init__(self, name, levels):
         self.name = name
         for each in levels:
@@ -2006,6 +2075,7 @@ class W_Const(W_Expr):
         return name_with_levels(self.name, self.levels)
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_Const)
         if not self.name.syntactic_eq(other.name) or len(self.levels) != len(
             other.levels
         ):
@@ -2141,6 +2211,8 @@ def _to_nat_val(expr, env):
 
 
 class W_LitNat(W_Expr):
+    _attrs_ = ['val']
+
     def __init__(self, val):
         self.val = val
         self.loose_bvar_range = 0
@@ -2422,6 +2494,8 @@ def _reduce_bin_nat_op_shiftright(args, env):
 
 
 class W_Proj(W_Expr):
+    _attrs_ = ['struct_name', 'field_index', 'struct_expr']
+
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
         self.field_index = field_index
@@ -2510,11 +2584,12 @@ class W_Proj(W_Expr):
 
         if isinstance(head, W_Const):
             decl = get_decl(env.declarations, head.name)
-            if isinstance(decl.w_kind, W_Constructor):
+            kind = decl.w_kind
+            if isinstance(kind, W_Constructor):
                 ctor_args.reverse()
                 # Constructor args = params ++ fields
                 # The field we want is at index num_params + field_index
-                idx = decl.w_kind.num_params + self.field_index
+                idx = kind.num_params + self.field_index
                 if idx < len(ctor_args):
                     return ctor_args[idx]
 
@@ -2558,6 +2633,7 @@ class W_Proj(W_Expr):
         return self.with_expr(self.struct_expr.closure(closure_env))
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_Proj)
         return (
             self.struct_name.syntactic_eq(other.struct_name)
             and self.field_index == other.field_index
@@ -2591,11 +2667,12 @@ class W_Proj(W_Expr):
         )
 
         assert isinstance(struct_type, W_Declaration)
-        assert isinstance(struct_type.w_kind, W_Inductive)
-        if len(struct_type.w_kind.constructors) != 1:
+        struct_kind = struct_type.w_kind
+        assert isinstance(struct_kind, W_Inductive)
+        if len(struct_kind.constructors) != 1:
             raise InvalidProjection.not_a_structure(
                 self.struct_name, self.field_index,
-                len(struct_type.w_kind.constructors), self.struct_expr,
+                len(struct_kind.constructors), self.struct_expr,
             )
 
         ind_type_whnf = apply_const_level_params(
@@ -2605,7 +2682,7 @@ class W_Proj(W_Expr):
             W_LEVEL_ZERO
         )
 
-        ctor_decl = struct_type.w_kind.constructors[0]
+        ctor_decl = struct_kind.constructors[0]
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
@@ -2724,6 +2801,13 @@ def _is_prop_type(expr, constants):
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
+    _attrs_ = [
+        'binder', 'body', 'finished_reduce',
+        '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
+        '_infer_cache_result',
+        '_closure_cache_env', '_closure_cache_result',
+    ]
+
     # Subclasses set this to a distinct tag so structurally-equal
     # lambdas and foralls don't collide in the content hash.
     _hash_tag = 0
@@ -2839,6 +2923,8 @@ class W_FunBase(W_Expr):
 
 
 class W_ForAll(W_FunBase):
+    _attrs_ = []
+
     _export_tag = "forallE"
     _ie_first_tag = False  # `'f' < 'i'`
     _hash_tag = 0xF0A1
@@ -2974,6 +3060,8 @@ def _binder_group_tokens(group, constants):
 
 
 class W_Lambda(W_FunBase):
+    _attrs_ = []
+
     _export_tag = "lam"
     _ie_first_tag = True  # `'i' < 'l'`
     _hash_tag = 0x1A3B
@@ -3062,6 +3150,8 @@ class W_Lambda(W_FunBase):
 
 
 class W_Let(W_Expr):
+    _attrs_ = ['name', 'type', 'value', 'body']
+
     def __init__(self, name, type, value, body):
         self.name = name
         self.type = type
@@ -3168,6 +3258,7 @@ class W_Let(W_Expr):
         )
 
     def syntactic_eq(self, other):
+        assert isinstance(other, W_Let)
         return (
             syntactic_eq(self.name, other.name)
             and syntactic_eq(self.type, other.type)
@@ -3196,6 +3287,12 @@ class W_Let(W_Expr):
 
 
 class W_App(W_Expr):
+    _attrs_ = [
+        'fn', 'arg',
+        '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
+        '_infer_cache_result', '_whnf_cache_result',
+    ]
+
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
@@ -3244,18 +3341,22 @@ class W_App(W_Expr):
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_App)
         self_fn = self.fn
-        if isinstance(self_fn, W_Closure) and isinstance(self_fn.body, W_Lambda):
-            new_env = [self.arg] + list(self_fn.env)
-            if def_eq(self_fn.body.body.closure(new_env), other):
-                return True
+        if isinstance(self_fn, W_Closure):
+            self_fn_body = self_fn.body
+            if isinstance(self_fn_body, W_Lambda):
+                new_env = [self.arg] + list(self_fn.env)
+                if def_eq(self_fn_body.body.closure(new_env), other):
+                    return True
         elif isinstance(self_fn, W_FunBase):
             if def_eq(self_fn.body.instantiate(self.arg), other):
                 return True
         other_fn = other.fn
-        if isinstance(other_fn, W_Closure) and isinstance(other_fn.body, W_Lambda):
-            new_env = [other.arg] + list(other_fn.env)
-            if def_eq(self, other_fn.body.body.closure(new_env)):
-                return True
+        if isinstance(other_fn, W_Closure):
+            other_fn_body = other_fn.body
+            if isinstance(other_fn_body, W_Lambda):
+                new_env = [other.arg] + list(other_fn.env)
+                if def_eq(self, other_fn_body.body.closure(new_env)):
+                    return True
         elif isinstance(other_fn, W_FunBase):
             if def_eq(self, other_fn.body.instantiate(other.arg)):
                 return True
@@ -3431,19 +3532,17 @@ class W_App(W_Expr):
             return False, self
 
         decl = get_decl(env.declarations, target.name)
-        if not isinstance(decl.w_kind, W_Recursor):
+        rec_kind = decl.w_kind
+        if not isinstance(rec_kind, W_Recursor):
             return False, self
 
         skip_count = (
-            decl.w_kind.num_params
-            + decl.w_kind.num_indices
-            + decl.w_kind.num_minors
-            + decl.w_kind.num_motives
+            rec_kind.num_params
+            + rec_kind.num_indices
+            + rec_kind.num_minors
+            + rec_kind.num_motives
         )
         major_idx = len(args) - 1 - skip_count
-
-        # for rec_rule in decl.w_kind.rules:
-        #     pass
 
         # Not enough arguments in our current app - we cannot reduce, since we need to know the major premise
         # to pick the recursor rule to apply
@@ -3453,7 +3552,7 @@ class W_App(W_Expr):
 
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
-        if decl.w_kind.k == 1:
+        if rec_kind.k == 1:
             # Verify that our major premise type is correct (by checking the whole expression)
             # before we get rid of it
             self.infer(env)
@@ -3474,22 +3573,24 @@ class W_App(W_Expr):
             # Mutual-inductive blocks legitimately have `len(all) > 1`;
             # k-like reduction can only operate on a single-inductive
             # context. Same bail-out reasoning.
-            if len(decl.w_kind.all) != 1:
+            if len(rec_kind.all) != 1:
                 return False, self
-            inductive_decl = get_decl(env.declarations, decl.w_kind.all[0])
-            assert isinstance(inductive_decl.w_kind, W_Inductive)
+            inductive_decl = get_decl(env.declarations, rec_kind.all[0])
+            ind_kind = inductive_decl.w_kind
+            assert isinstance(ind_kind, W_Inductive)
 
             # `_register_mutual_inductive` leaves `constructors=[]`,
             # so k-like for a mutual block's inductive would index out
             # of range. Stay safe.
-            if len(inductive_decl.w_kind.constructors) != 1:
+            if len(ind_kind.constructors) != 1:
                 return False, self
-            ctor_decl = inductive_decl.w_kind.constructors[0]
-            assert isinstance(ctor_decl.w_kind, W_Constructor)
+            ctor_decl = ind_kind.constructors[0]
+            ctor_kind = ctor_decl.w_kind
+            assert isinstance(ctor_kind, W_Constructor)
 
             new_args = list(args)
             new_args.reverse()
-            num_ctor_params = ctor_decl.w_kind.num_params
+            num_ctor_params = ctor_kind.num_params
 
             major_premise_ctor = ctor_decl.name.const(old_ty_base.levels)
             assert num_ctor_params >= 0
@@ -3545,7 +3646,7 @@ class W_App(W_Expr):
             return False, self
 
         all_ctor_args.reverse()
-        rec_rule = decl.w_kind.rule_for_ctor(major_premise_ctor.name)
+        rec_rule = rec_kind.rule_for_ctor(major_premise_ctor.name)
         if rec_rule is not None:
             # Construct an application of the recursor rule, using all
             # of the parameters except the major premise (which is
@@ -3560,9 +3661,9 @@ class W_App(W_Expr):
             new_args.reverse()
 
             total_args = (
-                decl.w_kind.num_params
-                + decl.w_kind.num_motives
-                + decl.w_kind.num_minors
+                rec_kind.num_params
+                + rec_kind.num_motives
+                + rec_kind.num_minors
             )
             assert total_args >= 0
             for arg in new_args[:total_args]:
@@ -3616,9 +3717,9 @@ class W_App(W_Expr):
         if not isinstance(target, W_Const):
             return None
         decl = get_decl(env.declarations, target.name)
-        if not isinstance(decl.w_kind, W_Recursor):
-            return None
         recursor = decl.w_kind
+        if not isinstance(recursor, W_Recursor):
+            return None
 
         # Non-recursive structure: one inductive in the block, one
         # ctor, no indices, no recursive args. The recursor must take
@@ -3628,15 +3729,15 @@ class W_App(W_Expr):
         if len(recursor.all) != 1:
             return None
         inductive_decl = get_decl(env.declarations, recursor.all[0])
-        if not isinstance(inductive_decl.w_kind, W_Inductive):
-            return None
         inductive = inductive_decl.w_kind
+        if not isinstance(inductive, W_Inductive):
+            return None
         if not inductive.is_non_recursive_structure():
             return None
         ctor_decl = inductive.constructors[0]
-        if not isinstance(ctor_decl.w_kind, W_Constructor):
-            return None
         ctor = ctor_decl.w_kind
+        if not isinstance(ctor, W_Constructor):
+            return None
 
         # Need params + motive + minor + major all present.
         skip_count = (
@@ -3799,23 +3900,27 @@ def _whnf_iota_chain(env, expr):
             cur = next_
 
         # If `cur` is a recursor application, descend into its major.
+        descended = False
         if isinstance(cur, W_App):
             target, args = cur.unapp()
             if isinstance(target, W_Const):
                 decl = env.declarations.get(target.name, None)
-                if decl is not None and isinstance(decl.w_kind, W_Recursor):
+                if decl is not None:
                     rec = decl.w_kind
-                    skip = (
-                        rec.num_params
-                        + rec.num_indices
-                        + rec.num_minors
-                        + rec.num_motives
-                    )
-                    major_idx = len(args) - 1 - skip
-                    if major_idx >= 0:
-                        chain.append((cur, args, major_idx))
-                        cur = args[major_idx]
-                        continue
+                    if isinstance(rec, W_Recursor):
+                        skip = (
+                            rec.num_params
+                            + rec.num_indices
+                            + rec.num_minors
+                            + rec.num_motives
+                        )
+                        major_idx = len(args) - 1 - skip
+                        if major_idx >= 0:
+                            chain.append((cur, args, major_idx))
+                            cur = args[major_idx]
+                            descended = True
+        if descended:
+            continue
 
         # No further descent. Walk back up applying iota.
         if not chain:
@@ -3826,7 +3931,9 @@ def _whnf_iota_chain(env, expr):
         # Cache the descent's result as the major's WHNF so the
         # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
         # returns immediately instead of recursing.
-        if isinstance(major_arg, W_App) or isinstance(major_arg, W_Closure):
+        if isinstance(major_arg, W_App):
+            major_arg._whnf_cache_result = cur
+        elif isinstance(major_arg, W_Closure):
             major_arg._whnf_cache_result = cur
 
         progress, reduced = parent.try_iota_reduce(env)
@@ -3852,6 +3959,8 @@ class W_Closure(W_Expr):
     ``env`` lives in the closure's outer scope (i.e. the scope
     containing the closure itself).
     """
+
+    _attrs_ = ['env', 'body', '_whnf_cache_result', '_infer_cache_result']
 
     def __init__(self, env, body):
         self.env = env
@@ -3947,6 +4056,8 @@ class W_Closure(W_Expr):
 
 
 class W_RecRule(_Item):
+    _attrs_ = ['ctor_name', 'num_fields', 'rhs']
+
     def __init__(self, ctor_name, num_fields, rhs):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
@@ -3954,6 +4065,8 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
+    _attrs_ = ['name', 'type', 'w_kind', 'levels', 'is_unsafe']
+
     def __init__(self, name, type, w_kind, levels, is_unsafe=False):
         self.name = name
         self.type = type
@@ -4017,6 +4130,8 @@ class W_Declaration(_Item):
 
 
 class W_DeclarationKind(_Item):
+    _attrs_ = []
+
     # Returns the value associated with this declaration kind.
     # This is the def value for a Definition, and `None` for things like Inductive
     def get_delta_reduce_target(self):
@@ -4055,6 +4170,8 @@ HINT_ABBREV = -1
 
 
 class W_Definition(W_DeclarationKind):
+    _attrs_ = ['value', 'hint']
+
     def __init__(self, value, hint):
         self.value = value
         self.hint = hint
@@ -4100,6 +4217,8 @@ class W_Opaque(W_Definition):
     stronger (we will never unfold it).
     """
 
+    _attrs_ = []
+
     def __init__(self, value):
         self.value = value
         self.hint = HINT_OPAQUE
@@ -4114,6 +4233,8 @@ class W_Opaque(W_Definition):
 
 
 class W_Theorem(W_DeclarationKind):
+    _attrs_ = ['value']
+
     def __init__(self, value):
         self.value = value
 
@@ -4144,6 +4265,8 @@ class W_Theorem(W_DeclarationKind):
 
 
 class W_Axiom(W_DeclarationKind):
+    _attrs_ = []
+
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
         result += name_with_levels_tokens(name, levels, constants)
@@ -4163,6 +4286,8 @@ class W_Quotient(W_DeclarationKind):
     are kernel-builtin constants; the kernel treats them specially for
     `Quot.lift` reduction. ``kind`` distinguishes which of the four.
     """
+
+    _attrs_ = ['kind']
 
     KIND_TYPE = 0  # `Quot`
     KIND_CTOR = 1  # `Quot.mk`
@@ -4217,6 +4342,12 @@ class W_Quotient(W_DeclarationKind):
 
 
 class W_Inductive(W_DeclarationKind):
+    _attrs_ = [
+        'all', 'constructors', 'recursors',
+        'num_nested', 'num_params', 'num_indices',
+        'is_reflexive', 'is_recursive', 'ctor_names',
+    ]
+
     def __init__(
         self,
         all,
@@ -4328,7 +4459,9 @@ class W_Inductive(W_DeclarationKind):
         Checks the result type, index arguments, universe levels,
         and strict positivity of field types.
         """
-        num_params = ctor.w_kind.num_params
+        ctor_kind = ctor.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+        num_params = ctor_kind.num_params
         assert num_params >= 0
         ind_name = self.all[0]
         error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
@@ -4337,10 +4470,10 @@ class W_Inductive(W_DeclarationKind):
             return error
         param_fvars = all_fvars[:num_params]
         remaining_fvars = all_fvars[num_params:]
-        if len(remaining_fvars) != ctor.w_kind.num_fields:
+        if len(remaining_fvars) != ctor_kind.num_fields:
             return W_ConstructorFieldCountMismatch(
                 env, ctor.type,
-                declared=ctor.w_kind.num_fields,
+                declared=ctor_kind.num_fields,
                 actual=len(remaining_fvars),
                 name=ctor.name,
             )
@@ -4348,6 +4481,7 @@ class W_Inductive(W_DeclarationKind):
         head, rev_args = ctor_type.unapp()
         if not head.is_named(ind_name):
             return error
+        assert isinstance(head, W_Const)
         if len(head.levels) != len(ctor.levels):
             return error
         for i in range(len(ctor.levels)):
@@ -4433,8 +4567,10 @@ class W_Inductive(W_DeclarationKind):
         for each in self.constructors:
             result.append(PLAIN.emit("\n"))
             inner = [NO_SPAN]
+            each_kind = each.w_kind
+            assert isinstance(each_kind, W_Constructor)
             ctor_tokens = list(
-                each.w_kind.constructor_tokens(
+                each_kind.constructor_tokens(
                     constructor_name=each.name,
                     type=each.type,
                     inductive=self,
@@ -4457,6 +4593,8 @@ class W_Inductive(W_DeclarationKind):
 
 
 class W_Constructor(W_DeclarationKind):
+    _attrs_ = ['num_params', 'num_fields', 'cidx']
+
     def __init__(self, num_params, num_fields, cidx=0):
         self.num_params = num_params
         self.num_fields = num_fields
@@ -4509,6 +4647,11 @@ class W_Constructor(W_DeclarationKind):
 
 
 class W_Recursor(W_DeclarationKind):
+    _attrs_ = [
+        'k', 'num_params', 'num_indices', 'num_motives', 'num_minors',
+        '_rules_by_ctor', 'all', 'rules',
+    ]
+
     def __init__(
         self,
         all,
@@ -4716,6 +4859,8 @@ def syntactic_eq(expr1, expr2):
 class _InferCacheEntry(object):
     """An entry in ``Environment._infer_cache``, keyed by expression identity."""
 
+    _attrs_ = ['expr', 'result']
+
     def __init__(self, expr, result):
         self.expr = expr
         self.result = result
@@ -4723,32 +4868,42 @@ class _InferCacheEntry(object):
 
 # Iterative instantiate driver. Same shape as the infer driver below.
 class _InstWork(object):
-    pass
+    _attrs_ = []
 
 
 class _InstVisit(_InstWork):
+    _attrs_ = ['expr', 'depth']
+
     def __init__(self, expr, depth):
         self.expr = expr
         self.depth = depth
 
 
 class _InstBuildApp(_InstWork):
+    _attrs_ = ['fn', 'arg']
+
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
 
 
 class _InstBuildLambda(_InstWork):
+    _attrs_ = ['binder']
+
     def __init__(self, binder):
         self.binder = binder
 
 
 class _InstBuildForAll(_InstWork):
+    _attrs_ = ['binder']
+
     def __init__(self, binder):
         self.binder = binder
 
 
 class _InstStore(_InstWork):
+    _attrs_ = ['expr', 'depth']
+
     def __init__(self, expr, depth):
         self.expr = expr
         self.depth = depth
@@ -4837,19 +4992,28 @@ def _iter_instantiate(root, expr, depth):
         else:
             assert isinstance(item, _InstStore)
             res = values[len(values) - 1]
-            item.expr._inst_cache_expr = expr
-            item.expr._inst_cache_depth = item.depth
-            item.expr._inst_cache_result = res
+            target = item.expr
+            if isinstance(target, W_App):
+                target._inst_cache_expr = expr
+                target._inst_cache_depth = item.depth
+                target._inst_cache_result = res
+            else:
+                assert isinstance(target, W_FunBase)
+                target._inst_cache_expr = expr
+                target._inst_cache_depth = item.depth
+                target._inst_cache_result = res
     return values[0]
 
 
 # Iterative infer driver. The work stack carries items of the following
 # kinds; pushes use LIFO ordering so the bottom of the stack runs last.
 class _InferWork(object):
-    pass
+    _attrs_ = []
 
 
 class _InferVisit(_InferWork):
+    _attrs_ = ['expr']
+
     def __init__(self, expr):
         self.expr = expr
 
@@ -4865,6 +5029,8 @@ class _InferAppStep(_InferWork):
     for the rare error-diagnostic case, and we can rebuild the spine
     on demand there.
     """
+
+    _attrs_ = ['head', 'args', 'j']
 
     def __init__(self, head, args, j):
         self.head = head
@@ -4884,17 +5050,23 @@ class _InferAppStep(_InferWork):
 
 
 class _InferBindLambda(_InferWork):
+    _attrs_ = ['binder', 'fvar']
+
     def __init__(self, binder, fvar):
         self.binder = binder
         self.fvar = fvar
 
 
 class _InferBindForAll(_InferWork):
+    _attrs_ = ['binder_sort']
+
     def __init__(self, binder_sort):
         self.binder_sort = binder_sort
 
 
 class _InferStore(_InferWork):
+    _attrs_ = ['expr']
+
     def __init__(self, expr):
         self.expr = expr
 
@@ -4923,8 +5095,20 @@ def _iter_infer(env, root):
             # keep a per-instance inline result; non-recursive expression
             # types are passed through env.infer (which has its own cache
             # fallback) and pushed straight onto the value stack.
-            if (cls is W_App or cls is W_Lambda or cls is W_ForAll
-                    or cls is W_Closure):
+            if cls is W_App:
+                assert isinstance(cur, W_App)
+                cached = cur._infer_cache_result
+                if cached is not None:
+                    values.append(cached)
+                    continue
+            elif cls is W_Lambda or cls is W_ForAll:
+                assert isinstance(cur, W_FunBase)
+                cached = cur._infer_cache_result
+                if cached is not None:
+                    values.append(cached)
+                    continue
+            elif cls is W_Closure:
+                assert isinstance(cur, W_Closure)
                 cached = cur._infer_cache_result
                 if cached is not None:
                     values.append(cached)
@@ -5030,11 +5214,22 @@ def _iter_infer(env, root):
             values.append(item.binder_sort.imax(body_sort).sort())
         else:
             assert isinstance(item, _InferStore)
-            item.expr._infer_cache_result = values[len(values) - 1]
+            target = item.expr
+            result = values[len(values) - 1]
+            if isinstance(target, W_App):
+                target._infer_cache_result = result
+            elif isinstance(target, W_FunBase):
+                target._infer_cache_result = result
+            elif isinstance(target, W_Closure):
+                target._infer_cache_result = result
+            elif isinstance(target, W_Const):
+                target._infer_cache_result = result
     return values[0]
 
 
 class Telescope(object):
+    _attrs_ = ['_binders']
+
     def __init__(self, *binders):
         assert len(binders) > 0
         self._binders = list(binders)

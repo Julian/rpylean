@@ -122,6 +122,17 @@ class FFI(object):
     """
     Dynamic loader for Lean libraries and functions.
     """
+
+    _attrs_ = [
+        'prefix', 'Init_shared', 'leanshared', 'leanshared_1',
+        '_close', '_deep_self_test_done',
+        '_alloc_object', '_mk_string', '_name_mk_string',
+        '_array_empty', '_array_push',
+        '_init_sp', '_import_modules',
+        '_env_find', '_env_constants', '_options_empty', '_dec_ref_cold',
+        'lean_version', 'lean_githash',
+    ]
+
     @staticmethod
     def from_prefix(prefix):
         """
@@ -470,3 +481,5 @@ class FFI(object):
 
 class FFIError(Exception):
     """An error raised by the FFI when Lean returns a failure."""
+
+    _attrs_ = []

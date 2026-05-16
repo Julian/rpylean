@@ -35,6 +35,7 @@ from rpylean.objects import (
     HINT_OPAQUE,
     Name,
     NumName,
+    StrName,
     W_Constructor,
     W_Inductive,
     W_LevelZero,
@@ -135,6 +136,15 @@ class Exporter(object):
     dedup relies on the FFI walker's pointer-cache (so shared subterms
     come back as the same rpylean object).
     """
+
+    _attrs_ = [
+        'stream',
+        'decls', '_visited', '_names',
+        '_next_name', '_next_level', '_next_expr',
+        '_level_ids', '_expr_ids',
+        '_induct_for_ctor', '_ctors_of', '_recs_of',
+        '_indexed', '_lean_version', '_lean_githash',
+    ]
 
     def __init__(self, stream):
         self.stream = stream
@@ -310,6 +320,7 @@ class Exporter(object):
     # ---- primitives ---------------------------------------------------
 
     def name_id(self, name):
+        assert isinstance(name, Name)
         if name in self._names:
             return self._names[name]
         # Anonymous is pre-seeded at id 0 in __init__; getting here means
@@ -322,6 +333,7 @@ class Exporter(object):
             payload = '{"i":%s,"pre":%d}' % (name.idx.str(), parent_id)
             self.stream.write('{"in":%d,"num":%s}\n' % (nid, payload))
         else:
+            assert isinstance(name, StrName)
             payload = '{"pre":%d,"str":%s}' % (
                 parent_id, _json_string(name.suffix),
             )

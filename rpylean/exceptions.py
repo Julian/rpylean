@@ -18,6 +18,8 @@ class ExportError(Exception):
     Something is wrong with the export file.
     """
 
+    _attrs_ = []
+
     def __str__(self):
         return FORMAT_PLAIN(self.tokens())
 
@@ -39,6 +41,8 @@ class ErrorAtSource(Exception):
     An ExportError paired with a source position.
     """
 
+    _attrs_ = ['error', 'source_pos']
+
     def __init__(self, error, source_pos):
         self.error = error
         self.source_pos = source_pos
@@ -48,6 +52,8 @@ class IndexGapError(ExportError):
     """
     An index in the export is not the next sequential value expected.
     """
+
+    _attrs_ = ['kind', 'expected', 'got']
 
     def __init__(self, kind, expected, got):
         self.kind = kind
@@ -66,6 +72,8 @@ class AlreadyDeclared(ExportError):
     """
     A declaration already exists in the environment.
     """
+
+    _attrs_ = ['name', 'reason']
 
     def __init__(self, name, constants):
         self.name = name
@@ -86,6 +94,8 @@ class DuplicateLevels(ExportError):
     """
     A declaration has duplicate level parameters.
     """
+
+    _attrs_ = ['name', 'levels', 'duplicate']
 
     def __init__(self, name, levels, duplicate):
         self.name = name
@@ -113,6 +123,8 @@ class ReflexiveKError(ExportError):
     requires a single constructor with 0 arguments.
     """
 
+    _attrs_ = ['name', 'rec_name']
+
     def __init__(self, name, rec_name):
         self.name = name
         self.rec_name = rec_name
@@ -136,6 +148,8 @@ class UnknownQuotient(ExportError):
     with Lean's type theory.
     """
 
+    _attrs_ = ['name', 'type']
+
     def __init__(self, name, type):
         self.name = name
         self.type = type
@@ -151,6 +165,8 @@ class W_Error(Exception):
     """
     An exception which might happen at (rpylean) runtime.
     """
+
+    _attrs_ = []
 
     def __str__(self):
         """
@@ -181,6 +197,8 @@ class W_InvalidDeclaration(W_Error):
     A type-checking error attributed to a specific declaration.
     """
 
+    _attrs_ = ['declaration', 'inner', 'declarations']
+
     def __init__(self, declaration, inner, declarations):
         self.declaration = declaration
         self.inner = inner
@@ -202,6 +220,8 @@ class InvalidProjection(W_Error):
     """
     A projection expression is invalid.
     """
+
+    _attrs_ = ['struct_name', 'field_index', 'expr', '_suffix']
 
     def __init__(self, struct_name, field_index, expr, suffix_tokens):
         self.struct_name = struct_name
@@ -309,6 +329,8 @@ class HeartbeatExceeded(W_Error):
     """
     The maximum number of def_eq steps was exceeded for a declaration.
     """
+
+    _attrs_ = ['declaration', 'heartbeats', 'max_heartbeat']
 
     def __init__(self, declaration, heartbeats, max_heartbeat):
         self.declaration = declaration

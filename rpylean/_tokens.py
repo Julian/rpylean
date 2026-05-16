@@ -20,6 +20,8 @@ def ansi_prefix(default_color, bold):
 class Token(object):
     """A syntactic category tag for pretty-printed output."""
 
+    _attrs_ = ['name', 'ansi_prefix']
+
     _all = []
 
     def __init__(self, name, default_color=None, bold=False):
@@ -75,6 +77,8 @@ class Diagnostic(object):
     ``message`` is a token list for the diagnostic message shown below
     the caret underline.
     """
+
+    _attrs_ = ['tokens', 'span', 'message']
 
     def __init__(self, tokens, span, message):
         self.tokens = tokens
@@ -216,6 +220,8 @@ def FORMAT_COLOR(tag, text):
 
 class TokenWriter(object):
     """A stream paired with a formatter, knowing how to write token streams."""
+
+    _attrs_ = ['stream', 'formatter']
 
     def __init__(self, stream, formatter):
         self.stream = stream

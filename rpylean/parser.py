@@ -29,6 +29,8 @@ class ExportVersionError(ExportError):
     The export file version doesn't match one we know how to parse.
     """
 
+    _attrs_ = ['got']
+
     def __init__(self, got):
         self.got = got
 
@@ -632,6 +634,12 @@ def _parse_def_hint(cursor):
 class _IndType(object):
     """Fields of one entry in an inductive line's ``types`` array."""
 
+    _attrs_ = [
+        'nidx', 'type_idx', 'is_reflexive', 'is_recursive',
+        'num_nested', 'num_params', 'num_indices',
+        'name_idxs', 'ctor_nidxs', 'levels',
+    ]
+
     def __init__(self):
         self.nidx = 0
         self.type_idx = 0
@@ -648,6 +656,11 @@ class _IndType(object):
 class _IndCtor(object):
     """Fields of one entry in an inductive line's ``ctors`` array."""
 
+    _attrs_ = [
+        'nidx', 'induct_nidx', 'type_idx',
+        'num_params', 'num_fields', 'cidx', 'levels',
+    ]
+
     def __init__(self):
         self.nidx = 0
         self.induct_nidx = 0
@@ -661,6 +674,12 @@ class _IndCtor(object):
 class _IndRec(object):
     """Fields of one entry in an inductive line's ``recs`` array, or of a
     standalone ``rec`` line."""
+
+    _attrs_ = [
+        'nidx', 'type_idx', 'k',
+        'num_params', 'num_indices', 'num_motives', 'num_minors',
+        'ind_name_idxs', 'rules', 'levels',
+    ]
 
     def __init__(self):
         self.nidx = 0
@@ -677,6 +696,8 @@ class _IndRec(object):
 
 class _IndRule(object):
     """Fields of one entry in a recursor's ``rules`` array."""
+
+    _attrs_ = ['ctor_nidx', 'num_fields', 'rhs_eidx']
 
     def __init__(self, ctor_nidx, num_fields, rhs_eidx):
         self.ctor_nidx = ctor_nidx
@@ -769,8 +790,9 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
         induct_name = builder.names[ctor.induct_nidx]
         parent = induct_by_name.get(induct_name, None)
         if parent is not None:
-            assert isinstance(parent.w_kind, objects.W_Inductive)
-            parent.w_kind.constructors.append(ctor_decl)
+            parent_kind = parent.w_kind
+            assert isinstance(parent_kind, objects.W_Inductive)
+            parent_kind.constructors.append(ctor_decl)
     for rec in rec_records:
         _register_recursor(builder, rec)
 

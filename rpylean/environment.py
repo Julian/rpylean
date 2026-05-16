@@ -39,6 +39,7 @@ from rpylean.objects import (
     W_Constructor,
     W_Definition,
     W_ForAll,
+    W_FunBase,
     W_HeartbeatError,
     W_Inductive,
     W_Lambda,
@@ -59,6 +60,8 @@ class EnvironmentBuilder(object):
 
     Incrementally builds up an environment as we parse an export file.
     """
+
+    _attrs_ = ['levels', 'exprs', 'names', 'declarations', 'env']
 
     def __init__(self, levels=None, exprs=None, names=[]):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
@@ -180,6 +183,8 @@ class DeclarationHook(object):
     Base class for streaming hooks invoked on each newly-registered declaration.
     """
 
+    _attrs_ = []
+
     def on_declaration(self, decl):
         """Return a truthy value to abort the consume loop early."""
         return False
@@ -205,6 +210,8 @@ class Tracer(object):
     No-op tracer.
     """
 
+    _attrs_ = ['_writer', '_depth']
+
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
@@ -228,6 +235,8 @@ class StreamTracer(Tracer):
     """
     Tracer that writes indented def_eq comparisons to a stream.
     """
+
+    _attrs_ = ['_pending_newline']
 
     def __init__(self, writer):
         self._writer = writer
@@ -277,6 +286,8 @@ class _DefEqCacheEntry(object):
     An entry in the def_eq cache, keyed by object identity.
     """
 
+    _attrs_ = ['expr1', 'expr2', 'result']
+
     def __init__(self, expr1, expr2, result):
         self.expr1 = expr1
         self.expr2 = expr2
@@ -295,6 +306,10 @@ class CheckResult(object):
     counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
     `0` otherwise.
     """
+
+    _attrs_ = [
+        'elapsed', 'gc_elapsed', 'bytes_allocated', 'heartbeats', 'error',
+    ]
 
     def __init__(self, elapsed, gc_elapsed, bytes_allocated, heartbeats,
                  error):
@@ -329,6 +344,12 @@ class Environment(object):
     A Lean environment with its declarations.
     """
 
+    _attrs_ = [
+        'declarations', 'tracer',
+        'heartbeat', 'max_heartbeat', 'count_heartbeats',
+        '_current_decl', '_def_eq_cache', '_infer_cache',
+    ]
+
     def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
         self.tracer = tracer
@@ -353,8 +374,24 @@ class Environment(object):
         # acts as a per-name cache and avoids the dict / hash / list-walk
         # overhead of the generic cache below.
         cls = expr.__class__
-        if (cls is W_App or cls is W_Lambda or cls is W_ForAll
-                or cls is W_Const):
+        if cls is W_App:
+            assert isinstance(expr, W_App)
+            cached = expr._infer_cache_result
+            if cached is not None:
+                return cached
+            result = expr.infer(self)
+            expr._infer_cache_result = result
+            return result
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(expr, W_FunBase)
+            cached = expr._infer_cache_result
+            if cached is not None:
+                return cached
+            result = expr.infer(self)
+            expr._infer_cache_result = result
+            return result
+        if cls is W_Const:
+            assert isinstance(expr, W_Const)
             cached = expr._infer_cache_result
             if cached is not None:
                 return cached
@@ -642,16 +679,17 @@ class Environment(object):
                 if self.def_eq(expr1_ty, expr2_ty):
                     return True
 
-        if cls1 is cls2 and (
-            # returning NotImplemented (from W_Const.def_eq)
-            # isn't valid RPython, and the point is these are not comparable
-            # until they're reduced...
-            # Still would love to think of a better way.
-            cls1 is not W_Const or expr1.name.syntactic_eq(expr2.name)
-        ):
-            if expr1.def_eq(expr2, self.def_eq):
-                return True
-            return self.def_eq_unit(expr1, expr2)
+        if cls1 is cls2:
+            if cls1 is W_Const:
+                assert isinstance(expr1, W_Const)
+                assert isinstance(expr2, W_Const)
+                names_eq = expr1.name.syntactic_eq(expr2.name)
+            else:
+                names_eq = True
+            if names_eq:
+                if expr1.def_eq(expr2, self.def_eq):
+                    return True
+                return self.def_eq_unit(expr1, expr2)
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
@@ -842,14 +880,16 @@ class Environment(object):
         if not isinstance(head, W_Const):
             return False
         decl = get_decl(self.declarations, head.name)
-        if not isinstance(decl.w_kind, W_Inductive):
-            return False
         ind = decl.w_kind
+        if not isinstance(ind, W_Inductive):
+            return False
         if not ind.is_non_recursive_structure():
             return False
         if ind.num_indices != 0:
             return False
-        if ind.constructors[0].w_kind.num_fields != 0:
+        first_ctor_kind = ind.constructors[0].w_kind
+        assert isinstance(first_ctor_kind, W_Constructor)
+        if first_ctor_kind.num_fields != 0:
             return False
         expr2_ty = expr2.infer(self)
         return self.def_eq(expr1_ty, expr2_ty)
@@ -887,11 +927,12 @@ class Environment(object):
 
         # Check if head is a constructor
         ctor_decl = get_decl(self.declarations, head.name)
-        if not isinstance(ctor_decl.w_kind, W_Constructor):
+        ctor_kind = ctor_decl.w_kind
+        if not isinstance(ctor_kind, W_Constructor):
             return False
 
-        num_params = ctor_decl.w_kind.num_params
-        num_fields = ctor_decl.w_kind.num_fields
+        num_params = ctor_kind.num_params
+        num_fields = ctor_kind.num_fields
 
         # Must be fully applied
         if len(args) != num_params + num_fields:
@@ -931,6 +972,8 @@ Environment.EMPTY = Environment.having([])
 
 
 class _Declarations(object):
+    _attrs_ = []
+
     def __iter__(self):
         return self
 
@@ -939,6 +982,8 @@ class _Declarations(object):
 
 
 class _AllDeclarations(_Declarations):
+    _attrs_ = ['declarations', 'iter']
+
     def __init__(self, declarations):
         self.declarations = declarations
         self.iter = iter(self.declarations.itervalues())
@@ -948,6 +993,8 @@ class _AllDeclarations(_Declarations):
 
 
 class _MatchingDeclarations(_Declarations):
+    _attrs_ = ['declarations', 'substring', 'iter']
+
     def __init__(self, declarations, substring):
         self.declarations = declarations
         self.substring = substring
@@ -960,6 +1007,8 @@ class _MatchingDeclarations(_Declarations):
 
 
 class _NamedDeclarations(_Declarations):
+    _attrs_ = ['declarations', 'names', 'iter']
+
     def __init__(self, declarations, names):
         self.declarations = declarations
         self.names = names
@@ -972,6 +1021,8 @@ class _NamedDeclarations(_Declarations):
 
 
 class _PublicDeclarations(_Declarations):
+    _attrs_ = ['iter']
+
     def __init__(self, iterator):
         self.iter = iterator
 

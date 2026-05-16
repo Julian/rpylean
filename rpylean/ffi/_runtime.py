@@ -107,6 +107,8 @@ from rpylean.objects import (
 # globals at runtime — `.clear()` on dict attributes is fine.
 
 class _WalkState(object):
+    _attrs_ = ['exprs', 'levels', 'names', 'bvars']
+
     def __init__(self):
         self.exprs = {}    # int (ptr addr) → W_Expr
         self.levels = {}   # int (ptr addr) → W_Level

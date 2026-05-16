@@ -14,6 +14,8 @@ class count(object):
     global variables.
     """
 
+    _attrs_ = ['count']
+
     def __init__(self):
         self.count = 0
 

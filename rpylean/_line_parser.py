@@ -20,6 +20,8 @@ from rpython.rlib.rutf8 import unichr_as_utf8_append
 class LineCursor(object):
     """A stateful byte cursor over a single NDJSON line."""
 
+    _attrs_ = ['line', 'pos', 'length']
+
     def __init__(self, line):
         self.line = line
         self.pos = 0
