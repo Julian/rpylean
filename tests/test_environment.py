@@ -1059,6 +1059,38 @@ class TestHeartbeat(object):
         assert type_check(env=env) == []
 
 
+class TestCheckResult(object):
+    def test_success_has_no_error(self):
+        decl = Name.simple("Good").definition(type=TYPE, value=PROP)
+        env = Environment.having([decl])
+
+        result = env.type_check_one(decl)
+        assert result.error is None
+        assert result.elapsed >= 0.0
+
+    def test_failure_carries_error(self):
+        bad = Name.simple("Bad").definition(type=PROP, value=PROP)
+        env = Environment.having([bad])
+
+        result = env.type_check_one(bad)
+        assert result.error is not None
+
+    def test_heartbeats_populated_when_counting(self):
+        decl = Name.simple("Good").definition(type=TYPE, value=PROP)
+        env = Environment.having([decl])
+        env.count_heartbeats = True
+
+        result = env.type_check_one(decl)
+        assert result.heartbeats > 0
+
+    def test_heartbeats_zero_when_not_counting(self):
+        decl = Name.simple("Good").definition(type=TYPE, value=PROP)
+        env = Environment.having([decl])
+
+        result = env.type_check_one(decl)
+        assert result.heartbeats == 0
+
+
 class TestDefEqCache(object):
     def test_cache_returns_same_result(self):
         """Repeated def_eq with the same objects returns the cached result."""

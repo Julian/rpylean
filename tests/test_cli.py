@@ -3,7 +3,8 @@ from StringIO import StringIO
 
 from rpylean._rcli import CLI, Args
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
-from rpylean.cli import Printer
+from rpylean._rcli import UsageError
+from rpylean.cli import Printer, _parse_threshold
 from rpylean.environment import Environment
 from rpylean.objects import TYPE, Name
 
@@ -286,3 +287,53 @@ class TestPrinter(object):
         printer = Printer.from_str("name", TokenWriter(out, FORMAT_PLAIN))
         printer.show(self.env, self.decl)
         assert out.getvalue() == "Foo\n"
+
+
+class TestParseThreshold(object):
+    def test_none(self):
+        assert _parse_threshold(None) == (-1.0, -1)
+
+    def test_bare_number_is_heartbeats(self):
+        assert _parse_threshold("100") == (-1.0, 100)
+
+    def test_seconds_suffix(self):
+        assert _parse_threshold("3s") == (3.0, -1)
+
+    def test_milliseconds(self):
+        assert _parse_threshold("500ms") == (0.5, -1)
+
+    def test_minutes(self):
+        assert _parse_threshold("2m") == (120.0, -1)
+
+    def test_heartbeats_suffix(self):
+        assert _parse_threshold("1000h") == (-1.0, 1000)
+
+    def test_zero_heartbeats(self):
+        assert _parse_threshold("0") == (-1.0, 0)
+
+    def test_zero_seconds(self):
+        assert _parse_threshold("0s") == (0.0, -1)
+
+    def test_invalid(self):
+        try:
+            _parse_threshold("nope")
+        except UsageError as err:
+            assert "Invalid threshold" in err.message
+        else:
+            assert False, "expected UsageError"
+
+    def test_invalid_unit_value(self):
+        try:
+            _parse_threshold("xms")
+        except UsageError as err:
+            assert "Invalid threshold" in err.message
+        else:
+            assert False, "expected UsageError"
+
+    def test_negative(self):
+        try:
+            _parse_threshold("-1")
+        except UsageError as err:
+            assert "Invalid threshold" in err.message
+        else:
+            assert False, "expected UsageError"

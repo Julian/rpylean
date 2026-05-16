@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 from sys import stderr
+from time import clock
 from traceback import print_exc
 import pdb
 
@@ -281,6 +282,21 @@ class _DefEqCacheEntry(object):
         self.result = result
 
 
+class CheckResult(object):
+    """
+    The outcome of type-checking a single declaration.
+
+    `heartbeats` is meaningful only when the environment has heartbeat
+    counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
+    `0` otherwise.
+    """
+
+    def __init__(self, elapsed, heartbeats, error):
+        self.elapsed = elapsed
+        self.heartbeats = heartbeats
+        self.error = error
+
+
 class Environment(object):
     """
     A Lean environment with its declarations.
@@ -291,6 +307,7 @@ class Environment(object):
         self.tracer = tracer
         self.heartbeat = 0
         self.max_heartbeat = 0
+        self.count_heartbeats = False
         self._current_decl = None
         self._def_eq_cache = {}
         self._infer_cache = {}
@@ -372,15 +389,16 @@ class Environment(object):
 
     def type_check(self, declarations, pp=None):
         """
-        Type check each declaration in the environment.
+        Type check each declaration, yielding only the errors.
         """
         for each in declarations:
-            for err in self.type_check_one(each, pp=pp):
-                yield err
+            result = self.type_check_one(each, pp=pp)
+            if result.error is not None:
+                yield result.error
 
     def type_check_one(self, decl, pp=None):
         """
-        Type check a single declaration, yielding zero or one errors.
+        Type check a single declaration, returning a `CheckResult`.
         """
         if pp is not None:
             pp(self, decl)
@@ -390,10 +408,12 @@ class Environment(object):
         self._current_decl = decl
         self._def_eq_cache = {}
         self._infer_cache = {}
+        error = None
+        start = clock()
         try:
             error = decl.type_check(self)
         except HeartbeatExceeded as err:
-            yield W_HeartbeatError(
+            error = W_HeartbeatError(
                 decl.name,
                 err.heartbeats,
                 err.max_heartbeat,
@@ -401,9 +421,9 @@ class Environment(object):
         except W_CheckError as err:
             if err.name is None:
                 err.name = decl.name
-            yield err
+            error = err
         except W_Error as err:
-            yield W_InvalidDeclaration(decl, err, self.declarations)
+            error = W_InvalidDeclaration(decl, err, self.declarations)
         except Exception:
             if not we_are_translated():
                 print_exc(None, stderr)
@@ -412,9 +432,8 @@ class Environment(object):
                 stderr.write("\n\n")
                 pdb.post_mortem()
             raise
-        else:
-            if error is not None:
-                yield error
+        elapsed = clock() - start
+        return CheckResult(elapsed, self.heartbeat, error)
 
     def all(self):
         """
@@ -447,9 +466,9 @@ class Environment(object):
         Check if two expressions are definitionally equal.
         """
         max_heartbeat = self.max_heartbeat
-        if max_heartbeat > 0:
+        if max_heartbeat > 0 or self.count_heartbeats:
             self.heartbeat += 1
-            if self.heartbeat > max_heartbeat:
+            if max_heartbeat > 0 and self.heartbeat > max_heartbeat:
                 raise HeartbeatExceeded(
                     self._current_decl,
                     self.heartbeat,

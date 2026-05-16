@@ -63,6 +63,14 @@ COLOR = (
                 "name|dots|decls|declarations|all)"
             ),
         ),
+        (
+            "slower-than",
+            (
+                "print each declaration that exceeded this threshold "
+                "to check (bare numbers are heartbeats; suffixes: "
+                "s/ms/m for time, h for heartbeats)"
+            ),
+        ),
         COLOR,
     ],
     flags=[
@@ -84,6 +92,7 @@ def check(self, args, stdin, stdout, stderr):
     max_heartbeat = int(args.options["max-heartbeat"] or "0")
     printer = Printer.from_str(args.options["print"], stdoutw)
     pp = printer.show if printer is not None else None
+    slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
     filter_match = args.options["filter-match"]
     filter_names = None
@@ -109,8 +118,11 @@ def check(self, args, stdin, stdout, stderr):
             path,
             stdin,
             stderr,
+            stdoutw,
             stderrw,
             pp,
+            slow_secs,
+            slow_hb,
             filter_match,
             filter_names,
             abort_at,
@@ -128,10 +140,24 @@ class _StreamingChecker(DeclarationHook):
     Per-declaration filter + type-check, accumulating errors and failure count.
     """
 
-    def __init__(self, env, stderrw, pp, filter_match, filter_names, abort_at):
+    def __init__(
+        self,
+        env,
+        stdoutw,
+        stderrw,
+        pp,
+        slow_secs,
+        slow_hb,
+        filter_match,
+        filter_names,
+        abort_at,
+    ):
         self.env = env
+        self.stdoutw = stdoutw
         self.stderrw = stderrw
         self.pp = pp
+        self.slow_secs = slow_secs
+        self.slow_hb = slow_hb
         self.filter_match = filter_match
         self.filter_names = filter_names
         self.abort_at = abort_at
@@ -142,8 +168,16 @@ class _StreamingChecker(DeclarationHook):
             return False
         if self.filter_names is not None and decl.name not in self.filter_names:
             return False
-        for w_error in self.env.type_check_one(decl, pp=self.pp):
-            w_error.write_to(self.stderrw)
+        result = self.env.type_check_one(decl, pp=self.pp)
+        slow_by_time = self.slow_secs >= 0.0 and result.elapsed > self.slow_secs
+        slow_by_hb = self.slow_hb >= 0 and result.heartbeats > self.slow_hb
+        if slow_by_time or slow_by_hb:
+            self.stdoutw.write_plain(
+                "%f\t%d\t" % (result.elapsed, result.heartbeats),
+            )
+            self.stdoutw.writeline(decl.name.tokens(self.env.declarations))
+        if result.error is not None:
+            result.error.write_to(self.stderrw)
             self.failures += 1
             if 0 < self.abort_at <= self.failures:
                 return True
@@ -154,8 +188,11 @@ def _check_one_file(
     path,
     stdin,
     stderr,
+    stdoutw,
     stderrw,
     pp,
+    slow_secs,
+    slow_hb,
     filter_match,
     filter_names,
     abort_at,
@@ -171,8 +208,11 @@ def _check_one_file(
     builder = EnvironmentBuilder()
     checker = _StreamingChecker(
         env=builder.env,
+        stdoutw=stdoutw,
         stderrw=stderrw,
         pp=pp,
+        slow_secs=slow_secs,
+        slow_hb=slow_hb,
         filter_match=filter_match,
         filter_names=filter_names,
         abort_at=abort_at,
@@ -183,6 +223,8 @@ def _check_one_file(
                 builder.env.tracer = StreamTracer(stderrw)
             if max_heartbeat > 0:
                 builder.env.max_heartbeat = max_heartbeat
+            if slow_secs >= 0.0 or slow_hb >= 0:
+                builder.env.count_heartbeats = True
             parser.validate_export_metadata(file)
             builder.consume(file, hook=checker)
         except ExportError as err:
@@ -297,6 +339,14 @@ def _resolve_prefix(args, stderr):
             "max-fail",
             "the maximum number of type errors to report before giving up",
         ),
+        (
+            "slower-than",
+            (
+                "print each declaration that exceeded this threshold "
+                "to check (bare numbers are heartbeats; suffixes: "
+                "s/ms/m for time, h for heartbeats)"
+            ),
+        ),
         COLOR,
     ],
 )
@@ -308,6 +358,7 @@ def check(self, args, stdin, stdout, stderr):
     if prefix is None:
         return 1
 
+    stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
 
     filter_match = args.options["filter-match"]
@@ -318,10 +369,14 @@ def check(self, args, stdin, stdout, stderr):
             filter_names[Name.from_str(each)] = True
 
     max_fail = int(args.options["max-fail"] or "0")
+    slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
     builder = EnvironmentBuilder()
+    if slow_secs >= 0.0 or slow_hb >= 0:
+        builder.env.count_heartbeats = True
     checker = _StreamingChecker(
-        env=builder.env, stderrw=stderrw, pp=None,
+        env=builder.env, stdoutw=stdoutw, stderrw=stderrw, pp=None,
+        slow_secs=slow_secs, slow_hb=slow_hb,
         filter_match=filter_match, filter_names=filter_names,
         abort_at=max_fail if max_fail > 0 else 0,
     )
@@ -496,6 +551,45 @@ def environment_from(path, stdin):
     finally:
         if path != "-":
             file.close()
+
+
+def _parse_threshold(s):
+    """Parse a ``--slower-than`` threshold into ``(seconds, heartbeats)``.
+
+    The non-active value of the pair is ``-1``. Bare numbers are heartbeats;
+    suffixes ``s``, ``ms``, ``m`` mean seconds; ``h`` means heartbeats.
+    Returns ``(-1.0, -1)`` for ``None``.
+    """
+    if s is None:
+        return -1.0, -1
+    length = len(s)
+    if s.endswith("ms"):
+        end = length - 2
+        assert end >= 0
+        return _pos_int(s, s[:end]) * 0.001, -1
+    if s.endswith("s"):
+        end = length - 1
+        assert end >= 0
+        return float(_pos_int(s, s[:end])), -1
+    if s.endswith("m"):
+        end = length - 1
+        assert end >= 0
+        return _pos_int(s, s[:end]) * 60.0, -1
+    if s.endswith("h"):
+        end = length - 1
+        assert end >= 0
+        return -1.0, _pos_int(s, s[:end])
+    return -1.0, _pos_int(s, s)
+
+
+def _pos_int(orig, n):
+    try:
+        value = int(n)
+    except ValueError:
+        raise UsageError("Invalid threshold: %s" % (orig,))
+    if value < 0:
+        raise UsageError("Invalid threshold: %s" % (orig,))
+    return value
 
 
 class Printer(object):
