@@ -7,6 +7,7 @@ from __future__ import print_function
 from time import time
 import errno
 
+from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean import parser
@@ -71,6 +72,12 @@ COLOR = (
                 "s/ms/m for time, h for heartbeats)"
             ),
         ),
+        (
+            "break-at",
+            "drop into pdb before checking each declaration whose name "
+            "contains this substring; requires running rpylean "
+            "untranslated (`pypy -m rpylean check ...`)",
+        ),
         COLOR,
     ],
     flags=[
@@ -101,6 +108,14 @@ def check(self, args, stdin, stdout, stderr):
         for each in args.options["filter"].split(","):
             filter_names[Name.from_str(each)] = True
 
+    break_at = args.options["break-at"]
+    if break_at is not None and we_are_translated():
+        raise UsageError(
+            "--break-at requires running rpylean untranslated "
+            "(`pypy -m rpylean check ...`); pdb is unavailable in the "
+            "translated binary."
+        )
+
     trace = args.options["trace"]
 
     for path in args.varargs:
@@ -128,6 +143,7 @@ def check(self, args, stdin, stdout, stderr):
             abort_at,
             max_heartbeat,
             trace,
+            break_at,
         )
         failures += new_failures
         elapsed = time() - start
@@ -144,7 +160,7 @@ class _StreamingChecker(DeclarationHook):
         'env', 'stdoutw', 'stderrw', 'pp',
         'slow_secs', 'slow_hb',
         'filter_match', 'filter_names',
-        'abort_at', 'failures',
+        'abort_at', 'failures', 'break_at',
     ]
 
     def __init__(
@@ -158,6 +174,7 @@ class _StreamingChecker(DeclarationHook):
         filter_match,
         filter_names,
         abort_at,
+        break_at,
     ):
         self.env = env
         self.stdoutw = stdoutw
@@ -169,12 +186,15 @@ class _StreamingChecker(DeclarationHook):
         self.filter_names = filter_names
         self.abort_at = abort_at
         self.failures = 0
+        self.break_at = break_at
 
     def on_declaration(self, decl):
         if self.filter_match is not None and self.filter_match not in decl.name.str():
             return False
         if self.filter_names is not None and decl.name not in self.filter_names:
             return False
+        if self.break_at is not None and self.break_at in decl.name.str():
+            self._break_for(decl)
         result = self.env.type_check_one(decl, pp=self.pp)
         slow_by_time = self.slow_secs >= 0.0 and result.elapsed > self.slow_secs
         slow_by_hb = self.slow_hb >= 0 and result.heartbeats > self.slow_hb
@@ -195,6 +215,18 @@ class _StreamingChecker(DeclarationHook):
                 return True
         return False
 
+    def _break_for(self, decl):
+        # Gated on `not we_are_translated()` because `pdb` is a CPython
+        # module and isn't available in the translated binary. The
+        # `--break-at` CLI handler already errors out when the user
+        # passes the flag under translation, so reaching here under
+        # translation is dead code.
+        if not we_are_translated():
+            import pdb
+            print("[break-at] entering pdb before checking: %s"
+                  % (decl.name.str(),))
+            pdb.set_trace()
+
 
 def _check_one_file(
     path,
@@ -210,6 +242,7 @@ def _check_one_file(
     abort_at,
     max_heartbeat,
     trace,
+    break_at,
 ):
     """
     Stream-check a single export file, returning the number of new failures.
@@ -228,6 +261,7 @@ def _check_one_file(
         filter_match=filter_match,
         filter_names=filter_names,
         abort_at=abort_at,
+        break_at=break_at,
     )
     try:
         try:
@@ -391,6 +425,7 @@ def check(self, args, stdin, stdout, stderr):
         slow_secs=slow_secs, slow_hb=slow_hb,
         filter_match=filter_match, filter_names=filter_names,
         abort_at=max_fail if max_fail > 0 else 0,
+        break_at=None,
     )
     collector = _FFICollector(builder, checker)
     with FFI.from_prefix(prefix) as ffi_obj:
