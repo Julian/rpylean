@@ -58,16 +58,20 @@ to_nat_val_jitdriver = JitDriver(
 )
 
 
-@elidable
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
 
-    This is a hot path during type checking - called for every constant.
-    The declarations dict is immutable after environment construction,
-    so this lookup is pure and can be elided by the JIT when the name
-    is known at trace time.
+    This is a hot path during type checking — called for every constant.
+    We promote both arguments here and dispatch to the `@elidable` inner
+    so every call site benefits from JIT-time folding, not only the ones
+    that happen to promote on their own.
     """
+    return _get_decl(promote(declarations), promote(name))
+
+
+@elidable
+def _get_decl(declarations, name):
     return declarations[name]
 
 
