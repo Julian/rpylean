@@ -47,6 +47,17 @@ whnf_jitdriver = JitDriver(
 )
 
 
+# JIT driver for the Nat.succ chain walker. The loop is uniform —
+# every iteration unpeels one `Nat.succ` and recurses; the JIT
+# specialises on the (empty) green key and inlines the WHNF call.
+to_nat_val_jitdriver = JitDriver(
+    greens=[],
+    reds=["succs", "expr", "env"],
+    name="to_nat_val",
+    is_recursive=True,
+)
+
+
 @elidable
 def get_decl(declarations, name):
     """
@@ -2209,6 +2220,9 @@ def _to_nat_val(expr, env):
     """
     succs = 0
     while True:
+        to_nat_val_jitdriver.jit_merge_point(
+            succs=succs, expr=expr, env=env,
+        )
         if isinstance(expr, W_LitNat):
             return expr.val.add(rbigint.fromint(succs))
         if isinstance(expr, W_Const):
