@@ -5292,12 +5292,14 @@ class Telescope(object):
         assert len(binders) > 0
         self._binders = list(binders)
 
+    @unroll_safe
     def forall(self, body):
         forall = W_ForAll(self._binders[-1], body)
         for binder in reversed(self._binders[:-1]):
             forall = W_ForAll(binder, forall)
         return forall
 
+    @unroll_safe
     def fun(self, body):
         fun = W_Lambda(self._binders[-1], body)
         for binder in reversed(self._binders[:-1]):
