@@ -2207,6 +2207,7 @@ _NAT_XOR = _NAT_NAME.child("xor")
 _NAT_SHIFT_LEFT = _NAT_NAME.child("shiftLeft")
 _NAT_SHIFT_RIGHT = _NAT_NAME.child("shiftRight")
 _NAT_SUCC_NAME = _NAT_NAME.child("succ")
+_NAT_REC_NAME = _NAT_NAME.child("rec")
 
 _BOOL_TRUE = Name.simple("Bool").child("true").const()
 _BOOL_FALSE = Name.simple("Bool").child("false").const()
@@ -3598,6 +3599,24 @@ class W_App(W_Expr):
         # to pick the recursor rule to apply
         if major_idx < 0:
             return False, self
+
+        # Fast path: `Nat.rec motive zero succ (W_LitNat N)`. The
+        # standard iota path applies `rec_rule.rhs` to four args
+        # (motive, zero, succ, pred) and lets the outer whnf loop
+        # beta away the four-lambda rule body — four betas per step.
+        # We construct the same one-step iota result directly here,
+        # skipping those four betas. The chain stays lazy: consumers
+        # only descend as far as they need, and each successive step
+        # also hits this path. On `Nat.brecOn`-shaped recursions in
+        # init.ndjson the rule-unwrap betas account for ~22% of all
+        # betas in the workload.
+        nat_rec_step = self._maybe_iota_nat_rec_step(
+            target, args, major_idx,
+        )
+        if nat_rec_step is not None:
+            env.tracer.iota(target.name)
+            return True, nat_rec_step
+
         major_premise = _whnf_iota_chain(env, args[major_idx])
 
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
@@ -3747,6 +3766,41 @@ class W_App(W_Expr):
             return True, new_app
 
         return False, self
+
+    def _maybe_iota_nat_rec_step(self, target, args, major_idx):
+        """One-step iota for `Nat.rec motive zero succ (W_LitNat N)`.
+
+        Returns the same expression the standard iota path would produce
+        after fully beta-reducing `rec_rule.rhs` against the four args
+        — namely:
+
+            N == 0   →   zero_case
+            N >  0   →   succ_case (W_LitNat N-1) (Nat.rec motive zero succ (W_LitNat N-1))
+
+        — but built directly as a small `W_App` tree rather than via an
+        app spine the outer whnf loop has to peel one beta at a time.
+        Returns None when this isn't applicable (not `Nat.rec`, major
+        isn't a literal, or trailing args sit after the major).
+        """
+        if not target.name.syntactic_eq(_NAT_REC_NAME):
+            return None
+        if major_idx != 0:
+            # Trailing args after the major aren't handled here — fall
+            # through so the standard iota path peels them as usual.
+            return None
+        major = args[0]
+        if not isinstance(major, W_LitNat):
+            return None
+        # args is outermost-first from `unapp`, so for the fully-applied
+        # `Nat.rec motive zero succ N` we have args = [N, succ, zero, motive].
+        succ_case = args[1]
+        zero_case = args[2]
+        motive = args[3]
+        if major.val.eq(rbigint.fromint(0)):
+            return zero_case
+        pred = W_LitNat(major.val.sub(rbigint.fromint(1)))
+        rec_at_pred = target.app(motive).app(zero_case).app(succ_case).app(pred)
+        return succ_case.app(pred).app(rec_at_pred)
 
     def try_struct_eta_reduce(self, env):
         """
