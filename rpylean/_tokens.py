@@ -247,6 +247,10 @@ class TokenWriter(object):
         """
         return self.write([PLAIN.emit(string)])
 
+    def flush(self):
+        """Flush the underlying stream's buffers."""
+        self.stream.flush()
+
 
 def indent(tokens, prefix):
     """Return tokens with prefix inserted after every newline in plain tokens."""

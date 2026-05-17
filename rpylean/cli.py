@@ -224,6 +224,12 @@ class _StreamingChecker(DeclarationHook):
             # snapshot up to *this point* rather than waiting for the
             # final summary (which never arrives if the run is stuck).
             self.env.tracer.print_summary(self.stderrw)
+            # `stderr` is block-buffered when redirected to a file, so
+            # without an explicit flush the user's `kill -INFO` probe
+            # would set the flag and write the line but it'd stay in
+            # the buffer until the run ended (or crashed) — defeating
+            # the point of the signal.
+            self.stderrw.flush()
         if self.filter_match is not None and self.filter_match not in decl.name.str():
             return False
         if self.filter_names is not None and decl.name not in self.filter_names:
