@@ -3500,7 +3500,9 @@ class W_App(W_Expr):
     def whnf(self, env):
         cached = self._whnf_cache_result
         if cached is not None:
+            env.tracer.whnf_cache_hit()
             return cached
+        env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
         self._whnf_cache_result = expr
         return expr
@@ -4092,7 +4094,9 @@ class W_Closure(W_Expr):
     def whnf(self, env):
         cached = self._whnf_cache_result
         if cached is not None:
+            env.tracer.whnf_cache_hit()
             return cached
+        env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
         self._whnf_cache_result = expr
         return expr

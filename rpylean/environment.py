@@ -235,6 +235,12 @@ class Tracer(object):
         initial expression and the final form returned as the WHNF.
         """
 
+    def whnf_cache_hit(self):
+        """Called when a `W_App.whnf` call returns its inline cache hit."""
+
+    def whnf_cache_miss(self):
+        """Called when a `W_App.whnf` call has to compute a fresh result."""
+
     def iota(self, recursor_name):
         """Called when a recursor's iota rule fires on a constructor.
 
@@ -267,6 +273,7 @@ class StreamTracer(Tracer):
     _attrs_ = [
         '_pending_newline',
         'def_eq_count', 'whnf_step_count', 'beta_count',
+        'whnf_cache_hit_count', 'whnf_cache_miss_count',
         'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
     ]
 
@@ -277,6 +284,8 @@ class StreamTracer(Tracer):
         self.def_eq_count = 0
         self.whnf_step_count = 0
         self.beta_count = 0
+        self.whnf_cache_hit_count = 0
+        self.whnf_cache_miss_count = 0
         self.iota_by_name = name_dict()
         self.delta_by_name = name_dict()
         self.nat_reduce_by_name = name_dict()
@@ -326,6 +335,12 @@ class StreamTracer(Tracer):
         self._writer.write(expr.tokens(declarations))
         self._writer.write_plain("\n")
 
+    def whnf_cache_hit(self):
+        self.whnf_cache_hit_count += 1
+
+    def whnf_cache_miss(self):
+        self.whnf_cache_miss_count += 1
+
     def iota(self, recursor_name):
         self.iota_by_name[recursor_name] = (
             self.iota_by_name.get(recursor_name, 0) + 1
@@ -352,6 +367,10 @@ class StreamTracer(Tracer):
         writer.write_plain("\n--- tracer stats ---\n")
         writer.write_plain("def_eq calls:   %d\n" % self.def_eq_count)
         writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
+        writer.write_plain("whnf calls (cache hit): %d\n"
+                           % self.whnf_cache_hit_count)
+        writer.write_plain("whnf calls (cache miss): %d\n"
+                           % self.whnf_cache_miss_count)
         writer.write_plain("beta reductions: %d\n" % self.beta_count)
         _write_by_name(writer, "iota fires", self.iota_by_name)
         _write_by_name(writer, "delta unfolds", self.delta_by_name)
