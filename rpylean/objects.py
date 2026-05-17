@@ -2152,6 +2152,7 @@ class W_Const(W_Expr):
         if val is None:
             return None
 
+        env.tracer.delta(name)
         return apply_const_level_params(self, val, env)
 
     def infer(self, env):
@@ -2355,6 +2356,13 @@ def _try_reduce_nat(expr, env):
     if nargs != 2:
         return None
 
+    result = _dispatch_nat_op(name, args, env)
+    if result is not None:
+        env.tracer.nat_reduce(name)
+    return result
+
+
+def _dispatch_nat_op(name, args, env):
     # For binary ops, args[1] is the first argument, args[0] is the second
     # (because we collected them innermost-first).
 
@@ -3559,9 +3567,11 @@ class W_App(W_Expr):
             inner = fn.body
             if isinstance(inner, W_Lambda):
                 new_env = [self.arg] + list(fn.env)
+                env.tracer.beta()
                 return inner.body.closure(new_env)
             fn = fn.force()
         if isinstance(fn, W_FunBase):
+            env.tracer.beta()
             return fn.body.instantiate(self.arg)
         return None
 
@@ -3733,6 +3743,7 @@ class W_App(W_Expr):
                 new_app = new_app.app(args[i])
                 i -= 1
 
+            env.tracer.iota(target.name)
             return True, new_app
 
         return False, self
@@ -3846,9 +3857,11 @@ class W_App(W_Expr):
             inner = fn.body
             if isinstance(inner, W_Lambda):
                 new_env = [self.arg] + list(fn.env)
+                env.tracer.beta()
                 return inner.body.closure(new_env)
             fn = fn.force()
         if isinstance(fn, W_FunBase):
+            env.tracer.beta()
             return fn.body.instantiate(self.arg)
 
         # Handle recursor in head position

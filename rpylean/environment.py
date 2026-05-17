@@ -208,6 +208,11 @@ def from_str(text):
 class Tracer(object):
     """
     No-op tracer.
+
+    Override any hook to observe the reduction loop. The bodies here
+    are intentionally empty so RPython inlines them away on the default
+    path; hot call sites in `objects.py` invoke these unconditionally
+    on `env.tracer` rather than gating on the tracer's identity.
     """
 
     _attrs_ = ['_writer', '_depth']
@@ -230,18 +235,51 @@ class Tracer(object):
         initial expression and the final form returned as the WHNF.
         """
 
+    def iota(self, recursor_name):
+        """Called when a recursor's iota rule fires on a constructor.
+
+        ``recursor_name`` is the recursor's ``Name`` (e.g. `Nat.rec`).
+        """
+
+    def beta(self):
+        """Called when a beta-redex `(fun ... ↦ ...) arg` is reduced."""
+
+    def delta(self, const_name):
+        """Called when a constant `c` is delta-unfolded to its definition."""
+
+    def nat_reduce(self, op_name):
+        """Called when the native nat reducer fires on a binary op.
+
+        ``op_name`` is the kernel-op ``Name`` (e.g. `Nat.add`).
+        """
+
 
 class StreamTracer(Tracer):
     """
-    Tracer that writes indented def_eq comparisons to a stream.
+    Tracer that counts everything and (when ``writer`` is non-None) writes
+    indented def_eq comparisons to that stream.
+
+    Pass ``writer=None`` to suppress stream output and just collect stats.
+    The counters are always live so callers can read them out via
+    `print_summary` at the end of a run.
     """
 
-    _attrs_ = ['_pending_newline']
+    _attrs_ = [
+        '_pending_newline',
+        'def_eq_count', 'whnf_step_count', 'beta_count',
+        'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
+    ]
 
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
         self._pending_newline = False
+        self.def_eq_count = 0
+        self.whnf_step_count = 0
+        self.beta_count = 0
+        self.iota_by_name = name_dict()
+        self.delta_by_name = name_dict()
+        self.nat_reduce_by_name = name_dict()
 
     def _flush_pending(self):
         if self._pending_newline:
@@ -249,6 +287,9 @@ class StreamTracer(Tracer):
             self._pending_newline = False
 
     def enter(self, expr1, expr2, declarations):
+        self.def_eq_count += 1
+        if self._writer is None:
+            return
         self._flush_pending()
         indent = "  " * self._depth
         self._writer.write_plain(indent)
@@ -261,6 +302,8 @@ class StreamTracer(Tracer):
         self._depth += 1
 
     def result(self, value):
+        if self._writer is None:
+            return value
         self._depth -= 1
         mark = " ✓" if value else " ✗"
         if self._pending_newline:
@@ -272,6 +315,9 @@ class StreamTracer(Tracer):
         return value
 
     def whnf_step(self, expr, declarations):
+        self.whnf_step_count += 1
+        if self._writer is None:
+            return
         self._flush_pending()
         indent = "  " * self._depth
         self._writer.write_plain(indent)
@@ -279,6 +325,52 @@ class StreamTracer(Tracer):
         self._writer.write_plain(" ")
         self._writer.write(expr.tokens(declarations))
         self._writer.write_plain("\n")
+
+    def iota(self, recursor_name):
+        self.iota_by_name[recursor_name] = (
+            self.iota_by_name.get(recursor_name, 0) + 1
+        )
+
+    def beta(self):
+        self.beta_count += 1
+
+    def delta(self, const_name):
+        self.delta_by_name[const_name] = (
+            self.delta_by_name.get(const_name, 0) + 1
+        )
+
+    def nat_reduce(self, op_name):
+        self.nat_reduce_by_name[op_name] = (
+            self.nat_reduce_by_name.get(op_name, 0) + 1
+        )
+
+    def print_summary(self, writer):
+        """Write a human-readable summary of collected counts to ``writer``.
+
+        ``writer`` is a `TokenWriter` (uses `write_plain`).
+        """
+        writer.write_plain("\n--- tracer stats ---\n")
+        writer.write_plain("def_eq calls:   %d\n" % self.def_eq_count)
+        writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
+        writer.write_plain("beta reductions: %d\n" % self.beta_count)
+        _write_by_name(writer, "iota fires", self.iota_by_name)
+        _write_by_name(writer, "delta unfolds", self.delta_by_name)
+        _write_by_name(writer, "native nat reductions", self.nat_reduce_by_name)
+
+
+def _write_by_name(writer, label, counts):
+    # Dump unsorted (matching `--slower-than`'s output style) so callers
+    # can pipe through `sort -k1 -rn` if they want a ranked summary —
+    # avoids needing an RPython-friendly sort key here.
+    if not counts:
+        writer.write_plain("%s: 0\n" % label)
+        return
+    total = 0
+    for name, count in counts.iteritems():
+        total += count
+    writer.write_plain("%s: %d total\n" % (label, total))
+    for name, count in counts.iteritems():
+        writer.write_plain("  %d\t%s\n" % (count, name.str()))
 
 
 class _DefEqCacheEntry(object):

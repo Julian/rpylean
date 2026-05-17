@@ -87,6 +87,13 @@ COLOR = (
             "",
             "yes",  # we can't use StreamTracer here, thanks static typing
         ),
+        (
+            "stats",
+            "collect reduction counts (def_eq, whnf, iota, beta, delta, "
+            "native nat) and print a summary after the check",
+            "",
+            "yes",
+        ),
     ],
 )
 def check(self, args, stdin, stdout, stderr):
@@ -117,6 +124,7 @@ def check(self, args, stdin, stdout, stderr):
         )
 
     trace = args.options["trace"]
+    stats = args.options["stats"]
 
     for path in args.varargs:
         start = time()
@@ -144,6 +152,7 @@ def check(self, args, stdin, stdout, stderr):
             max_heartbeat,
             trace,
             break_at,
+            stats,
         )
         failures += new_failures
         elapsed = time() - start
@@ -243,6 +252,7 @@ def _check_one_file(
     max_heartbeat,
     trace,
     break_at,
+    stats,
 ):
     """
     Stream-check a single export file, returning the number of new failures.
@@ -263,10 +273,17 @@ def _check_one_file(
         abort_at=abort_at,
         break_at=break_at,
     )
+    # When either --trace or --stats is set, install a `StreamTracer`.
+    # The writer is None for --stats-only (no stream output, just count);
+    # --trace points the writer at stderr. A single class covers both
+    # because counting is cheap and harmless to keep on whenever the
+    # stream tracer is active.
+    tracer = None
+    if trace or stats:
+        tracer = StreamTracer(stderrw if trace else None)
+        builder.env.tracer = tracer
     try:
         try:
-            if trace:
-                builder.env.tracer = StreamTracer(stderrw)
             if max_heartbeat > 0:
                 builder.env.max_heartbeat = max_heartbeat
             if slow_secs >= 0.0 or slow_hb >= 0:
@@ -285,6 +302,8 @@ def _check_one_file(
     finally:
         if path != "-":
             file.close()
+        if stats and tracer is not None:
+            tracer.print_summary(stderrw)
     return checker.failures
 
 
