@@ -2827,13 +2827,7 @@ def _reduce_bin_nat_op_gcd(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    # Euclidean algorithm
-    a = v1
-    b = v2
-    zero = rbigint.fromint(0)
-    while b.gt(zero):
-        a, b = b, a.mod(b)
-    return _mk_w_litnat(a)
+    return _mk_w_litnat(v1.gcd(v2))
 
 
 def _reduce_bin_nat_op_mod(args, env):
