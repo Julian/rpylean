@@ -2537,15 +2537,18 @@ def _reduce_bin_nat_op_shiftright(args, env):
 
 
 class W_Proj(W_Expr):
-    _attrs_ = ['struct_name', 'field_index', 'struct_expr']
-    # struct_expr is mutated in `_whnf_core` to cache reduction;
-    # the rest of the slot is set-once at construction time.
-    _immutable_fields_ = ['struct_name', 'field_index']
+    _attrs_ = ['struct_name', 'field_index', 'struct_expr', '_struct_whnf']
+    _immutable_fields_ = ['struct_name', 'field_index', 'struct_expr']
 
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
         self.field_index = field_index
         self.struct_expr = struct_expr
+        # Cache slot for the WHNF of `struct_expr` (avoids re-driving
+        # the same reduction when projecting more than once into the
+        # same struct). Kept in its own mutable slot so `struct_expr`
+        # stays set-once — required for hash-consing `W_Proj` instances.
+        self._struct_whnf = None
         self.loose_bvar_range = struct_expr.loose_bvar_range
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ struct_expr.hash()
@@ -2615,13 +2618,18 @@ class W_Proj(W_Expr):
         return result
 
     def _whnf_core(self, env):
-        reduced_struct = self.struct_expr.whnf(env)
-
-        # String literals carry their constructor form implicitly. To
-        # project a field out of one, materialize the constructor app
-        # and whnf again so the field-extract below sees the spine.
-        if isinstance(reduced_struct, W_LitStr):
-            reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
+        cached = self._struct_whnf
+        if cached is not None:
+            reduced_struct = cached
+        else:
+            reduced_struct = self.struct_expr.whnf(env)
+            # String literals carry their constructor form implicitly.
+            # To project a field out of one, materialize the constructor
+            # app and whnf again so the field-extract below sees the
+            # spine.
+            if isinstance(reduced_struct, W_LitStr):
+                reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
+            self._struct_whnf = reduced_struct
 
         # Try to perform projection reduction (structural iota reduction).
         # If the struct expression reduces to a constructor application,
@@ -2639,15 +2647,6 @@ class W_Proj(W_Expr):
                 if idx < len(ctor_args):
                     return ctor_args[idx]
 
-        # Projection is stuck but we may have reduced the struct expr.
-        if reduced_struct is not self.struct_expr:
-            # Replace self with a projection over the reduced struct
-            # so that we don't redo the struct reduction if whnf is
-            # called again (e.g. from def_eq).  Returning None here
-            # tells the loop we are done (self.with_expr returns a
-            # new W_Proj which has _whnf_core returning None because
-            # the struct_expr is already in WHNF).
-            self.struct_expr = reduced_struct
         return None
 
     def incr_free_bvars(self, count, depth):

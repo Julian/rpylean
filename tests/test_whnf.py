@@ -272,17 +272,19 @@ class TestLet(object):
 
 
 class TestProj(object):
-    def test_reduces_struct(self):
+    def test_stuck_proj_returns_self(self):
+        # Projection on a struct that doesn't reduce to a constructor is
+        # already in WHNF — the head is `Proj` over a non-ctor head. The
+        # struct's reduction is cached internally so subsequent whnf calls
+        # don't redo the work, but the W_Proj instance itself is unchanged
+        # (struct_expr is immutable; required for `W_Proj` hash-consing).
         a_decl = a.axiom(type=NAT)
         f_decl = f.definition(type=NAT, value=a_decl.const())
         env = Environment.having([a_decl, f_decl])
 
-        # Create a projection where the struct expr can reduce
-        # proj.0 (f) where f := a
         proj = S.proj(field_index=0, struct_expr=f_decl.const())
 
-        expected = S.proj(field_index=0, struct_expr=a_decl.const())
-        assert syntactic_eq(proj.whnf(env), expected)
+        assert proj.whnf(env) is proj
 
     def test_extracts_field_from_constructor(self):
         """
