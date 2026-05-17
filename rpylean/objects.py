@@ -542,6 +542,7 @@ class Name(_Item):
     """
 
     _attrs_ = ['_level_cache', 'parent', '_hash', 'is_internal', 'is_private']
+    _immutable_fields_ = ['parent', '_hash', 'is_internal', 'is_private']
 
     def __init__(self):
         # Lazy cache for `as_level_param()`; populated on first call.
@@ -960,6 +961,7 @@ class StrName(Name):
     """Lean's ``Name.str p s``: a string-suffixed name nested in ``p``."""
 
     _attrs_ = ['suffix']
+    _immutable_fields_ = ['suffix']
 
     def __init__(self, parent, suffix):
         Name.__init__(self)
@@ -999,6 +1001,7 @@ class NumName(Name):
     """
 
     _attrs_ = ['idx']
+    _immutable_fields_ = ['idx']
 
     def __init__(self, parent, idx):
         Name.__init__(self)
@@ -1042,6 +1045,7 @@ class Binder(_Item):
     """
 
     _attrs_ = ['name', 'type', 'left', 'right', '_fvar']
+    _immutable_fields_ = ['name', 'type', 'left', 'right']
 
     @staticmethod
     def default(name, type):
@@ -1186,6 +1190,7 @@ def leq(fn):
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
     _attrs_ = ['_hash']
+    _immutable_fields_ = ['_hash']
 
     @elidable
     def hash(self):
@@ -1320,6 +1325,7 @@ W_LEVEL_ZERO = W_LevelZero()
 
 class W_LevelSucc(W_Level):
     _attrs_ = ['parent']
+    _immutable_fields_ = ['parent']
 
     def __init__(self, parent):
         self.parent = parent
@@ -1368,6 +1374,7 @@ class W_LevelSucc(W_Level):
 
 class W_LevelMax(W_Level):
     _attrs_ = ['lhs', 'rhs']
+    _immutable_fields_ = ['lhs', 'rhs']
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -1425,6 +1432,7 @@ class W_LevelMax(W_Level):
 
 class W_LevelIMax(W_Level):
     _attrs_ = ['lhs', 'rhs']
+    _immutable_fields_ = ['lhs', 'rhs']
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -1468,6 +1476,7 @@ class W_LevelIMax(W_Level):
 
 class W_LevelParam(W_Level):
     _attrs_ = ['name']
+    _immutable_fields_ = ['name']
 
     def __init__(self, name):
         self.name = name
@@ -1543,6 +1552,7 @@ class W_LevelParam(W_Level):
 
 class W_Expr(_Item):
     _attrs_ = ['_hash', 'loose_bvar_range']
+    _immutable_fields_ = ['_hash', 'loose_bvar_range']
 
     @elidable
     def hash(self):
@@ -1726,6 +1736,7 @@ class W_Expr(_Item):
 
 class W_BVar(W_Expr):
     _attrs_ = ['id']
+    _immutable_fields_ = ['id']
 
     def __init__(self, id):
         self.id = id
@@ -1789,6 +1800,7 @@ class W_FVar(W_Expr):
     """An FVar which refers to its binder by identity."""
 
     _attrs_ = ['id', 'binder']
+    _immutable_fields_ = ['id', 'binder']
 
     _counter = count()
 
@@ -1837,6 +1849,7 @@ class W_FVar(W_Expr):
 
 class W_LitStr(W_Expr):
     _attrs_ = ['val']
+    _immutable_fields_ = ['val']
 
     def __init__(self, val):
         assert isinstance(val, str)
@@ -1916,6 +1929,7 @@ class W_LitStr(W_Expr):
 
 class W_Sort(W_Expr):
     _attrs_ = ['level']
+    _immutable_fields_ = ['level']
 
     def __init__(self, level):
         self.level = level
@@ -2011,6 +2025,7 @@ def apply_const_level_params(const, target, env):
 
 class W_Const(W_Expr):
     _attrs_ = ['name', 'levels', '_infer_cache_result']
+    _immutable_fields_ = ['name', 'levels']
 
     def __init__(self, name, levels):
         self.name = name
@@ -2212,6 +2227,7 @@ def _to_nat_val(expr, env):
 
 class W_LitNat(W_Expr):
     _attrs_ = ['val']
+    _immutable_fields_ = ['val']
 
     def __init__(self, val):
         self.val = val
@@ -2495,6 +2511,9 @@ def _reduce_bin_nat_op_shiftright(args, env):
 
 class W_Proj(W_Expr):
     _attrs_ = ['struct_name', 'field_index', 'struct_expr']
+    # struct_expr is mutated in `_whnf_core` to cache reduction;
+    # the rest of the slot is set-once at construction time.
+    _immutable_fields_ = ['struct_name', 'field_index']
 
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
@@ -2807,6 +2826,7 @@ class W_FunBase(W_Expr):
         '_infer_cache_result',
         '_closure_cache_env', '_closure_cache_result',
     ]
+    _immutable_fields_ = ['binder', 'body']
 
     # Subclasses set this to a distinct tag so structurally-equal
     # lambdas and foralls don't collide in the content hash.
@@ -3151,6 +3171,7 @@ class W_Lambda(W_FunBase):
 
 class W_Let(W_Expr):
     _attrs_ = ['name', 'type', 'value', 'body']
+    _immutable_fields_ = ['name', 'type', 'value', 'body']
 
     def __init__(self, name, type, value, body):
         self.name = name
@@ -3292,6 +3313,7 @@ class W_App(W_Expr):
         '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
         '_infer_cache_result', '_whnf_cache_result',
     ]
+    _immutable_fields_ = ['fn', 'arg']
 
     def __init__(self, fn, arg):
         self.fn = fn
@@ -3961,6 +3983,7 @@ class W_Closure(W_Expr):
     """
 
     _attrs_ = ['env', 'body', '_whnf_cache_result', '_infer_cache_result']
+    _immutable_fields_ = ['env', 'body']
 
     def __init__(self, env, body):
         self.env = env
@@ -4057,6 +4080,7 @@ class W_Closure(W_Expr):
 
 class W_RecRule(_Item):
     _attrs_ = ['ctor_name', 'num_fields', 'rhs']
+    _immutable_fields_ = ['ctor_name', 'num_fields', 'rhs']
 
     def __init__(self, ctor_name, num_fields, rhs):
         self.ctor_name = ctor_name
@@ -4066,6 +4090,7 @@ class W_RecRule(_Item):
 
 class W_Declaration(_Item):
     _attrs_ = ['name', 'type', 'w_kind', 'levels', 'is_unsafe']
+    _immutable_fields_ = ['name', 'type', 'w_kind', 'levels', 'is_unsafe']
 
     def __init__(self, name, type, w_kind, levels, is_unsafe=False):
         self.name = name
@@ -4171,6 +4196,7 @@ HINT_ABBREV = -1
 
 class W_Definition(W_DeclarationKind):
     _attrs_ = ['value', 'hint']
+    _immutable_fields_ = ['value', 'hint']
 
     def __init__(self, value, hint):
         self.value = value
@@ -4234,6 +4260,7 @@ class W_Opaque(W_Definition):
 
 class W_Theorem(W_DeclarationKind):
     _attrs_ = ['value']
+    _immutable_fields_ = ['value']
 
     def __init__(self, value):
         self.value = value
@@ -4288,6 +4315,7 @@ class W_Quotient(W_DeclarationKind):
     """
 
     _attrs_ = ['kind']
+    _immutable_fields_ = ['kind']
 
     KIND_TYPE = 0  # `Quot`
     KIND_CTOR = 1  # `Quot.mk`
@@ -4344,6 +4372,13 @@ class W_Quotient(W_DeclarationKind):
 class W_Inductive(W_DeclarationKind):
     _attrs_ = [
         'all', 'constructors', 'recursors',
+        'num_nested', 'num_params', 'num_indices',
+        'is_reflexive', 'is_recursive', 'ctor_names',
+    ]
+    # `constructors` is appended to by the parser when registering
+    # mutual-inductive blocks; everything else is set-once at construction.
+    _immutable_fields_ = [
+        'all', 'recursors',
         'num_nested', 'num_params', 'num_indices',
         'is_reflexive', 'is_recursive', 'ctor_names',
     ]
@@ -4594,6 +4629,7 @@ class W_Inductive(W_DeclarationKind):
 
 class W_Constructor(W_DeclarationKind):
     _attrs_ = ['num_params', 'num_fields', 'cidx']
+    _immutable_fields_ = ['num_params', 'num_fields', 'cidx']
 
     def __init__(self, num_params, num_fields, cidx=0):
         self.num_params = num_params
@@ -4650,6 +4686,10 @@ class W_Recursor(W_DeclarationKind):
     _attrs_ = [
         'k', 'num_params', 'num_indices', 'num_motives', 'num_minors',
         '_rules_by_ctor', 'all', 'rules',
+    ]
+    _immutable_fields_ = [
+        'k', 'num_params', 'num_indices', 'num_motives', 'num_minors',
+        'all', 'rules',
     ]
 
     def __init__(
