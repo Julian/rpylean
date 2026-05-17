@@ -10,7 +10,7 @@ import errno
 from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
-from rpylean import parser
+from rpylean import _progress, parser
 from rpylean._rcli import CLI, UsageError
 from rpylean._tokens import PLAIN, writer_from_arg
 from rpylean.exceptions import ExportError
@@ -100,6 +100,11 @@ def check(self, args, stdin, stdout, stderr):
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
 
+    # Wire `kill -INFO <pid>` (macOS) / `kill -USR1 <pid>` (Linux) to
+    # print a one-line progress dump from `_StreamingChecker`. Cheap
+    # — one flag-test per declaration, zero work on the no-signal path.
+    _progress.install()
+
     failures = 0
 
     max_fail = int(args.options["max-fail"] or "0")
@@ -170,6 +175,7 @@ class _StreamingChecker(DeclarationHook):
         'slow_secs', 'slow_hb',
         'filter_match', 'filter_names',
         'abort_at', 'failures', 'break_at',
+        'n_seen', 'n_checked',
     ]
 
     def __init__(
@@ -196,12 +202,33 @@ class _StreamingChecker(DeclarationHook):
         self.abort_at = abort_at
         self.failures = 0
         self.break_at = break_at
+        self.n_seen = 0
+        self.n_checked = 0
 
     def on_declaration(self, decl):
+        self.n_seen += 1
+        # Drain any pending SIGINFO/SIGUSR1 — see `rpylean/_progress.py`.
+        # This is the only safe point in a streaming check: a signal
+        # arriving mid-decl waits for the next boundary, at which the
+        # `decl.name.str()` we print *is* what we were stuck on (the
+        # decl that just blocked the loop on the prior iteration).
+        if _progress.poll():
+            self.stderrw.write_plain(
+                "[progress] seen=%d checked=%d failures=%d cur=%s\n" % (
+                    self.n_seen, self.n_checked, self.failures,
+                    decl.name.str(),
+                ),
+            )
+            # No-op on the default `Tracer`; `StreamTracer` (active
+            # under `--stats`) dumps a running iota/beta/delta/whnf
+            # snapshot up to *this point* rather than waiting for the
+            # final summary (which never arrives if the run is stuck).
+            self.env.tracer.print_summary(self.stderrw)
         if self.filter_match is not None and self.filter_match not in decl.name.str():
             return False
         if self.filter_names is not None and decl.name not in self.filter_names:
             return False
+        self.n_checked += 1
         if self.break_at is not None and self.break_at in decl.name.str():
             self._break_for(decl)
         result = self.env.type_check_one(decl, pp=self.pp)
@@ -425,6 +452,8 @@ def check(self, args, stdin, stdout, stderr):
 
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
+
+    _progress.install()
 
     filter_match = args.options["filter-match"]
     filter_names = None

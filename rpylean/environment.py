@@ -260,6 +260,13 @@ class Tracer(object):
         ``op_name`` is the kernel-op ``Name`` (e.g. `Nat.add`).
         """
 
+    def print_summary(self, writer):
+        """Called by the progress signal handler (and end-of-run with
+        ``--stats``) to dump whatever rolling counters the tracer holds.
+        No-op by default; `StreamTracer` overrides to dump iota / beta /
+        delta / whnf-cache counts.
+        """
+
 
 class StreamTracer(Tracer):
     """
