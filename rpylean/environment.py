@@ -47,6 +47,7 @@ from rpylean.objects import (
     W_LitStr,
     W_Sort,
     _InferCacheEntry,
+    _mk_w_bvar,
     fun,
     get_decl,
     name_dict,
@@ -487,26 +488,26 @@ class Environment(object):
         cls = expr.__class__
         if cls is W_App:
             assert isinstance(expr, W_App)
-            cached = expr._infer_cache_result
-            if cached is not None:
-                return cached
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
             result = expr.infer(self)
+            expr._infer_cache_env = self
             expr._infer_cache_result = result
             return result
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(expr, W_FunBase)
-            cached = expr._infer_cache_result
-            if cached is not None:
-                return cached
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
             result = expr.infer(self)
+            expr._infer_cache_env = self
             expr._infer_cache_result = result
             return result
         if cls is W_Const:
             assert isinstance(expr, W_Const)
-            cached = expr._infer_cache_result
-            if cached is not None:
-                return cached
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
             result = expr.infer(self)
+            expr._infer_cache_env = self
             expr._infer_cache_result = result
             return result
 
@@ -1018,7 +1019,7 @@ class Environment(object):
             if isinstance(expr2_ty, W_ForAll):
                 # Turn 'f' into 'fun x => f x'
                 return fun(expr2_ty.binder)(
-                    expr2.incr_free_bvars(1, 0).app(W_BVar(0)),
+                    expr2.incr_free_bvars(1, 0).app(_mk_w_bvar(0)),
                 )
         return None
 

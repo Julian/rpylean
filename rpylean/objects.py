@@ -106,10 +106,13 @@ def _append_marked_tokens(result, span_holder, expr, constants, mark):
     """
     Append tokens for ``expr`` to ``result``, tracking ``mark``.
 
-    If ``mark`` is ``expr`` (by identity), record the token index range
-    into ``span_holder[0]`` as a ``(start, end)`` tuple.
-    Otherwise, pass ``mark`` through to ``expr.tokens()`` so that
-    subexpressions can be matched.
+    If ``mark`` is ``expr`` (by identity) *and* no span has been recorded
+    yet, record the token index range into ``span_holder[0]`` as a
+    ``(start, end)`` tuple. (Hash-consing means the same interned
+    sub-expression can appear at many syntactic positions; we report
+    the first occurrence in source order so the caret lands where a
+    reader would look for it.) Otherwise, pass ``mark`` through to
+    ``expr.tokens()`` so that subexpressions can be matched.
 
     ``expr`` is any object with a ``tokens(constants, mark, span_holder)``
     method -- typically a ``W_Expr`` or ``Binder``.
@@ -117,7 +120,8 @@ def _append_marked_tokens(result, span_holder, expr, constants, mark):
     if mark is not None and mark is expr:
         start = len(result)
         result += expr.tokens(constants)
-        span_holder[0] = (start, len(result))
+        if span_holder is not None and span_holder[0] == NO_SPAN:
+            span_holder[0] = (start, len(result))
         return
     if mark is not None and span_holder is not None and span_holder[0] == NO_SPAN:
         inner = [NO_SPAN]
@@ -540,6 +544,365 @@ def name_dict():
     return r_dict(_eq, _hash)
 
 
+# ---- Hash-consing intern tables -----------------------------------------
+#
+# One global ``dict[int, list[T]]`` per interned kind, keyed by a
+# scalar hash computed directly from the already-stored ``_hash``
+# fields of the interned components (or, for primitive-keyed types,
+# the primitive). Collision buckets are short Python lists scanned
+# with ``is``-comparisons.
+#
+# Why this shape:
+#   * native ``dict[int, ...]`` ops are inlined by the JIT — unlike
+#     ``r_dict`` (which dispatches its eq/hash through function
+#     pointers and stays opaque to the tracer);
+#   * no allocation on hit — the lookup never builds a probe instance,
+#     it just hashes two ints and walks a bucket;
+#   * no per-instance carrier overhead — one shared structure rather
+#     than thousands of tiny dicts attached to each ``fn``/``binder``;
+#   * the per-construction work the JIT sees is just two field loads,
+#     one ``dict.get``, and a few ``is``-checks — every step
+#     constant-foldable when the components are promoted.
+#
+# Two primitive-keyed exceptions: ``W_BVar`` (small ``int`` index ─
+# preallocated array fast path) and ``W_LitStr`` (``str`` value ─
+# native ``dict[str, ...]``). ``W_LitNat`` mixes both: a preallocated
+# array for the small-nat fast path, plus a string-keyed dict for big
+# nats.
+
+# Bucket scan helpers. Each takes the existing instance's stored
+# components and compares them to the proposed ones via identity.
+# Kept tiny so the JIT inlines them.
+
+_HASH_MASK = 0x7FFFFFFF
+
+
+def _mix2(a, b):
+    return ((a * 1000003) ^ b) & _HASH_MASK
+
+
+def _mix3(a, b, c):
+    h = (a * 1000003) ^ b
+    return ((h * 1000003) ^ c) & _HASH_MASK
+
+
+def _mix4(a, b, c, d):
+    h = (a * 1000003) ^ b
+    h = (h * 1000003) ^ c
+    return ((h * 1000003) ^ d) & _HASH_MASK
+
+
+# ---- Primitive-keyed tables ---------------------------------------------
+
+_W_BVAR_PREALLOC = 1024
+_W_BVAR_ARRAY = [None] * _W_BVAR_PREALLOC  # type: list  # filled lazily
+_W_BVAR_BIG = {}  # int -> W_BVar (idx >= _W_BVAR_PREALLOC)
+
+
+def _mk_w_bvar(idx):
+    if 0 <= idx < _W_BVAR_PREALLOC:
+        existing = _W_BVAR_ARRAY[idx]
+        if existing is not None:
+            return existing
+        e = W_BVar(idx)
+        _W_BVAR_ARRAY[idx] = e
+        return e
+    existing = _W_BVAR_BIG.get(idx, None)
+    if existing is not None:
+        return existing
+    e = W_BVar(idx)
+    _W_BVAR_BIG[idx] = e
+    return e
+
+
+_W_LITSTR_TABLE = {}  # str -> W_LitStr
+
+
+def _mk_w_litstr(val):
+    existing = _W_LITSTR_TABLE.get(val, None)
+    if existing is not None:
+        return existing
+    e = W_LitStr(val)
+    _W_LITSTR_TABLE[val] = e
+    return e
+
+
+_W_LITNAT_PREALLOC = 1024
+_W_LITNAT_ARRAY = [None] * _W_LITNAT_PREALLOC  # filled lazily
+_W_LITNAT_BIG = {}  # str(val) -> W_LitNat (big nats only)
+
+
+def _mk_w_litnat(val):
+    # Small fast path: nats that fit in a native int are pre-arrayed.
+    if val.int_le(_W_LITNAT_PREALLOC - 1):
+        i = val.toint()
+        if i >= 0:
+            existing = _W_LITNAT_ARRAY[i]
+            if existing is not None:
+                return existing
+            e = W_LitNat(val)
+            _W_LITNAT_ARRAY[i] = e
+            return e
+    key = val.str()
+    existing = _W_LITNAT_BIG.get(key, None)
+    if existing is not None:
+        return existing
+    e = W_LitNat(val)
+    _W_LITNAT_BIG[key] = e
+    return e
+
+
+# ---- Globally-interned content-keyed tables -----------------------------
+
+_INTERN_STR_NAME = {}      # int -> list[StrName]
+_INTERN_NUM_NAME = {}      # int -> list[NumName]
+_INTERN_W_CONST = {}       # int -> list[W_Const]
+_INTERN_W_PROJ = {}        # int -> list[W_Proj]
+_INTERN_W_LET = {}         # int -> list[W_Let]
+_INTERN_W_SORT = {}        # int -> list[W_Sort]
+_INTERN_LEVEL_SUCC = {}    # int -> list[W_LevelSucc]
+_INTERN_LEVEL_MAX = {}     # int -> list[W_LevelMax]
+_INTERN_LEVEL_IMAX = {}    # int -> list[W_LevelIMax]
+_INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
+# NOT hash-consed (see comments by their `_mk_*` factories):
+#   * W_App / W_Lambda / W_ForAll — dominant per-reduction-step churn,
+#     redundancy is already captured by per-instance `_*_cache_*` slots,
+#     interning blows up the permanent live heap.
+#   * Binder — `_fvar` is *per-binding-position* mutable state that
+#     interning would silently share across distinct positions.
+
+
+def _mk_str_name(parent, suffix):
+    assert isinstance(parent, Name)
+    h = _mix2(parent._hash, compute_hash(suffix))
+    bucket = _INTERN_STR_NAME.get(h, None)
+    if bucket is None:
+        e = StrName(parent, suffix)
+        _INTERN_STR_NAME[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.parent is parent and existing.suffix == suffix:
+            return existing
+    e = StrName(parent, suffix)
+    bucket.append(e)
+    return e
+
+
+def _mk_num_name(parent, idx):
+    assert isinstance(parent, Name)
+    # `idx.hash()` here is rbigint's content hash — cheap, no string alloc.
+    h = _mix2(parent._hash, idx.hash())
+    bucket = _INTERN_NUM_NAME.get(h, None)
+    if bucket is None:
+        e = NumName(parent, idx)
+        _INTERN_NUM_NAME[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.parent is parent and existing.idx.eq(idx):
+            return existing
+    e = NumName(parent, idx)
+    bucket.append(e)
+    return e
+
+
+def _mk_level_succ(parent):
+    assert isinstance(parent, W_Level)
+    h = (parent._hash * 1000003) & _HASH_MASK
+    bucket = _INTERN_LEVEL_SUCC.get(h, None)
+    if bucket is None:
+        e = W_LevelSucc(parent)
+        _INTERN_LEVEL_SUCC[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.parent is parent:
+            return existing
+    e = W_LevelSucc(parent)
+    bucket.append(e)
+    return e
+
+
+def _mk_level_max(lhs, rhs):
+    assert isinstance(lhs, W_Level)
+    assert isinstance(rhs, W_Level)
+    h = _mix2(lhs._hash, rhs._hash)
+    bucket = _INTERN_LEVEL_MAX.get(h, None)
+    if bucket is None:
+        e = W_LevelMax(lhs, rhs)
+        _INTERN_LEVEL_MAX[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.lhs is lhs and existing.rhs is rhs:
+            return existing
+    e = W_LevelMax(lhs, rhs)
+    bucket.append(e)
+    return e
+
+
+def _mk_level_imax(lhs, rhs):
+    assert isinstance(lhs, W_Level)
+    assert isinstance(rhs, W_Level)
+    h = _mix2(lhs._hash, rhs._hash)
+    bucket = _INTERN_LEVEL_IMAX.get(h, None)
+    if bucket is None:
+        e = W_LevelIMax(lhs, rhs)
+        _INTERN_LEVEL_IMAX[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.lhs is lhs and existing.rhs is rhs:
+            return existing
+    e = W_LevelIMax(lhs, rhs)
+    bucket.append(e)
+    return e
+
+
+def _mk_level_param(name):
+    assert isinstance(name, Name)
+    h = (name._hash * 1000003) & _HASH_MASK
+    bucket = _INTERN_LEVEL_PARAM.get(h, None)
+    if bucket is None:
+        e = W_LevelParam(name)
+        _INTERN_LEVEL_PARAM[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.name is name:
+            return existing
+    e = W_LevelParam(name)
+    bucket.append(e)
+    return e
+
+
+def _mk_w_sort(level):
+    assert isinstance(level, W_Level)
+    h = (level._hash * 1000003) & _HASH_MASK
+    bucket = _INTERN_W_SORT.get(h, None)
+    if bucket is None:
+        e = W_Sort(level)
+        _INTERN_W_SORT[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.level is level:
+            return existing
+    e = W_Sort(level)
+    bucket.append(e)
+    return e
+
+
+def _mk_w_const(name, levels):
+    assert isinstance(name, Name)
+    h = name._hash
+    for lvl in levels:
+        assert isinstance(lvl, W_Level)
+        h = (h * 1000003) ^ lvl._hash
+    h = h & _HASH_MASK
+    bucket = _INTERN_W_CONST.get(h, None)
+    if bucket is None:
+        e = W_Const(name=name, levels=levels)
+        _INTERN_W_CONST[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.name is not name:
+            continue
+        if len(existing.levels) != len(levels):
+            continue
+        match = True
+        for i in range(len(levels)):
+            if existing.levels[i] is not levels[i]:
+                match = False
+                break
+        if match:
+            return existing
+    e = W_Const(name=name, levels=levels)
+    bucket.append(e)
+    return e
+
+
+# Binder style is fixed per `_mk_binder_*` factory, so we use one
+# table per style. The hash mixes name + type only; left/right are
+# implied by which table you're in.
+
+# Binders are NOT hash-consed. Each `Binder` instance carries a
+# mutable `_fvar` slot used by `binder.fvar()` to hand out a stable
+# `W_FVar` for that *binding occurrence*. Interning would collapse two
+# distinct binding positions that happen to share `(name, type)` into
+# one instance, so both positions would receive the *same* FVar — the
+# type-checker uses FVar identity to distinguish enclosing binders, so
+# this silently corrupts inferred types (e.g. `∀ p p, Eq p p` checks
+# even where the declared signature was `∀ p a, Eq p a`).
+
+def _mk_binder_default(name, type):
+    return Binder(name=name, type=type, left="(", right=")")
+
+
+def _mk_binder_implicit(name, type):
+    return Binder(name=name, type=type, left="{", right="}")
+
+
+def _mk_binder_instance(name, type):
+    return Binder(name=name, type=type, left="[", right="]")
+
+
+def _mk_binder_strict_implicit(name, type):
+    return Binder(name=name, type=type, left="\xe2\xa6\x83", right="\xe2\xa6\x84")
+
+
+# W_App / W_Lambda / W_ForAll are NOT hash-consed (see comment by
+# `_INTERN_BINDER_DEFAULT`); the factories below just allocate
+# directly. They exist as a single named entry-point per type so
+# that callers don't have to know which kinds are interned and which
+# aren't — and so we can revisit interning these types in isolation
+# without chasing callsites again.
+
+def _mk_app(fn, arg):
+    return W_App(fn, arg)
+
+
+def _mk_w_lambda(binder, body):
+    return W_Lambda(binder, body)
+
+
+def _mk_w_forall(binder, body):
+    return W_ForAll(binder, body)
+
+
+def _mk_w_proj(struct_name, field_index, struct_expr):
+    assert isinstance(struct_name, Name)
+    assert isinstance(struct_expr, W_Expr)
+    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
+    bucket = _INTERN_W_PROJ.get(h, None)
+    if bucket is None:
+        e = W_Proj(struct_name, field_index, struct_expr)
+        _INTERN_W_PROJ[h] = [e]
+        return e
+    for existing in bucket:
+        if (existing.struct_name is struct_name
+                and existing.field_index == field_index
+                and existing.struct_expr is struct_expr):
+            return existing
+    e = W_Proj(struct_name, field_index, struct_expr)
+    bucket.append(e)
+    return e
+
+
+def _mk_w_let(name, type, value, body):
+    assert isinstance(name, Name)
+    assert isinstance(type, W_Expr)
+    assert isinstance(value, W_Expr)
+    assert isinstance(body, W_Expr)
+    h = _mix4(name._hash, type._hash, value._hash, body._hash)
+    bucket = _INTERN_W_LET.get(h, None)
+    if bucket is None:
+        e = W_Let(name=name, type=type, value=value, body=body)
+        _INTERN_W_LET[h] = [e]
+        return e
+    for existing in bucket:
+        if (existing.name is name and existing.type is type
+                and existing.value is value and existing.body is body):
+            return existing
+    e = W_Let(name=name, type=type, value=value, body=body)
+    bucket.append(e)
+    return e
+
+
 class Name(_Item):
     """
     Lean's ``Name`` inductive type — a linked structure mirroring::
@@ -598,14 +961,14 @@ class Name(_Item):
 
     def child(self, suffix):
         """Construct a ``Name.str`` child of this name."""
-        return StrName(self, suffix)
+        return _mk_str_name(self, suffix)
 
     def num_child(self, idx):
         """
         Construct a ``Name.num`` child of this name. ``idx`` is the
         integer index (an ``rbigint`` since Lean's ``Nat`` is unbounded).
         """
-        return NumName(self, idx)
+        return _mk_num_name(self, idx)
 
     def __repr__(self):
         return "`%s" % (self.str(),)
@@ -761,7 +1124,7 @@ class Name(_Item):
         """
         Construct a constant expression for this name.
         """
-        return W_Const(name=self, levels=[] if levels is None else levels)
+        return _mk_w_const(self, [] if levels is None else levels)
 
     def declaration(self, type, w_kind, levels=None, is_unsafe=False):
         """
@@ -912,13 +1275,13 @@ class Name(_Item):
         """
         Construct a let expression with this name.
         """
-        return W_Let(name=self, type=type, value=value, body=body)
+        return _mk_w_let(self, type, value, body)
 
     def proj(self, field_index, struct_expr):
         """
         Construct a projection with this name.
         """
-        return W_Proj(self, field_index, struct_expr)
+        return _mk_w_proj(self, field_index, struct_expr)
 
     def as_level_param(self):
         """
@@ -934,7 +1297,7 @@ class Name(_Item):
         PBC and `W_Level` is then unanalysable).
         """
         if self._level_cache is None:
-            self._level_cache = W_LevelParam(self)
+            self._level_cache = _mk_level_param(self)
         return self._level_cache
 
     # Kept for backwards-compat with test fixtures that call `.level()`
@@ -1059,36 +1422,36 @@ class Binder(_Item):
     strictly for pretty printing.
     """
 
-    _attrs_ = ['name', 'type', 'left', 'right', '_fvar']
-    _immutable_fields_ = ['name', 'type', 'left', 'right']
+    _attrs_ = ['name', 'type', 'left', 'right', '_fvar', '_hash']
+    _immutable_fields_ = ['name', 'type', 'left', 'right', '_hash']
 
     @staticmethod
     def default(name, type):
         """
         A default style binder.
         """
-        return Binder(name=name, type=type, left="(", right=")")
+        return _mk_binder_default(name, type)
 
     @staticmethod
     def implicit(name, type):
         """
         An implicit style binder.
         """
-        return Binder(name=name, type=type, left="{", right="}")
+        return _mk_binder_implicit(name, type)
 
     @staticmethod
     def instance(name, type):
         """
         An intance-implicit style binder.
         """
-        return Binder(name=name, type=type, left="[", right="]")
+        return _mk_binder_instance(name, type)
 
     @staticmethod
     def strict_implicit(name, type):
         """
         A strict implicit style binder.
         """
-        return Binder(name=name, type=type, left="⦃", right="⦄")
+        return _mk_binder_strict_implicit(name, type)
 
     def __init__(self, name, type, left, right):
         self.name = name
@@ -1096,6 +1459,13 @@ class Binder(_Item):
         self.left = left
         self.right = right
         self._fvar = None
+        h = name.hash() ^ type.hash()
+        h = (h * 1000003) ^ compute_hash(left)
+        h = (h * 1000003) ^ compute_hash(right)
+        self._hash = h & 0xFFFFFFFF
+
+    def hash(self):
+        return self._hash
 
     def __repr__(self):
         return "<Binder %s>" % (self.name.str())
@@ -1185,12 +1555,13 @@ class Binder(_Item):
         """
         Create a new binder of the same name and kind but with a new type.
         """
-        return Binder(
-            name=self.name,
-            type=type,
-            left=self.left,
-            right=self.right,
-        )
+        if self.left == "(":
+            return _mk_binder_default(self.name, type)
+        if self.left == "{":
+            return _mk_binder_implicit(self.name, type)
+        if self.left == "[":
+            return _mk_binder_instance(self.name, type)
+        return _mk_binder_strict_implicit(self.name, type)
 
 
 def leq(fn):
@@ -1247,13 +1618,13 @@ class W_Level(_Item):
         """
         Return a Sort for this level.
         """
-        return W_Sort(self)
+        return _mk_w_sort(self)
 
     def succ(self):
         """
         Return the level which is successor to this one.
         """
-        return W_LevelSucc(self)
+        return _mk_level_succ(self)
 
     def imax_leq(self, imax, other, balance):
         """Check imax ≤ other when self is the imax's rhs."""
@@ -1280,7 +1651,7 @@ class W_Level(_Item):
         elif isinstance(other, W_LevelMax):
             if self.leq(other.lhs) or self.leq(other.rhs):
                 return other
-        return W_LevelMax(self, other)
+        return _mk_level_max(self, other)
 
     def imax(self, other):
         """
@@ -1299,7 +1670,7 @@ class W_Level(_Item):
             isinstance(other.lhs, W_LevelSucc) or isinstance(other.rhs, W_LevelSucc)
         ):
             return self.max(other)
-        return W_LevelIMax(self, other)
+        return _mk_level_imax(self, other)
 
 
 class W_LevelZero(W_Level):
@@ -1660,7 +2031,7 @@ class W_Expr(_Item):
         """
         Apply this (which better be a function) to the given argument(s).
         """
-        expr = W_App(self, arg)
+        expr = _mk_app(self, arg)
         if not more:
             return expr
         return expr.app(*more)
@@ -1787,12 +2158,12 @@ class W_BVar(W_Expr):
             # This variable is not bound here (e.g. 'fun x => BVar(1)')
             # Instantiation has removed the outermost binder, so we need to decrement this
             # TODO - should we take in a context instead of relying on 'bvar.id'?
-            return W_BVar(self.id - 1)
+            return _mk_w_bvar(self.id - 1)
         return self
 
     def incr_free_bvars(self, count, depth):
         if self.id >= depth:
-            return W_BVar(self.id + count)
+            return _mk_w_bvar(self.id + count)
         return self
 
     def subst_levels(self, substs):
@@ -1803,12 +2174,12 @@ class W_BVar(W_Expr):
             return self
         if self.id < len(env):
             return env[self.id]
-        return W_BVar(self.id - len(env))
+        return _mk_w_bvar(self.id - len(env))
 
     def _whnf_under_closure(self, closure_env):
         if self.id < len(closure_env):
             return closure_env[self.id]
-        return W_BVar(self.id - len(closure_env))
+        return _mk_w_bvar(self.id - len(closure_env))
 
 
 class W_FVar(W_Expr):
@@ -1858,7 +2229,7 @@ class W_FVar(W_Expr):
 
     def bind_fvar(self, fvar, depth):
         if self.id == fvar.id:
-            return W_BVar(depth)
+            return _mk_w_bvar(depth)
         return self
 
 
@@ -2039,7 +2410,7 @@ def apply_const_level_params(const, target, env):
 
 
 class W_Const(W_Expr):
-    _attrs_ = ['name', 'levels', '_infer_cache_result']
+    _attrs_ = ['name', 'levels', '_infer_cache_env', '_infer_cache_result']
     _immutable_fields_ = ['name', 'levels']
 
     def __init__(self, name, levels):
@@ -2048,10 +2419,10 @@ class W_Const(W_Expr):
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
         self.loose_bvar_range = 0
-        # Inline infer cache. References to a constant in a proof term hit
-        # the same shared instance (every use of e.g. ``Nat.add`` resolves
-        # to one ``W_Const``), so caching on identity is effectively a
-        # per-name cache.
+        # Inline infer cache, tagged with the env — hash-consing shares
+        # this instance across `Environment`s and inferred types depend
+        # on the env's declarations.
+        self._infer_cache_env = None
         self._infer_cache_result = None
         h = name.hash()
         for lvl in levels:
@@ -2259,15 +2630,15 @@ class W_LitNat(W_Expr):
 
     @staticmethod
     def char(char):
-        return W_LitNat(rbigint.fromint(ord(char)))
+        return _mk_w_litnat(rbigint.fromint(ord(char)))
 
     @staticmethod
     def int(i):
-        return W_LitNat(rbigint.fromint(i))
+        return _mk_w_litnat(rbigint.fromint(i))
 
     @staticmethod
     def long(i):
-        return W_LitNat(rbigint.fromlong(i))
+        return _mk_w_litnat(rbigint.fromlong(i))
 
     def def_eq(self, other, def_eq):
         assert isinstance(other, W_LitNat)
@@ -2308,7 +2679,7 @@ class W_LitNat(W_Expr):
         """
         if self.val.eq(rbigint.fromint(0)):
             return NAT_ZERO
-        return NAT_SUCC.app(W_LitNat(self.val.sub(rbigint.fromint(1))))
+        return NAT_SUCC.app(_mk_w_litnat(self.val.sub(rbigint.fromint(1))))
 
     def bind_fvar(self, fvar, depth):
         return self
@@ -2424,7 +2795,7 @@ def _reduce_bin_nat_op_add(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.add(v2))
+    return _mk_w_litnat(v1.add(v2))
 
 
 def _reduce_bin_nat_op_sub(args, env):
@@ -2432,15 +2803,15 @@ def _reduce_bin_nat_op_sub(args, env):
     if v1 is None:
         return None
     if v1.lt(v2):
-        return W_LitNat(rbigint.fromint(0))
-    return W_LitNat(v1.sub(v2))
+        return _mk_w_litnat(rbigint.fromint(0))
+    return _mk_w_litnat(v1.sub(v2))
 
 
 def _reduce_bin_nat_op_mul(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.mul(v2))
+    return _mk_w_litnat(v1.mul(v2))
 
 
 def _reduce_nat_pow(args, env):
@@ -2449,7 +2820,7 @@ def _reduce_nat_pow(args, env):
         return None
     if v2.gt(_REDUCE_POW_MAX_EXP):
         return None
-    return W_LitNat(v1.pow(v2))
+    return _mk_w_litnat(v1.pow(v2))
 
 
 def _reduce_bin_nat_op_gcd(args, env):
@@ -2462,7 +2833,7 @@ def _reduce_bin_nat_op_gcd(args, env):
     zero = rbigint.fromint(0)
     while b.gt(zero):
         a, b = b, a.mod(b)
-    return W_LitNat(a)
+    return _mk_w_litnat(a)
 
 
 def _reduce_bin_nat_op_mod(args, env):
@@ -2470,8 +2841,8 @@ def _reduce_bin_nat_op_mod(args, env):
     if v1 is None:
         return None
     if v2.eq(rbigint.fromint(0)):
-        return W_LitNat(v1)
-    return W_LitNat(v1.mod(v2))
+        return _mk_w_litnat(v1)
+    return _mk_w_litnat(v1.mod(v2))
 
 
 def _reduce_bin_nat_op_div(args, env):
@@ -2479,8 +2850,8 @@ def _reduce_bin_nat_op_div(args, env):
     if v1 is None:
         return None
     if v2.eq(rbigint.fromint(0)):
-        return W_LitNat(rbigint.fromint(0))
-    return W_LitNat(v1.div(v2))
+        return _mk_w_litnat(rbigint.fromint(0))
+    return _mk_w_litnat(v1.div(v2))
 
 
 def _reduce_bin_nat_pred_beq(args, env):
@@ -2505,49 +2876,54 @@ def _reduce_bin_nat_op_land(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.and_(v2))
+    return _mk_w_litnat(v1.and_(v2))
 
 
 def _reduce_bin_nat_op_lor(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.or_(v2))
+    return _mk_w_litnat(v1.or_(v2))
 
 
 def _reduce_bin_nat_op_xor(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.xor(v2))
+    return _mk_w_litnat(v1.xor(v2))
 
 
 def _reduce_bin_nat_op_shiftleft(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.lshift(v2.toint()))
+    return _mk_w_litnat(v1.lshift(v2.toint()))
 
 
 def _reduce_bin_nat_op_shiftright(args, env):
     v1, v2 = _get_bin_nat_args(args, env)
     if v1 is None:
         return None
-    return W_LitNat(v1.rshift(v2.toint()))
+    return _mk_w_litnat(v1.rshift(v2.toint()))
 
 
 class W_Proj(W_Expr):
-    _attrs_ = ['struct_name', 'field_index', 'struct_expr', '_struct_whnf']
+    _attrs_ = [
+        'struct_name', 'field_index', 'struct_expr',
+        '_struct_whnf_env', '_struct_whnf',
+    ]
     _immutable_fields_ = ['struct_name', 'field_index', 'struct_expr']
 
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
         self.field_index = field_index
         self.struct_expr = struct_expr
-        # Cache slot for the WHNF of `struct_expr` (avoids re-driving
-        # the same reduction when projecting more than once into the
-        # same struct). Kept in its own mutable slot so `struct_expr`
-        # stays set-once — required for hash-consing `W_Proj` instances.
+        # Inline cache of `struct_expr.whnf(env)` for the `env` it was
+        # computed under. Lives in its own mutable slot so `struct_expr`
+        # stays set-once (interning of `W_Proj` requires it). The env
+        # tag is needed because hash-consing shares the same `W_Proj`
+        # across `Environment`s and `whnf` is env-dependent.
+        self._struct_whnf_env = None
         self._struct_whnf = None
         self.loose_bvar_range = struct_expr.loose_bvar_range
         h = (struct_name.hash() * 1000003) ^ field_index
@@ -2618,9 +2994,8 @@ class W_Proj(W_Expr):
         return result
 
     def _whnf_core(self, env):
-        cached = self._struct_whnf
-        if cached is not None:
-            reduced_struct = cached
+        if self._struct_whnf_env is env:
+            reduced_struct = self._struct_whnf
         else:
             reduced_struct = self.struct_expr.whnf(env)
             # String literals carry their constructor form implicitly.
@@ -2629,6 +3004,7 @@ class W_Proj(W_Expr):
             # spine.
             if isinstance(reduced_struct, W_LitStr):
                 reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
+            self._struct_whnf_env = env
             self._struct_whnf = reduced_struct
 
         # Try to perform projection reduction (structural iota reduction).
@@ -2849,7 +3225,7 @@ class W_FunBase(W_Expr):
     _attrs_ = [
         'binder', 'body', 'finished_reduce',
         '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
-        '_infer_cache_result',
+        '_infer_cache_env', '_infer_cache_result',
         '_closure_cache_env', '_closure_cache_result',
     ]
     _immutable_fields_ = ['binder', 'body']
@@ -2872,11 +3248,12 @@ class W_FunBase(W_Expr):
             self.loose_bvar_range = binder_range
         else:
             self.loose_bvar_range = body_range
-        # 1-entry inline instantiate cache.
+        # 1-entry inline instantiate cache (env-independent).
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
         self._inst_cache_result = None
-        # Inline infer cache.
+        # Inline infer cache, env-tagged for hash-consing safety.
+        self._infer_cache_env = None
         self._infer_cache_result = None
         # 1-entry inline closure cache, keyed on env identity. Critical
         # for DAG-shared lambdas: when ``λ`` appears N times under the
@@ -3337,7 +3714,8 @@ class W_App(W_Expr):
     _attrs_ = [
         'fn', 'arg',
         '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
-        '_infer_cache_result', '_whnf_cache_result',
+        '_infer_cache_env', '_infer_cache_result',
+        '_whnf_cache_env', '_whnf_cache_result',
     ]
     _immutable_fields_ = ['fn', 'arg']
 
@@ -3350,13 +3728,14 @@ class W_App(W_Expr):
             self.loose_bvar_range = fn_range
         else:
             self.loose_bvar_range = arg_range
-        # 1-entry inline instantiate cache.
+        # 1-entry inline instantiate cache (env-independent).
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
         self._inst_cache_result = None
-        # Inline infer cache.
+        # Inline infer/whnf caches, env-tagged for hash-consing safety.
+        self._infer_cache_env = None
         self._infer_cache_result = None
-        # Inline whnf cache.
+        self._whnf_cache_env = None
         self._whnf_cache_result = None
         h = (fn.hash() * 1000003) ^ arg.hash()
         self._hash = ((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF
@@ -3497,12 +3876,12 @@ class W_App(W_Expr):
         return _iter_infer(env, self)
 
     def whnf(self, env):
-        cached = self._whnf_cache_result
-        if cached is not None:
+        if self._whnf_cache_env is env:
             env.tracer.whnf_cache_hit()
-            return cached
+            return self._whnf_cache_result
         env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
+        self._whnf_cache_env = env
         self._whnf_cache_result = expr
         return expr
 
@@ -3799,7 +4178,7 @@ class W_App(W_Expr):
         motive = args[3]
         if major.val.eq(rbigint.fromint(0)):
             return zero_case
-        pred = W_LitNat(major.val.sub(rbigint.fromint(1)))
+        pred = _mk_w_litnat(major.val.sub(rbigint.fromint(1)))
         rec_at_pred = target.app(motive).app(zero_case).app(succ_case).app(pred)
         return succ_case.app(pred).app(rec_at_pred)
 
@@ -3984,13 +4363,11 @@ def _whnf_iota_chain(env, expr):
     circuits on the cache check below.
     """
     if isinstance(expr, W_App):
-        cached = expr._whnf_cache_result
-        if cached is not None:
-            return cached
+        if expr._whnf_cache_env is env:
+            return expr._whnf_cache_result
     elif isinstance(expr, W_Closure):
-        cached = expr._whnf_cache_result
-        if cached is not None:
-            return cached
+        if expr._whnf_cache_env is env:
+            return expr._whnf_cache_result
 
     chain = []
     cur = expr
@@ -4040,8 +4417,10 @@ def _whnf_iota_chain(env, expr):
         # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
         # returns immediately instead of recursing.
         if isinstance(major_arg, W_App):
+            major_arg._whnf_cache_env = env
             major_arg._whnf_cache_result = cur
         elif isinstance(major_arg, W_Closure):
+            major_arg._whnf_cache_env = env
             major_arg._whnf_cache_result = cur
 
         progress, reduced = parent.try_iota_reduce(env)
@@ -4068,7 +4447,11 @@ class W_Closure(W_Expr):
     containing the closure itself).
     """
 
-    _attrs_ = ['env', 'body', '_whnf_cache_result', '_infer_cache_result']
+    _attrs_ = [
+        'env', 'body',
+        '_whnf_cache_env', '_whnf_cache_result',
+        '_infer_cache_env', '_infer_cache_result',
+    ]
     _immutable_fields_ = ['env', 'body']
 
     def __init__(self, env, body):
@@ -4083,7 +4466,10 @@ class W_Closure(W_Expr):
             if v.loose_bvar_range > max_loose:
                 max_loose = v.loose_bvar_range
         self.loose_bvar_range = max_loose
+        # Inline whnf/infer caches, env-tagged for hash-consing safety.
+        self._whnf_cache_env = None
         self._whnf_cache_result = None
+        self._infer_cache_env = None
         self._infer_cache_result = None
         # Closures shouldn't reach the exporter (they're produced during
         # reduction, not by the walker), but give them an identity-based
@@ -4091,12 +4477,12 @@ class W_Closure(W_Expr):
         self._hash = compute_identity_hash(self)
 
     def whnf(self, env):
-        cached = self._whnf_cache_result
-        if cached is not None:
+        if self._whnf_cache_env is env:
             env.tracer.whnf_cache_hit()
-            return cached
+            return self._whnf_cache_result
         env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
+        self._whnf_cache_env = env
         self._whnf_cache_result = expr
         return expr
 
@@ -5113,10 +5499,10 @@ def _iter_instantiate(root, expr, depth):
             values.append(fn.app(arg))
         elif isinstance(item, _InstBuildLambda):
             body = values.pop()
-            values.append(W_Lambda(item.binder, body))
+            values.append(_mk_w_lambda(item.binder, body))
         elif isinstance(item, _InstBuildForAll):
             body = values.pop()
-            values.append(W_ForAll(item.binder, body))
+            values.append(_mk_w_forall(item.binder, body))
         else:
             assert isinstance(item, _InstStore)
             res = values[len(values) - 1]
@@ -5225,21 +5611,18 @@ def _iter_infer(env, root):
             # fallback) and pushed straight onto the value stack.
             if cls is W_App:
                 assert isinstance(cur, W_App)
-                cached = cur._infer_cache_result
-                if cached is not None:
-                    values.append(cached)
+                if cur._infer_cache_env is env:
+                    values.append(cur._infer_cache_result)
                     continue
             elif cls is W_Lambda or cls is W_ForAll:
                 assert isinstance(cur, W_FunBase)
-                cached = cur._infer_cache_result
-                if cached is not None:
-                    values.append(cached)
+                if cur._infer_cache_env is env:
+                    values.append(cur._infer_cache_result)
                     continue
             elif cls is W_Closure:
                 assert isinstance(cur, W_Closure)
-                cached = cur._infer_cache_result
-                if cached is not None:
-                    values.append(cached)
+                if cur._infer_cache_env is env:
+                    values.append(cur._infer_cache_result)
                     continue
             else:
                 values.append(env.infer(cur))
@@ -5345,12 +5728,16 @@ def _iter_infer(env, root):
             target = item.expr
             result = values[len(values) - 1]
             if isinstance(target, W_App):
+                target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_FunBase):
+                target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_Closure):
+                target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_Const):
+                target._infer_cache_env = env
                 target._infer_cache_result = result
     return values[0]
 
@@ -5364,16 +5751,16 @@ class Telescope(object):
 
     @unroll_safe
     def forall(self, body):
-        forall = W_ForAll(self._binders[-1], body)
+        forall = _mk_w_forall(self._binders[-1], body)
         for binder in reversed(self._binders[:-1]):
-            forall = W_ForAll(binder, forall)
+            forall = _mk_w_forall(binder, forall)
         return forall
 
     @unroll_safe
     def fun(self, body):
-        fun = W_Lambda(self._binders[-1], body)
+        fun = _mk_w_lambda(self._binders[-1], body)
         for binder in reversed(self._binders[:-1]):
-            fun = W_Lambda(binder, fun)
+            fun = _mk_w_lambda(binder, fun)
         return fun
 
 

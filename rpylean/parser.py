@@ -236,7 +236,7 @@ def _read_expr_value(cursor, builder, disc):
     fully-resolved ``W_Expr``. The cursor is positioned just after the
     ``:`` following the discriminator key."""
     if disc == "bvar":
-        return objects.W_BVar(id=cursor.read_int())
+        return objects._mk_w_bvar(cursor.read_int())
     if disc == "sort":
         return builder.levels[cursor.read_int()].sort()
     if disc == "app":
@@ -252,9 +252,9 @@ def _read_expr_value(cursor, builder, disc):
     if disc == "natVal":
         nat = rbigint.fromstr(cursor.read_string())
         assert nat.int_ge(0)
-        return objects.W_LitNat(val=nat)
+        return objects._mk_w_litnat(nat)
     if disc == "strVal":
-        return objects.W_LitStr(val=cursor.read_string())
+        return objects._mk_w_litstr(cursor.read_string())
     if disc == "proj":
         return _read_proj(cursor, builder)
     raise ValueError("unknown expr discriminator: %s" % disc)

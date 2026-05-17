@@ -262,7 +262,10 @@ class TestConst(object):
         """
         x1 = Name.simple("x")
         x2 = Name.simple("x")
-        assert x1 is not x2
+        # Hash-consing collapses to identity, so this used to test
+        # structural equality across distinct `Name`s; with hash-consing
+        # the equality is now identity.
+        assert x1 is x2
         decls = [x1.axiom(type=TYPE)]
         env = Environment.having(decls)
         assert env.def_eq(x1.const(), x2.const())

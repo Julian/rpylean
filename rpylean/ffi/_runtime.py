@@ -79,17 +79,17 @@ from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,
     Name,
-    W_BVar,
     W_Constructor,
     W_Declaration,
-    W_ForAll,
     W_Inductive,
-    W_Lambda,
     W_LEVEL_ZERO,
-    W_LitNat,
-    W_LitStr,
     W_RecRule,
     W_Recursor,
+    _mk_w_bvar,
+    _mk_w_forall,
+    _mk_w_lambda,
+    _mk_w_litnat,
+    _mk_w_litstr,
 )
 
 
@@ -323,7 +323,7 @@ def _read_expr_uncached(o):
         cached = _WALK.bvars.get(idx_int, None)
         if cached is not None:
             return cached
-        bv = W_BVar(idx_int)
+        bv = _mk_w_bvar(idx_int)
         _WALK.bvars[idx_int] = bv
         return bv
     if tag == 3:  # sort(u)
@@ -341,8 +341,8 @@ def _read_expr_uncached(o):
         body = read_expr(_lean.ctor_get(o, 2))
         binder = _make_binder(_ctor_byte(o, 3, 8), name, ty)
         if tag == 6:
-            return W_Lambda(binder, body)
-        return W_ForAll(binder, body)
+            return _mk_w_lambda(binder, body)
+        return _mk_w_forall(binder, body)
     if tag == 8:  # letE(name, type, value, body, nondep)
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))
@@ -353,9 +353,9 @@ def _read_expr_uncached(o):
         lit = _lean.ctor_get(o, 0)
         ltag = _lean.ptr_tag(lit)
         if ltag == 0:  # natVal
-            return W_LitNat(read_nat(_lean.ctor_get(lit, 0)))
+            return _mk_w_litnat(read_nat(_lean.ctor_get(lit, 0)))
         # strVal
-        return W_LitStr(_lean.string_cstr(_lean.ctor_get(lit, 0)))
+        return _mk_w_litstr(_lean.string_cstr(_lean.ctor_get(lit, 0)))
     if tag == 10:  # mdata: drop the metadata, walk the inner expr
         return read_expr(_lean.ctor_get(o, 1))
     if tag == 11:  # proj(typeName, idx, struct)

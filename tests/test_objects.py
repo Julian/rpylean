@@ -73,18 +73,18 @@ class TestName(object):
     def test_not_private_nested(self):
         assert not Name.of(["foo", "bar"]).is_private
 
-    def test_eq_different_identity(self):
-        """Names with equal components but different identity are equal."""
+    def test_eq_same_identity_hash_consed(self):
+        """Names with equal components are hash-consed to the same instance."""
         n1 = Name.simple("Nat")
         n2 = Name.simple("Nat")
-        assert n1 is not n2
+        assert n1 is n2
         assert n1 == n2
 
-    def test_ne_different_identity(self):
-        """Names with equal components but different identity are not unequal."""
+    def test_ne_same_identity_hash_consed(self):
+        """Names with equal components are hash-consed; `!=` is False."""
         n1 = Name.simple("Nat")
         n2 = Name.simple("Nat")
-        assert n1 is not n2
+        assert n1 is n2
         assert not (n1 != n2)
 
     def test_app(self):
@@ -229,7 +229,7 @@ class TestName(object):
         assert Prod.proj(0, expr) == W_Proj(Prod, 0, expr)
 
     def test_binder(self):
-        Nat = Name.simple("Nat")
+        Nat = Name.simple("Nat").const()
         assert x.binder(type=Nat) == Binder(
             name=x,
             type=Nat,
@@ -238,7 +238,7 @@ class TestName(object):
         )
 
     def test_implicit_binder(self):
-        Nat = Name.simple("Nat")
+        Nat = Name.simple("Nat").const()
         assert x.implicit_binder(type=Nat) == Binder(
             name=x,
             type=Nat,
@@ -247,7 +247,7 @@ class TestName(object):
         )
 
     def test_instance_implicit_binder(self):
-        NeZero = Name.simple("NeZero")
+        NeZero = Name.simple("NeZero").const()
         assert x.instance_binder(type=NeZero) == Binder(
             name=x,
             type=NeZero,
@@ -256,7 +256,7 @@ class TestName(object):
         )
 
     def test_strict_implicit_binder(self):
-        Nat = Name.simple("Nat")
+        Nat = Name.simple("Nat").const()
         assert x.strict_implicit_binder(type=Nat) == Binder(
             name=x,
             type=Nat,
@@ -274,7 +274,7 @@ def test_names():
 
 class TestBinder(object):
     def test_to_implicit(self):
-        Nat = Name.simple("Nat")
+        Nat = Name.simple("Nat").const()
         binder = Binder.default(name=x, type=Nat).to_implicit()
         assert binder == Binder.implicit(name=x, type=Nat)
 
@@ -447,22 +447,22 @@ class TestLevel(object):
         assert lhs.eq(rhs)
         assert rhs.eq(lhs)
 
-    def test_leq_eq_distinct_max_succ(self):
-        """(max 1 u) + 1 ≤ (max 1 u) + 1 with distinct objects."""
+    def test_leq_eq_hash_consed_max_succ(self):
+        """(max 1 u) + 1 ≤ (max 1 u) + 1. Hash-consing collapses to identity."""
         u1 = Name.simple("u").level()
         u2 = Name.simple("u").level()
         lhs = W_LEVEL_ZERO.succ().max(u1).succ()
         rhs = W_LEVEL_ZERO.succ().max(u2).succ()
-        assert lhs is not rhs
+        assert lhs is rhs
         assert lhs.leq(rhs)
         assert rhs.leq(lhs)
         assert lhs.eq(rhs)
 
-    def test_leq_eq_distinct_param(self):
-        """u ≤ u with distinct W_LevelParam objects."""
+    def test_leq_eq_hash_consed_param(self):
+        """u ≤ u. Hash-consing collapses structurally-equal params to identity."""
         u1 = Name.simple("u").level()
         u2 = Name.simple("u").level()
-        assert u1 is not u2
+        assert u1 is u2
         assert u1.leq(u2)
         assert u2.leq(u1)
         assert u1.eq(u2)
