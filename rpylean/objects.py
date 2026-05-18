@@ -1,6 +1,6 @@
 from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
 from rpython.rlib.objectmodel import (
-    compute_hash, compute_identity_hash, not_rpython, specialize,
+    compute_hash, compute_identity_hash, newlist_hint, not_rpython, specialize,
 )
 from rpython.rlib.rbigint import rbigint
 
@@ -1987,7 +1987,10 @@ class W_Expr(_Item):
         reversed because they are peeled outermost-first; callers that
         need left-to-right order should reverse the result.
         """
-        args = []
+        # Most spines we see are 1-4 args; preallocating skips the
+        # first 2-3 list resizes per call (this is a hot path —
+        # profiles consistently put `unapp` near the top).
+        args = newlist_hint(4)
         expr = self
         while isinstance(expr, W_App):
             args.append(expr.arg)
@@ -3784,8 +3787,8 @@ class W_App(W_Expr):
         # Iterative spine walk to avoid stack overflow on deep W_App trees.
         # Collect args from both sides while both fns are W_App, then
         # compare heads and args pairwise via def_eq.
-        self_args = []
-        other_args = []
+        self_args = newlist_hint(4)
+        other_args = newlist_hint(4)
         lhs = self
         rhs = other
         while isinstance(lhs, W_App) and isinstance(rhs, W_App):
