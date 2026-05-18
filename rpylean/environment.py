@@ -420,21 +420,32 @@ class CheckResult(object):
     `elapsed` is wall/CPU clock; `gc_elapsed` is the time the runtime
     spent in GC during this check (subtract for "real work" time);
     `bytes_allocated` is the cumulative bytes allocated by the runtime
-    during the check (most of which are short-lived and reclaimed by GC).
+    during the check (most of which are short-lived and reclaimed by GC);
+    `live_memory` is the live heap size at the *end* of the check —
+    a sequence of decls whose `live_memory` keeps climbing is
+    permanently growing the working set, vs. churning through
+    ephemeral allocations that the GC reclaims back to a stable
+    plateau.
+    `peak_growth` is how much this decl pushed the process-wide peak
+    heap up: 0 means the decl fit within previously-seen high-water
+    headroom; positive means the run needed *more* memory to clear it.
     `heartbeats` is meaningful only when the environment has heartbeat
     counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
     `0` otherwise.
     """
 
     _attrs_ = [
-        'elapsed', 'gc_elapsed', 'bytes_allocated', 'heartbeats', 'error',
+        'elapsed', 'gc_elapsed', 'bytes_allocated', 'live_memory',
+        'peak_growth', 'heartbeats', 'error',
     ]
 
-    def __init__(self, elapsed, gc_elapsed, bytes_allocated, heartbeats,
-                 error):
+    def __init__(self, elapsed, gc_elapsed, bytes_allocated, live_memory,
+                 peak_growth, heartbeats, error):
         self.elapsed = elapsed
         self.gc_elapsed = gc_elapsed
         self.bytes_allocated = bytes_allocated
+        self.live_memory = live_memory
+        self.peak_growth = peak_growth
         self.heartbeats = heartbeats
         self.error = error
 
@@ -455,6 +466,31 @@ def _bytes_allocated():
     """
     if we_are_translated():
         return rgc.get_stats(rgc.TOTAL_ALLOCATED_MEMORY)
+    return 0
+
+
+def _live_memory():
+    """
+    Current live heap size in bytes. Returns 0 in untranslated mode.
+
+    Unlike `_bytes_allocated` (a monotonically-increasing cumulative
+    counter), this reflects what the GC has not yet reclaimed — useful
+    for spotting per-decl working-set growth.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.TOTAL_MEMORY)
+    return 0
+
+
+def _peak_memory():
+    """
+    Process-wide peak heap size so far in bytes. Returns 0 in
+    untranslated mode. Monotonically non-decreasing across a run — a
+    *delta* across one decl tells you how much that decl raised the
+    high-water mark.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.PEAK_MEMORY)
     return 0
 
 
@@ -594,6 +630,7 @@ class Environment(object):
         error = None
         gc_start = _gc_time_seconds()
         bytes_start = _bytes_allocated()
+        peak_start = _peak_memory()
         start = clock()
         try:
             error = decl.type_check(self)
@@ -620,8 +657,11 @@ class Environment(object):
         elapsed = clock() - start
         gc_elapsed = _gc_time_seconds() - gc_start
         bytes_allocated = _bytes_allocated() - bytes_start
+        live_memory = _live_memory()
+        peak_growth = _peak_memory() - peak_start
         return CheckResult(
-            elapsed, gc_elapsed, bytes_allocated, self.heartbeat, error,
+            elapsed, gc_elapsed, bytes_allocated, live_memory,
+            peak_growth, self.heartbeat, error,
         )
 
     def all(self):

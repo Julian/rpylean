@@ -75,3 +75,11 @@ bench file:
         "PYTHONPATH='{{ pypy_checkout }}/' '{{ pypy }}' -m rpylean check '{{ file }}'" \
         "'{{ translated }}' --jit off check '{{ file }}'" \
         "'{{ translated }}' check '{{ file }}'"
+
+# Run the translated binary with PYPYLOG=jit-summary and emit the
+# RPython JIT summary to stderr at process exit. Pair this with `just
+# bench` for wall-time numbers — this run is unmeasured and exists
+# only to capture trace counts, abort reasons, and tracing/backend
+# time for one invocation.
+bench-jit-summary file:
+    PYPYLOG=jit-summary:- "{{ translated }}" check "{{ file }}"

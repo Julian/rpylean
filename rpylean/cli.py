@@ -7,6 +7,7 @@ from __future__ import print_function
 from time import time
 import errno
 
+from rpython.rlib import debug
 from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
@@ -22,6 +23,8 @@ from rpylean.environment import (
     DeclarationHook,
     EnvironmentBuilder,
     StreamTracer,
+    _bytes_allocated,
+    _peak_memory,
     from_export,
 )
 from rpylean.objects import Name, name_dict
@@ -175,7 +178,7 @@ class _StreamingChecker(DeclarationHook):
         'slow_secs', 'slow_hb',
         'filter_match', 'filter_names',
         'abort_at', 'failures', 'break_at',
-        'n_seen', 'n_checked',
+        'n_seen', 'n_checked', 'total_heartbeats',
     ]
 
     def __init__(
@@ -204,6 +207,7 @@ class _StreamingChecker(DeclarationHook):
         self.break_at = break_at
         self.n_seen = 0
         self.n_checked = 0
+        self.total_heartbeats = 0
 
     def on_declaration(self, decl):
         self.n_seen += 1
@@ -237,15 +241,29 @@ class _StreamingChecker(DeclarationHook):
         self.n_checked += 1
         if self.break_at is not None and self.break_at in decl.name.str():
             self._break_for(decl)
+        # PYPYLOG section marker so JIT log output (jit-log-opt, etc.)
+        # is interleaved with `[ts] {rpylean-decl ... }rpylean-decl`
+        # markers naming the decl currently being checked. Translated
+        # only — `debug_start` prints unconditionally to stderr in
+        # untranslated mode, which would swamp the dev REPL.
+        if we_are_translated():
+            debug.debug_start("rpylean-decl")
+            if debug.have_debug_prints():
+                debug.debug_print(decl.name.str())
         result = self.env.type_check_one(decl, pp=self.pp)
+        if we_are_translated():
+            debug.debug_stop("rpylean-decl")
+        self.total_heartbeats += result.heartbeats
         slow_by_time = self.slow_secs >= 0.0 and result.elapsed > self.slow_secs
         slow_by_hb = self.slow_hb >= 0 and result.heartbeats > self.slow_hb
         if slow_by_time or slow_by_hb:
             self.stdoutw.write_plain(
-                "%f\t%f\t%d\t%d\t" % (
+                "%f\t%f\t%d\t%d\t%d\t%d\t" % (
                     result.elapsed,
                     result.gc_elapsed,
                     result.bytes_allocated,
+                    result.live_memory,
+                    result.peak_growth,
                     result.heartbeats,
                 ),
             )
@@ -315,6 +333,7 @@ def _check_one_file(
     if trace or stats:
         tracer = StreamTracer(stderrw if trace else None)
         builder.env.tracer = tracer
+    bytes_at_start = _bytes_allocated()
     try:
         try:
             if max_heartbeat > 0:
@@ -337,6 +356,33 @@ def _check_one_file(
             file.close()
         if stats and tracer is not None:
             tracer.print_summary(stderrw)
+        # One-line aggregate so two runs are comparable at a glance
+        # without grepping `--slower-than` output. RPython's `%`
+        # formatter doesn't accept `%.1f`, so the MB figures are
+        # rounded to whole megabytes via integer division.
+        # `_bytes_allocated()` and `_peak_memory()` are no-ops
+        # untranslated (return 0), so we skip the memory fields in
+        # that mode rather than emit three misleading zeros.
+        if we_are_translated():
+            _MB = 1024 * 1024
+            stderrw.write_plain(
+                "summary: %d/%d decls checked, peak %d MB, "
+                "allocated %d MB, heartbeats %d\n" % (
+                    checker.n_checked,
+                    checker.n_seen,
+                    _peak_memory() // _MB,
+                    (_bytes_allocated() - bytes_at_start) // _MB,
+                    checker.total_heartbeats,
+                )
+            )
+        else:
+            stderrw.write_plain(
+                "summary: %d/%d decls checked, heartbeats %d\n" % (
+                    checker.n_checked,
+                    checker.n_seen,
+                    checker.total_heartbeats,
+                )
+            )
     return checker.failures
 
 
