@@ -5374,143 +5374,82 @@ class _InferCacheEntry(object):
         self.result = result
 
 
-# Iterative instantiate driver. Same shape as the infer driver below.
-class _InstWork(object):
-    _attrs_ = []
-
-
-class _InstVisit(_InstWork):
-    _attrs_ = ['expr', 'depth']
-
-    def __init__(self, expr, depth):
-        self.expr = expr
-        self.depth = depth
-
-
-class _InstBuildApp(_InstWork):
-    _attrs_ = ['fn', 'arg']
-
-    def __init__(self, fn, arg):
-        self.fn = fn
-        self.arg = arg
-
-
-class _InstBuildLambda(_InstWork):
-    _attrs_ = ['binder']
-
-    def __init__(self, binder):
-        self.binder = binder
-
-
-class _InstBuildForAll(_InstWork):
-    _attrs_ = ['binder']
-
-    def __init__(self, binder):
-        self.binder = binder
-
-
-class _InstStore(_InstWork):
-    _attrs_ = ['expr', 'depth']
-
-    def __init__(self, expr, depth):
-        self.expr = expr
-        self.depth = depth
-
-
 def _iter_instantiate(root, expr, depth):
     """
-    Iteratively substitute ``expr`` for the bvar at ``depth`` in ``root``.
+    Substitute ``expr`` for the bvar at ``depth`` in ``root``.
 
-    Drives the ``W_App`` / ``W_Lambda`` / ``W_ForAll`` alternation through
-    an explicit work stack so deeply nested terms (e.g. ``app-lam``) do
-    not blow the host stack. Per-instance 1-entry inline cache breaks
-    the 2^N work that DAG-shared subexpressions would cause, with no
-    dict allocation per call.
+    Recursive — splits per-kind into `_inst_app` / `_inst_lambda` /
+    `_inst_forall` so each call site has a single static type and the
+    JIT can trace each path independently (the older explicit-work-stack
+    version had a 5-way polymorphic dispatch that defeated tracing —
+    79+ bridges, ~25% regression with a JIT driver attached). The
+    per-instance 1-entry inline cache (`_inst_cache_*` on `W_App` /
+    `W_FunBase`) breaks the 2^N work that DAG-shared subexpressions
+    would otherwise cause.
+
+    The original work-stack version existed to keep `app-lam`
+    alternations from blowing the C stack on extreme depths; we now
+    rely on RPython's `stack_check___` guard (already ~3% of profile
+    time, so the cost is paid regardless) to abort cleanly if a
+    pathological term outruns the host stack.
     """
-    if root.loose_bvar_range <= depth:
-        return root
-    work = [_InstVisit(root, depth)]
-    values = []
-    while len(work) > 0:
-        item = work.pop()
-        if isinstance(item, _InstVisit):
-            cur = item.expr
-            d = item.depth
-            if cur.loose_bvar_range <= d:
-                values.append(cur)
-                continue
-            cls = cur.__class__
-            if cls is W_App:
-                assert isinstance(cur, W_App)
-                if (cur._inst_cache_expr is expr
-                        and cur._inst_cache_depth == d):
-                    values.append(cur._inst_cache_result)
-                    continue
-                fn = cur.fn
-                arg = cur.arg
-                fn_static = fn.loose_bvar_range <= d
-                arg_static = arg.loose_bvar_range <= d
-                work.append(_InstStore(cur, d))
-                work.append(_InstBuildApp(
-                    fn if fn_static else None,
-                    arg if arg_static else None,
-                ))
-                if not arg_static:
-                    work.append(_InstVisit(arg, d))
-                if not fn_static:
-                    work.append(_InstVisit(fn, d))
-            elif cls is W_Lambda:
-                assert isinstance(cur, W_FunBase)
-                if (cur._inst_cache_expr is expr
-                        and cur._inst_cache_depth == d):
-                    values.append(cur._inst_cache_result)
-                    continue
-                new_binder = cur.binder.instantiate(expr, d)
-                work.append(_InstStore(cur, d))
-                work.append(_InstBuildLambda(new_binder))
-                work.append(_InstVisit(cur.body, d + 1))
-            elif cls is W_ForAll:
-                assert isinstance(cur, W_FunBase)
-                if (cur._inst_cache_expr is expr
-                        and cur._inst_cache_depth == d):
-                    values.append(cur._inst_cache_result)
-                    continue
-                new_binder = cur.binder.instantiate(expr, d)
-                work.append(_InstStore(cur, d))
-                work.append(_InstBuildForAll(new_binder))
-                work.append(_InstVisit(cur.body, d + 1))
-            else:
-                values.append(cur.instantiate(expr, d))
-        elif isinstance(item, _InstBuildApp):
-            if item.arg is None:
-                arg = values.pop()
-            else:
-                arg = item.arg
-            if item.fn is None:
-                fn = values.pop()
-            else:
-                fn = item.fn
-            values.append(fn.app(arg))
-        elif isinstance(item, _InstBuildLambda):
-            body = values.pop()
-            values.append(_mk_w_lambda(item.binder, body))
-        elif isinstance(item, _InstBuildForAll):
-            body = values.pop()
-            values.append(_mk_w_forall(item.binder, body))
-        else:
-            assert isinstance(item, _InstStore)
-            res = values[len(values) - 1]
-            target = item.expr
-            if isinstance(target, W_App):
-                target._inst_cache_expr = expr
-                target._inst_cache_depth = item.depth
-                target._inst_cache_result = res
-            else:
-                assert isinstance(target, W_FunBase)
-                target._inst_cache_expr = expr
-                target._inst_cache_depth = item.depth
-                target._inst_cache_result = res
-    return values[0]
+    return _instantiate(root, expr, depth)
+
+
+def _instantiate(cur, sub, depth):
+    if cur.loose_bvar_range <= depth:
+        return cur
+    cls = cur.__class__
+    if cls is W_App:
+        assert isinstance(cur, W_App)
+        return _inst_app(cur, sub, depth)
+    if cls is W_Lambda:
+        assert isinstance(cur, W_Lambda)
+        return _inst_lambda(cur, sub, depth)
+    if cls is W_ForAll:
+        assert isinstance(cur, W_ForAll)
+        return _inst_forall(cur, sub, depth)
+    return cur.instantiate(sub, depth)
+
+
+def _inst_app(app, sub, depth):
+    if app._inst_cache_expr is sub and app._inst_cache_depth == depth:
+        return app._inst_cache_result
+    fn = app.fn
+    arg = app.arg
+    if fn.loose_bvar_range > depth:
+        fn = _instantiate(fn, sub, depth)
+    if arg.loose_bvar_range > depth:
+        arg = _instantiate(arg, sub, depth)
+    result = fn.app(arg)
+    app._inst_cache_expr = sub
+    app._inst_cache_depth = depth
+    app._inst_cache_result = result
+    return result
+
+
+def _inst_lambda(fun, sub, depth):
+    if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
+        return fun._inst_cache_result
+    new_binder = fun.binder.instantiate(sub, depth)
+    new_body = _instantiate(fun.body, sub, depth + 1)
+    result = _mk_w_lambda(new_binder, new_body)
+    fun._inst_cache_expr = sub
+    fun._inst_cache_depth = depth
+    fun._inst_cache_result = result
+    return result
+
+
+def _inst_forall(fun, sub, depth):
+    if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
+        return fun._inst_cache_result
+    new_binder = fun.binder.instantiate(sub, depth)
+    new_body = _instantiate(fun.body, sub, depth + 1)
+    result = _mk_w_forall(new_binder, new_body)
+    fun._inst_cache_expr = sub
+    fun._inst_cache_depth = depth
+    fun._inst_cache_result = result
+    return result
 
 
 # Iterative infer driver. The work stack carries items of the following
@@ -5588,6 +5527,13 @@ def _iter_infer(env, root):
     ``W_Lambda.infer`` that grows the host stack linearly with the
     nesting depth (e.g. ~4000 levels in ``app-lam.ndjson``). Other
     expression types fall back to their recursive ``infer``.
+
+    A recursive split into ``_infer_app`` / ``_infer_lambda`` /
+    ``_infer_forall`` / ``_infer_closure`` (the same shape we use for
+    ``_instantiate``) was tried; it overflows the host stack on
+    ``app-lam.ndjson`` because every lambda level recurses *twice*
+    (through ``_infer_lambda`` then ``_infer_closure``-on-body), so
+    a 4000-level term needs ~8000 C frames.
 
     Reuses ``env._infer_cache`` so DAG-shared subexpressions are
     inferred only once.
