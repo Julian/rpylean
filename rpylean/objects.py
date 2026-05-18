@@ -2413,7 +2413,11 @@ def apply_const_level_params(const, target, env):
 
 
 class W_Const(W_Expr):
-    _attrs_ = ['name', 'levels', '_infer_cache_env', '_infer_cache_result']
+    _attrs_ = [
+        'name', 'levels',
+        '_infer_cache_env', '_infer_cache_result',
+        '_delta_cache_env', '_delta_cache_result',
+    ]
     _immutable_fields_ = ['name', 'levels']
 
     def __init__(self, name, levels):
@@ -2422,11 +2426,18 @@ class W_Const(W_Expr):
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
         self.loose_bvar_range = 0
-        # Inline infer cache, tagged with the env — hash-consing shares
-        # this instance across `Environment`s and inferred types depend
-        # on the env's declarations.
+        # Inline caches, tagged with the env — hash-consing shares this
+        # instance across `Environment`s and both the inferred type
+        # and the delta-unfolded value depend on the env's declarations.
+        # `_infer_cache_*` caches `apply_const_level_params(self, decl.type)`,
+        # `_delta_cache_*` caches the same applied to `decl.value`. Both
+        # walks were unconditionally re-running before — `subst_levels`
+        # showed up as ~10% leaf time in profiles because every shared
+        # `W_Const` reference repeated the full structural rewrite.
         self._infer_cache_env = None
         self._infer_cache_result = None
+        self._delta_cache_env = None
+        self._delta_cache_result = None
         h = name.hash()
         for lvl in levels:
             h = (h * 1000003) ^ lvl.hash()
@@ -2527,16 +2538,25 @@ class W_Const(W_Expr):
             return None
 
         env.tracer.delta(name)
-        return apply_const_level_params(self, val, env)
+        if self._delta_cache_env is env:
+            return self._delta_cache_result
+        result = apply_const_level_params(self, val, env)
+        self._delta_cache_env = env
+        self._delta_cache_result = result
+        return result
 
     def infer(self, env):
+        if self._infer_cache_env is env:
+            return self._infer_cache_result
         decl = get_decl(env.declarations, self.name)
         params = decl.levels
-
         if not params:
-            return decl.type
-
-        return apply_const_level_params(self, decl.type, env)
+            result = decl.type
+        else:
+            result = apply_const_level_params(self, decl.type, env)
+        self._infer_cache_env = env
+        self._infer_cache_result = result
+        return result
 
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
