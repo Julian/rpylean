@@ -58,6 +58,30 @@ to_nat_val_jitdriver = JitDriver(
 )
 
 
+def _inst_printable_location(cls):
+    return "instantiate: %s" % cls.__name__
+
+
+# JIT driver for `_instantiate`'s per-kind dispatch (W_App / W_Lambda /
+# W_ForAll). Each kind has its own helper (`_inst_app` / `_inst_lambda` /
+# `_inst_forall`) that may recurse into `_instantiate` for sub-terms;
+# `is_recursive=True` lets the JIT compile per-kind traces that can
+# tail-call themselves.
+#
+# History: a previous driver attached to the older work-stack version
+# (5-way polymorphic dispatch) caused a ~25% regression and 79+
+# bridges (see `_iter_instantiate`'s docstring). The current direct-
+# recursion split is a 3-way dispatch, which should be a friendlier
+# trace shape — but worth measuring before assuming it pays off.
+inst_jitdriver = JitDriver(
+    greens=["cls"],
+    reds=["depth", "cur", "sub"],
+    name="instantiate",
+    get_printable_location=_inst_printable_location,
+    is_recursive=True,
+)
+
+
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
@@ -5423,6 +5447,14 @@ def _instantiate(cur, sub, depth):
     if cur.loose_bvar_range <= depth:
         return cur
     cls = cur.__class__
+    # Merge point after the no-op early-out, so the trace doesn't
+    # specialise on a path that exits immediately.
+    inst_jitdriver.jit_merge_point(
+        cls=cls,
+        cur=cur,
+        sub=sub,
+        depth=depth,
+    )
     if cls is W_App:
         assert isinstance(cur, W_App)
         return _inst_app(cur, sub, depth)

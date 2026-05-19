@@ -6,7 +6,7 @@ from traceback import print_exc
 import pdb
 
 from rpython.rlib import rgc
-from rpython.rlib.jit import promote
+from rpython.rlib.jit import JitDriver, promote
 from rpython.rlib.objectmodel import (
     compute_identity_hash,
     not_rpython,
@@ -52,6 +52,33 @@ from rpylean.objects import (
     get_decl,
     name_dict,
     syntactic_eq,
+)
+
+
+def _def_eq_printable_location(expr1_class):
+    """
+    Label `def_eq` traces by the left head class. We don't include
+    `expr2.__class__` because WHNF tends to canonicalise both heads
+    into the same class on hot paths — adding it as a second green
+    multiplied the specialisation space ~10× without proportionate
+    payback on init-prelude (bridges went 90 → 133 vs the no-driver
+    baseline).
+    """
+    return "def_eq: %s" % expr1_class.__name__
+
+
+# JIT driver covering the structural-dispatch core of def_eq. Merge
+# point lives at the top of `_def_eq_core` (after closure-peeling),
+# so the green sees the post-WHNF post-force left head — the same
+# class `_def_eq_core` dispatches on. `is_recursive=True` because the
+# core recurses into `def_eq` for sub-checks, and each recursive entry
+# hits this same merge point with its own green key.
+def_eq_jitdriver = JitDriver(
+    greens=["expr1_class"],
+    reds=["expr1", "expr2", "env"],
+    name="def_eq",
+    get_printable_location=_def_eq_printable_location,
+    is_recursive=True,
 )
 
 
@@ -400,19 +427,6 @@ def _write_by_name(writer, label, counts):
         writer.write_plain("  %d\t%s\n" % (count, name.str()))
 
 
-class _DefEqCacheEntry(object):
-    """
-    An entry in the def_eq cache, keyed by object identity.
-    """
-
-    _attrs_ = ['expr1', 'expr2', 'result']
-
-    def __init__(self, expr1, expr2, result):
-        self.expr1 = expr1
-        self.expr2 = expr2
-        self.result = result
-
-
 class CheckResult(object):
     """
     The outcome of type-checking a single declaration.
@@ -502,7 +516,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'heartbeat', 'max_heartbeat', 'count_heartbeats',
-        '_current_decl', '_def_eq_cache', '_infer_cache',
+        '_current_decl', '_infer_cache',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -512,7 +526,6 @@ class Environment(object):
         self.max_heartbeat = 0
         self.count_heartbeats = False
         self._current_decl = None
-        self._def_eq_cache = {}
         self._infer_cache = {}
 
     def infer(self, expr):
@@ -625,7 +638,6 @@ class Environment(object):
         # FIXME: Better state encapsulation for heartbeats...
         self.heartbeat = 0
         self._current_decl = decl
-        self._def_eq_cache = {}
         self._infer_cache = {}
         error = None
         gc_start = _gc_time_seconds()
@@ -709,10 +721,8 @@ class Environment(object):
 
         # Pointer-equality fast path before WHNF: shared subexpressions
         # are very common in proof terms (the DAG that lean4export
-        # produces is heavily shared), and WHNFing the same instance
-        # twice just to discover it's equal to itself wastes work and
-        # — more importantly — bloats the def_eq cache with redundant
-        # entries that slow down subsequent lookups.
+        # produces is heavily shared), so WHNFing the same instance
+        # twice just to discover it's equal to itself wastes work.
         if expr1 is expr2:
             return tracer.result(True)
 
@@ -736,90 +746,44 @@ class Environment(object):
         if self._try_lazy_delta(expr1, expr2):
             return tracer.result(True)
 
-        # Pre-WHNF cache lookup. Same `_def_eq_cache` as the post-WHNF
-        # path below; entries are keyed by identity of *whatever pair
-        # of instances was passed to def_eq*, so a hit here lets us
-        # skip both WHNFs and `_def_eq_core` for a pair we've already
-        # decided on this decl.
-        pre_key = compute_identity_hash(expr1) * 1000003 ^ compute_identity_hash(
-            expr2
-        )
-        pre_entries = self._def_eq_cache.get(pre_key, None)
-        if pre_entries is not None:
-            i = 0
-            while i < len(pre_entries):
-                entry = pre_entries[i]
-                if entry.expr1 is expr1 and entry.expr2 is expr2:
-                    return tracer.result(entry.result)
-                i += 1
-
-        # First reduce both to WHNF to ensure heads are in canonical form
-        pre_expr1 = expr1
-        pre_expr2 = expr2
+        # Reduce both to WHNF so heads are in canonical form.
         expr1 = expr1.whnf(self)
         expr2 = expr2.whnf(self)
 
-        # Same post-WHNF: pointer equality before hitting the cache or
-        # invoking `_def_eq_core`'s structural dispatch.
+        # Pointer equality after WHNF before invoking `_def_eq_core`'s
+        # structural dispatch — heads collapsed by WHNF often share.
         if expr1 is expr2:
             return tracer.result(True)
 
-        # Check the def_eq cache (keyed by object identity after WHNF)
-        post_key = compute_identity_hash(expr1) * 1000003 ^ compute_identity_hash(
-            expr2
-        )
-        if post_key == pre_key:
-            post_entries = pre_entries
-        else:
-            post_entries = self._def_eq_cache.get(post_key, None)
-            if post_entries is not None:
-                i = 0
-                while i < len(post_entries):
-                    entry = post_entries[i]
-                    if entry.expr1 is expr1 and entry.expr2 is expr2:
-                        return tracer.result(entry.result)
-                    i += 1
-
-        result = self._def_eq_core(expr1, expr2)
-
-        # Store the result under the post-WHNF key.
-        post_entry = _DefEqCacheEntry(expr1, expr2, result)
-        if post_entries is not None:
-            post_entries.append(post_entry)
-        else:
-            self._def_eq_cache[post_key] = [post_entry]
-
-        # Also store under the pre-WHNF key when WHNF actually changed
-        # at least one side (otherwise the keys / instances coincide
-        # and we'd be storing the same entry twice).
-        if pre_expr1 is not expr1 or pre_expr2 is not expr2:
-            pre_entry = _DefEqCacheEntry(pre_expr1, pre_expr2, result)
-            if pre_key == post_key:
-                # Same bucket; `post_entries` is the live list we
-                # just appended `post_entry` to.
-                post_entries.append(pre_entry)
-            elif pre_entries is not None:
-                pre_entries.append(pre_entry)
-            else:
-                self._def_eq_cache[pre_key] = [pre_entry]
-
-        return tracer.result(result)
+        return tracer.result(self._def_eq_core(expr1, expr2))
 
     def _def_eq_core(self, expr1, expr2):
         """
         Core definitional equality logic, called after WHNF reduction.
         """
         # Closures are an internal representation of deferred substitution;
-        # peel any that survive WHNF here so the rest of the dispatch
-        # can compare canonical forms.
+        # peel any that survive WHNF here so the rest of the dispatch —
+        # and the JIT driver's greens — see canonical forms rather than
+        # closure wrappers.
         if isinstance(expr1, W_Closure):
             expr1 = expr1.force()
         if isinstance(expr2, W_Closure):
             expr2 = expr2.force()
 
-        # Promote the classes so the JIT can specialize on expression types.
-        # This is critical for the type dispatch below - it allows the JIT
-        # to compile specialized traces for common type combinations.
+        # Merge point sits at the structural-dispatch entry: heads are
+        # post-WHNF and post-closure-force here, so the JIT specializes
+        # on the left head's class — the same dispatch the code below
+        # switches on.
+        def_eq_jitdriver.jit_merge_point(
+            expr1_class=expr1.__class__,
+            expr1=expr1,
+            expr2=expr2,
+            env=self,
+        )
+
+        # The greens above already promote the classes for the JIT; the
+        # explicit `promote` calls give the annotator the same hint on
+        # the untranslated/non-JIT path.
         cls1 = promote(expr1.__class__)
         cls2 = promote(expr2.__class__)
 
