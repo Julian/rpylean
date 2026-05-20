@@ -87,6 +87,26 @@ inst_jitdriver = JitDriver(
 )
 
 
+def _app_args_printable_location():
+    return "app_args"
+
+
+# JIT driver for `W_App.def_eq`'s args-spine comparison loop. The loop
+# body is uniform (`def_eq(self_args[i], other_args[i])`) so greens
+# are empty; reds carry the loop index and the two arg lists plus
+# the bound `env.def_eq` to call. Each iteration enters the
+# `def_eq_jitdriver` via that bound method, so this driver only needs
+# to compile the outer loop's dispatch — congruence over deep app
+# spines (the `assemble*` family in `init.ndjson` is the motivating
+# case) flows through here.
+app_args_jitdriver = JitDriver(
+    greens=[],
+    reds=["i", "self_args", "other_args", "def_eq"],
+    name="app_args",
+    get_printable_location=_app_args_printable_location,
+)
+
+
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
@@ -3851,6 +3871,12 @@ class W_App(W_Expr):
             return False
         i = len(self_args) - 1
         while i >= 0:
+            app_args_jitdriver.jit_merge_point(
+                i=i,
+                self_args=self_args,
+                other_args=other_args,
+                def_eq=def_eq,
+            )
             if not def_eq(self_args[i], other_args[i]):
                 return False
             i -= 1
