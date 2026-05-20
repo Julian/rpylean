@@ -1169,6 +1169,7 @@ class Name(_Item):
         """
         return Binder.strict_implicit(name=self, type=type)
 
+    @unroll_safe
     def const(self, levels=None):
         """
         Construct a constant expression for this name.
@@ -2079,6 +2080,7 @@ class W_Expr(_Item):
         """
         return True
 
+    @unroll_safe
     def app(self, arg, *more):
         """
         Apply this (which better be a function) to the given argument(s).
@@ -2088,6 +2090,7 @@ class W_Expr(_Item):
             return expr
         return expr.app(*more)
 
+    @unroll_safe
     def closure(self, env):
         """
         Wrap this expression in a closure that defers ``env``'s substitution.
@@ -2221,6 +2224,7 @@ class W_BVar(W_Expr):
     def subst_levels(self, substs):
         return self
 
+    @unroll_safe
     def closure(self, env):
         if not env:
             return self
@@ -3333,6 +3337,7 @@ class W_FunBase(W_Expr):
         h = (h * 1000003) ^ body.hash()
         self._hash = ((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF
 
+    @unroll_safe
     def closure(self, env):
         if not env:
             return self
