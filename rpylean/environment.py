@@ -8,7 +8,6 @@ import pdb
 from rpython.rlib import rgc
 from rpython.rlib.jit import JitDriver, promote
 from rpython.rlib.objectmodel import (
-    compute_identity_hash,
     not_rpython,
     we_are_translated,
 )
@@ -46,7 +45,6 @@ from rpylean.objects import (
     W_LitNat,
     W_LitStr,
     W_Sort,
-    _InferCacheEntry,
     _mk_w_bvar,
     fun,
     get_decl,
@@ -516,7 +514,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'heartbeat', 'max_heartbeat', 'count_heartbeats',
-        '_current_decl', '_infer_cache',
+        '_current_decl',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -540,21 +538,19 @@ class Environment(object):
         self.max_heartbeat = 0
         self.count_heartbeats = False
         self._current_decl = None
-        self._infer_cache = {}
 
     def infer(self, expr):
         """
-        Infer the type of ``expr``, caching the result by identity.
+        Infer the type of ``expr``.
 
-        Crucial for type-checking proof terms with DAG-shared subexpressions
-        (e.g. ``app-lam.ndjson``): without caching, sharing turns into O(2ⁿ)
-        re-inference of the same lambda.
+        The hot classes (`W_App`, `W_Lambda`, `W_ForAll`, `W_Const`) hit
+        a per-instance inline cache slot — DAG-shared subexpressions
+        otherwise turn into O(2ⁿ) re-inference, so this matters even
+        when the JIT is involved. Cold classes (`W_Let`, `W_Proj`,
+        `W_Sort`, literals, vars) re-compute on each call; they're rare
+        enough on hot paths that a dict-based fallback wasn't paying
+        for the JIT-hostile lookups it added to the def_eq trace.
         """
-        # Recursive types and W_Const use a per-instance inline cache slot.
-        # W_Const references are heavily DAG-shared (every use of e.g.
-        # ``Nat.add`` resolves to the same instance) so caching on identity
-        # acts as a per-name cache and avoids the dict / hash / list-walk
-        # overhead of the generic cache below.
         cls = expr.__class__
         if cls is W_App:
             assert isinstance(expr, W_App)
@@ -580,23 +576,7 @@ class Environment(object):
             expr._infer_cache_env = self
             expr._infer_cache_result = result
             return result
-
-        key = compute_identity_hash(expr)
-        entries = self._infer_cache.get(key, None)
-        if entries is not None:
-            i = 0
-            while i < len(entries):
-                entry = entries[i]
-                if entry.expr is expr:
-                    return entry.result
-                i += 1
-        result = expr.infer(self)
-        new_entry = _InferCacheEntry(expr, result)
-        if entries is not None:
-            entries.append(new_entry)
-        else:
-            self._infer_cache[key] = [new_entry]
-        return result
+        return expr.infer(self)
 
     @not_rpython
     def __getitem__(self, value):
@@ -652,7 +632,6 @@ class Environment(object):
         # FIXME: Better state encapsulation for heartbeats...
         self.heartbeat = 0
         self._current_decl = decl
-        self._infer_cache = {}
         error = None
         gc_start = _gc_time_seconds()
         bytes_start = _bytes_allocated()

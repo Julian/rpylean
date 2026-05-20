@@ -5416,16 +5416,6 @@ def syntactic_eq(expr1, expr2):
     return expr1.syntactic_eq(expr2)
 
 
-class _InferCacheEntry(object):
-    """An entry in ``Environment._infer_cache``, keyed by expression identity."""
-
-    _attrs_ = ['expr', 'result']
-
-    def __init__(self, expr, result):
-        self.expr = expr
-        self.result = result
-
-
 def _iter_instantiate(root, expr, depth):
     """
     Substitute ``expr`` for the bvar at ``depth`` in ``root``.
