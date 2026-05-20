@@ -626,6 +626,18 @@ def name_dict():
 _HASH_MASK = 0x7FFFFFFF
 
 
+# The `* 1000003 ^` mixing step is CPython's tuple-hash primitive,
+# inlined here so we can combine already-precomputed `_hash` slots
+# from W_Expr / W_Level / Name fields without allocating a tuple per
+# call (which `compute_hash((a, b))` would). Keep `_HASH_MASK` applied
+# only at the boundary of the public `_mixN` helpers; intermediate
+# accumulators in loops (see `_mk_w_const`) skip the mask to preserve
+# entropy across steps.
+
+def _mix1(a):
+    return (a * 1000003) & _HASH_MASK
+
+
 def _mix2(a, b):
     return ((a * 1000003) ^ b) & _HASH_MASK
 
@@ -705,6 +717,7 @@ def _mk_w_litnat(val):
 
 _INTERN_STR_NAME = {}      # int -> list[StrName]
 _INTERN_NUM_NAME = {}      # int -> list[NumName]
+_INTERN_W_APP = {}         # int -> list[W_App]
 _INTERN_W_CONST = {}       # int -> list[W_Const]
 _INTERN_W_PROJ = {}        # int -> list[W_Proj]
 _INTERN_W_LET = {}         # int -> list[W_Let]
@@ -756,7 +769,7 @@ def _mk_num_name(parent, idx):
 
 def _mk_level_succ(parent):
     assert isinstance(parent, W_Level)
-    h = (parent._hash * 1000003) & _HASH_MASK
+    h = _mix1(parent._hash)
     bucket = _INTERN_LEVEL_SUCC.get(h, None)
     if bucket is None:
         e = W_LevelSucc(parent)
@@ -806,7 +819,7 @@ def _mk_level_imax(lhs, rhs):
 
 def _mk_level_param(name):
     assert isinstance(name, Name)
-    h = (name._hash * 1000003) & _HASH_MASK
+    h = _mix1(name._hash)
     bucket = _INTERN_LEVEL_PARAM.get(h, None)
     if bucket is None:
         e = W_LevelParam(name)
@@ -822,7 +835,7 @@ def _mk_level_param(name):
 
 def _mk_w_sort(level):
     assert isinstance(level, W_Level)
-    h = (level._hash * 1000003) & _HASH_MASK
+    h = _mix1(level._hash)
     bucket = _INTERN_W_SORT.get(h, None)
     if bucket is None:
         e = W_Sort(level)
@@ -894,15 +907,36 @@ def _mk_binder_strict_implicit(name, type):
     return Binder(name=name, type=type, left="\xe2\xa6\x83", right="\xe2\xa6\x84")
 
 
-# W_App / W_Lambda / W_ForAll are NOT hash-consed (see comment by
-# `_INTERN_BINDER_DEFAULT`); the factories below just allocate
-# directly. They exist as a single named entry-point per type so
-# that callers don't have to know which kinds are interned and which
-# aren't — and so we can revisit interning these types in isolation
-# without chasing callsites again.
+# W_App is hash-consed via `_INTERN_W_APP`. Its fields (`fn`, `arg`)
+# are themselves W_Exprs, mostly drawn from already-interned classes
+# (`W_Const`, `W_Sort`, `W_Proj`, …) or from other interned W_Apps,
+# so identity-keyed bucket lookup finds duplicates reliably during
+# reduction (the case `assemble*`-family `init.ndjson` decls hit).
+#
+# W_Lambda / W_ForAll are NOT hash-consed: their binders carry a
+# mutable `_fvar` slot used by `binder.fvar()` to hand out a stable
+# FVar for that *binding occurrence*, so binders themselves can't
+# be interned (see the comment by `_mk_binder_default`). Without
+# binder interning, identity-keyed W_Lambda lookup would almost never
+# find a match (each instantiation creates a fresh binder via
+# `binder.instantiate(...)`), so interning would only pay for the
+# bucket scan without yielding sharing.
 
 def _mk_app(fn, arg):
-    return W_App(fn, arg)
+    assert isinstance(fn, W_Expr)
+    assert isinstance(arg, W_Expr)
+    h = _mix2(fn._hash, arg._hash)
+    bucket = _INTERN_W_APP.get(h, None)
+    if bucket is None:
+        e = W_App(fn, arg)
+        _INTERN_W_APP[h] = [e]
+        return e
+    for existing in bucket:
+        if existing.fn is fn and existing.arg is arg:
+            return existing
+    e = W_App(fn, arg)
+    bucket.append(e)
+    return e
 
 
 def _mk_w_lambda(binder, body):
