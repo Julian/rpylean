@@ -7,7 +7,7 @@ from rpython.rlib.rfile import create_stdio
 import os
 
 from rpylean._tokens import ERROR, FORMAT_COLOR, PROMPT, TokenWriter
-from rpylean.environment import StreamTracer
+from rpylean.environment import StreamTracer, TypeChecker
 from rpylean.objects import Name
 
 
@@ -157,7 +157,7 @@ def reduce_decl(env, args, _, stdoutw, stderrw):
     prev_tracer = env.tracer
     env.tracer = StreamTracer(stdoutw)
     try:
-        const.whnf(env)
+        const.whnf(TypeChecker(env, declaration))
     finally:
         env.tracer = prev_tracer
 

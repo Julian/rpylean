@@ -4793,13 +4793,12 @@ class W_Definition(W_DeclarationKind):
         exporter.emit_def(decl, self.value, self.hint)
 
     def type_check(self, type, tc):
-        env = tc.env
-        type_type = type.infer(env)
-        if not isinstance(type_type.whnf(env), W_Sort):
-            return W_NotASort(env, type, inferred_type=type_type, name=None)
-        val_type = self.value.infer(env)
-        if not env.def_eq(type, val_type):
-            return W_TypeError(env, self.value, type, inferred_type=val_type)
+        type_type = type.infer(tc)
+        if not isinstance(type_type.whnf(tc), W_Sort):
+            return W_NotASort(tc, type, inferred_type=type_type, name=None)
+        val_type = self.value.infer(tc)
+        if not tc.def_eq(type, val_type):
+            return W_TypeError(tc, self.value, type, inferred_type=val_type)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
@@ -4857,16 +4856,15 @@ class W_Theorem(W_DeclarationKind):
         exporter.emit_thm(decl, self.value)
 
     def type_check(self, type, tc):
-        env = tc.env
-        type_type = type.infer(env)
-        type_type_whnf = type_type.whnf(env)
+        type_type = type.infer(tc)
+        type_type_whnf = type_type.whnf(tc)
         if not isinstance(type_type_whnf, W_Sort):
-            return W_NotASort(env, type, inferred_type=type_type, name=None)
+            return W_NotASort(tc, type, inferred_type=type_type, name=None)
         if not type_type_whnf.level.eq(W_LEVEL_ZERO):
-            return W_NotAProp(env, type, inferred_sort=type_type_whnf, name=None)
-        val_type = self.value.infer(env)
-        if not env.def_eq(type, val_type):
-            return W_TypeError(env, self.value, type, inferred_type=val_type)
+            return W_NotAProp(tc, type, inferred_sort=type_type_whnf, name=None)
+        val_type = self.value.infer(tc)
+        if not tc.def_eq(type, val_type):
+            return W_TypeError(tc, self.value, type, inferred_type=val_type)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
@@ -4889,10 +4887,9 @@ class W_Axiom(W_DeclarationKind):
         return result
 
     def type_check(self, type, tc):
-        env = tc.env
-        type_type = type.infer(env)
-        if not isinstance(type_type.whnf(env), W_Sort):
-            return W_NotASort(env, type, inferred_type=type_type, name=None)
+        type_type = type.infer(tc)
+        if not isinstance(type_type.whnf(tc), W_Sort):
+            return W_NotASort(tc, type, inferred_type=type_type, name=None)
 
 
 class W_Quotient(W_DeclarationKind):
@@ -4944,10 +4941,9 @@ class W_Quotient(W_DeclarationKind):
         exporter.emit_quot(decl, self.kind_str())
 
     def type_check(self, type, tc):
-        env = tc.env
-        type_type = type.infer(env)
-        if not isinstance(type_type.whnf(env), W_Sort):
-            return W_NotASort(env, type, inferred_type=type_type, name=None)
+        type_type = type.infer(tc)
+        if not isinstance(type_type.whnf(tc), W_Sort):
+            return W_NotASort(tc, type, inferred_type=type_type, name=None)
 
     def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
         # rpylean displays quot decls as ordinary axioms.
@@ -5061,19 +5057,18 @@ class W_Inductive(W_DeclarationKind):
         return self.constructors[0].type.binder_name(self.num_params + index)
 
     def type_check(self, type, tc):
-        env = tc.env
         target = type
         for depth in range(self.num_params + self.num_indices):
             if not isinstance(target, W_ForAll):
-                return W_NotASort(env, type, inferred_type=target, name=None)
+                return W_NotASort(tc, type, inferred_type=target, name=None)
             target = target.body.instantiate(target.binder.fvar(), depth)
-        target_sort = target.whnf(env)
+        target_sort = target.whnf(tc)
         if not isinstance(target_sort, W_Sort):
             return W_NotASort(
-                env, type, inferred_type=target.infer(env), name=None,
+                tc, type, inferred_type=target.infer(tc), name=None,
             )
         for ctor in self.constructors:
-            error = self._check_constructor(ctor, target_sort.level, env)
+            error = self._check_constructor(ctor, target_sort.level, tc)
             if error is not None:
                 return error
 

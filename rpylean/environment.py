@@ -430,20 +430,442 @@ class TypeChecker(object):
     Per-declaration type-checking context.
 
     Created by `Environment.type_check_one` at the start of each decl
-    check and discarded when the check returns. The class is currently
-    a thin scaffold — it owns the parent `Environment` reference and
-    the decl being checked, so callees can be passed a `tc` instead of
-    an `env` without needing per-decl state moved over yet. Subsequent
-    commits move `heartbeat`, the per-decl arenas, and the per-TC
-    caches onto this object so they're naturally bounded by decl scope.
+    check and discarded when the check returns. Owns the per-decl
+    mutable state — the heartbeat counter, and `def_eq` / `infer` /
+    associated reduction helpers which all read it. Persistent
+    run-config (declarations, tracer, max_heartbeat, count_heartbeats)
+    is reached via `self.env`.
     """
 
-    _attrs_ = ['env', 'decl']
-    _immutable_fields_ = ['env', 'decl']
+    _attrs_ = [
+        'env', 'decl', 'heartbeat',
+        'declarations', 'tracer',
+        'max_heartbeat', 'count_heartbeats',
+    ]
+    # `declarations` etc. are mirrored from the env at construction so
+    # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
+    # `env.declarations` / `env.tracer` / `env.def_eq` / `env.infer`
+    # continue to work when handed a `TypeChecker` — those fields are
+    # quasi-immutable on `Environment`, so the snapshot is stable for
+    # the lifetime of the TC.
+    _immutable_fields_ = [
+        'env', 'decl',
+        'declarations',
+        'tracer?', 'max_heartbeat?', 'count_heartbeats?',
+    ]
+
+    # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
+    # `expr.whnf` is idempotent (cached on the instance), so each side
+    # makes at most one step of progress and the loop bottoms out in a
+    # handful of iterations regardless; the cap is just to rule out
+    # runaway behaviour on pathological inputs.
+    _LAZY_DELTA_MAX_ITER = 32
 
     def __init__(self, env, decl):
         self.env = env
         self.decl = decl
+        self.heartbeat = 0
+        self.declarations = env.declarations
+        self.tracer = env.tracer
+        self.max_heartbeat = env.max_heartbeat
+        self.count_heartbeats = env.count_heartbeats
+
+    # ---- public def_eq / infer entry points ----------------------------
+
+    def def_eq(self, expr1, expr2):
+        """
+        Check if two expressions are definitionally equal.
+        """
+        env = self.env
+        max_heartbeat = env.max_heartbeat
+        if max_heartbeat > 0 or env.count_heartbeats:
+            self.heartbeat += 1
+            if max_heartbeat > 0 and self.heartbeat > max_heartbeat:
+                raise HeartbeatExceeded(
+                    self.decl,
+                    self.heartbeat,
+                    max_heartbeat,
+                )
+
+        tracer = env.tracer
+        tracer.enter(expr1, expr2, env.declarations)
+
+        # Pointer-equality fast path before WHNF: shared subexpressions
+        # are very common in proof terms (the DAG that lean4export
+        # produces is heavily shared), so WHNFing the same instance
+        # twice just to discover it's equal to itself wastes work.
+        if expr1 is expr2:
+            return tracer.result(True)
+
+        # Structural-equality fast path before WHNF: catches DAG
+        # fragments that are equal but live in distinct instances —
+        # e.g. things produced by reduction rather than parsed. The
+        # walk piggy-backs on identity at each level (see
+        # `syntactic_eq`) so it remains cheap for shared subtrees.
+        if syntactic_eq(expr1, expr2):
+            return tracer.result(True)
+
+        # Lazy delta reduction: when both sides are application spines
+        # headed by the same delta-reducible constant, compare args
+        # *before* unfolding either head. Mirrors lean4's
+        # `isDefEqLazyDelta`. Crucial for proof terms in the
+        # `String.Decode` / BitVec / UIntN family, whose bodies are
+        # long `congr (congrArg f h) (ite_congr ...)` chains: the
+        # spines line up structurally so we should never delta-reduce
+        # through `instHMod → UInt32.mod → BitVec.umod → Fin.mod`
+        # just to compare two identical arg subtrees.
+        if self._try_lazy_delta(expr1, expr2):
+            return tracer.result(True)
+
+        # Reduce both to WHNF so heads are in canonical form.
+        expr1 = expr1.whnf(self)
+        expr2 = expr2.whnf(self)
+
+        # Pointer equality after WHNF before invoking `_def_eq_core`'s
+        # structural dispatch — heads collapsed by WHNF often share.
+        if expr1 is expr2:
+            return tracer.result(True)
+
+        return tracer.result(self._def_eq_core(expr1, expr2))
+
+    def infer(self, expr):
+        """
+        Infer the type of ``expr``.
+
+        The hot classes (`W_App`, `W_Lambda`, `W_ForAll`, `W_Const`)
+        hit a per-instance inline cache slot — DAG-shared
+        subexpressions otherwise turn into O(2ⁿ) re-inference, so this
+        matters even when the JIT is involved. Cold classes (`W_Let`,
+        `W_Proj`, `W_Sort`, literals, vars) re-compute on each call;
+        they're rare enough on hot paths that a dict-based fallback
+        wasn't paying for the JIT-hostile lookups it added to the
+        def_eq trace.
+        """
+        cls = expr.__class__
+        if cls is W_App:
+            assert isinstance(expr, W_App)
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
+            result = expr.infer(self)
+            expr._infer_cache_env = self
+            expr._infer_cache_result = result
+            return result
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(expr, W_FunBase)
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
+            result = expr.infer(self)
+            expr._infer_cache_env = self
+            expr._infer_cache_result = result
+            return result
+        if cls is W_Const:
+            assert isinstance(expr, W_Const)
+            if expr._infer_cache_env is self:
+                return expr._infer_cache_result
+            result = expr.infer(self)
+            expr._infer_cache_env = self
+            expr._infer_cache_result = result
+            return result
+        return expr.infer(self)
+
+    # ---- inner helpers --------------------------------------------------
+
+    def _def_eq_core(self, expr1, expr2):
+        """
+        Core definitional equality logic, called after WHNF reduction.
+        """
+        # Closures are an internal representation of deferred
+        # substitution; peel any that survive WHNF here so the rest of
+        # the dispatch — and the JIT driver's greens — see canonical
+        # forms rather than closure wrappers.
+        if isinstance(expr1, W_Closure):
+            expr1 = expr1.force()
+        if isinstance(expr2, W_Closure):
+            expr2 = expr2.force()
+
+        # Merge point sits at the structural-dispatch entry: heads are
+        # post-WHNF and post-closure-force here, so the JIT specializes
+        # on the left head's class — the same dispatch the code below
+        # switches on.
+        def_eq_jitdriver.jit_merge_point(
+            expr1_class=expr1.__class__,
+            expr1=expr1,
+            expr2=expr2,
+            env=self,
+        )
+
+        # The greens above already promote the classes for the JIT;
+        # the explicit `promote` calls give the annotator the same
+        # hint on the untranslated/non-JIT path.
+        cls1 = promote(expr1.__class__)
+        cls2 = promote(expr2.__class__)
+
+        # Fast-path: syntactically identical expressions are def-eq
+        # without needing to infer types or do proof-irrelevance work.
+        # Critical for avoiding redundant type inference on every
+        # recursive def_eq call over a large expression tree.
+        if cls1 is cls2 and syntactic_eq(expr1, expr2):
+            return True
+
+        # Proof irrelevance: two proofs of the same Prop are equal.
+        expr1_ty = expr1.infer(self)
+        if syntactic_eq(expr1_ty.infer(self), PROP):
+            expr2_ty = expr2.infer(self)
+            if syntactic_eq(expr2_ty.infer(self), PROP):
+                if self.def_eq(expr1_ty, expr2_ty):
+                    return True
+
+        if cls1 is cls2:
+            if cls1 is W_Const:
+                assert isinstance(expr1, W_Const)
+                assert isinstance(expr2, W_Const)
+                names_eq = expr1.name.syntactic_eq(expr2.name)
+            else:
+                names_eq = True
+            if names_eq:
+                if expr1.def_eq(expr2, self.def_eq):
+                    return True
+                return self.def_eq_unit(expr1, expr2)
+
+        # Only perform this check after we've already tried reduction,
+        # since this check can get fail in cases like
+        # '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
+        expr2_eta = self.try_eta_expand(expr1, expr2)
+        if expr2_eta is not None:
+            return self.def_eq(expr1, expr2_eta)
+        expr1_eta = self.try_eta_expand(expr2, expr1)
+        if expr1_eta is not None:
+            return self.def_eq(expr1_eta, expr2)
+
+        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
+        if self.try_struct_eta(expr1, expr2):
+            return True
+        if self.try_struct_eta(expr2, expr1):
+            return True
+
+        if self.def_eq_unit(expr1, expr2):
+            return True
+
+        # As the *very* last step, expose a single Nat constructor from
+        # any remaining `W_LitNat`. We only peel one `Nat.succ` per
+        # def-eq call: if the other side is `Nat.succ Y`, the recursive
+        # def-eq descends into `(W_LitNat (val-1), Y)` and we loop only
+        # as deep as the other side's actual `Nat.succ` nesting. If the
+        # other side is anything else, def-eq bails immediately. This
+        # keeps `UInt32.size`-sized literals (2^32) from materialising
+        # ~4 billion `Nat.succ` nodes the way `build_nat_expr` did.
+        if cls1 is W_LitNat:
+            return self.def_eq(expr1.one_step_constructor(), expr2)
+        elif isinstance(expr2, W_LitNat):
+            return self.def_eq(expr1, expr2.one_step_constructor())
+
+        if cls1 is W_LitStr:
+            return self.def_eq(expr1.build_str_expr(self), expr2)
+        elif isinstance(expr2, W_LitStr):
+            return self.def_eq(expr1, expr2.build_str_expr(self))
+
+        return False
+
+    def _try_lazy_delta(self, expr1, expr2):
+        """
+        Iterative lazy delta reduction, mirroring lean4's
+        ``isDefEqLazyDelta``: walk the heads of ``expr1`` and ``expr2``
+        in sync, unfolding one side at a time and short-circuiting
+        whenever a same-head args check succeeds.
+
+        Returns ``True`` iff a same-head args check passes; returns
+        ``False`` to mean "can't decide here, fall through to the
+        WHNF + ``_def_eq_core`` path". **Never** returns ``False``
+        meaning "the expressions are unequal".
+
+        Which side to unfold is decided by ``W_Definition.hint``:
+        an abbrev (``HINT_ABBREV``) unfolds before a regular def, and
+        among regulars the higher-height side unfolds first. Higher
+        height means a definition layered on top of lower-height ones,
+        so peeling it off pushes both sides toward a common lower-level
+        form.
+        """
+        for _ in range(self._LAZY_DELTA_MAX_ITER):
+            kind1 = self._delta_kind(expr1.head())
+            kind2 = self._delta_kind(expr2.head())
+
+            # Neither side is delta-reducible: lazy delta has nothing
+            # more to offer; let the caller's WHNF + _def_eq_core path
+            # handle it.
+            if kind1 is None and kind2 is None:
+                return False
+
+            # Exactly one side reducible: unfold that one and retry.
+            if kind1 is None:
+                new_e2 = expr2.whnf(self)
+                if new_e2 is expr2:
+                    return False
+                expr2 = new_e2
+                continue
+            if kind2 is None:
+                new_e1 = expr1.whnf(self)
+                if new_e1 is expr1:
+                    return False
+                expr1 = new_e1
+                continue
+
+            # Both delta-reducible. Pick which side to unfold.
+            hint1 = kind1.hint
+            hint2 = kind2.hint
+
+            if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
+                new_e1 = expr1.whnf(self)
+                if new_e1 is expr1:
+                    return False
+                expr1 = new_e1
+                continue
+            if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
+                new_e2 = expr2.whnf(self)
+                if new_e2 is expr2:
+                    return False
+                expr2 = new_e2
+                continue
+
+            # Same-head args fast path. Two app spines headed by the
+            # same `W_Const` (with matching levels) are def-equal iff
+            # their args are pairwise def-equal — no need to unfold
+            # the head at all.
+            head1, args1 = expr1.unapp()
+            head2, args2 = expr2.unapp()
+            if syntactic_eq(head1, head2) and len(args1) == len(args2):
+                all_eq = True
+                for j in range(len(args1)):
+                    if not self.def_eq(args1[j], args2[j]):
+                        all_eq = False
+                        break
+                if all_eq:
+                    return True
+
+            # Heights differ: unfold the higher one.
+            if hint1 > hint2:
+                new_e1 = expr1.whnf(self)
+                if new_e1 is expr1:
+                    return False
+                expr1 = new_e1
+                continue
+            if hint1 < hint2:
+                new_e2 = expr2.whnf(self)
+                if new_e2 is expr2:
+                    return False
+                expr2 = new_e2
+                continue
+
+            # Same height, and same-head args either failed or
+            # arities/heads didn't match. Unfold both; if neither made
+            # progress, bail.
+            new_e1 = expr1.whnf(self)
+            new_e2 = expr2.whnf(self)
+            if new_e1 is expr1 and new_e2 is expr2:
+                return False
+            expr1 = new_e1
+            expr2 = new_e2
+
+        return False
+
+    def _delta_kind(self, head):
+        """Return ``head``'s ``W_Definition`` kind if ``head`` is a
+        delta-reducible constant — i.e. a definition that's neither
+        an opaque nor a constructor/inductive/recursor (those don't
+        subclass ``W_Definition``). Returns ``None`` otherwise.
+        """
+        if not isinstance(head, W_Const):
+            return None
+        decl = self.env.declarations.get(head.name, None)
+        if decl is None:
+            return None
+        kind = decl.w_kind
+        if not isinstance(kind, W_Definition):
+            return None
+        if kind.get_delta_reduce_target() is None:
+            return None
+        return kind
+
+    def def_eq_unit(self, expr1, expr2):
+        """
+        Unit-like definitional equality: any two values of a
+        non-recursive structure with zero indices and a zero-field
+        constructor are def-eq — there are no fields to disagree on,
+        so equality follows from the types matching.
+        """
+        expr1_ty = expr1.infer(self).whnf(self)
+        head = expr1_ty.head()
+        if not isinstance(head, W_Const):
+            return False
+        decl = get_decl(self.env.declarations, head.name)
+        ind = decl.w_kind
+        if not isinstance(ind, W_Inductive):
+            return False
+        if not ind.is_non_recursive_structure():
+            return False
+        if ind.num_indices != 0:
+            return False
+        first_ctor_kind = ind.constructors[0].w_kind
+        assert isinstance(first_ctor_kind, W_Constructor)
+        if first_ctor_kind.num_fields != 0:
+            return False
+        expr2_ty = expr2.infer(self)
+        return self.def_eq(expr1_ty, expr2_ty)
+
+    def try_eta_expand(self, expr1, expr2):
+        if isinstance(expr1, W_Lambda):
+            expr2_ty = expr2.infer(self).whnf(self)
+            if isinstance(expr2_ty, W_Closure):
+                expr2_ty = expr2_ty.force()
+            if isinstance(expr2_ty, W_ForAll):
+                # Turn 'f' into 'fun x => f x'
+                return fun(expr2_ty.binder)(
+                    expr2.incr_free_bvars(1, 0).app(_mk_w_bvar(0)),
+                )
+        return None
+
+    def try_struct_eta(self, ctor_side, other_side):
+        """
+        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
+        """
+        head, args = ctor_side.unapp()
+
+        if not isinstance(head, W_Const):
+            return False
+
+        ctor_decl = get_decl(self.env.declarations, head.name)
+        ctor_kind = ctor_decl.w_kind
+        if not isinstance(ctor_kind, W_Constructor):
+            return False
+
+        num_params = ctor_kind.num_params
+        num_fields = ctor_kind.num_fields
+
+        if len(args) != num_params + num_fields:
+            return False
+
+        ctor_ty = ctor_side.infer(self).whnf(self)
+        result_head = ctor_ty.head()
+        if not isinstance(result_head, W_Const):
+            return False
+        struct_name = result_head.name
+        inductive_decl = get_decl(self.env.declarations, struct_name)
+        if not isinstance(inductive_decl.w_kind, W_Inductive):
+            return False
+        ind = inductive_decl.w_kind
+        if not ind.is_non_recursive_structure():
+            return False
+
+        if not self.def_eq(ctor_ty, other_side.infer(self)):
+            return False
+
+        args.reverse()
+        i = 0
+        while i < num_fields:
+            proj = struct_name.proj(i, other_side)
+            if not self.def_eq(proj, args[num_params + i]):
+                return False
+            i += 1
+        return True
 
 
 class CheckResult(object):
@@ -534,8 +956,7 @@ class Environment(object):
 
     _attrs_ = [
         'declarations', 'tracer',
-        'heartbeat', 'max_heartbeat', 'count_heartbeats',
-        '_current_decl',
+        'max_heartbeat', 'count_heartbeats',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -555,49 +976,8 @@ class Environment(object):
     def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
         self.tracer = tracer
-        self.heartbeat = 0
         self.max_heartbeat = 0
         self.count_heartbeats = False
-        self._current_decl = None
-
-    def infer(self, expr):
-        """
-        Infer the type of ``expr``.
-
-        The hot classes (`W_App`, `W_Lambda`, `W_ForAll`, `W_Const`) hit
-        a per-instance inline cache slot — DAG-shared subexpressions
-        otherwise turn into O(2ⁿ) re-inference, so this matters even
-        when the JIT is involved. Cold classes (`W_Let`, `W_Proj`,
-        `W_Sort`, literals, vars) re-compute on each call; they're rare
-        enough on hot paths that a dict-based fallback wasn't paying
-        for the JIT-hostile lookups it added to the def_eq trace.
-        """
-        cls = expr.__class__
-        if cls is W_App:
-            assert isinstance(expr, W_App)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
-            result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
-            return result
-        if cls is W_Lambda or cls is W_ForAll:
-            assert isinstance(expr, W_FunBase)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
-            result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
-            return result
-        if cls is W_Const:
-            assert isinstance(expr, W_Const)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
-            result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
-            return result
-        return expr.infer(self)
 
     @not_rpython
     def __getitem__(self, value):
@@ -661,10 +1041,6 @@ class Environment(object):
             pp(self, decl)
 
         tc = TypeChecker(self, decl)
-        # FIXME: heartbeat / _current_decl still live on Environment;
-        # next commit moves them onto `tc`.
-        self.heartbeat = 0
-        self._current_decl = decl
         error = None
         gc_start = _gc_time_seconds()
         bytes_start = _bytes_allocated()
@@ -699,7 +1075,7 @@ class Environment(object):
         peak_growth = _peak_memory() - peak_start
         return CheckResult(
             elapsed, gc_elapsed, bytes_allocated, live_memory,
-            peak_growth, self.heartbeat, error,
+            peak_growth, tc.heartbeat, error,
         )
 
     def all(self):
@@ -730,390 +1106,22 @@ class Environment(object):
 
     def def_eq(self, expr1, expr2):
         """
-        Check if two expressions are definitionally equal.
+        Definitional equality, with a transient `TypeChecker`.
+
+        Each call gets its own `TypeChecker(self, None)`; heartbeat
+        counting won't accumulate across calls. Tests and REPL paths
+        that just need a single comparison use this. Production paths
+        (type_check_one) construct one TC and call `tc.def_eq` directly
+        so heartbeat and any per-decl caches are properly scoped.
         """
-        max_heartbeat = self.max_heartbeat
-        if max_heartbeat > 0 or self.count_heartbeats:
-            self.heartbeat += 1
-            if max_heartbeat > 0 and self.heartbeat > max_heartbeat:
-                raise HeartbeatExceeded(
-                    self._current_decl,
-                    self.heartbeat,
-                    max_heartbeat,
-                )
+        return TypeChecker(self, None).def_eq(expr1, expr2)
 
-        tracer = self.tracer
-        tracer.enter(expr1, expr2, self.declarations)
-
-        # Pointer-equality fast path before WHNF: shared subexpressions
-        # are very common in proof terms (the DAG that lean4export
-        # produces is heavily shared), so WHNFing the same instance
-        # twice just to discover it's equal to itself wastes work.
-        if expr1 is expr2:
-            return tracer.result(True)
-
-        # Structural-equality fast path before WHNF: catches DAG
-        # fragments that are equal but live in distinct instances —
-        # e.g. things produced by reduction rather than parsed. The
-        # walk piggy-backs on identity at each level (see
-        # `syntactic_eq`) so it remains cheap for shared subtrees.
-        if syntactic_eq(expr1, expr2):
-            return tracer.result(True)
-
-        # Lazy delta reduction: when both sides are application spines
-        # headed by the same delta-reducible constant, compare args
-        # *before* unfolding either head. Mirrors lean4's
-        # `isDefEqLazyDelta`. Crucial for proof terms in the
-        # `String.Decode` / BitVec / UIntN family, whose bodies are
-        # long `congr (congrArg f h) (ite_congr ...)` chains: the
-        # spines line up structurally so we should never delta-reduce
-        # through `instHMod → UInt32.mod → BitVec.umod → Fin.mod`
-        # just to compare two identical arg subtrees.
-        if self._try_lazy_delta(expr1, expr2):
-            return tracer.result(True)
-
-        # Reduce both to WHNF so heads are in canonical form.
-        expr1 = expr1.whnf(self)
-        expr2 = expr2.whnf(self)
-
-        # Pointer equality after WHNF before invoking `_def_eq_core`'s
-        # structural dispatch — heads collapsed by WHNF often share.
-        if expr1 is expr2:
-            return tracer.result(True)
-
-        return tracer.result(self._def_eq_core(expr1, expr2))
-
-    def _def_eq_core(self, expr1, expr2):
+    def infer(self, expr):
         """
-        Core definitional equality logic, called after WHNF reduction.
+        Type inference, with a transient `TypeChecker`. See `def_eq`.
         """
-        # Closures are an internal representation of deferred substitution;
-        # peel any that survive WHNF here so the rest of the dispatch —
-        # and the JIT driver's greens — see canonical forms rather than
-        # closure wrappers.
-        if isinstance(expr1, W_Closure):
-            expr1 = expr1.force()
-        if isinstance(expr2, W_Closure):
-            expr2 = expr2.force()
+        return TypeChecker(self, None).infer(expr)
 
-        # Merge point sits at the structural-dispatch entry: heads are
-        # post-WHNF and post-closure-force here, so the JIT specializes
-        # on the left head's class — the same dispatch the code below
-        # switches on.
-        def_eq_jitdriver.jit_merge_point(
-            expr1_class=expr1.__class__,
-            expr1=expr1,
-            expr2=expr2,
-            env=self,
-        )
-
-        # The greens above already promote the classes for the JIT; the
-        # explicit `promote` calls give the annotator the same hint on
-        # the untranslated/non-JIT path.
-        cls1 = promote(expr1.__class__)
-        cls2 = promote(expr2.__class__)
-
-        # Fast-path: syntactically identical expressions are def-eq without
-        # needing to infer types or do proof-irrelevance work. Critical for
-        # avoiding redundant type inference on every recursive def_eq call
-        # over a large expression tree.
-        if cls1 is cls2 and syntactic_eq(expr1, expr2):
-            return True
-
-        # Proof irrelevance: two proofs of the same Prop are equal.
-        expr1_ty = expr1.infer(self)
-        if syntactic_eq(expr1_ty.infer(self), PROP):
-            expr2_ty = expr2.infer(self)
-            if syntactic_eq(expr2_ty.infer(self), PROP):
-                if self.def_eq(expr1_ty, expr2_ty):
-                    return True
-
-        if cls1 is cls2:
-            if cls1 is W_Const:
-                assert isinstance(expr1, W_Const)
-                assert isinstance(expr2, W_Const)
-                names_eq = expr1.name.syntactic_eq(expr2.name)
-            else:
-                names_eq = True
-            if names_eq:
-                if expr1.def_eq(expr2, self.def_eq):
-                    return True
-                return self.def_eq_unit(expr1, expr2)
-
-        # Only perform this check after we've already tried reduction,
-        # since this check can get fail in cases like '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
-
-        expr2_eta = self.try_eta_expand(expr1, expr2)
-        if expr2_eta is not None:
-            return self.def_eq(expr1, expr2_eta)
-        expr1_eta = self.try_eta_expand(expr2, expr1)
-        if expr1_eta is not None:
-            return self.def_eq(expr1_eta, expr2)
-
-        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
-        if self.try_struct_eta(expr1, expr2):
-            return True
-        if self.try_struct_eta(expr2, expr1):
-            return True
-
-        if self.def_eq_unit(expr1, expr2):
-            return True
-
-        # As the *very* last step, expose a single Nat constructor from
-        # any remaining `W_LitNat`. We only peel one `Nat.succ` per
-        # def-eq call: if the other side is `Nat.succ Y`, the recursive
-        # def-eq descends into `(W_LitNat (val-1), Y)` and we loop only
-        # as deep as the other side's actual `Nat.succ` nesting. If the
-        # other side is anything else, def-eq bails immediately. This
-        # keeps `UInt32.size`-sized literals (2^32) from materialising
-        # ~4 billion `Nat.succ` nodes the way `build_nat_expr` did.
-        if cls1 is W_LitNat:
-            return self.def_eq(expr1.one_step_constructor(), expr2)
-        elif isinstance(expr2, W_LitNat):
-            return self.def_eq(expr1, expr2.one_step_constructor())
-
-        if cls1 is W_LitStr:
-            return self.def_eq(expr1.build_str_expr(self), expr2)
-        elif isinstance(expr2, W_LitStr):
-            return self.def_eq(expr1, expr2.build_str_expr(self))
-
-        return False
-
-    # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
-    # `expr.whnf` is idempotent (cached on the instance), so each
-    # side makes at most one step of progress and the loop bottoms
-    # out in a handful of iterations regardless; the cap is just to
-    # rule out runaway behaviour on pathological inputs.
-    _LAZY_DELTA_MAX_ITER = 32
-
-    def _try_lazy_delta(self, expr1, expr2):
-        """
-        Iterative lazy delta reduction, mirroring lean4's
-        ``isDefEqLazyDelta``: walk the heads of ``expr1`` and
-        ``expr2`` in sync, unfolding one side at a time and
-        short-circuiting whenever a same-head args check succeeds.
-
-        Returns ``True`` iff a same-head args check passes; returns
-        ``False`` to mean "can't decide here, fall through to the
-        WHNF + ``_def_eq_core`` path". **Never** returns ``False``
-        meaning "the expressions are unequal".
-
-        Which side to unfold is decided by ``W_Definition.hint``:
-        an abbrev (``HINT_ABBREV``) unfolds before a regular def,
-        and among regulars the higher-height side unfolds first.
-        Higher height means a definition layered on top of
-        lower-height ones, so peeling it off pushes both sides
-        toward a common lower-level form.
-        """
-        for _ in range(self._LAZY_DELTA_MAX_ITER):
-            kind1 = self._delta_kind(expr1.head())
-            kind2 = self._delta_kind(expr2.head())
-
-            # Neither side is delta-reducible: lazy delta has nothing
-            # more to offer; let the caller's WHNF + _def_eq_core
-            # path handle it.
-            if kind1 is None and kind2 is None:
-                return False
-
-            # Exactly one side reducible: unfold that one and retry.
-            # WHNF is idempotent (cached on the instance) so a
-            # second WHNF of the same instance signals "no further
-            # progress possible on this side" and we bail.
-            if kind1 is None:
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
-                continue
-            if kind2 is None:
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
-                continue
-
-            # Both delta-reducible. Pick which side to unfold.
-            hint1 = kind1.hint
-            hint2 = kind2.hint
-
-            # Abbrevs unfold ahead of regular defs, regardless of
-            # the numeric `hint` value (in our encoding abbrev is
-            # -1, so straight height comparison would unfold the
-            # *regular* side, which is the wrong way around).
-            if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
-                continue
-            if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
-                continue
-
-            # Same-head args fast path. Two app spines headed by the
-            # same `W_Const` (with matching levels) are def-equal iff
-            # their args are pairwise def-equal — no need to unfold
-            # the head at all. We only ``unapp`` here, after the
-            # cheap head/hint checks have committed us to looking at
-            # args, so the bail-out cases above avoid the spine-list
-            # allocation.
-            head1, args1 = expr1.unapp()
-            head2, args2 = expr2.unapp()
-            if syntactic_eq(head1, head2) and len(args1) == len(args2):
-                all_eq = True
-                for j in range(len(args1)):
-                    if not self.def_eq(args1[j], args2[j]):
-                        all_eq = False
-                        break
-                if all_eq:
-                    return True
-
-            # Heights differ: unfold the higher one.
-            if hint1 > hint2:
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
-                continue
-            if hint1 < hint2:
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
-                continue
-
-            # Same height, and same-head args either failed or
-            # arities/heads didn't match. Unfold both; if neither
-            # made progress, bail.
-            new_e1 = expr1.whnf(self)
-            new_e2 = expr2.whnf(self)
-            if new_e1 is expr1 and new_e2 is expr2:
-                return False
-            expr1 = new_e1
-            expr2 = new_e2
-
-        return False
-
-    def _delta_kind(self, head):
-        """Return ``head``'s ``W_Definition`` kind if ``head`` is a
-        delta-reducible constant — i.e. a definition that's neither
-        an opaque nor a constructor/inductive/recursor (those don't
-        subclass ``W_Definition``). Returns ``None`` otherwise.
-        """
-        if not isinstance(head, W_Const):
-            return None
-        decl = self.declarations.get(head.name, None)
-        if decl is None:
-            return None
-        kind = decl.w_kind
-        if not isinstance(kind, W_Definition):
-            return None
-        # `W_Opaque` is a `W_Definition` subclass whose
-        # `get_delta_reduce_target` returns ``None`` — rules it out.
-        if kind.get_delta_reduce_target() is None:
-            return None
-        return kind
-
-    def def_eq_unit(self, expr1, expr2):
-        """
-        Unit-like definitional equality: any two values of a
-        non-recursive structure with zero indices and a zero-field
-        constructor are def-eq — there are no fields to disagree on,
-        so equality follows from the types matching.
-        """
-        expr1_ty = expr1.infer(self).whnf(self)
-        head = expr1_ty.head()
-        if not isinstance(head, W_Const):
-            return False
-        decl = get_decl(self.declarations, head.name)
-        ind = decl.w_kind
-        if not isinstance(ind, W_Inductive):
-            return False
-        if not ind.is_non_recursive_structure():
-            return False
-        if ind.num_indices != 0:
-            return False
-        first_ctor_kind = ind.constructors[0].w_kind
-        assert isinstance(first_ctor_kind, W_Constructor)
-        if first_ctor_kind.num_fields != 0:
-            return False
-        expr2_ty = expr2.infer(self)
-        return self.def_eq(expr1_ty, expr2_ty)
-
-    def try_eta_expand(self, expr1, expr2):
-        if isinstance(expr1, W_Lambda):
-            expr2_ty = expr2.infer(self).whnf(self)
-            # WHNF can leave a `W_Closure` at the head — force it so
-            # the `isinstance(W_ForAll)` check below isn't dodged by
-            # a deferred substitution. Funext's proof routes through
-            # `congrArg` and stalls here without this; see
-            # `arena/perf/grind-ring-5`.
-            if isinstance(expr2_ty, W_Closure):
-                expr2_ty = expr2_ty.force()
-            if isinstance(expr2_ty, W_ForAll):
-                # Turn 'f' into 'fun x => f x'
-                return fun(expr2_ty.binder)(
-                    expr2.incr_free_bvars(1, 0).app(_mk_w_bvar(0)),
-                )
-        return None
-
-    def try_struct_eta(self, ctor_side, other_side):
-        """
-        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
-
-        If ctor_side is a fully applied constructor of a structure type,
-        and the types match, compare each field of the constructor
-        application with the corresponding projection of other_side.
-        """
-        # Decompose ctor_side into head + args
-        head, args = ctor_side.unapp()
-
-        if not isinstance(head, W_Const):
-            return False
-
-        # Check if head is a constructor
-        ctor_decl = get_decl(self.declarations, head.name)
-        ctor_kind = ctor_decl.w_kind
-        if not isinstance(ctor_kind, W_Constructor):
-            return False
-
-        num_params = ctor_kind.num_params
-        num_fields = ctor_kind.num_fields
-
-        # Must be fully applied
-        if len(args) != num_params + num_fields:
-            return False
-
-        # Check that ctor_side's type is a structure-like inductive.
-        ctor_ty = ctor_side.infer(self).whnf(self)
-        result_head = ctor_ty.head()
-        if not isinstance(result_head, W_Const):
-            return False
-        struct_name = result_head.name
-        inductive_decl = get_decl(self.declarations, struct_name)
-        if not isinstance(inductive_decl.w_kind, W_Inductive):
-            return False
-        ind = inductive_decl.w_kind
-        if not ind.is_non_recursive_structure():
-            return False
-
-        # Check that inferred types are def-eq
-        if not self.def_eq(ctor_ty, other_side.infer(self)):
-            return False
-
-        # Compare each field: Proj(i, other_side) ≟ args[num_params + i]
-        args.reverse()
-        i = 0
-        while i < num_fields:
-            proj = struct_name.proj(i, other_side)
-            if not self.def_eq(proj, args[num_params + i]):
-                return False
-            i += 1
-
-        return True
 
 
 #: The empty environment.

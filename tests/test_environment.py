@@ -1027,29 +1027,32 @@ class TestHeartbeat(object):
     def test_heartbeat_exceeded_is_an_error(self):
         """Exceeding the heartbeat limit raises HeartbeatExceeded."""
         from rpylean.exceptions import HeartbeatExceeded
+        from rpylean.environment import TypeChecker
 
         env = Environment.having([])
         env.max_heartbeat = 3
-        env._current_decl = Name.simple("Test").definition(type=TYPE, value=PROP)
+        decl = Name.simple("Test").definition(type=TYPE, value=PROP)
+        tc = TypeChecker(env, decl)
 
         # First 3 calls succeed
-        env.def_eq(PROP, PROP)
-        env.def_eq(PROP, PROP)
-        env.def_eq(PROP, PROP)
-        assert env.heartbeat == 3
+        tc.def_eq(PROP, PROP)
+        tc.def_eq(PROP, PROP)
+        tc.def_eq(PROP, PROP)
+        assert tc.heartbeat == 3
 
         with pytest.raises(HeartbeatExceeded) as exc_info:
-            env.def_eq(PROP, PROP)
+            tc.def_eq(PROP, PROP)
         error_str = str(exc_info.value)
         assert "in Test" in error_str
         assert "heartbeat limit exceeded" in error_str
 
     def test_check_one_resets_heartbeat(self):
-        """_check_one resets the heartbeat counter before each declaration."""
+        """`type_check_one` creates a fresh `TypeChecker` per decl, so
+        the heartbeat counter starts at 0 even if a previous run hit
+        the limit."""
         decl = Name.simple("OK").definition(type=TYPE, value=PROP)
         env = Environment.having([decl])
         env.max_heartbeat = 100
-        env.heartbeat = 99  # would overflow on next def_eq
 
         assert type_check(env=env) == []
 
