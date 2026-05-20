@@ -5472,6 +5472,7 @@ def _instantiate(cur, sub, depth):
     return cur.instantiate(sub, depth)
 
 
+@unroll_safe
 def _inst_app(app, sub, depth):
     if app._inst_cache_expr is sub and app._inst_cache_depth == depth:
         return app._inst_cache_result
@@ -5488,6 +5489,7 @@ def _inst_app(app, sub, depth):
     return result
 
 
+@unroll_safe
 def _inst_lambda(fun, sub, depth):
     if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
         return fun._inst_cache_result
@@ -5500,6 +5502,7 @@ def _inst_lambda(fun, sub, depth):
     return result
 
 
+@unroll_safe
 def _inst_forall(fun, sub, depth):
     if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
         return fun._inst_cache_result
