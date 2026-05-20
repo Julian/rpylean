@@ -39,11 +39,16 @@ def _whnf_printable_location(expr_class):
 # JIT driver for the WHNF reduction loop - the core hot path of type checking.
 # greens: expr_class determines which reduction rule applies
 # reds: the mutable state during reduction
+# is_recursive=True: WHNF can re-enter itself via subterm reduction (e.g.
+# `W_App._whnf_core` calling `expr.whnf(env)` on the function head, or
+# iota reduction going through def_eq → whnf again). Without the hint the
+# JIT bails on these mutually-recursive entries before specialising.
 whnf_jitdriver = JitDriver(
     greens=["expr_class"],
     reds=["made_progress", "expr", "env"],
     name="whnf",
     get_printable_location=_whnf_printable_location,
+    is_recursive=True,
 )
 
 
