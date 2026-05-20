@@ -518,6 +518,20 @@ class Environment(object):
         'heartbeat', 'max_heartbeat', 'count_heartbeats',
         '_current_decl', '_infer_cache',
     ]
+    # `declarations` is fully immutable: the reference is set in
+    # `__init__` and never reassigned (the dict's *contents* are
+    # mutated as decls are parsed, but the reference isn't).
+    # `tracer` / `max_heartbeat` / `count_heartbeats` change only at
+    # run-setup time (CLI options) or at REPL command boundaries —
+    # never inside the check loop — so quasi-immutable (`?`) lets the
+    # JIT compile assuming they're constant and invalidate only on the
+    # rare reassignment.
+    _immutable_fields_ = [
+        'declarations',
+        'tracer?',
+        'max_heartbeat?',
+        'count_heartbeats?',
+    ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
