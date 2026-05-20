@@ -4726,9 +4726,9 @@ class W_Declaration(_Item):
             mark=mark, span_holder=span_holder,
         )
 
-    def type_check(self, env):
+    def type_check(self, tc):
         try:
-            error = self.w_kind.type_check(self.type, env)
+            error = self.w_kind.type_check(self.type, tc)
         except W_CheckError as error:
             error.name = self.name
             error.declaration = self
@@ -4792,7 +4792,8 @@ class W_Definition(W_DeclarationKind):
         exporter.dump_deps(self.value)
         exporter.emit_def(decl, self.value, self.hint)
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         type_type = type.infer(env)
         if not isinstance(type_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=type_type, name=None)
@@ -4855,7 +4856,8 @@ class W_Theorem(W_DeclarationKind):
         exporter.dump_deps(self.value)
         exporter.emit_thm(decl, self.value)
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         type_type = type.infer(env)
         type_type_whnf = type_type.whnf(env)
         if not isinstance(type_type_whnf, W_Sort):
@@ -4886,7 +4888,8 @@ class W_Axiom(W_DeclarationKind):
         _append_marked_tokens(result, span_holder, type, constants, mark)
         return result
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         type_type = type.infer(env)
         if not isinstance(type_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=type_type, name=None)
@@ -4940,7 +4943,8 @@ class W_Quotient(W_DeclarationKind):
         exporter.begin_decl(decl)
         exporter.emit_quot(decl, self.kind_str())
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         type_type = type.infer(env)
         if not isinstance(type_type.whnf(env), W_Sort):
             return W_NotASort(env, type, inferred_type=type_type, name=None)
@@ -5056,7 +5060,8 @@ class W_Inductive(W_DeclarationKind):
             return None
         return self.constructors[0].type.binder_name(self.num_params + index)
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         target = type
         for depth in range(self.num_params + self.num_indices):
             if not isinstance(target, W_ForAll):
@@ -5236,7 +5241,7 @@ class W_Constructor(W_DeclarationKind):
         exporter.begin_decl(decl)
         exporter.emit_axiom(decl)
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
         # TODO - implement type checking
         # This includes checking that num_params and num_fields match the declared ctype
         pass
@@ -5327,7 +5332,8 @@ class W_Recursor(W_DeclarationKind):
             if ind in exporter.decls:
                 exporter.dump_constant(exporter.decls[ind])
 
-    def type_check(self, type, env):
+    def type_check(self, type, tc):
+        env = tc.env
         # Shape-level + rhs-head validation. Catches malformed exports
         # where:
         #   - the rec rules don't align with the inductive's ctors

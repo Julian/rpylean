@@ -425,6 +425,27 @@ def _write_by_name(writer, label, counts):
         writer.write_plain("  %d\t%s\n" % (count, name.str()))
 
 
+class TypeChecker(object):
+    """
+    Per-declaration type-checking context.
+
+    Created by `Environment.type_check_one` at the start of each decl
+    check and discarded when the check returns. The class is currently
+    a thin scaffold — it owns the parent `Environment` reference and
+    the decl being checked, so callees can be passed a `tc` instead of
+    an `env` without needing per-decl state moved over yet. Subsequent
+    commits move `heartbeat`, the per-decl arenas, and the per-TC
+    caches onto this object so they're naturally bounded by decl scope.
+    """
+
+    _attrs_ = ['env', 'decl']
+    _immutable_fields_ = ['env', 'decl']
+
+    def __init__(self, env, decl):
+        self.env = env
+        self.decl = decl
+
+
 class CheckResult(object):
     """
     The outcome of type-checking a single declaration.
@@ -622,6 +643,16 @@ class Environment(object):
             if result.error is not None:
                 yield result.error
 
+    def check_decl(self, decl):
+        """
+        Type-check a single declaration without the `CheckResult`
+        bookkeeping `type_check_one` does — returns the `W_Error` (or
+        ``None`` on success) directly. Convenience for tests and
+        scripts that want a one-shot check; production paths should
+        use `type_check_one`.
+        """
+        return decl.type_check(TypeChecker(self, decl))
+
     def type_check_one(self, decl, pp=None):
         """
         Type check a single declaration, returning a `CheckResult`.
@@ -629,7 +660,9 @@ class Environment(object):
         if pp is not None:
             pp(self, decl)
 
-        # FIXME: Better state encapsulation for heartbeats...
+        tc = TypeChecker(self, decl)
+        # FIXME: heartbeat / _current_decl still live on Environment;
+        # next commit moves them onto `tc`.
         self.heartbeat = 0
         self._current_decl = decl
         error = None
@@ -638,7 +671,7 @@ class Environment(object):
         peak_start = _peak_memory()
         start = clock()
         try:
-            error = decl.type_check(self)
+            error = decl.type_check(tc)
         except HeartbeatExceeded as err:
             error = W_HeartbeatError(
                 decl.name,

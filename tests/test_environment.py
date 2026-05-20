@@ -57,7 +57,7 @@ class TestTypeCheck(object):
 
         invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
 
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
         assert error is not None
 
         assert error.expected_type == PROP
@@ -69,7 +69,7 @@ class TestTypeCheck(object):
         non_prop_value = forall(x.binder(type=PROP))(W_BVar(0))
         invalid = Name.simple("nonPropThm").theorem(type=PROP, value=non_prop_value)
 
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
 
         assert isinstance(error, W_NotAProp)
 
@@ -88,7 +88,7 @@ class TestTypeCheck(object):
             type=constType.const(), value=PROP
         )
 
-        error = nonTypeType.type_check(env)
+        error = env.check_decl(nonTypeType)
         assert str(error) == dedent(
             """\
             def nonTypeType : constType :=
@@ -112,7 +112,7 @@ class TestTypeCheck(object):
         env = Environment.having([constType_decl])
 
         bad_axiom = Name.simple("badAxiom").axiom(type=constType.const())
-        error = bad_axiom.type_check(env)
+        error = env.check_decl(bad_axiom)
         assert error is not None
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
@@ -139,7 +139,7 @@ class TestTypeCheck(object):
             value=PROP,
         )
 
-        error = bad_forall.type_check(env)
+        error = env.check_decl(bad_forall)
         assert error is not None
 
 
@@ -221,7 +221,7 @@ class TestTypeError(object):
     def test_with_name(self):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
 
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
         assert str(error) == (
             "def foo : Prop :=\n"
             "  Type\n"
@@ -234,7 +234,7 @@ class TestTypeError(object):
     def test_anonymous(self):
         invalid = Name.ANONYMOUS.definition(type=PROP, value=TYPE)
 
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
         assert str(error) == (
             "def [anonymous] : Prop :=\n"
             "  Type\n"
@@ -742,7 +742,7 @@ class TestRecursorRuleShape(object):
 class TestDiagnosticTokens(object):
     def test_type_error_diagnostic(self):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
 
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
@@ -764,7 +764,7 @@ class TestDiagnosticTokens(object):
         nonTypeType = Name.simple("nonTypeType").definition(
             type=constType.const(), value=PROP
         )
-        error = nonTypeType.type_check(env)
+        error = env.check_decl(nonTypeType)
 
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
@@ -783,7 +783,7 @@ class TestDiagnosticTokens(object):
                 forall(y.binder(type=b0))(forall(a.binder(type=b0))(b1)),
             ),
         )
-        error = bad.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(bad)
 
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
@@ -798,7 +798,7 @@ class TestDiagnosticTokens(object):
     def test_not_a_prop_diagnostic(self):
         non_prop_value = forall(x.binder(type=PROP))(W_BVar(0))
         invalid = Name.simple("nonPropThm").theorem(type=PROP, value=non_prop_value)
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
 
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
@@ -812,7 +812,7 @@ class TestDiagnosticTokens(object):
 
     def test_type_error_message_prose_uses_message_token(self):
         invalid = Name.simple("foo").definition(type=PROP, value=TYPE)
-        error = invalid.type_check(Environment.EMPTY)
+        error = Environment.EMPTY.check_decl(invalid)
         message = error.as_diagnostic().message
         prose = [(tag, text) for tag, text in message if "has type" in text]
         assert prose == [MESSAGE.emit("\nhas type\n  ")]

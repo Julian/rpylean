@@ -97,7 +97,7 @@ def check(env, args, _, stdoutw, stderrw):
         stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
 
-    error = declaration.type_check(env)
+    error = env.check_decl(declaration)
     if error is None:
         stdoutw.write_plain("%s correctly type checks.\n" % name.str())
     else:
@@ -111,7 +111,7 @@ def check(env, args, _, stdoutw, stderrw):
 def first(env, _, __, stdoutw, stderrw):
     for each in env.declarations.values():
         try:
-            error = each.type_check(env)
+            error = env.check_decl(each)
         except Exception as error:
             stderrw.write_plain(
                 "Unexpected error when checking %s: %s\n"
