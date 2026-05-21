@@ -949,45 +949,18 @@ def _mk_app(fn, arg):
 
 def _mk_app_in(tc, fn, arg):
     """
-    Allocate a `W_App(fn, arg)` against the per-decl arena on `tc`,
-    falling back to the persistent table so a (fn, arg) pair that
-    was already shared at parse time stays shared during reduction.
-    New allocations land in `tc._intern_w_app`; that dict is dropped
-    when the `TypeChecker` goes out of scope, capping the lifetime
-    of reduction-produced W_Apps to a single declaration's check.
-
-    `tc` may be `None` (parser/test path with no checking session at
-    all) or a bare `Environment` whose `_intern_w_app` slot is the
-    `None` sentinel — both route to `_mk_app` against the persistent
-    table.
+    Allocate a `W_App(fn, arg)` for a reduction-time call site.
+    With a `tc`, skips hash-consing entirely and returns a fresh
+    `W_App`: reduction-time intermediates are mostly used once
+    and pinning them in any intern dict (per-decl arena or
+    persistent table) just prevents the GC from reclaiming them
+    once the type-checker has moved past. Without a `tc` (parser /
+    test paths), routes to `_mk_app` so the parsed source DAG
+    still gets its hash-consing.
     """
     if tc is None:
         return _mk_app(fn, arg)
-    arena = tc._intern_w_app
-    if arena is None:
-        return _mk_app(fn, arg)
-    assert isinstance(fn, W_Expr)
-    assert isinstance(arg, W_Expr)
-    h = _mix2(fn._hash, arg._hash)
-    # Per-decl arena first (most recent / most likely hit during
-    # iterative reduction).
-    bucket = arena.get(h, None)
-    if bucket is not None:
-        for existing in bucket:
-            if existing.fn is fn and existing.arg is arg:
-                return existing
-    # Persistent fallback: a parsed W_App with the same shape.
-    persistent = _INTERN_W_APP.get(h, None)
-    if persistent is not None:
-        for existing in persistent:
-            if existing.fn is fn and existing.arg is arg:
-                return existing
-    e = W_App(fn, arg)
-    if bucket is None:
-        arena[h] = [e]
-    else:
-        bucket.append(e)
-    return e
+    return W_App(fn, arg)
 
 
 def _mk_w_lambda(binder, body):
@@ -2188,9 +2161,11 @@ class W_Expr(_Item):
     @unroll_safe
     def app_in(self, tc, arg, *more):
         """
-        `.app(...)` against a `TypeChecker`'s per-decl arena. The arena
-        falls back to the persistent table on a miss, so already-parsed
-        shared (fn, arg) pairs remain shared during reduction.
+        `.app(...)` for a reduction-time call site. With a `tc`,
+        allocates a fresh `W_App` (no hash-consing) so the result
+        isn't pinned in any intern dict for the lifetime of the
+        check. Without a `tc` (parser / test paths), routes to the
+        persistent intern table.
         """
         expr = _mk_app_in(tc, self, arg)
         if not more:

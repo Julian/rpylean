@@ -441,7 +441,6 @@ class TypeChecker(object):
         'env', 'decl', 'heartbeat',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        '_intern_w_app',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -449,13 +448,6 @@ class TypeChecker(object):
     # continue to work when handed a `TypeChecker` — those fields are
     # quasi-immutable on `Environment`, so the snapshot is stable for
     # the lifetime of the TC.
-    #
-    # `_intern_w_app` is the per-decl W_App arena: production reduction
-    # paths route through `expr.app_in(tc, arg)` → `_mk_app_in(tc, ...)`
-    # which checks this dict before falling back to the persistent
-    # parser-time `_INTERN_W_APP`. When the TC goes out of scope the
-    # arena's entries become unreachable and GC reclaims them — the
-    # bound on memory the persistent table can't give us.
     _immutable_fields_ = [
         'env', 'decl',
         'declarations',
@@ -477,7 +469,6 @@ class TypeChecker(object):
         self.tracer = env.tracer
         self.max_heartbeat = env.max_heartbeat
         self.count_heartbeats = env.count_heartbeats
-        self._intern_w_app = {}
 
     # ---- public def_eq / infer entry points ----------------------------
 
@@ -966,7 +957,6 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        '_intern_w_app',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -976,17 +966,11 @@ class Environment(object):
     # never inside the check loop — so quasi-immutable (`?`) lets the
     # JIT compile assuming they're constant and invalidate only on the
     # rare reassignment.
-    # `_intern_w_app` is `None` on `Environment` (sentinel telling
-    # `_mk_app_in` to fall back to the persistent global table); on
-    # `TypeChecker` it's a per-decl arena dict. Same attribute name on
-    # both classes lets `expr.app_in(env_or_tc, arg)` dispatch without
-    # isinstance checks.
     _immutable_fields_ = [
         'declarations',
         'tracer?',
         'max_heartbeat?',
         'count_heartbeats?',
-        '_intern_w_app',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -994,7 +978,6 @@ class Environment(object):
         self.tracer = tracer
         self.max_heartbeat = 0
         self.count_heartbeats = False
-        self._intern_w_app = None
 
     @not_rpython
     def __getitem__(self, value):
