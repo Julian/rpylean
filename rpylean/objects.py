@@ -80,7 +80,7 @@ def _inst_printable_location(cls):
 # trace shape — but worth measuring before assuming it pays off.
 inst_jitdriver = JitDriver(
     greens=["cls"],
-    reds=["depth", "cur", "sub"],
+    reds=["depth", "tc", "cur", "sub"],
     name="instantiate",
     get_printable_location=_inst_printable_location,
     is_recursive=True,
@@ -956,10 +956,13 @@ def _mk_app_in(tc, fn, arg):
     when the `TypeChecker` goes out of scope, capping the lifetime
     of reduction-produced W_Apps to a single declaration's check.
 
-    `tc` may also be a bare `Environment` (when called from a test or
-    REPL command outside a checking session) — in that case its
-    `_intern_w_app` slot is `None` and we route to `_mk_app`.
+    `tc` may be `None` (parser/test path with no checking session at
+    all) or a bare `Environment` whose `_intern_w_app` slot is the
+    `None` sentinel — both route to `_mk_app` against the persistent
+    table.
     """
+    if tc is None:
+        return _mk_app(fn, arg)
     arena = tc._intern_w_app
     if arena is None:
         return _mk_app(fn, arg)
@@ -1660,10 +1663,10 @@ class Binder(_Item):
             return self
         return self.with_type(type=self.type.incr_free_bvars(expr, depth))
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         if self.type.loose_bvar_range <= depth:
             return self
-        return self.with_type(type=self.type.instantiate(expr, depth))
+        return self.with_type(type=self.type.instantiate(tc, expr, depth))
 
     def subst_levels(self, subts):
         new_type = self.type.subst_levels(subts)
@@ -2140,7 +2143,7 @@ class W_Expr(_Item):
         while isinstance(expr, W_ForAll):
             fvar = expr.binder.fvar()
             fvars.append(fvar)
-            expr = expr.body.instantiate(fvar, 0)
+            expr = expr.body.instantiate(None, fvar, 0)
         return fvars, expr
 
     def contains_const(self, name):
@@ -2303,7 +2306,7 @@ class W_BVar(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         if self.id == depth:
             incr = expr.incr_free_bvars(depth, 0)
             return incr
@@ -2368,7 +2371,7 @@ class W_FVar(W_Expr):
     def incr_free_bvars(self, count, depth):
         return self
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         return self
 
     def syntactic_eq(self, other):
@@ -2450,7 +2453,7 @@ class W_LitStr(W_Expr):
         """
         return STRING
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         return self
 
     def subst_levels(self, substs):
@@ -2520,7 +2523,7 @@ class W_Sort(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         return self
 
     def infer(self, env):
@@ -2654,7 +2657,7 @@ class W_Const(W_Expr):
     def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         return self
 
     def incr_free_bvars(self, count, depth):
@@ -2833,7 +2836,7 @@ class W_LitNat(W_Expr):
         """Return a token list tagging this nat literal."""
         return [LITERAL.emit(self.str())]
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         return self
 
     def subst_levels(self, substs):
@@ -3204,10 +3207,10 @@ class W_Proj(W_Expr):
             return self
         return self.with_expr(new_expr)
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
-        return self.with_expr(self.struct_expr.instantiate(expr, depth))
+        return self.with_expr(self.struct_expr.instantiate(tc, expr, depth))
 
     def subst_levels(self, substs):
         new_expr = self.struct_expr.subst_levels(substs)
@@ -3286,7 +3289,7 @@ class W_Proj(W_Expr):
         for app in reversed(apps):
             ctor_type = ctor_type.whnf(env)
             assert isinstance(ctor_type, W_ForAll)
-            new_type = ctor_type.body.instantiate(app.arg)
+            new_type = ctor_type.body.instantiate(env, app.arg)
             ctor_type = new_type
 
         # Fields can depend on earlier fields, so the constructor takes in 'proj'
@@ -3314,7 +3317,7 @@ class W_Proj(W_Expr):
                             self.struct_expr,
                         )
                 proj = self.struct_name.proj(i, self.struct_expr)
-                ctor_type = ctor_type.body.instantiate(proj)
+                ctor_type = ctor_type.body.instantiate(env, proj)
             else:
                 # Non-dependent field: body doesn't refer to it, skip instantiation.
                 ctor_type = ctor_type.body
@@ -3350,7 +3353,7 @@ def _is_prop_type(expr, constants):
         elif isinstance(current, W_ForAll):
             # imax(sort_of(A), sort_of(B)) = 0 whenever sort_of(B) = 0,
             # so \u2200 (x : A), B is Prop iff B is Prop.
-            stack.append(current.body.instantiate(current.binder.fvar()))
+            stack.append(current.body.instantiate(None, current.binder.fvar()))
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
@@ -3371,7 +3374,7 @@ def _is_prop_type(expr, constants):
                         # Beta-reduce by applying each arg to the lambda body.
                         for arg in args:
                             if isinstance(val, W_Lambda):
-                                val = val.body.instantiate(arg)
+                                val = val.body.instantiate(None, arg)
                             else:
                                 break
                         stack.append(val)
@@ -3381,7 +3384,7 @@ def _is_prop_type(expr, constants):
                         decl_type = decl.type
                         for arg in args:
                             if isinstance(decl_type, W_ForAll):
-                                decl_type = decl_type.body.instantiate(arg)
+                                decl_type = decl_type.body.instantiate(None, arg)
                             else:
                                 break
                         stack.append(decl_type)
@@ -3489,7 +3492,7 @@ class W_FunBase(W_Expr):
         """The binder type must not mention any inductive in the block."""
         if inductive._contains_any_inductive(self.binder.type):
             return False
-        return self.body.instantiate(self.binder.fvar()).whnf(env).is_strictly_positive(
+        return self.body.instantiate(env, self.binder.fvar()).whnf(env).is_strictly_positive(
             inductive, env,
         )
 
@@ -3504,8 +3507,13 @@ class W_FunBase(W_Expr):
             return False
 
         fvar = self.binder.fvar()
-        body = self.body.instantiate(fvar)
-        other_body = other.body.instantiate(fvar)
+        # No `tc` in scope here — the per-class `def_eq` only gets the
+        # bound `def_eq` callback. Reduction-time callers route the
+        # body through `tc.def_eq` → `_def_eq_core`, which has its own
+        # tc; the binder instantiation here is for the comparison
+        # framework only and goes through the persistent table.
+        body = self.body.instantiate(None, fvar)
+        other_body = other.body.instantiate(None, fvar)
 
         return def_eq(body, other_body)
 
@@ -3527,7 +3535,7 @@ class W_ForAll(W_FunBase):
     def _infer_recursive(self, env):
         binder_sort = self.binder.type.infer(env).whnf(env).expect_sort(env)
         body_sort = (
-            self.body.instantiate(self.binder.fvar())
+            self.body.instantiate(env, self.binder.fvar())
             .infer(env)
             .whnf(env)
             .expect_sort(env)
@@ -3537,8 +3545,8 @@ class W_ForAll(W_FunBase):
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
 
-    def instantiate(self, expr, depth=0):
-        return _iter_instantiate(self, expr, depth)
+    def instantiate(self, tc, expr, depth=0):
+        return _iter_instantiate(tc, self, expr, depth)
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
@@ -3587,7 +3595,7 @@ class W_ForAll(W_FunBase):
         elif isinstance(lhs_type, W_FVar):
             lhs_type = lhs_type.binder.type
 
-        rhs = self.body.instantiate(self.binder.fvar())
+        rhs = self.body.instantiate(None, self.binder.fvar())
         if (
             not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
         ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
@@ -3702,7 +3710,7 @@ class W_Lambda(W_FunBase):
 
         body = current
         for binder in reversed(binders):
-            body = body.instantiate(binder.fvar())
+            body = body.instantiate(None, binder.fvar())
 
         _append_marked_tokens(result, span_holder, body, constants, mark)
         return result
@@ -3720,8 +3728,8 @@ class W_Lambda(W_FunBase):
             return self
         return fun(new_binder)(new_body)
 
-    def instantiate(self, expr, depth=0):
-        return _iter_instantiate(self, expr, depth)
+    def instantiate(self, tc, expr, depth=0):
+        return _iter_instantiate(tc, self, expr, depth)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -3801,7 +3809,7 @@ class W_Let(W_Expr):
         result.append(OPERATOR.emit(" := "))
         _append_marked_tokens(result, span_holder, self.value, constants, mark)
         result.append(PLAIN.emit("\n"))
-        body = self.body.instantiate(fvar)
+        body = self.body.instantiate(None, fvar)
         _append_marked_tokens(result, span_holder, body, constants, mark)
         return result
 
@@ -3817,16 +3825,16 @@ class W_Let(W_Expr):
                 env, self.value, self.type,
                 inferred_type=inferred_value_type,
             )
-        body_type = self.body.instantiate(self.value)
+        body_type = self.body.instantiate(env, self.value)
         return body_type.infer(env)
 
-    def instantiate(self, expr, depth=0):
+    def instantiate(self, tc, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
         return self.name.let(
-            type=self.type.instantiate(expr, depth),
-            value=self.value.instantiate(expr, depth),
-            body=self.body.instantiate(expr, depth + 1),
+            type=self.type.instantiate(tc, expr, depth),
+            value=self.value.instantiate(tc, expr, depth),
+            body=self.body.instantiate(tc, expr, depth + 1),
         )
 
     def incr_free_bvars(self, count, depth):
@@ -3860,7 +3868,7 @@ class W_Let(W_Expr):
         )
 
     def _whnf_core(self, env):
-        return self.body.instantiate(self.value)
+        return self.body.instantiate(env, self.value)
 
     def subst_levels(self, substs):
         new_type = self.type.subst_levels(substs)
@@ -3944,7 +3952,11 @@ class W_App(W_Expr):
                 if def_eq(self_fn_body.body.closure(new_env), other):
                     return True
         elif isinstance(self_fn, W_FunBase):
-            if def_eq(self_fn.body.instantiate(self.arg), other):
+            # No `tc` in scope at this per-class method; the beta-reduction
+            # intermediates here are only used to feed back into the def_eq
+            # callback and aren't expected to survive past this comparison,
+            # so allocating against the persistent table is acceptable.
+            if def_eq(self_fn.body.instantiate(None, self.arg), other):
                 return True
         other_fn = other.fn
         if isinstance(other_fn, W_Closure):
@@ -3954,7 +3966,7 @@ class W_App(W_Expr):
                 if def_eq(self, other_fn_body.body.closure(new_env)):
                     return True
         elif isinstance(other_fn, W_FunBase):
-            if def_eq(self, other_fn.body.instantiate(other.arg)):
+            if def_eq(self, other_fn.body.instantiate(None, other.arg)):
                 return True
         # Iterative spine walk to avoid stack overflow on deep W_App trees.
         # Collect args from both sides while both fns are W_App, then
@@ -4004,7 +4016,7 @@ class W_App(W_Expr):
                 for j in range(n - 1, -1, -1):
                     if isinstance(decl_type, W_ForAll):
                         mask.append(decl_type.binder.is_default())
-                        decl_type = decl_type.body.instantiate(args[j])
+                        decl_type = decl_type.body.instantiate(None, args[j])
                     else:
                         mask.append(True)
                 has_implicit = False
@@ -4128,7 +4140,7 @@ class W_App(W_Expr):
             fn = fn.force()
         if isinstance(fn, W_FunBase):
             env.tracer.beta()
-            return fn.body.instantiate(self.arg)
+            return fn.body.instantiate(env, self.arg)
         return None
 
     def try_iota_reduce(self, env):
@@ -4471,7 +4483,7 @@ class W_App(W_Expr):
             fn = fn.force()
         if isinstance(fn, W_FunBase):
             env.tracer.beta()
-            return fn.body.instantiate(self.arg)
+            return fn.body.instantiate(env, self.arg)
 
         # Handle recursor in head position
         iota_progress, reduced = self.try_iota_reduce(env)
@@ -4502,8 +4514,8 @@ class W_App(W_Expr):
             return self
         return new_fn.app(new_arg)
 
-    def instantiate(self, expr, depth=0):
-        return _iter_instantiate(self, expr, depth)
+    def instantiate(self, tc, expr, depth=0):
+        return _iter_instantiate(tc, self, expr, depth)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range <= depth:
@@ -4684,7 +4696,7 @@ class W_Closure(W_Expr):
         # over-substituted by later iterations.
         k = n - 1
         while k >= 0:
-            result = result.instantiate(self.env[k], k)
+            result = result.instantiate(None, self.env[k], k)
             k -= 1
         return result
 
@@ -4694,8 +4706,8 @@ class W_Closure(W_Expr):
     def infer(self, env):
         return self.force().infer(env)
 
-    def instantiate(self, expr, depth=0):
-        return self.force().instantiate(expr, depth)
+    def instantiate(self, tc, expr, depth=0):
+        return self.force().instantiate(tc, expr, depth)
 
     def bind_fvar(self, fvar, depth):
         return self.force().bind_fvar(fvar, depth)
@@ -5125,7 +5137,7 @@ class W_Inductive(W_DeclarationKind):
         for depth in range(self.num_params + self.num_indices):
             if not isinstance(target, W_ForAll):
                 return W_NotASort(tc, type, inferred_type=target, name=None)
-            target = target.body.instantiate(target.binder.fvar(), depth)
+            target = target.body.instantiate(tc, target.binder.fvar(), depth)
         target_sort = target.whnf(tc)
         if not isinstance(target_sort, W_Sort):
             return W_NotASort(
@@ -5546,7 +5558,7 @@ def syntactic_eq(expr1, expr2):
     return expr1.syntactic_eq(expr2)
 
 
-def _iter_instantiate(root, expr, depth):
+def _iter_instantiate(tc, root, expr, depth):
     """
     Substitute ``expr`` for the bvar at ``depth`` in ``root``.
 
@@ -5564,11 +5576,15 @@ def _iter_instantiate(root, expr, depth):
     rely on RPython's `stack_check___` guard (already ~3% of profile
     time, so the cost is paid regardless) to abort cleanly if a
     pathological term outruns the host stack.
+
+    `tc` may be a `TypeChecker` (per-decl arena routing for any new
+    `W_App`s built by `_inst_app`) or `None` (parser/test path; allocates
+    against the persistent table).
     """
-    return _instantiate(root, expr, depth)
+    return _instantiate(tc, root, expr, depth)
 
 
-def _instantiate(cur, sub, depth):
+def _instantiate(tc, cur, sub, depth):
     if cur.loose_bvar_range <= depth:
         return cur
     cls = cur.__class__
@@ -5576,33 +5592,34 @@ def _instantiate(cur, sub, depth):
     # specialise on a path that exits immediately.
     inst_jitdriver.jit_merge_point(
         cls=cls,
+        tc=tc,
         cur=cur,
         sub=sub,
         depth=depth,
     )
     if cls is W_App:
         assert isinstance(cur, W_App)
-        return _inst_app(cur, sub, depth)
+        return _inst_app(tc, cur, sub, depth)
     if cls is W_Lambda:
         assert isinstance(cur, W_Lambda)
-        return _inst_lambda(cur, sub, depth)
+        return _inst_lambda(tc, cur, sub, depth)
     if cls is W_ForAll:
         assert isinstance(cur, W_ForAll)
-        return _inst_forall(cur, sub, depth)
-    return cur.instantiate(sub, depth)
+        return _inst_forall(tc, cur, sub, depth)
+    return cur.instantiate(tc, sub, depth)
 
 
 @unroll_safe
-def _inst_app(app, sub, depth):
+def _inst_app(tc, app, sub, depth):
     if app._inst_cache_expr is sub and app._inst_cache_depth == depth:
         return app._inst_cache_result
     fn = app.fn
     arg = app.arg
     if fn.loose_bvar_range > depth:
-        fn = _instantiate(fn, sub, depth)
+        fn = _instantiate(tc, fn, sub, depth)
     if arg.loose_bvar_range > depth:
-        arg = _instantiate(arg, sub, depth)
-    result = fn.app(arg)
+        arg = _instantiate(tc, arg, sub, depth)
+    result = fn.app_in(tc, arg)
     app._inst_cache_expr = sub
     app._inst_cache_depth = depth
     app._inst_cache_result = result
@@ -5610,11 +5627,11 @@ def _inst_app(app, sub, depth):
 
 
 @unroll_safe
-def _inst_lambda(fun, sub, depth):
+def _inst_lambda(tc, fun, sub, depth):
     if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
         return fun._inst_cache_result
-    new_binder = fun.binder.instantiate(sub, depth)
-    new_body = _instantiate(fun.body, sub, depth + 1)
+    new_binder = fun.binder.instantiate(tc, sub, depth)
+    new_body = _instantiate(tc, fun.body, sub, depth + 1)
     result = _mk_w_lambda(new_binder, new_body)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
@@ -5623,11 +5640,11 @@ def _inst_lambda(fun, sub, depth):
 
 
 @unroll_safe
-def _inst_forall(fun, sub, depth):
+def _inst_forall(tc, fun, sub, depth):
     if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
         return fun._inst_cache_result
-    new_binder = fun.binder.instantiate(sub, depth)
-    new_body = _instantiate(fun.body, sub, depth + 1)
+    new_binder = fun.binder.instantiate(tc, sub, depth)
+    new_body = _instantiate(tc, fun.body, sub, depth + 1)
     result = _mk_w_forall(new_binder, new_body)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
@@ -5838,7 +5855,7 @@ def _iter_infer(env, root):
                     env, arg, fn_type.binder.type,
                     inferred_type=arg_type,
                 )
-            values.append(fn_type.body.instantiate(arg))
+            values.append(fn_type.body.instantiate(env, arg))
         elif isinstance(item, _InferBindLambda):
             body_type = values.pop()
             body_type = body_type.bind_fvar(item.fvar, 0)

@@ -828,7 +828,7 @@ class TypeChecker(object):
             if isinstance(expr2_ty, W_ForAll):
                 # Turn 'f' into 'fun x => f x'
                 return fun(expr2_ty.binder)(
-                    expr2.incr_free_bvars(1, 0).app(_mk_w_bvar(0)),
+                    expr2.incr_free_bvars(1, 0).app_in(self, _mk_w_bvar(0)),
                 )
         return None
 
