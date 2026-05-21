@@ -664,9 +664,9 @@ class TypeChecker(object):
         # keeps `UInt32.size`-sized literals (2^32) from materialising
         # ~4 billion `Nat.succ` nodes the way `build_nat_expr` did.
         if cls1 is W_LitNat:
-            return self.def_eq(expr1.one_step_constructor(), expr2)
+            return self.def_eq(expr1.one_step_constructor(self), expr2)
         elif isinstance(expr2, W_LitNat):
-            return self.def_eq(expr1, expr2.one_step_constructor())
+            return self.def_eq(expr1, expr2.one_step_constructor(self))
 
         if cls1 is W_LitStr:
             return self.def_eq(expr1.build_str_expr(self), expr2)

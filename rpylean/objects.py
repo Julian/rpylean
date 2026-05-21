@@ -2202,7 +2202,7 @@ class W_Expr(_Item):
             return self
         return W_Closure(env, self)
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         """
         One WHNF step for ``W_Closure(closure_env, self)``.
 
@@ -2333,7 +2333,7 @@ class W_BVar(W_Expr):
             return env[self.id]
         return _mk_w_bvar(self.id - len(env))
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         if self.id < len(closure_env):
             return closure_env[self.id]
         return _mk_w_bvar(self.id - len(closure_env))
@@ -2440,12 +2440,12 @@ class W_LitStr(W_Expr):
         if len(self.val) > 5:
             print("Building large str expr for %s" % self.val[:10])
         Char = Name.simple("Char").const()
-        cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app(Char)
-        expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app(Char)
+        cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app_in(env, Char)
+        expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app_in(env, Char)
         for i in range(len(self.val) - 1, -1, -1):
-            char_expr = Name.from_str("Char.ofNat").app(W_LitNat.char(self.val[i]))
-            expr = cons.app(char_expr, expr)
-        return Name.from_str("String.ofList").app(expr)
+            char_expr = Name.from_str("Char.ofNat").app_in(env, W_LitNat.char(self.val[i]))
+            expr = cons.app_in(env, char_expr).app_in(env, expr)
+        return Name.from_str("String.ofList").app_in(env, expr)
 
     def infer(self, env):
         """
@@ -2846,7 +2846,7 @@ class W_LitNat(W_Expr):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
 
-    def one_step_constructor(self):
+    def one_step_constructor(self, tc):
         """
         Expose one Nat constructor: ``Nat.zero`` if the value is zero,
         otherwise ``Nat.succ (W_LitNat (val - 1))``.
@@ -2856,7 +2856,7 @@ class W_LitNat(W_Expr):
         """
         if self.val.eq(rbigint.fromint(0)):
             return NAT_ZERO
-        return NAT_SUCC.app(_mk_w_litnat(self.val.sub(rbigint.fromint(1))))
+        return NAT_SUCC.app_in(tc, _mk_w_litnat(self.val.sub(rbigint.fromint(1))))
 
     def bind_fvar(self, tc, fvar, depth):
         return self
@@ -3221,7 +3221,7 @@ class W_Proj(W_Expr):
     def with_expr(self, expr):
         return self.struct_name.proj(self.field_index, expr)
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         return self.with_expr(self.struct_expr.closure(closure_env))
 
     def syntactic_eq(self, other):
@@ -3517,7 +3517,7 @@ class W_FunBase(W_Expr):
 
         return def_eq(body, other_body)
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         # Closure-of-lambda (or -ForAll) is itself a value in WHNF.
         return None
 
@@ -3882,7 +3882,7 @@ class W_Let(W_Expr):
             type=new_type, value=new_value, body=new_body,
         )
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         # let x := val in body  ⇒  body[x ↦ val], all under closure_env.
         return self.body.closure([self.value]).closure(closure_env)
 
@@ -4178,7 +4178,7 @@ class W_App(W_Expr):
         # init.ndjson the rule-unwrap betas account for ~22% of all
         # betas in the workload.
         nat_rec_step = self._maybe_iota_nat_rec_step(
-            target, args, major_idx,
+            env, target, args, major_idx,
         )
         if nat_rec_step is not None:
             env.tracer.iota(target.name)
@@ -4271,7 +4271,7 @@ class W_App(W_Expr):
         # re-expanded lazily on the next WHNF iteration. This avoids materialising
         # an N-deep Nat.succ chain up front for large literals.
         if isinstance(major_premise, W_LitNat):
-            major_premise = major_premise.one_step_constructor()
+            major_premise = major_premise.one_step_constructor(env)
 
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')
@@ -4334,7 +4334,7 @@ class W_App(W_Expr):
 
         return False, self
 
-    def _maybe_iota_nat_rec_step(self, target, args, major_idx):
+    def _maybe_iota_nat_rec_step(self, tc, target, args, major_idx):
         """One-step iota for `Nat.rec motive zero succ (W_LitNat N)`.
 
         Returns the same expression the standard iota path would produce
@@ -4366,8 +4366,8 @@ class W_App(W_Expr):
         if major.val.eq(rbigint.fromint(0)):
             return zero_case
         pred = _mk_w_litnat(major.val.sub(rbigint.fromint(1)))
-        rec_at_pred = target.app(motive).app(zero_case).app(succ_case).app(pred)
-        return succ_case.app(pred).app(rec_at_pred)
+        rec_at_pred = target.app_in(tc, motive).app_in(tc, zero_case).app_in(tc, succ_case).app_in(tc, pred)
+        return succ_case.app_in(tc, pred).app_in(tc, rec_at_pred)
 
     def try_struct_eta_reduce(self, env):
         """
@@ -4531,8 +4531,8 @@ class W_App(W_Expr):
             return self
         return new_fn.app(new_arg)
 
-    def _whnf_under_closure(self, closure_env):
-        return self.fn.closure(closure_env).app(self.arg.closure(closure_env))
+    def _whnf_under_closure(self, tc, closure_env):
+        return self.fn.closure(closure_env).app_in(tc, self.arg.closure(closure_env))
 
 
 def _whnf_iota_chain(env, expr):
@@ -4674,11 +4674,11 @@ class W_Closure(W_Expr):
         return expr
 
     def _whnf_core(self, env):
-        return self.body._whnf_under_closure(self.env)
+        return self.body._whnf_under_closure(env, self.env)
 
-    def _whnf_under_closure(self, closure_env):
+    def _whnf_under_closure(self, tc, closure_env):
         # Nested closure: peel inner first, then re-wrap.
-        inner_step = self.body._whnf_under_closure(self.env)
+        inner_step = self.body._whnf_under_closure(tc, self.env)
         if inner_step is None:
             return None
         return inner_step.closure(closure_env)
