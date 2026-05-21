@@ -1652,16 +1652,16 @@ class Binder(_Item):
             self._fvar = fvar
         return fvar
 
-    def bind_fvar(self, fvar, depth):
-        new_type = self.type.bind_fvar(fvar, depth)
+    def bind_fvar(self, tc, fvar, depth):
+        new_type = self.type.bind_fvar(tc, fvar, depth)
         if new_type is self.type:
             return self
         return self.with_type(type=new_type)
 
-    def incr_free_bvars(self, expr, depth):
+    def incr_free_bvars(self, tc, expr, depth):
         if self.type.loose_bvar_range <= depth:
             return self
-        return self.with_type(type=self.type.incr_free_bvars(expr, depth))
+        return self.with_type(type=self.type.incr_free_bvars(tc, expr, depth))
 
     def instantiate(self, tc, expr, depth=0):
         if self.type.loose_bvar_range <= depth:
@@ -2303,12 +2303,12 @@ class W_BVar(W_Expr):
         assert isinstance(other, W_BVar)
         return self.id == other.id
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         return self
 
     def instantiate(self, tc, expr, depth=0):
         if self.id == depth:
-            incr = expr.incr_free_bvars(depth, 0)
+            incr = expr.incr_free_bvars(tc, depth, 0)
             return incr
         elif self.id > depth:
             # This variable is not bound here (e.g. 'fun x => BVar(1)')
@@ -2317,7 +2317,7 @@ class W_BVar(W_Expr):
             return _mk_w_bvar(self.id - 1)
         return self
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.id >= depth:
             return _mk_w_bvar(self.id + count)
         return self
@@ -2368,7 +2368,7 @@ class W_FVar(W_Expr):
     def tokens(self, constants, mark=None, span_holder=None):
         return [BINDER_NAME.emit(self.str())]
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         return self
 
     def instantiate(self, tc, expr, depth=0):
@@ -2384,7 +2384,7 @@ class W_FVar(W_Expr):
         """
         return self.binder.type
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         if self.id == fvar.id:
             return _mk_w_bvar(depth)
         return self
@@ -2459,10 +2459,10 @@ class W_LitStr(W_Expr):
     def subst_levels(self, substs):
         return self
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         return self
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         return self
 
     def syntactic_eq(self, other):
@@ -2517,10 +2517,10 @@ class W_Sort(W_Expr):
             return "%s %s" % (prefix, text)
         return "%s (%s + %s)" % (prefix, text, balance)
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         return self
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         return self
 
     def instantiate(self, tc, expr, depth=0):
@@ -2654,13 +2654,13 @@ class W_Const(W_Expr):
                 return False
         return True
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         return self
 
     def instantiate(self, tc, expr, depth=0):
         return self
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         return self
 
     def _whnf_core(self, env):
@@ -2858,10 +2858,10 @@ class W_LitNat(W_Expr):
             return NAT_ZERO
         return NAT_SUCC.app(_mk_w_litnat(self.val.sub(rbigint.fromint(1))))
 
-    def bind_fvar(self, fvar, depth):
+    def bind_fvar(self, tc, fvar, depth):
         return self
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         return self
 
     def infer(self, env):
@@ -3196,13 +3196,13 @@ class W_Proj(W_Expr):
 
         return None
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
+        return self.with_expr(self.struct_expr.incr_free_bvars(tc, count, depth))
 
-    def bind_fvar(self, fvar, depth):
-        new_expr = self.struct_expr.bind_fvar(fvar, depth)
+    def bind_fvar(self, tc, fvar, depth):
+        new_expr = self.struct_expr.bind_fvar(tc, fvar, depth)
         if new_expr is self.struct_expr:
             return self
         return self.with_expr(new_expr)
@@ -3554,18 +3554,18 @@ class W_ForAll(W_FunBase):
             self.body, other.body
         )
 
-    def bind_fvar(self, fvar, depth):
-        new_binder = self.binder.bind_fvar(fvar, depth)
-        new_body = self.body.bind_fvar(fvar, depth + 1)
+    def bind_fvar(self, tc, fvar, depth):
+        new_binder = self.binder.bind_fvar(tc, fvar, depth)
+        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
         return forall(new_binder)(new_body)
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return forall(self.binder.incr_free_bvars(count, depth))(
-            self.body.incr_free_bvars(count, depth + 1),
+        return forall(self.binder.incr_free_bvars(tc, count, depth))(
+            self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
     def subst_levels(self, levels):
@@ -3721,9 +3721,9 @@ class W_Lambda(W_FunBase):
             self.body, other.body
         )
 
-    def bind_fvar(self, fvar, depth):
-        new_binder = self.binder.bind_fvar(fvar, depth)
-        new_body = self.body.bind_fvar(fvar, depth + 1)
+    def bind_fvar(self, tc, fvar, depth):
+        new_binder = self.binder.bind_fvar(tc, fvar, depth)
+        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
         return fun(new_binder)(new_body)
@@ -3731,11 +3731,11 @@ class W_Lambda(W_FunBase):
     def instantiate(self, tc, expr, depth=0):
         return _iter_instantiate(tc, self, expr, depth)
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return fun(self.binder.incr_free_bvars(count, depth))(
-            self.body.incr_free_bvars(count, depth + 1),
+        return fun(self.binder.incr_free_bvars(tc, count, depth))(
+            self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
     def infer(self, env):
@@ -3837,19 +3837,19 @@ class W_Let(W_Expr):
             body=self.body.instantiate(tc, expr, depth + 1),
         )
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
         return self.name.let(
-            type=self.type.incr_free_bvars(count, depth),
-            value=self.value.incr_free_bvars(count, depth),
-            body=self.body.incr_free_bvars(count, depth + 1),
+            type=self.type.incr_free_bvars(tc, count, depth),
+            value=self.value.incr_free_bvars(tc, count, depth),
+            body=self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
-    def bind_fvar(self, fvar, depth):
-        new_type = self.type.bind_fvar(fvar, depth)
-        new_value = self.value.bind_fvar(fvar, depth)
-        new_body = self.body.bind_fvar(fvar, depth + 1)
+    def bind_fvar(self, tc, fvar, depth):
+        new_type = self.type.bind_fvar(tc, fvar, depth)
+        new_value = self.value.bind_fvar(tc, fvar, depth)
+        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
         if (new_type is self.type
                 and new_value is self.value
                 and new_body is self.body):
@@ -4507,21 +4507,21 @@ class W_App(W_Expr):
 
         return None
 
-    def bind_fvar(self, fvar, depth):
-        new_fn = self.fn.bind_fvar(fvar, depth)
-        new_arg = self.arg.bind_fvar(fvar, depth)
+    def bind_fvar(self, tc, fvar, depth):
+        new_fn = self.fn.bind_fvar(tc, fvar, depth)
+        new_arg = self.arg.bind_fvar(tc, fvar, depth)
         if new_fn is self.fn and new_arg is self.arg:
             return self
-        return new_fn.app(new_arg)
+        return new_fn.app_in(tc, new_arg)
 
     def instantiate(self, tc, expr, depth=0):
         return _iter_instantiate(tc, self, expr, depth)
 
-    def incr_free_bvars(self, count, depth):
+    def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return self.fn.incr_free_bvars(count, depth).app(
-            self.arg.incr_free_bvars(count, depth),
+        return self.fn.incr_free_bvars(tc, count, depth).app_in(
+            tc, self.arg.incr_free_bvars(tc, count, depth),
         )
 
     def subst_levels(self, substs):
@@ -4709,11 +4709,11 @@ class W_Closure(W_Expr):
     def instantiate(self, tc, expr, depth=0):
         return self.force().instantiate(tc, expr, depth)
 
-    def bind_fvar(self, fvar, depth):
-        return self.force().bind_fvar(fvar, depth)
+    def bind_fvar(self, tc, fvar, depth):
+        return self.force().bind_fvar(tc, fvar, depth)
 
-    def incr_free_bvars(self, count, depth):
-        return self.force().incr_free_bvars(count, depth)
+    def incr_free_bvars(self, tc, count, depth):
+        return self.force().incr_free_bvars(tc, count, depth)
 
     def subst_levels(self, substs):
         return self.force().subst_levels(substs)
@@ -5858,7 +5858,7 @@ def _iter_infer(env, root):
             values.append(fn_type.body.instantiate(env, arg))
         elif isinstance(item, _InferBindLambda):
             body_type = values.pop()
-            body_type = body_type.bind_fvar(item.fvar, 0)
+            body_type = body_type.bind_fvar(env, item.fvar, 0)
             values.append(forall(item.binder)(body_type))
         elif isinstance(item, _InferBindForAll):
             body_sort = values.pop().whnf(env).expect_sort(env)

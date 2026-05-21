@@ -552,11 +552,11 @@ class TestLitStr(object):
     def test_bind_fvar(self):
         lit = W_LitStr("hi")
         fvar = x.binder(type=NAT).fvar()
-        assert lit.bind_fvar(fvar, 0) is lit
+        assert lit.bind_fvar(None, fvar, 0) is lit
 
     def test_incr_free_bvars(self):
         lit = W_LitStr("hi")
-        assert lit.incr_free_bvars(1, 0) is lit
+        assert lit.incr_free_bvars(None, 1, 0) is lit
 
 
 class TestForAll(object):
