@@ -861,7 +861,7 @@ class TypeChecker(object):
         args.reverse()
         i = 0
         while i < num_fields:
-            proj = struct_name.proj(i, other_side)
+            proj = struct_name.proj_in(self, i, other_side)
             if not self.def_eq(proj, args[num_params + i]):
                 return False
             i += 1

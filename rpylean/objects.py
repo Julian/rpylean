@@ -990,6 +990,19 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
     return e
 
 
+def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
+    """
+    Reduction-path companion to `_mk_w_proj`. With a `tc`, allocates
+    a fresh `W_Proj`; without (`tc is None`, parser/FFI/test paths),
+    routes through the persistent intern table. See `_mk_app_in` for
+    the rationale — pinning reduction-time terms in an intern dict
+    prevents the GC from reclaiming them once they go out of use.
+    """
+    if tc is None:
+        return _mk_w_proj(struct_name, field_index, struct_expr)
+    return W_Proj(struct_name, field_index, struct_expr)
+
+
 def _mk_w_let(name, type, value, body):
     assert isinstance(name, Name)
     assert isinstance(type, W_Expr)
@@ -1396,6 +1409,14 @@ class Name(_Item):
         Construct a projection with this name.
         """
         return _mk_w_proj(self, field_index, struct_expr)
+
+    def proj_in(self, tc, field_index, struct_expr):
+        """
+        Reduction-path `.proj(...)` — allocates a fresh `W_Proj` when
+        called with a `tc` instead of hash-consing through the
+        persistent intern table.
+        """
+        return _mk_w_proj_in(tc, self, field_index, struct_expr)
 
     def as_level_param(self):
         """
@@ -3180,30 +3201,30 @@ class W_Proj(W_Expr):
     def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return self.with_expr(self.struct_expr.incr_free_bvars(tc, count, depth))
+        return self.with_expr(tc, self.struct_expr.incr_free_bvars(tc, count, depth))
 
     def bind_fvar(self, tc, fvar, depth):
         new_expr = self.struct_expr.bind_fvar(tc, fvar, depth)
         if new_expr is self.struct_expr:
             return self
-        return self.with_expr(new_expr)
+        return self.with_expr(tc, new_expr)
 
     def instantiate(self, tc, expr, depth=0):
         if self.loose_bvar_range <= depth:
             return self
-        return self.with_expr(self.struct_expr.instantiate(tc, expr, depth))
+        return self.with_expr(tc, self.struct_expr.instantiate(tc, expr, depth))
 
     def subst_levels(self, tc, substs):
         new_expr = self.struct_expr.subst_levels(tc, substs)
         if new_expr is self.struct_expr:
             return self
-        return self.with_expr(new_expr)
+        return self.with_expr(tc, new_expr)
 
-    def with_expr(self, expr):
-        return self.struct_name.proj(self.field_index, expr)
+    def with_expr(self, tc, expr):
+        return self.struct_name.proj_in(tc, self.field_index, expr)
 
     def _whnf_under_closure(self, tc, closure_env):
-        return self.with_expr(self.struct_expr.closure(closure_env))
+        return self.with_expr(tc, self.struct_expr.closure(closure_env))
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Proj)
@@ -3297,7 +3318,7 @@ class W_Proj(W_Expr):
                             self.struct_name, self.field_index,
                             self.struct_expr,
                         )
-                proj = self.struct_name.proj(i, self.struct_expr)
+                proj = self.struct_name.proj_in(env, i, self.struct_expr)
                 ctor_type = ctor_type.body.instantiate(env, proj)
             else:
                 # Non-dependent field: body doesn't refer to it, skip instantiation.
@@ -4417,7 +4438,7 @@ class W_App(W_Expr):
         struct_name = recursor.all[0]
         new_app = minor
         for i in range(ctor.num_fields):
-            new_app = new_app.app_in(env, struct_name.proj(i, major))
+            new_app = new_app.app_in(env, struct_name.proj_in(env, i, major))
 
         # Re-apply any args after the major (the recursor's own extra
         # applications, peeled outermost-first by `unapp`).
