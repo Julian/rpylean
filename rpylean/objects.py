@@ -923,6 +923,14 @@ def _mk_binder_strict_implicit(name, type):
 # bucket scan without yielding sharing.
 
 def _mk_app(fn, arg):
+    """
+    Allocate a `W_App(fn, arg)` against the persistent intern table.
+    Used by parser-time construction (where there's no `TypeChecker`)
+    and by ad-hoc `.app(...)` calls from tests / utility code.
+    Reduction-path call sites should use `_mk_app_in(tc, ...)` so the
+    allocation goes into the per-decl arena and is reclaimed when the
+    TC goes out of scope.
+    """
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
     h = _mix2(fn._hash, arg._hash)
@@ -936,6 +944,46 @@ def _mk_app(fn, arg):
             return existing
     e = W_App(fn, arg)
     bucket.append(e)
+    return e
+
+
+def _mk_app_in(tc, fn, arg):
+    """
+    Allocate a `W_App(fn, arg)` against the per-decl arena on `tc`,
+    falling back to the persistent table so a (fn, arg) pair that
+    was already shared at parse time stays shared during reduction.
+    New allocations land in `tc._intern_w_app`; that dict is dropped
+    when the `TypeChecker` goes out of scope, capping the lifetime
+    of reduction-produced W_Apps to a single declaration's check.
+
+    `tc` may also be a bare `Environment` (when called from a test or
+    REPL command outside a checking session) — in that case its
+    `_intern_w_app` slot is `None` and we route to `_mk_app`.
+    """
+    arena = tc._intern_w_app
+    if arena is None:
+        return _mk_app(fn, arg)
+    assert isinstance(fn, W_Expr)
+    assert isinstance(arg, W_Expr)
+    h = _mix2(fn._hash, arg._hash)
+    # Per-decl arena first (most recent / most likely hit during
+    # iterative reduction).
+    bucket = arena.get(h, None)
+    if bucket is not None:
+        for existing in bucket:
+            if existing.fn is fn and existing.arg is arg:
+                return existing
+    # Persistent fallback: a parsed W_App with the same shape.
+    persistent = _INTERN_W_APP.get(h, None)
+    if persistent is not None:
+        for existing in persistent:
+            if existing.fn is fn and existing.arg is arg:
+                return existing
+    e = W_App(fn, arg)
+    if bucket is None:
+        arena[h] = [e]
+    else:
+        bucket.append(e)
     return e
 
 
@@ -2118,11 +2166,27 @@ class W_Expr(_Item):
     def app(self, arg, *more):
         """
         Apply this (which better be a function) to the given argument(s).
+
+        Allocates against the persistent parser-time intern table; use
+        `.app_in(tc, arg)` from reduction paths so the allocation lands
+        in the per-decl arena and is reclaimed when the TC ends.
         """
         expr = _mk_app(self, arg)
         if not more:
             return expr
         return expr.app(*more)
+
+    @unroll_safe
+    def app_in(self, tc, arg, *more):
+        """
+        `.app(...)` against a `TypeChecker`'s per-decl arena. The arena
+        falls back to the persistent table on a miss, so already-parsed
+        shared (fn, arg) pairs remain shared during reduction.
+        """
+        expr = _mk_app_in(tc, self, arg)
+        if not more:
+            return expr
+        return expr.app_in(tc, *more)
 
     @unroll_safe
     def closure(self, env):
@@ -4040,7 +4104,7 @@ class W_App(W_Expr):
         f = args[2]
         # mk_args[2-0]: {α} r a — a is mk_args[0] (reversed)
         a = mk_args[0]
-        return f.app(a)
+        return f.app_in(env, a)
 
     def _whnf_core_no_iota(self, env):
         """W_App._whnf_core minus the iota/struct-eta/quot-lift steps.
@@ -4053,7 +4117,7 @@ class W_App(W_Expr):
             return reduced
         fn_next = self.fn._whnf_core(env)
         if fn_next is not None:
-            return fn_next.app(self.arg)
+            return fn_next.app_in(env, self.arg)
         fn = self.fn
         if isinstance(fn, W_Closure):
             inner = fn.body
@@ -4155,7 +4219,7 @@ class W_App(W_Expr):
             major_premise_ctor = ctor_decl.name.const(old_ty_base.levels)
             assert num_ctor_params >= 0
             for arg in new_args[0:num_ctor_params]:
-                major_premise_ctor = major_premise_ctor.app(arg)
+                major_premise_ctor = major_premise_ctor.app_in(env, arg)
 
             new_ty = major_premise_ctor.infer(env)
             if not env.def_eq(old_ty, new_ty):
@@ -4227,7 +4291,7 @@ class W_App(W_Expr):
             )
             assert total_args >= 0
             for arg in new_args[:total_args]:
-                new_app = new_app.app(arg)
+                new_app = new_app.app_in(env, arg)
 
             # For nested-inductive recursors the ctor whose iota we're
             # firing can belong to a *different* inductive than the
@@ -4246,11 +4310,11 @@ class W_App(W_Expr):
             assert ctor_end >= 0
 
             for ctor_field in all_ctor_args[ctor_start:ctor_end]:
-                new_app = new_app.app(ctor_field)
+                new_app = new_app.app_in(env, ctor_field)
 
             i = major_idx - 1
             while i >= 0:
-                new_app = new_app.app(args[i])
+                new_app = new_app.app_in(env, args[i])
                 i -= 1
 
             env.tracer.iota(target.name)
@@ -4360,13 +4424,13 @@ class W_App(W_Expr):
         struct_name = recursor.all[0]
         new_app = minor
         for i in range(ctor.num_fields):
-            new_app = new_app.app(struct_name.proj(i, major))
+            new_app = new_app.app_in(env, struct_name.proj(i, major))
 
         # Re-apply any args after the major (the recursor's own extra
         # applications, peeled outermost-first by `unapp`).
         i = major_idx - 1
         while i >= 0:
-            new_app = new_app.app(args[i])
+            new_app = new_app.app_in(env, args[i])
             i -= 1
 
         return new_app
@@ -4388,7 +4452,7 @@ class W_App(W_Expr):
         # JIT enough iterations to compile a useful trace.
         fn_next = self.fn._whnf_core(env)
         if fn_next is not None:
-            return fn_next.app(self.arg)
+            return fn_next.app_in(env, self.arg)
 
         # self.fn is now in WHNF.
         fn = self.fn
