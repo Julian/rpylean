@@ -1230,6 +1230,12 @@ class Name(_Item):
         """
         return self.const().app(*args)
 
+    def app_in(self, tc, *args):
+        """
+        Apply this name to the given argument(s), allocating in tc's arena.
+        """
+        return self.const().app_in(tc, *args)
+
     def binder(self, type):
         """
         Bind this name in a (default) binder.
@@ -1668,8 +1674,8 @@ class Binder(_Item):
             return self
         return self.with_type(type=self.type.instantiate(tc, expr, depth))
 
-    def subst_levels(self, subts):
-        new_type = self.type.subst_levels(subts)
+    def subst_levels(self, tc, subts):
+        new_type = self.type.subst_levels(tc, subts)
         if new_type is self.type:
             return self
         return self.with_type(type=new_type)
@@ -1828,7 +1834,7 @@ class W_LevelZero(W_Level):
     def pretty_parts(self):
         return "", 0
 
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         return self
 
     def syntactic_eq(self, other):
@@ -1873,8 +1879,8 @@ class W_LevelSucc(W_Level):
         text, balance = self.parent.pretty_parts()
         return text, balance + 1
 
-    def subst_levels(self, substs):
-        new_parent = self.parent.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_parent = self.parent.subst_levels(tc, substs)
         if new_parent is self.parent:
             return self
         return new_parent.succ()
@@ -1939,9 +1945,9 @@ class W_LevelMax(W_Level):
 
         return "(max %s %s)" % (lhs, rhs), 0
 
-    def subst_levels(self, substs):
-        new_lhs = self.lhs.subst_levels(substs)
-        new_rhs = self.rhs.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_lhs = self.lhs.subst_levels(tc, substs)
+        new_rhs = self.rhs.subst_levels(tc, substs)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.max(new_rhs)
@@ -1983,9 +1989,9 @@ class W_LevelIMax(W_Level):
         rhs, _ = self.rhs.pretty_parts()
         return "(imax %s %s)" % (lhs, rhs), 0
 
-    def subst_levels(self, substs):
-        new_lhs = self.lhs.subst_levels(substs)
-        new_rhs = self.rhs.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_lhs = self.lhs.subst_levels(tc, substs)
+        new_rhs = self.rhs.subst_levels(tc, substs)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.imax(new_rhs)
@@ -2041,7 +2047,7 @@ class W_LevelParam(W_Level):
     def is_named(self, name):
         return self.name.syntactic_eq(name)
 
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         return substs.get(self.name, self)
 
     def imax_leq(self, imax, other, balance):
@@ -2049,11 +2055,11 @@ class W_LevelParam(W_Level):
         subst_zero = {self.name: W_LEVEL_ZERO}
         subst_succ = {self.name: self.succ()}
         return (
-            imax.subst_levels(subst_zero).leq(
-                other.subst_levels(subst_zero), balance,
+            imax.subst_levels(None, subst_zero).leq(
+                other.subst_levels(None, subst_zero), balance,
             )
-            and imax.subst_levels(subst_succ).leq(
-                other.subst_levels(subst_succ), balance,
+            and imax.subst_levels(None, subst_succ).leq(
+                other.subst_levels(None, subst_succ), balance,
             )
         )
 
@@ -2062,11 +2068,11 @@ class W_LevelParam(W_Level):
         subst_zero = {self.name: W_LEVEL_ZERO}
         subst_succ = {self.name: self.succ()}
         return (
-            other.subst_levels(subst_zero).leq(
-                imax.subst_levels(subst_zero), balance,
+            other.subst_levels(None, subst_zero).leq(
+                imax.subst_levels(None, subst_zero), balance,
             )
-            and other.subst_levels(subst_succ).leq(
-                imax.subst_levels(subst_succ), balance,
+            and other.subst_levels(None, subst_succ).leq(
+                imax.subst_levels(None, subst_succ), balance,
             )
         )
 
@@ -2322,7 +2328,7 @@ class W_BVar(W_Expr):
             return _mk_w_bvar(self.id + count)
         return self
 
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         return self
 
     @unroll_safe
@@ -2456,7 +2462,7 @@ class W_LitStr(W_Expr):
     def instantiate(self, tc, expr, depth=0):
         return self
 
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         return self
 
     def bind_fvar(self, tc, fvar, depth):
@@ -2532,8 +2538,8 @@ class W_Sort(W_Expr):
     def expect_sort(self, env):
         return self.level
 
-    def subst_levels(self, substs):
-        new_level = self.level.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_level = self.level.subst_levels(tc, substs)
         if new_level is self.level:
             return self
         return new_level.sort()
@@ -2563,7 +2569,7 @@ def apply_const_level_params(const, target, env):
     substs = {}
     for i in range(len(params)):
         substs[params[i]] = const.levels[i]
-    return target.subst_levels(substs)
+    return target.subst_levels(env, substs)
 
 
 class W_Const(W_Expr):
@@ -2716,13 +2722,13 @@ class W_Const(W_Expr):
         return self.infer(env).whnf(env).expect_sort(env)
 
     @unroll_safe
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         levels = self.levels
         if not levels:
             return self
         new_levels = None
         for i in range(len(levels)):
-            new_level = levels[i].subst_levels(substs)
+            new_level = levels[i].subst_levels(tc, substs)
             if new_level is not levels[i]:
                 if new_levels is None:
                     new_levels = list(levels)
@@ -2839,7 +2845,7 @@ class W_LitNat(W_Expr):
     def instantiate(self, tc, expr, depth=0):
         return self
 
-    def subst_levels(self, substs):
+    def subst_levels(self, tc, substs):
         return self
 
     def syntactic_eq(self, other):
@@ -3212,8 +3218,8 @@ class W_Proj(W_Expr):
             return self
         return self.with_expr(self.struct_expr.instantiate(tc, expr, depth))
 
-    def subst_levels(self, substs):
-        new_expr = self.struct_expr.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_expr = self.struct_expr.subst_levels(tc, substs)
         if new_expr is self.struct_expr:
             return self
         return self.with_expr(new_expr)
@@ -3370,7 +3376,7 @@ def _is_prop_type(expr, constants):
                             substs = {}
                             for i in range(len(decl.levels)):
                                 substs[decl.levels[i]] = head.levels[i]
-                            val = val.subst_levels(substs)
+                            val = val.subst_levels(None, substs)
                         # Beta-reduce by applying each arg to the lambda body.
                         for arg in args:
                             if isinstance(val, W_Lambda):
@@ -3568,9 +3574,9 @@ class W_ForAll(W_FunBase):
             self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
-    def subst_levels(self, levels):
-        new_binder = self.binder.subst_levels(levels)
-        new_body = self.body.subst_levels(levels)
+    def subst_levels(self, tc, levels):
+        new_binder = self.binder.subst_levels(tc, levels)
+        new_body = self.body.subst_levels(tc, levels)
         if new_binder is self.binder and new_body is self.body:
             return self
         return forall(new_binder)(new_body)
@@ -3741,9 +3747,9 @@ class W_Lambda(W_FunBase):
     def infer(self, env):
         return _iter_infer(env, self)
 
-    def subst_levels(self, substs):
-        new_binder = self.binder.subst_levels(substs)
-        new_body = self.body.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_binder = self.binder.subst_levels(tc, substs)
+        new_body = self.body.subst_levels(tc, substs)
         if new_binder is self.binder and new_body is self.body:
             return self
         return fun(new_binder)(new_body)
@@ -3870,10 +3876,10 @@ class W_Let(W_Expr):
     def _whnf_core(self, env):
         return self.body.instantiate(env, self.value)
 
-    def subst_levels(self, substs):
-        new_type = self.type.subst_levels(substs)
-        new_value = self.value.subst_levels(substs)
-        new_body = self.body.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_type = self.type.subst_levels(tc, substs)
+        new_value = self.value.subst_levels(tc, substs)
+        new_body = self.body.subst_levels(tc, substs)
         if (new_type is self.type
                 and new_value is self.value
                 and new_body is self.body):
@@ -4012,7 +4018,7 @@ class W_App(W_Expr):
                     substs = {}
                     for k in range(len(decl.levels)):
                         substs[decl.levels[k]] = current.levels[k]
-                    decl_type = decl_type.subst_levels(substs)
+                    decl_type = decl_type.subst_levels(None, substs)
                 for j in range(n - 1, -1, -1):
                     if isinstance(decl_type, W_ForAll):
                         mask.append(decl_type.binder.is_default())
@@ -4524,12 +4530,12 @@ class W_App(W_Expr):
             tc, self.arg.incr_free_bvars(tc, count, depth),
         )
 
-    def subst_levels(self, substs):
-        new_fn = self.fn.subst_levels(substs)
-        new_arg = self.arg.subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        new_fn = self.fn.subst_levels(tc, substs)
+        new_arg = self.arg.subst_levels(tc, substs)
         if new_fn is self.fn and new_arg is self.arg:
             return self
-        return new_fn.app(new_arg)
+        return new_fn.app_in(tc, new_arg)
 
     def _whnf_under_closure(self, tc, closure_env):
         return self.fn.closure(closure_env).app_in(tc, self.arg.closure(closure_env))
@@ -4715,8 +4721,8 @@ class W_Closure(W_Expr):
     def incr_free_bvars(self, tc, count, depth):
         return self.force().incr_free_bvars(tc, count, depth)
 
-    def subst_levels(self, substs):
-        return self.force().subst_levels(substs)
+    def subst_levels(self, tc, substs):
+        return self.force().subst_levels(tc, substs)
 
     def def_eq(self, other, def_eq):
         # Re-dispatch through env.def_eq so the forced LHS gets WHNF'd
@@ -5687,11 +5693,11 @@ class _InferAppStep(_InferWork):
     def arg(self):
         return self.args[self.j]
 
-    def spine_so_far(self):
+    def spine_so_far(self, tc):
         spine = self.head
         i = len(self.args) - 1
         while i > self.j:
-            spine = spine.app(self.args[i])
+            spine = spine.app_in(tc, self.args[i])
             i -= 1
         return spine
 
@@ -5805,8 +5811,8 @@ def _iter_infer(env, root):
                 if inner_cls is W_App:
                     assert isinstance(inner, W_App)
                     # Push the closure through to the App's pieces.
-                    new_app = inner.fn.closure(closure_env).app(
-                        inner.arg.closure(closure_env),
+                    new_app = inner.fn.closure(closure_env).app_in(
+                        env, inner.arg.closure(closure_env),
                     )
                     work.append(_InferStore(cur))
                     work.append(_InferVisit(new_app))
@@ -5848,7 +5854,7 @@ def _iter_infer(env, root):
             arg = item.arg()
             if not isinstance(fn_type, W_ForAll):
                 raise W_NotAFunction(
-                    env, item.spine_so_far(), inferred_type=fn_type_base,
+                    env, item.spine_so_far(env), inferred_type=fn_type_base,
                 )
             if not env.def_eq(fn_type.binder.type, arg_type):
                 raise W_TypeError(

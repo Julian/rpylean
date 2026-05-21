@@ -547,7 +547,7 @@ class TestLitNat(object):
 class TestLitStr(object):
     def test_subst_levels(self):
         lit = W_LitStr("hi")
-        assert lit.subst_levels({Name.simple("u"): W_LEVEL_ZERO}) is lit
+        assert lit.subst_levels(None, {Name.simple("u"): W_LEVEL_ZERO}) is lit
 
     def test_bind_fvar(self):
         lit = W_LitStr("hi")
