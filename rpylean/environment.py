@@ -45,6 +45,7 @@ from rpylean.objects import (
     W_LitNat,
     W_LitStr,
     W_Sort,
+    _BOOL_TRUE,
     _mk_w_bvar,
     fun,
     get_decl,
@@ -516,6 +517,20 @@ class TypeChecker(object):
         # just to compare two identical arg subtrees.
         if self._try_lazy_delta(expr1, expr2):
             return tracer.result(True)
+
+        # `decide`-tactic shortcut: when one side is the constant
+        # `Bool.true`, WHNF only the other and check it reduces there
+        # too. Mirrors lean4's `is_def_eq_core` (type_checker.cpp:1062)
+        # and nanoda_lib (tc.rs:935). Proofs from `decide` come out as
+        # `of_eq_true (Eq.refl true) : decide p = true`, so the spot
+        # we hit this is the `decide p =?= true` def_eq — short-circuits
+        # away the full structural dispatch on the proof side.
+        if expr2 is _BOOL_TRUE:
+            if expr1.whnf(self) is _BOOL_TRUE:
+                return tracer.result(True)
+        elif expr1 is _BOOL_TRUE:
+            if expr2.whnf(self) is _BOOL_TRUE:
+                return tracer.result(True)
 
         # Reduce both to WHNF so heads are in canonical form.
         expr1 = expr1.whnf(self)
