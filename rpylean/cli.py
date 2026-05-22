@@ -268,6 +268,10 @@ class _StreamingChecker(DeclarationHook):
                 ),
             )
             self.stdoutw.writeline(decl.name.tokens(self.env.declarations))
+            # Flush per row so a `timeout`-killed run's tsv reflects what
+            # the worker actually saw, not just what filled the 8 KB stdio
+            # buffer before the SIGTERM dropped the tail.
+            self.stdoutw.flush()
         if result.error is not None:
             result.error.write_to(self.stderrw)
             self.failures += 1
