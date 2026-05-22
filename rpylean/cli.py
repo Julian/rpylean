@@ -795,6 +795,7 @@ class _DotPrinter(Printer):
 
     def show(self, env, decl):
         self.writer.write([PLAIN.emit(".")])
+        self.writer.flush()
 
 
 if __name__ == "__main__":
