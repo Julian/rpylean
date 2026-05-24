@@ -46,7 +46,9 @@ from rpylean.objects import (
     W_LitStr,
     W_Sort,
     _BOOL_TRUE,
+    _is_nat_zero_const,
     _mk_w_bvar,
+    _nat_succ_pred,
     fun,
     get_decl,
     name_dict,
@@ -1029,12 +1031,12 @@ class Environment(object):
             by_name[each.name] = each
         return Environment(declarations=by_name)
 
-    def type_check(self, declarations, pp=None):
+    def type_check(self, declarations, printer=None):
         """
         Type check each declaration, yielding only the errors.
         """
         for each in declarations:
-            result = self.type_check_one(each, pp=pp)
+            result = self.type_check_one(each, printer=printer)
             if result.error is not None:
                 yield result.error
 
@@ -1048,12 +1050,12 @@ class Environment(object):
         """
         return decl.type_check(TypeChecker(self, decl))
 
-    def type_check_one(self, decl, pp=None):
+    def type_check_one(self, decl, printer=None):
         """
         Type check a single declaration, returning a `CheckResult`.
         """
-        if pp is not None:
-            pp(self, decl)
+        if printer is not None:
+            printer.before(self, decl)
 
         tc = TypeChecker(self, decl)
         error = None
@@ -1088,10 +1090,13 @@ class Environment(object):
         bytes_allocated = _bytes_allocated() - bytes_start
         live_memory = _live_memory()
         peak_growth = _peak_memory() - peak_start
-        return CheckResult(
+        result = CheckResult(
             elapsed, gc_elapsed, bytes_allocated, live_memory,
             peak_growth, tc.heartbeat, error,
         )
+        if printer is not None:
+            printer.after(self, decl, result)
+        return result
 
     def all(self):
         """

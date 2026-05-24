@@ -1001,17 +1001,23 @@ class TestInvalidDeclaration(object):
         )
 
 
-def test_pp():
+def test_printer():
     good = Name.simple("GoodDef").definition(type=TYPE, value=PROP)
     env = Environment.having([good])
 
-    printed = []
+    events = []
 
-    def pp(env, decl):
-        printed.append((env, decl))
+    class RecordingPrinter(object):
+        wants_heartbeats = False
 
-    list(env.type_check(env.all(), pp=pp))
-    assert printed == [(env, good)]
+        def before(self, env, decl):
+            events.append(("before", env, decl))
+
+        def after(self, env, decl, result):
+            events.append(("after", env, decl, result.error))
+
+    list(env.type_check(env.all(), printer=RecordingPrinter()))
+    assert events == [("before", env, good), ("after", env, good, None)]
 
 
 class TestHeartbeat(object):

@@ -13,7 +13,10 @@ from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean import _progress, parser
 from rpylean._rcli import CLI, UsageError
-from rpylean._tokens import PLAIN, writer_from_arg
+from rpylean._tokens import (
+    ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3, HEAT_4,
+    PLAIN, writer_from_arg,
+)
 from rpylean.exceptions import ExportError
 from rpylean.ffi import (
     Exporter, FFI, detect_prefix, read_constant_info,
@@ -64,7 +67,7 @@ COLOR = (
             "print",
             (
                 "print something for each declaration (valid values are "
-                "name|dots|decls|declarations|all)"
+                "name|dots|timing|jsonl|decls|declarations|all)"
             ),
         ),
         (
@@ -113,7 +116,6 @@ def check(self, args, stdin, stdout, stderr):
     max_fail = int(args.options["max-fail"] or "0")
     max_heartbeat = int(args.options["max-heartbeat"] or "0")
     printer = Printer.from_str(args.options["print"], stdoutw)
-    pp = printer.show if printer is not None else None
     slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
     filter_match = args.options["filter-match"]
@@ -151,7 +153,7 @@ def check(self, args, stdin, stdout, stderr):
             stderr,
             stdoutw,
             stderrw,
-            pp,
+            printer,
             slow_secs,
             slow_hb,
             filter_match,
@@ -174,7 +176,7 @@ class _StreamingChecker(DeclarationHook):
     """
 
     _attrs_ = [
-        'env', 'stdoutw', 'stderrw', 'pp',
+        'env', 'stdoutw', 'stderrw', 'printer',
         'slow_secs', 'slow_hb',
         'filter_match', 'filter_names',
         'abort_at', 'failures', 'break_at',
@@ -186,7 +188,7 @@ class _StreamingChecker(DeclarationHook):
         env,
         stdoutw,
         stderrw,
-        pp,
+        printer,
         slow_secs,
         slow_hb,
         filter_match,
@@ -197,7 +199,7 @@ class _StreamingChecker(DeclarationHook):
         self.env = env
         self.stdoutw = stdoutw
         self.stderrw = stderrw
-        self.pp = pp
+        self.printer = printer
         self.slow_secs = slow_secs
         self.slow_hb = slow_hb
         self.filter_match = filter_match
@@ -250,7 +252,7 @@ class _StreamingChecker(DeclarationHook):
             debug.debug_start("rpylean-decl")
             if debug.have_debug_prints():
                 debug.debug_print(decl.name.str())
-        result = self.env.type_check_one(decl, pp=self.pp)
+        result = self.env.type_check_one(decl, printer=self.printer)
         if we_are_translated():
             debug.debug_stop("rpylean-decl")
         self.total_heartbeats += result.heartbeats
@@ -298,7 +300,7 @@ def _check_one_file(
     stderr,
     stdoutw,
     stderrw,
-    pp,
+    printer,
     slow_secs,
     slow_hb,
     filter_match,
@@ -320,7 +322,7 @@ def _check_one_file(
         env=builder.env,
         stdoutw=stdoutw,
         stderrw=stderrw,
-        pp=pp,
+        printer=printer,
         slow_secs=slow_secs,
         slow_hb=slow_hb,
         filter_match=filter_match,
@@ -342,7 +344,11 @@ def _check_one_file(
         try:
             if max_heartbeat > 0:
                 builder.env.max_heartbeat = max_heartbeat
-            if slow_secs >= 0.0 or slow_hb >= 0:
+            if (
+                slow_secs >= 0.0
+                or slow_hb >= 0
+                or (printer is not None and printer.wants_heartbeats)
+            ):
                 builder.env.count_heartbeats = True
             parser.validate_export_metadata(file)
             builder.consume(file, hook=checker)
@@ -525,7 +531,7 @@ def check(self, args, stdin, stdout, stderr):
     if slow_secs >= 0.0 or slow_hb >= 0:
         builder.env.count_heartbeats = True
     checker = _StreamingChecker(
-        env=builder.env, stdoutw=stdoutw, stderrw=stderrw, pp=None,
+        env=builder.env, stdoutw=stdoutw, stderrw=stderrw, printer=None,
         slow_secs=slow_secs, slow_hb=slow_hb,
         filter_match=filter_match, filter_names=filter_names,
         abort_at=max_fail if max_fail > 0 else 0,
@@ -753,17 +759,25 @@ def _pos_int(orig, n):
 
 class Printer(object):
     """
-    A pretty-printer for declarations.
+    A streaming pretty-printer for declarations being type-checked.
+
+    Subclasses override `before` (called just before a decl is checked)
+    and/or `after` (called with the `CheckResult` once the check returns).
+    `wants_heartbeats` lets a subclass opt the env into heartbeat counting
+    so `result.heartbeats` is populated when its output depends on it.
     """
 
     _attrs_ = ['writer']
+    wants_heartbeats = False
 
     def __init__(self, writer):
         self.writer = writer
 
-    def show(self, env, decl):
-        """Print a single declaration according to this printer's mode."""
-        raise NotImplementedError
+    def before(self, env, decl):
+        """Run just before `decl` is type-checked."""
+
+    def after(self, env, decl, result):
+        """Run just after `decl` is type-checked, with its `CheckResult`."""
 
     @staticmethod
     def from_str(pp_str, writer):
@@ -774,6 +788,10 @@ class Printer(object):
             return _NamePrinter(writer)
         elif pp_str == "dots":
             return _DotPrinter(writer)
+        elif pp_str == "timing":
+            return _TimingPrinter(writer)
+        elif pp_str == "jsonl":
+            return _JSONLPrinter(writer)
         elif pp_str is None or pp_str == "none":
             return None
         else:
@@ -783,22 +801,159 @@ class Printer(object):
 class _DeclPrinter(Printer):
     _attrs_ = []
 
-    def show(self, env, decl):
+    def before(self, env, decl):
         self.writer.writeline(decl.tokens(env.declarations))
 
 
 class _NamePrinter(Printer):
+    """Print `name ... ` before, then `OK` / `FAIL` after the check."""
+
     _attrs_ = []
 
-    def show(self, env, decl):
-        self.writer.writeline(decl.name.tokens(env.declarations))
+    def before(self, env, decl):
+        self.writer.write(decl.name.tokens(env.declarations))
+        self.writer.write([PLAIN.emit(" ... ")])
+        self.writer.flush()
+
+    def after(self, env, decl, result):
+        if result.error is None:
+            self.writer.writeline([PLAIN.emit("OK")])
+        else:
+            self.writer.writeline([ERROR.emit("FAIL")])
+        self.writer.flush()
+
+
+#: Heat levels for streaming printers, ordered cool → hot. Each entry is
+#: ``(token, glyph)``. Glyphs are 5 visually distinct ASCII chars so the
+#: magnitude survives ``--color=no``; colors layer on top via the token
+#: when the writer is in ANSI mode.
+_HEAT_LEVELS = [
+    (HEAT_0, "."),
+    (HEAT_1, ":"),
+    (HEAT_2, "o"),
+    (HEAT_3, "O"),
+    (HEAT_4, "#"),
+]
+
+
+def _heat_level(elapsed, heartbeats):
+    """
+    Pick an index into `_HEAT_LEVELS` from one decl's `CheckResult`.
+
+    Prefers heartbeats (deterministic across machines and JIT warmup);
+    falls back to wall-clock when heartbeats aren't being counted.
+    """
+    if heartbeats > 0:
+        if heartbeats < 1000:
+            return 0
+        elif heartbeats < 10000:
+            return 1
+        elif heartbeats < 100000:
+            return 2
+        elif heartbeats < 1000000:
+            return 3
+        return 4
+    if elapsed < 0.001:
+        return 0
+    elif elapsed < 0.01:
+        return 1
+    elif elapsed < 0.1:
+        return 2
+    elif elapsed < 1.0:
+        return 3
+    return 4
 
 
 class _DotPrinter(Printer):
-    _attrs_ = []
+    """One glyph per decl, colored by heartbeats (or wall time)."""
 
-    def show(self, env, decl):
-        self.writer.write([PLAIN.emit(".")])
+    _attrs_ = []
+    wants_heartbeats = True
+
+    def after(self, env, decl, result):
+        token, glyph = _HEAT_LEVELS[_heat_level(result.elapsed, result.heartbeats)]
+        self.writer.write([token.emit(glyph)])
+        self.writer.flush()
+
+
+class _TimingPrinter(_NamePrinter):
+    """Stream `name ... elapsed (N hb)` per decl (extends `_NamePrinter`)."""
+
+    _attrs_ = []
+    wants_heartbeats = True
+
+    def after(self, env, decl, result):
+        # Heartbeat counting is unconditionally enabled (`wants_heartbeats`),
+        # so `0 hb` here means the decl genuinely needed no def_eq calls,
+        # not that the counter was off.
+        timing = "%fs (%d hb)" % (result.elapsed, result.heartbeats)
+        if result.error is None:
+            self.writer.writeline([PLAIN.emit(timing)])
+        else:
+            self.writer.writeline(
+                [PLAIN.emit(timing + " "), ERROR.emit("FAIL")],
+            )
+        self.writer.flush()
+
+
+_HEX = "0123456789abcdef"
+
+
+def _json_escape(s):
+    """Escape `s` for use inside a JSON string literal."""
+    out = []
+    for ch in s:
+        c = ord(ch)
+        if c == 0x22:
+            out.append("\\\"")
+        elif c == 0x5c:
+            out.append("\\\\")
+        elif c == 0x0a:
+            out.append("\\n")
+        elif c == 0x0d:
+            out.append("\\r")
+        elif c == 0x09:
+            out.append("\\t")
+        elif c < 0x20:
+            # All control chars fit in two hex digits; the upper byte is 0.
+            out.append("\\u00" + _HEX[c >> 4] + _HEX[c & 0xf])
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+class _JSONLPrinter(Printer):
+    """One JSON object per checked decl, newline delimited."""
+
+    _attrs_ = []
+    wants_heartbeats = True
+
+    def after(self, env, decl, result):
+        if result.error is None:
+            status = "\"ok\":true"
+        else:
+            status = "\"ok\":false,\"error\":\"%s\"" % (
+                _json_escape(FORMAT_PLAIN(result.error.tokens())),
+            )
+        line = (
+            "{\"name\":\"%s\",%s,"
+            "\"elapsed\":%f,"
+            "\"gc_elapsed\":%f,"
+            "\"bytes_allocated\":%d,"
+            "\"live_memory\":%d,"
+            "\"peak_growth\":%d,"
+            "\"heartbeats\":%d}\n"
+        ) % (
+            _json_escape(decl.name.str()),
+            status,
+            result.elapsed,
+            result.gc_elapsed,
+            result.bytes_allocated,
+            result.live_memory,
+            result.peak_growth,
+            result.heartbeats,
+        )
+        self.writer.write([PLAIN.emit(line)])
         self.writer.flush()
 
 

@@ -4,8 +4,10 @@ from StringIO import StringIO
 from rpylean._rcli import CLI, Args
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
 from rpylean._rcli import UsageError
-from rpylean.cli import Printer, _parse_threshold
-from rpylean.environment import Environment
+from rpylean.cli import (
+    Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_threshold,
+)
+from rpylean.environment import CheckResult, Environment
 from rpylean.objects import TYPE, Name
 
 
@@ -306,17 +308,167 @@ class TestPrinter(object):
     decl = Name.simple("Foo").axiom(type=TYPE)
     env = Environment.having([decl])
 
-    def test_color(self):
-        out = StringIO()
-        printer = Printer.from_str("name", TokenWriter(out, FORMAT_COLOR))
-        printer.show(self.env, self.decl)
-        assert "\033[" in out.getvalue()
+    def _ok(self, heartbeats=0, elapsed=0.0):
+        return CheckResult(
+            elapsed=elapsed, gc_elapsed=0.0, bytes_allocated=0,
+            live_memory=0, peak_growth=0, heartbeats=heartbeats, error=None,
+        )
 
-    def test_plain(self):
+    def _run(self, mode, formatter, result=None):
         out = StringIO()
-        printer = Printer.from_str("name", TokenWriter(out, FORMAT_PLAIN))
-        printer.show(self.env, self.decl)
-        assert out.getvalue() == "Foo\n"
+        printer = Printer.from_str(mode, TokenWriter(out, formatter))
+        printer.before(self.env, self.decl)
+        printer.after(self.env, self.decl, result or self._ok())
+        return out.getvalue()
+
+    def test_name_color(self):
+        assert "\033[" in self._run("name", FORMAT_COLOR)
+
+    def test_name_plain(self):
+        assert self._run("name", FORMAT_PLAIN) == "Foo ... OK\n"
+
+    def test_name_fail(self):
+        result = CheckResult(
+            elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
+            live_memory=0, peak_growth=0, heartbeats=0,
+            error=object(),  # truthy non-None; printer only branches on `is None`
+        )
+        assert self._run("name", FORMAT_PLAIN, result=result) == "Foo ... FAIL\n"
+
+    def test_dots_plain_distinct_glyphs(self):
+        # All 5 heat levels must use distinct ASCII glyphs so --color=no
+        # still conveys magnitude.
+        glyphs = set(glyph for _token, glyph in _HEAT_LEVELS)
+        assert len(glyphs) == len(_HEAT_LEVELS)
+
+    def test_dots_all_heat_levels_distinguishable(self):
+        # End-to-end: one heartbeat value per bucket goes in, 5 distinct
+        # plain-text glyphs come out. Catches regressions where someone
+        # accidentally collapses two heat levels in `_HEAT_LEVELS` or
+        # `_heat_level`.
+        per_bucket = [500, 5000, 50000, 500000, 5000000]
+        outs = [
+            self._run("dots", FORMAT_PLAIN, result=self._ok(heartbeats=hb))
+            for hb in per_bucket
+        ]
+        assert len(set(outs)) == 5
+
+    def test_dots_plain(self):
+        assert self._run("dots", FORMAT_PLAIN) == "."
+
+    def test_dots_color_hot(self):
+        out = self._run("dots", FORMAT_COLOR, result=self._ok(heartbeats=2000000))
+        assert "\033[" in out and "#" in out
+
+    def test_timing(self):
+        out = self._run("timing", FORMAT_PLAIN, result=self._ok(heartbeats=42, elapsed=0.5))
+        assert out.startswith("Foo ... ") and "(42 hb)" in out and out.endswith("\n")
+
+    def test_timing_zero_heartbeats_still_reported(self):
+        # `wants_heartbeats=True` guarantees counting is on, so `0 hb` here
+        # means a real zero — surface it rather than hiding it.
+        out = self._run("timing", FORMAT_PLAIN, result=self._ok(elapsed=0.25))
+        assert "(0 hb)" in out
+
+    def test_jsonl(self):
+        out = self._run("jsonl", FORMAT_PLAIN, result=self._ok(heartbeats=7, elapsed=0.5))
+        # Only `after` writes; `before` is a no-op, so output is exactly one line.
+        # `ok` is positioned right after `name` so previews / `head -c` snippets
+        # show success status first.
+        assert out.startswith('{"name":"Foo","ok":true,')
+        assert '"heartbeats":7' in out
+        assert out.endswith("}\n")
+
+    def test_jsonl_failure_status_before_metrics(self):
+        # `ok` and `error` are status fields and belong adjacent at the
+        # top of each record so a parser can short-circuit on failure.
+        class FakeError(object):
+            def tokens(self):
+                from rpylean._tokens import PLAIN
+                return [PLAIN.emit("oops")]
+
+        result = CheckResult(
+            elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
+            live_memory=0, peak_growth=0, heartbeats=0, error=FakeError(),
+        )
+        out = self._run("jsonl", FORMAT_PLAIN, result=result)
+        assert out.startswith('{"name":"Foo","ok":false,"error":"oops",')
+
+    def test_jsonl_failure_includes_error(self):
+        class FakeError(object):
+            def tokens(self):
+                from rpylean._tokens import PLAIN
+                return [PLAIN.emit("boom\nline2")]
+
+        result = CheckResult(
+            elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
+            live_memory=0, peak_growth=0, heartbeats=0, error=FakeError(),
+        )
+        out = self._run("jsonl", FORMAT_PLAIN, result=result)
+        # `\n` in the error must be JSON-escaped (`\\n`), not raw, so the line stays parseable.
+        assert '"ok":false' in out
+        assert '"error":"boom\\nline2"' in out
+
+    def test_decls_plain(self):
+        out = self._run("all", FORMAT_PLAIN)
+        # Full declaration prints in `before`; `after` is a no-op.
+        assert "Foo" in out and out.endswith("\n")
+
+    def test_unknown(self):
+        try:
+            Printer.from_str("nope", TokenWriter(StringIO(), FORMAT_PLAIN))
+        except UsageError as err:
+            assert "nope" in err.message
+        else:
+            assert False, "expected UsageError"
+
+    def test_none(self):
+        assert Printer.from_str(None, TokenWriter(StringIO(), FORMAT_PLAIN)) is None
+        assert Printer.from_str("none", TokenWriter(StringIO(), FORMAT_PLAIN)) is None
+
+    def test_wants_heartbeats(self):
+        # The streaming-time printers opt into heartbeat counting so the
+        # env populates `result.heartbeats`; the rest don't pay the cost.
+        w = TokenWriter(StringIO(), FORMAT_PLAIN)
+        assert Printer.from_str("dots", w).wants_heartbeats
+        assert Printer.from_str("timing", w).wants_heartbeats
+        assert Printer.from_str("jsonl", w).wants_heartbeats
+        assert not Printer.from_str("name", w).wants_heartbeats
+        assert not Printer.from_str("all", w).wants_heartbeats
+
+
+class TestHeatLevel(object):
+    def test_uses_heartbeats_when_present(self):
+        assert _heat_level(elapsed=100.0, heartbeats=500) == 0
+        assert _heat_level(elapsed=0.0, heartbeats=2000000) == 4
+
+    def test_falls_back_to_elapsed(self):
+        assert _heat_level(elapsed=0.0005, heartbeats=0) == 0
+        assert _heat_level(elapsed=0.05, heartbeats=0) == 2
+        assert _heat_level(elapsed=5.0, heartbeats=0) == 4
+
+    def test_boundaries_are_strict_less(self):
+        # `< 1000` so exactly 1000 falls into the next bucket; lets us
+        # change boundaries later without subtle off-by-one regressions.
+        assert _heat_level(elapsed=0.0, heartbeats=999) == 0
+        assert _heat_level(elapsed=0.0, heartbeats=1000) == 1
+
+
+class TestJSONEscape(object):
+    def test_plain_passthrough(self):
+        assert _json_escape("hello") == "hello"
+
+    def test_quote_and_backslash(self):
+        assert _json_escape('a"b\\c') == 'a\\"b\\\\c'
+
+    def test_control_chars(self):
+        assert _json_escape("a\nb\tc\rd") == "a\\nb\\tc\\rd"
+        assert _json_escape("\x01") == "\\u0001"
+
+    def test_high_bytes_pass_through(self):
+        # Lean identifiers can contain unicode (e.g. `≤`); UTF-8 bytes
+        # should pass through as-is — JSON parsers accept raw UTF-8.
+        assert _json_escape("\xe2\x89\xa4") == "\xe2\x89\xa4"
 
 
 class TestParseThreshold(object):
