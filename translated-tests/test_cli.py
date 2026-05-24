@@ -146,8 +146,8 @@ def test_ffi_export_roundtrips_through_check(tmpdir):
     out, err = check.communicate()
     assert check.returncode == 0, (out, err)
     names = out.splitlines()
-    assert "Nat.succ" in names, names
-    assert "Eq.refl" in names, names
+    assert "Nat.succ ... OK" in names, names
+    assert "Eq.refl ... OK" in names, names
 
 
 def test_ffi_export_decodes_big_nat_literals():
@@ -193,4 +193,4 @@ def test_export_error_does_not_skip_remaining_files(tmpdir):
     process = rpylean("check", "--print=names", str(invalid), str(valid))
     stdout, stderr = process.communicate()
 
-    assert stdout == "basicDef\n", (stdout, stderr)
+    assert stdout == "basicDef ... OK\n", (stdout, stderr)
