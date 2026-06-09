@@ -619,7 +619,7 @@ class TestClosure(object):
         a_decl = Name.simple("a").axiom(type=NAT)
         a = a_decl.const()
         closure = W_Closure([a], W_BVar(0))
-        assert closure.force() == a
+        assert closure.force(None) == a
 
     def test_force_with_multi_env(self):
         """Closure([a, b], App(BVar(0), BVar(1))).force() = App(a, b)."""
@@ -629,7 +629,7 @@ class TestClosure(object):
         b = b_decl.const()
         body = W_App(W_BVar(0), W_BVar(1))
         closure = W_Closure([a, b], body)
-        assert closure.force() == W_App(a, b)
+        assert closure.force(None) == W_App(a, b)
 
     def test_force_preserves_env_entry_bvars(self):
         """env entries' free bvars survive force without being over-substituted."""
@@ -640,4 +640,4 @@ class TestClosure(object):
         # App(BVar(0), BVar(0)).
         body = W_App(W_BVar(0), W_BVar(1))
         closure = W_Closure([W_BVar(0), W_BVar(0)], body)
-        assert closure.force() == W_App(W_BVar(0), W_BVar(0))
+        assert closure.force(None) == W_App(W_BVar(0), W_BVar(0))

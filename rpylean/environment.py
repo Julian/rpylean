@@ -658,9 +658,9 @@ class TypeChecker(object):
         # the dispatch — and the JIT driver's greens — see canonical
         # forms rather than closure wrappers.
         if isinstance(expr1, W_Closure):
-            expr1 = expr1.force()
+            expr1 = expr1.force(self)
         if isinstance(expr2, W_Closure):
-            expr2 = expr2.force()
+            expr2 = expr2.force(self)
 
         # Merge point sits at the structural-dispatch entry: heads are
         # post-WHNF and post-closure-force here, so the JIT specializes
@@ -945,7 +945,7 @@ class TypeChecker(object):
         if isinstance(expr1, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_Closure):
-                expr2_ty = expr2_ty.force()
+                expr2_ty = expr2_ty.force(self)
             if isinstance(expr2_ty, W_ForAll):
                 # Turn 'f' into 'fun x => f x'
                 return fun(expr2_ty.binder)(

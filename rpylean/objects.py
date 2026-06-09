@@ -4249,7 +4249,7 @@ class W_App(W_Expr):
                 new_env = [self.arg] + list(fn.env)
                 env.tracer.beta()
                 return inner.body.closure(new_env)
-            fn = fn.force()
+            fn = fn.force(env)
         if isinstance(fn, W_FunBase):
             env.tracer.beta()
             return fn.body.instantiate(env, self.arg)
@@ -4592,7 +4592,7 @@ class W_App(W_Expr):
                 new_env = [self.arg] + list(fn.env)
                 env.tracer.beta()
                 return inner.body.closure(new_env)
-            fn = fn.force()
+            fn = fn.force(env)
         if isinstance(fn, W_FunBase):
             env.tracer.beta()
             return fn.body.instantiate(env, self.arg)
@@ -4795,10 +4795,18 @@ class W_Closure(W_Expr):
             return None
         return inner_step.closure(closure_env)
 
-    def force(self):
+    def force(self, tc):
         """
         Materialize the closure-free form by performing the deferred
         substitution eagerly.
+
+        ``tc`` routes the substitution-produced `W_App`s into the
+        per-decl arena (when called from reduction paths). Cold-path
+        callers without a TC pass `None`; those allocations route to
+        the persistent intern. Without this threading, reduction-time
+        force()s would dump every materialised `W_App` into the
+        persistent table, recreating the leak the per-decl arena was
+        meant to bound.
         """
         n = len(self.env)
         result = self.body
@@ -4808,47 +4816,51 @@ class W_Closure(W_Expr):
         # over-substituted by later iterations.
         k = n - 1
         while k >= 0:
-            result = result.instantiate(None, self.env[k], k)
+            result = result.instantiate(tc, self.env[k], k)
             k -= 1
         return result
 
     def syntactic_eq(self, other):
-        return syntactic_eq(self.force(), other)
+        return syntactic_eq(self.force(None), other)
 
     def infer(self, env):
-        return self.force().infer(env)
+        return self.force(env).infer(env)
 
     def instantiate(self, tc, expr, depth=0):
-        return self.force().instantiate(tc, expr, depth)
+        return self.force(tc).instantiate(tc, expr, depth)
 
     def bind_fvar(self, tc, fvar, depth):
-        return self.force().bind_fvar(tc, fvar, depth)
+        return self.force(tc).bind_fvar(tc, fvar, depth)
 
     def incr_free_bvars(self, tc, count, depth):
-        return self.force().incr_free_bvars(tc, count, depth)
+        return self.force(tc).incr_free_bvars(tc, count, depth)
 
     def subst_levels(self, tc, substs):
-        return self.force().subst_levels(tc, substs)
+        return self.force(tc).subst_levels(tc, substs)
 
     def def_eq(self, other, def_eq):
         # Re-dispatch through env.def_eq so the forced LHS gets WHNF'd
         # against ``other`` (which may itself still be a closure).
-        return def_eq(self.force(), other)
+        # `def_eq` here is the TC's bound method, so we don't have direct
+        # access to the TC reference; route force through the persistent
+        # intern (None) and let the surrounding TC pick up any W_Apps
+        # that need pinning to its arena via its own reduction calls.
+        return def_eq(self.force(None), other)
 
     def tokens(self, constants, mark=None, span_holder=None):
-        return self.force().tokens(constants, mark=mark, span_holder=span_holder)
+        return self.force(None).tokens(constants, mark=mark, span_holder=span_holder)
 
     def expect_sort(self, env):
-        return self.force().expect_sort(env)
+        return self.force(env).expect_sort(env)
 
     def contains_const(self, name):
-        return self.force().contains_const(name)
+        return self.force(None).contains_const(name)
 
     def _any_subexpr_invalid_index(self, inductive):
-        return self.force()._any_subexpr_invalid_index(inductive)
+        return self.force(None)._any_subexpr_invalid_index(inductive)
 
     def is_strictly_positive(self, inductive, env):
-        return self.force().is_strictly_positive(inductive, env)
+        return self.force(env).is_strictly_positive(inductive, env)
 
 
 class W_RecRule(_Item):
@@ -5662,9 +5674,9 @@ def syntactic_eq(expr1, expr2):
     if expr1 is expr2:
         return True
     if isinstance(expr1, W_Closure):
-        expr1 = expr1.force()
+        expr1 = expr1.force(None)
     if isinstance(expr2, W_Closure):
-        expr2 = expr2.force()
+        expr2 = expr2.force(None)
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
@@ -5971,7 +5983,7 @@ def _iter_infer(env, root):
             fn_type_base = values.pop()
             fn_type = fn_type_base.whnf(env)
             if isinstance(fn_type, W_Closure):
-                fn_type = fn_type.force()
+                fn_type = fn_type.force(env)
             arg = item.arg()
             if not isinstance(fn_type, W_ForAll):
                 raise W_NotAFunction(
