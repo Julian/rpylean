@@ -44,14 +44,22 @@ from rpylean.objects import (
     W_Lambda,
     W_LitNat,
     W_LitStr,
+    W_Proj,
     W_Sort,
     _BOOL_TRUE,
+    _is_nat_zero_const,
     _mk_w_bvar,
+    _nat_succ_pred,
     fun,
     get_decl,
     name_dict,
     syntactic_eq,
 )
+
+
+_OFFSET_UNDEF = 0
+_OFFSET_TRUE = 1
+_OFFSET_FALSE = 2
 
 
 def _def_eq_printable_location(expr1_class):
@@ -518,6 +526,19 @@ class TypeChecker(object):
         if self._try_lazy_delta(expr1, expr2):
             return tracer.result(True)
 
+        # Nat-offset: short-circuit `Nat.zero =?= Nat.zero` and
+        # `Nat.succ a =?= Nat.succ b` (and the `W_LitNat` analogues)
+        # without WHNF. Mirrors lean4's `is_def_eq_offset`
+        # (type_checker.cpp:961), called from `lazy_delta_reduction`
+        # at line 975. Recurses on the predecessors; `_OFFSET_FALSE`
+        # bypasses the fallthrough so a structurally-unequal Nat-succ
+        # spine doesn't get re-explored via WHNF + `_def_eq_core`.
+        offset = self._def_eq_offset(expr1, expr2)
+        if offset == _OFFSET_TRUE:
+            return tracer.result(True)
+        if offset == _OFFSET_FALSE:
+            return tracer.result(False)
+
         # `decide`-tactic shortcut: when one side is the constant
         # `Bool.true`, WHNF only the other and check it reduces there
         # too. Mirrors lean4's `is_def_eq_core` (type_checker.cpp:1062)
@@ -681,6 +702,41 @@ class TypeChecker(object):
 
         return False
 
+    def _def_eq_offset(self, expr1, expr2):
+        """
+        Mirrors lean4's ``is_def_eq_offset`` (type_checker.cpp:961).
+
+        Returns:
+          ``_OFFSET_TRUE``   both sides are ``Nat.zero``, or both are
+                             ``Nat.succ x`` / ``Nat.succ y`` with
+                             ``x``, ``y`` def-equal predecessors.
+          ``_OFFSET_FALSE``  both sides are ``Nat.succ _`` but the
+                             predecessors are not def-equal.
+          ``_OFFSET_UNDEF``  Nat-shape doesn't apply; caller falls
+                             through to its normal path.
+
+        Two ``W_LitNat`` literals get compared by value rather than by
+        peeling — peeling a 2³² literal one ``Nat.succ`` at a time
+        would blow the stack, and lean4 sidesteps the same case via
+        the ``Lit`` fast path in ``quick_is_def_eq``
+        (type_checker.cpp:758).
+        """
+        if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+            if expr1.val.eq(expr2.val):
+                return _OFFSET_TRUE
+            return _OFFSET_FALSE
+        if _is_nat_zero_const(expr1) and _is_nat_zero_const(expr2):
+            return _OFFSET_TRUE
+        pred1 = _nat_succ_pred(expr1)
+        if pred1 is None:
+            return _OFFSET_UNDEF
+        pred2 = _nat_succ_pred(expr2)
+        if pred2 is None:
+            return _OFFSET_UNDEF
+        if self.def_eq(pred1, pred2):
+            return _OFFSET_TRUE
+        return _OFFSET_FALSE
+
     def _try_lazy_delta(self, expr1, expr2):
         """
         Iterative lazy delta reduction, mirroring lean4's
@@ -711,13 +767,29 @@ class TypeChecker(object):
                 return False
 
             # Exactly one side reducible: unfold that one and retry.
+            # First, if the non-delta side is a projection-headed app,
+            # try WHNFing it instead — the proj may resolve cheaply via
+            # struct-eta or constructor iota, avoiding an expensive
+            # well-founded-recursion delta-unfold on the other side.
+            # Mirrors lean4's `try_unfold_proj_app` (type_checker.cpp:868,
+            # called from `lazy_delta_reduction_step` at lines 898/905).
             if kind1 is None:
+                if isinstance(expr1.head(), W_Proj):
+                    new_e1 = expr1.whnf(self)
+                    if new_e1 is not expr1:
+                        expr1 = new_e1
+                        continue
                 new_e2 = expr2.whnf(self)
                 if new_e2 is expr2:
                     return False
                 expr2 = new_e2
                 continue
             if kind2 is None:
+                if isinstance(expr2.head(), W_Proj):
+                    new_e2 = expr2.whnf(self)
+                    if new_e2 is not expr2:
+                        expr2 = new_e2
+                        continue
                 new_e1 = expr1.whnf(self)
                 if new_e1 is expr1:
                     return False

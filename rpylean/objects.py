@@ -950,17 +950,13 @@ def _mk_app(fn, arg):
 def _mk_app_in(tc, fn, arg):
     """
     Allocate a `W_App(fn, arg)` for a reduction-time call site.
-    With a `tc`, skips hash-consing entirely and returns a fresh
-    `W_App`: reduction-time intermediates are mostly used once
-    and pinning them in any intern dict (per-decl arena or
-    persistent table) just prevents the GC from reclaiming them
-    once the type-checker has moved past. Without a `tc` (parser /
-    test paths), routes to `_mk_app` so the parsed source DAG
-    still gets its hash-consing.
+    Routes through the persistent intern table so that identical
+    reduction-time sub-expressions get shared — `Nat.brecOn`-style
+    unfolding (Init's `IntN.shiftLeft_and` family) constructs the
+    same sub-W_App ~N times per recursion step and without sharing
+    the same WHNF work runs at every reconstruction.
     """
-    if tc is None:
-        return _mk_app(fn, arg)
-    return W_App(fn, arg)
+    return _mk_app(fn, arg)
 
 
 def _mk_w_lambda(binder, body):
@@ -992,15 +988,10 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
 
 def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
     """
-    Reduction-path companion to `_mk_w_proj`. With a `tc`, allocates
-    a fresh `W_Proj`; without (`tc is None`, parser/FFI/test paths),
-    routes through the persistent intern table. See `_mk_app_in` for
-    the rationale — pinning reduction-time terms in an intern dict
-    prevents the GC from reclaiming them once they go out of use.
+    Reduction-path companion to `_mk_w_proj`. Routes through the
+    persistent intern table — see `_mk_app_in` for the rationale.
     """
-    if tc is None:
-        return _mk_w_proj(struct_name, field_index, struct_expr)
-    return W_Proj(struct_name, field_index, struct_expr)
+    return _mk_w_proj(struct_name, field_index, struct_expr)
 
 
 def _mk_w_let(name, type, value, body):
@@ -2793,6 +2784,40 @@ def _to_nat_val(expr, env):
                 expr = expr.arg.whnf(env)
                 continue
         return None
+
+
+def _is_nat_zero_const(expr):
+    """
+    Whether ``expr`` is the syntactic form of ``Nat.zero``: either the
+    ``Nat.zero`` constant or a ``W_LitNat`` with value zero.
+
+    Caller is responsible for any needed WHNF; this never reduces.
+    """
+    if isinstance(expr, W_LitNat):
+        return expr.val.eq(rbigint.fromint(0))
+    if isinstance(expr, W_Const):
+        return expr.name.syntactic_eq(NAT_ZERO.name)
+    return False
+
+
+def _nat_succ_pred(expr):
+    """
+    If ``expr`` is the syntactic form of ``Nat.succ pred``, return
+    ``pred``; otherwise return None.
+
+    Caller is responsible for any needed WHNF.
+    """
+    if isinstance(expr, W_LitNat):
+        if not expr.val.eq(rbigint.fromint(0)):
+            return _mk_w_litnat(expr.val.sub(rbigint.fromint(1)))
+        return None
+    if isinstance(expr, W_App):
+        head = expr.fn
+        if isinstance(head, W_Const) and head.name.syntactic_eq(
+            _NAT_SUCC_NAME,
+        ):
+            return expr.arg
+    return None
 
 
 class W_LitNat(W_Expr):
