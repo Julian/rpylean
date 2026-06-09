@@ -453,6 +453,7 @@ class TypeChecker(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'start_time', '_whnf_tick',
+        '_intern_w_app', '_intern_w_proj',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -490,6 +491,14 @@ class TypeChecker(object):
         self.max_wall_time = env.max_wall_time
         self.start_time = clock()
         self._whnf_tick = 0
+        # Per-decl arenas for reduction-produced W_App / W_Proj —
+        # mirrors nanoda_lib's fresh per-decl `LeanDag` dag created
+        # in `with_tc_and_declar` (util.rs:239+). Stays bounded by
+        # the *distinct* sub-expressions reduction visits within this
+        # decl; dropped when the TC goes out of scope so reduction
+        # output never pollutes the persistent parse-time intern.
+        self._intern_w_app = {}
+        self._intern_w_proj = {}
 
     def tick_wall_time(self):
         """
@@ -1079,6 +1088,7 @@ class Environment(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time',
+        '_intern_w_app', '_intern_w_proj',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -1102,6 +1112,12 @@ class Environment(object):
         self.max_heartbeat = 0
         self.count_heartbeats = False
         self.max_wall_time = 0.0
+        # `None` is the sentinel routing `_mk_app_in` / `_mk_w_proj_in`
+        # back to the persistent intern. Same attribute name as on
+        # `TypeChecker` so the duck-typed dispatch works without
+        # isinstance checks.
+        self._intern_w_app = None
+        self._intern_w_proj = None
 
     def tick_wall_time(self):
         """No-op: wall-time tracking is a per-decl `TypeChecker` concern;

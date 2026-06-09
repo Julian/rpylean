@@ -970,14 +970,50 @@ def _mk_app(fn, arg):
 
 def _mk_app_in(tc, fn, arg):
     """
-    Allocate a `W_App(fn, arg)` for a reduction-time call site.
-    Routes through the persistent intern table so that identical
-    reduction-time sub-expressions get shared — `Nat.brecOn`-style
-    unfolding (Init's `IntN.shiftLeft_and` family) constructs the
-    same sub-W_App ~N times per recursion step and without sharing
-    the same WHNF work runs at every reconstruction.
+    Allocate a `W_App(fn, arg)` for a reduction-time call site,
+    against the per-decl arena on `tc`.
+
+    The arena gives us hash-consing across iterations within one
+    declaration (so `Nat.brecOn`-style sub-W_Apps reconstructed each
+    step are shared and re-hit the WHNF cache) without polluting the
+    persistent table — the arena dict is dropped when the TC goes
+    out of scope, so reduction-produced W_Apps don't accumulate over
+    the run. Mirrors nanoda_lib's two-tier dag scheme
+    (`util.rs:218-227`, `alloc_expr` at `util.rs:394`).
+
+    A parsed (fn, arg) pair is still shared via the persistent
+    fallback so reduction-time W_Apps that happen to coincide with
+    parser output stay folded together.
+
+    `tc` may also be a bare `Environment` (tests / REPL / cold paths
+    outside a check); its `_intern_w_app` slot is `None` and we route
+    directly to `_mk_app`. A bare `None` (no env at all) takes the
+    same fallback.
     """
-    return _mk_app(fn, arg)
+    if tc is None:
+        return _mk_app(fn, arg)
+    arena = tc._intern_w_app
+    if arena is None:
+        return _mk_app(fn, arg)
+    assert isinstance(fn, W_Expr)
+    assert isinstance(arg, W_Expr)
+    h = _mix2(fn._hash, arg._hash)
+    bucket = arena.get(h, None)
+    if bucket is not None:
+        for existing in bucket:
+            if existing.fn is fn and existing.arg is arg:
+                return existing
+    persistent = _INTERN_W_APP.get(h, None)
+    if persistent is not None:
+        for existing in persistent:
+            if existing.fn is fn and existing.arg is arg:
+                return existing
+    e = W_App(fn, arg)
+    if bucket is None:
+        arena[h] = [e]
+    else:
+        bucket.append(e)
+    return e
 
 
 def _mk_w_lambda(binder, body):
@@ -1009,10 +1045,37 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
 
 def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
     """
-    Reduction-path companion to `_mk_w_proj`. Routes through the
-    persistent intern table — see `_mk_app_in` for the rationale.
+    Reduction-path companion to `_mk_w_proj`. Same two-tier scheme as
+    `_mk_app_in`: per-decl arena first, then persistent fallback.
     """
-    return _mk_w_proj(struct_name, field_index, struct_expr)
+    if tc is None:
+        return _mk_w_proj(struct_name, field_index, struct_expr)
+    arena = tc._intern_w_proj
+    if arena is None:
+        return _mk_w_proj(struct_name, field_index, struct_expr)
+    assert isinstance(struct_name, Name)
+    assert isinstance(struct_expr, W_Expr)
+    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
+    bucket = arena.get(h, None)
+    if bucket is not None:
+        for existing in bucket:
+            if (existing.struct_name is struct_name
+                    and existing.field_index == field_index
+                    and existing.struct_expr is struct_expr):
+                return existing
+    persistent = _INTERN_W_PROJ.get(h, None)
+    if persistent is not None:
+        for existing in persistent:
+            if (existing.struct_name is struct_name
+                    and existing.field_index == field_index
+                    and existing.struct_expr is struct_expr):
+                return existing
+    e = W_Proj(struct_name, field_index, struct_expr)
+    if bucket is None:
+        arena[h] = [e]
+    else:
+        bucket.append(e)
+    return e
 
 
 def _mk_w_let(name, type, value, body):
