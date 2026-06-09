@@ -430,6 +430,30 @@ class W_HeartbeatError(W_CheckError):
         return Diagnostic(tokens, NO_SPAN, message)
 
 
+class W_WallTimeError(W_CheckError):
+    """
+    The per-declaration wall-time limit was exceeded.
+    """
+
+    _attrs_ = ['elapsed', 'max_wall_time']
+
+    def __init__(self, name, elapsed, max_wall_time):
+        self.name = name
+        self.elapsed = elapsed
+        self.max_wall_time = max_wall_time
+
+    def as_diagnostic(self):
+        tokens = [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.name.str()),
+        ]
+        message = [MESSAGE.emit(
+            ":\nwall-time limit exceeded (%fs elapsed, limit %fs)"
+            % (self.elapsed, self.max_wall_time),
+        )]
+        return Diagnostic(tokens, NO_SPAN, message)
+
+
 class W_UniverseTooHigh(W_CheckError):
     """
     A constructor field's type lives in a universe too high for the inductive.
@@ -925,11 +949,8 @@ def _mk_binder_strict_implicit(name, type):
 def _mk_app(fn, arg):
     """
     Allocate a `W_App(fn, arg)` against the persistent intern table.
-    Used by parser-time construction (where there's no `TypeChecker`)
-    and by ad-hoc `.app(...)` calls from tests / utility code.
-    Reduction-path call sites should use `_mk_app_in(tc, ...)` so the
-    allocation goes into the per-decl arena and is reclaimed when the
-    TC goes out of scope.
+    Used at every reduction-time `_mk_app_in` site, so it is on the
+    hottest path.
     """
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
@@ -2225,6 +2246,7 @@ class W_Expr(_Item):
                 made_progress=made_progress,
             )
             env.tracer.whnf_step(expr, env.declarations)
+            env.tick_wall_time()
             next = expr._whnf_core(env)
             if next is None:
                 return (expr, made_progress)

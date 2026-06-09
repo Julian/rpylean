@@ -23,6 +23,7 @@ from rpylean.exceptions import (
     UnknownQuotient,
     W_Error,
     W_InvalidDeclaration,
+    WallTimeExceeded,
 )
 from rpylean.objects import (
     HINT_ABBREV,
@@ -40,6 +41,7 @@ from rpylean.objects import (
     W_ForAll,
     W_FunBase,
     W_HeartbeatError,
+    W_WallTimeError,
     W_Inductive,
     W_Lambda,
     W_LitNat,
@@ -450,6 +452,7 @@ class TypeChecker(object):
         'env', 'decl', 'heartbeat',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
+        'max_wall_time', 'start_time', '_whnf_tick',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -461,6 +464,7 @@ class TypeChecker(object):
         'env', 'decl',
         'declarations',
         'tracer?', 'max_heartbeat?', 'count_heartbeats?',
+        'max_wall_time?', 'start_time',
     ]
 
     # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
@@ -470,6 +474,11 @@ class TypeChecker(object):
     # runaway behaviour on pathological inputs.
     _LAZY_DELTA_MAX_ITER = 32
 
+    # Mask for the wall-time sampling in `def_eq`. We only read `clock()`
+    # every 1024th heartbeat to keep the per-call cost negligible —
+    # `clock()` is ~20-50ns but a 5% throttle on def_eq matters.
+    _WALL_TIME_SAMPLE_MASK = 1023
+
     def __init__(self, env, decl):
         self.env = env
         self.decl = decl
@@ -478,6 +487,30 @@ class TypeChecker(object):
         self.tracer = env.tracer
         self.max_heartbeat = env.max_heartbeat
         self.count_heartbeats = env.count_heartbeats
+        self.max_wall_time = env.max_wall_time
+        self.start_time = clock()
+        self._whnf_tick = 0
+
+    def tick_wall_time(self):
+        """
+        Increment the wall-time tick counter; every 1024th call, check
+        whether `max_wall_time` has been exceeded and raise if so. Called
+        from the hot WHNF loop (`whnf_with_progress`) and from `def_eq`.
+
+        No-op when `max_wall_time` is zero (the common case), so the JIT
+        can fold the check away when the limit isn't set.
+        """
+        max_wall_time = self.max_wall_time
+        if max_wall_time <= 0.0:
+            return
+        self._whnf_tick += 1
+        if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
+            return
+        elapsed = clock() - self.start_time
+        if elapsed > max_wall_time:
+            raise WallTimeExceeded(
+                self.decl, elapsed, max_wall_time,
+            )
 
     # ---- public def_eq / infer entry points ----------------------------
 
@@ -495,6 +528,7 @@ class TypeChecker(object):
                     self.heartbeat,
                     max_heartbeat,
                 )
+        self.tick_wall_time()
 
         tracer = env.tracer
         tracer.enter(expr1, expr2, env.declarations)
@@ -1044,20 +1078,22 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
+        'max_wall_time',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
     # mutated as decls are parsed, but the reference isn't).
-    # `tracer` / `max_heartbeat` / `count_heartbeats` change only at
-    # run-setup time (CLI options) or at REPL command boundaries —
-    # never inside the check loop — so quasi-immutable (`?`) lets the
-    # JIT compile assuming they're constant and invalidate only on the
-    # rare reassignment.
+    # `tracer` / `max_heartbeat` / `count_heartbeats` / `max_wall_time`
+    # change only at run-setup time (CLI options) or at REPL command
+    # boundaries — never inside the check loop — so quasi-immutable
+    # (`?`) lets the JIT compile assuming they're constant and
+    # invalidate only on the rare reassignment.
     _immutable_fields_ = [
         'declarations',
         'tracer?',
         'max_heartbeat?',
         'count_heartbeats?',
+        'max_wall_time?',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -1065,6 +1101,12 @@ class Environment(object):
         self.tracer = tracer
         self.max_heartbeat = 0
         self.count_heartbeats = False
+        self.max_wall_time = 0.0
+
+    def tick_wall_time(self):
+        """No-op: wall-time tracking is a per-decl `TypeChecker` concern;
+        bare `Environment` (REPL / tests / cold paths) never enforces it."""
+        pass
 
     @not_rpython
     def __getitem__(self, value):
@@ -1140,6 +1182,12 @@ class Environment(object):
                 decl.name,
                 err.heartbeats,
                 err.max_heartbeat,
+            )
+        except WallTimeExceeded as err:
+            error = W_WallTimeError(
+                decl.name,
+                err.elapsed,
+                err.max_wall_time,
             )
         except W_CheckError as err:
             if err.name is None:

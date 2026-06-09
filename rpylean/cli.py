@@ -64,6 +64,11 @@ COLOR = (
             "maximum number of def_eq calls per declaration before giving up",
         ),
         (
+            "max-wall-time-per-decl",
+            "maximum wall-clock seconds per declaration before giving up "
+            "(suffixes: s/ms/m, default seconds; sampled every 1024 def_eq calls)",
+        ),
+        (
             "print",
             (
                 "print something for each declaration (valid values are "
@@ -115,6 +120,7 @@ def check(self, args, stdin, stdout, stderr):
 
     max_fail = int(args.options["max-fail"] or "0")
     max_heartbeat = int(args.options["max-heartbeat"] or "0")
+    max_wall_time = _parse_seconds(args.options["max-wall-time-per-decl"])
     printer = Printer.from_str(args.options["print"], stdoutw)
     slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
@@ -160,6 +166,7 @@ def check(self, args, stdin, stdout, stderr):
             filter_names,
             abort_at,
             max_heartbeat,
+            max_wall_time,
             trace,
             break_at,
             stats,
@@ -307,6 +314,7 @@ def _check_one_file(
     filter_names,
     abort_at,
     max_heartbeat,
+    max_wall_time,
     trace,
     break_at,
     stats,
@@ -344,6 +352,8 @@ def _check_one_file(
         try:
             if max_heartbeat > 0:
                 builder.env.max_heartbeat = max_heartbeat
+            if max_wall_time > 0.0:
+                builder.env.max_wall_time = max_wall_time
             if (
                 slow_secs >= 0.0
                 or slow_hb >= 0
@@ -745,6 +755,34 @@ def _parse_threshold(s):
         assert end >= 0
         return -1.0, _pos_int(s, s[:end])
     return -1.0, _pos_int(s, s)
+
+
+def _parse_seconds(s):
+    """Parse a wall-clock duration into seconds. Returns 0.0 for `None`.
+
+    Bare numbers and `s` suffix are seconds; `ms` is milliseconds; `m` is
+    minutes. `h` (heartbeats) is rejected — this option is time-only.
+    """
+    if s is None:
+        return 0.0
+    if s.endswith("h"):
+        raise UsageError(
+            "Invalid wall-time threshold (use s/ms/m suffix, not h): %s" % (s,)
+        )
+    length = len(s)
+    if s.endswith("ms"):
+        end = length - 2
+        assert end >= 0
+        return _pos_int(s, s[:end]) * 0.001
+    if s.endswith("s"):
+        end = length - 1
+        assert end >= 0
+        return float(_pos_int(s, s[:end]))
+    if s.endswith("m"):
+        end = length - 1
+        assert end >= 0
+        return _pos_int(s, s[:end]) * 60.0
+    return float(_pos_int(s, s))
 
 
 def _pos_int(orig, n):

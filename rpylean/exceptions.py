@@ -346,3 +346,28 @@ class HeartbeatExceeded(W_Error):
                 % (self.heartbeats, self.max_heartbeat)
             ),
         ]
+
+
+class WallTimeExceeded(W_Error):
+    """
+    The maximum wall-clock time was exceeded for a declaration. Sampled
+    from `def_eq` every 1024 calls, so the actual elapsed time at raise
+    may overshoot the limit by however long a single sub-WHNF takes.
+    """
+
+    _attrs_ = ['declaration', 'elapsed', 'max_wall_time']
+
+    def __init__(self, declaration, elapsed, max_wall_time):
+        self.declaration = declaration
+        self.elapsed = elapsed
+        self.max_wall_time = max_wall_time
+
+    def tokens(self):
+        return [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.declaration.name.str()),
+            ERROR.emit(
+                "\nwall-time limit exceeded (%fs elapsed, limit %fs)"
+                % (self.elapsed, self.max_wall_time)
+            ),
+        ]
