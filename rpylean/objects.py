@@ -5727,11 +5727,20 @@ def _inst_app(tc, app, sub, depth):
         return app._inst_cache_result
     fn = app.fn
     arg = app.arg
+    new_fn = fn
+    new_arg = arg
     if fn.loose_bvar_range > depth:
-        fn = _instantiate(tc, fn, sub, depth)
+        new_fn = _instantiate(tc, fn, sub, depth)
     if arg.loose_bvar_range > depth:
-        arg = _instantiate(tc, arg, sub, depth)
-    result = fn.app_in(tc, arg)
+        new_arg = _instantiate(tc, arg, sub, depth)
+    # If neither side moved, reuse the existing app — avoids a fresh
+    # `_mk_app_in` lookup per `_inst_app` call. For brecOn-style hot
+    # loops the substitute frequently doesn't reach this sub-app even
+    # though its `loose_bvar_range` admitted descent.
+    if new_fn is fn and new_arg is arg:
+        result = app
+    else:
+        result = new_fn.app_in(tc, new_arg)
     app._inst_cache_expr = sub
     app._inst_cache_depth = depth
     app._inst_cache_result = result
@@ -5744,7 +5753,10 @@ def _inst_lambda(tc, fun, sub, depth):
         return fun._inst_cache_result
     new_binder = fun.binder.instantiate(tc, sub, depth)
     new_body = _instantiate(tc, fun.body, sub, depth + 1)
-    result = _mk_w_lambda(new_binder, new_body)
+    if new_binder is fun.binder and new_body is fun.body:
+        result = fun
+    else:
+        result = _mk_w_lambda(new_binder, new_body)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
     fun._inst_cache_result = result
@@ -5757,7 +5769,10 @@ def _inst_forall(tc, fun, sub, depth):
         return fun._inst_cache_result
     new_binder = fun.binder.instantiate(tc, sub, depth)
     new_body = _instantiate(tc, fun.body, sub, depth + 1)
-    result = _mk_w_forall(new_binder, new_body)
+    if new_binder is fun.binder and new_body is fun.body:
+        result = fun
+    else:
+        result = _mk_w_forall(new_binder, new_body)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
     fun._inst_cache_result = result
