@@ -956,21 +956,30 @@ class TypeChecker(object):
         the ``Lit`` fast path in ``quick_is_def_eq``
         (type_checker.cpp:758).
         """
-        if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
-            if expr1.val.eq(expr2.val):
+        while True:
+            if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+                if expr1.val.eq(expr2.val):
+                    return _OFFSET_TRUE
+                return _OFFSET_FALSE
+            if _is_nat_zero_const(expr1) and _is_nat_zero_const(expr2):
                 return _OFFSET_TRUE
-            return _OFFSET_FALSE
-        if _is_nat_zero_const(expr1) and _is_nat_zero_const(expr2):
-            return _OFFSET_TRUE
-        pred1 = _nat_succ_pred(expr1)
-        if pred1 is None:
-            return _OFFSET_UNDEF
-        pred2 = _nat_succ_pred(expr2)
-        if pred2 is None:
-            return _OFFSET_UNDEF
-        if self.def_eq(pred1, pred2):
-            return _OFFSET_TRUE
-        return _OFFSET_FALSE
+            pred1 = _nat_succ_pred(expr1)
+            if pred1 is None:
+                return _OFFSET_UNDEF
+            pred2 = _nat_succ_pred(expr2)
+            if pred2 is None:
+                return _OFFSET_UNDEF
+            # Both sides peeled a `Nat.succ`: loop on the predecessors
+            # rather than recursing through the full def_eq — a
+            # `succ`-spine is as deep as its literal (`Char.«succ?_eq»`
+            # exposes 0x110000-level chains) and a def_eq frame per
+            # level overflows the stack. When the shapes stop being
+            # numeric the answer is undecided here: the caller's lazy
+            # delta loop peels further layers iteratively as reduction
+            # exposes them.
+            self.tick_wall_time()
+            expr1 = pred1
+            expr2 = pred2
 
     def _try_lazy_delta(self, expr1, expr2):
         """
@@ -998,6 +1007,41 @@ class TypeChecker(object):
         for _ in range(self._LAZY_DELTA_MAX_ITER):
             if expr1 is expr2:
                 return _LD_TRUE, expr1, expr2
+
+            # Iterative Nat-offset peeling — lean4 re-checks
+            # is_def_eq_offset at the top of every lazy delta
+            # iteration (type_checker.cpp:975). Reduction exposes
+            # `Nat.succ` layers one delta step at a time; peeling
+            # matching numeric layers here in place means a
+            # 0x110000-deep chain (`Char.«succ?_eq»`) costs loop
+            # iterations, where a def_eq recursion per layer
+            # overflows the stack.
+            peeled = False
+            while True:
+                if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
+                    if expr1.val.eq(expr2.val):
+                        return _LD_TRUE, expr1, expr2
+                    # Unequal literals: _def_eq_core's definitive
+                    # literal check answers False.
+                    break
+                pred1 = _nat_succ_pred(expr1)
+                if pred1 is None:
+                    break
+                pred2 = _nat_succ_pred(expr2)
+                if pred2 is None:
+                    break
+                self.tick_wall_time()
+                expr1 = pred1
+                expr2 = pred2
+                peeled = True
+            if peeled:
+                # Predecessors come from inside constructor apps and
+                # may not be in whnf_core form, which the rest of the
+                # iteration assumes.
+                expr1 = expr1.whnf_core(self)
+                expr2 = expr2.whnf_core(self)
+                if expr1 is expr2:
+                    return _LD_TRUE, expr1, expr2
 
             # Native nat probe, only when both sides are closed —
             # lean4's `!has_fvar(t_n) && !has_fvar(s_n)` guard
