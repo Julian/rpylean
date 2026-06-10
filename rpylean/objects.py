@@ -783,19 +783,35 @@ _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 #     interning would silently share across distinct positions.
 
 
-# Every node whose per-instance inline caches were populated since the
-# last `reset_decl_caches()` call. The inline caches are keyed on
-# per-declaration identities (the `TypeChecker`, a closure env, a
-# substitute), so after a decl's check returns they can never hit again
-# — but their `*_result` references would pin entire reduction towers
-# on nodes that outlive the decl (parsed / interned ones). Write sites
-# register the node here on the first write into an empty slot; the
-# checker resets every registered node between decls.
-_DECL_CACHE_WRITES = []
+class _CacheWriteRegistry(object):
+    """
+    Every node whose per-instance inline caches were populated since
+    the last `reset_decl_caches()` call. The inline caches are keyed
+    on per-declaration identities (the `TypeChecker`, a closure env, a
+    substitute), so after a decl's check returns they can never hit
+    again — but their `*_result` references would pin entire reduction
+    towers on nodes that outlive the decl (parsed / interned ones).
+    Write sites register the node here on the first write into an
+    empty slot; the checker resets every registered node between
+    decls.
+
+    The registered nodes live in a rebindable `items` slot (rather
+    than a bare module-level list) because RPython's list shrinking
+    only decrements the length: the backing array keeps stale
+    references in the vacated slots, which would itself pin every
+    node ever registered. Dropping the whole list frees the backing
+    array too.
+    """
+
+    def __init__(self):
+        self.items = []
+
+
+_DECL_CACHE_WRITES = _CacheWriteRegistry()
 
 
 def _note_cache_write(expr):
-    _DECL_CACHE_WRITES.append(expr)
+    _DECL_CACHE_WRITES.items.append(expr)
 
 
 def reset_decl_caches():
@@ -804,10 +820,32 @@ def reset_decl_caches():
     call. Called by the checker after each declaration so dead caches
     don't pin that decl's reduction output for the rest of the run.
     """
-    writes = _DECL_CACHE_WRITES
-    for i in range(len(writes)):
-        writes[i]._reset_caches()
-    del writes[:]
+    items = _DECL_CACHE_WRITES.items
+    for i in range(len(items)):
+        items[i]._reset_caches()
+    _DECL_CACHE_WRITES.items = []
+
+
+def intern_stats():
+    """
+    Entry counts of the persistent intern tables, plus the pending
+    cache-write registry length, for leak hunting: the tables only
+    ever grow, so a count climbing in step with declarations checked
+    (rather than with parsing) means reduction products are being
+    interned persistently somewhere; the registry should be near zero
+    at any declaration boundary — a climbing value means
+    `reset_decl_caches` isn't draining it.
+    """
+    apps = 0
+    for bucket in _INTERN_W_APP.itervalues():
+        apps += len(bucket)
+    projs = 0
+    for bucket in _INTERN_W_PROJ.itervalues():
+        projs += len(bucket)
+    consts = 0
+    for bucket in _INTERN_W_CONST.itervalues():
+        consts += len(bucket)
+    return apps, projs, consts, len(_DECL_CACHE_WRITES.items)
 
 
 def _mk_str_name(parent, suffix):
@@ -3345,6 +3383,10 @@ class W_Proj(W_Expr):
         h = (h * 1000003) ^ struct_expr.hash()
         self._hash = ((h * 1000003) ^ 0x9709) & 0xFFFFFFFF
 
+    def _reset_caches(self):
+        self._struct_whnf_env = None
+        self._struct_whnf = None
+
     def contains_const(self, name):
         return self.struct_expr.contains_const(name)
 
@@ -3419,6 +3461,8 @@ class W_Proj(W_Expr):
             # spine.
             if isinstance(reduced_struct, W_LitStr):
                 reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
+            if self._struct_whnf_env is None:
+                _note_cache_write(self)
             self._struct_whnf_env = env
             self._struct_whnf = reduced_struct
 
