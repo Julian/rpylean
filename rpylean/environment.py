@@ -1009,18 +1009,29 @@ class TypeChecker(object):
             # `failed_before` check (type_checker.cpp:922): nested
             # congruence chains (e.g. omega certificates) otherwise
             # re-pay the failed comparison at every nesting level.
-            head1, args1 = expr1.unapp()
-            head2, args2 = expr2.unapp()
-            if syntactic_eq(head1, head2) and len(args1) == len(args2):
-                if not self._failed_before(expr1, expr2):
-                    all_eq = True
-                    for j in range(len(args1)):
-                        if not self.def_eq(args1[j], args2[j]):
-                            all_eq = False
-                            break
-                    if all_eq:
-                        return _LD_TRUE, expr1, expr2
-                    self._cache_failure(expr1, expr2)
+            #
+            # Only for *regular* definitions, mirroring lean4's
+            # `d_t->get_hints().is_regular()` gate (type_checker.cpp:
+            # 918). For abbrevs — `casesOn` and friends — the args
+            # include dead match arms: unfolding both sides lets the
+            # recursor's iota evaluate the major and select the live
+            # arm, while an args check would compare the dead arms,
+            # which can be arbitrarily expensive to refute (e.g.
+            # `Int.subNatNat` arms whose comparison descends a unary
+            # `Nat.sub` tower under a 0x110000-scale literal).
+            if hint1 >= 0:
+                head1, args1 = expr1.unapp()
+                head2, args2 = expr2.unapp()
+                if syntactic_eq(head1, head2) and len(args1) == len(args2):
+                    if not self._failed_before(expr1, expr2):
+                        all_eq = True
+                        for j in range(len(args1)):
+                            if not self.def_eq(args1[j], args2[j]):
+                                all_eq = False
+                                break
+                        if all_eq:
+                            return _LD_TRUE, expr1, expr2
+                        self._cache_failure(expr1, expr2)
 
             # Heights differ: unfold the higher one.
             if hint1 > hint2:
