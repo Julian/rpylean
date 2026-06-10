@@ -2297,6 +2297,11 @@ class W_Expr(_Item):
 
         Uses an iterative loop with the JIT driver to avoid deep
         recursion and allow the tracing JIT to compile efficient loops.
+
+        `_whnf_core` steps never delta-reduce; when they bottom out,
+        the head constant is unfolded one definition layer here and
+        the loop continues — lean4's `whnf` loop over `whnf_core` +
+        `unfold_definition` (type_checker.cpp:644).
         """
         expr = self
         made_progress = False
@@ -2312,9 +2317,59 @@ class W_Expr(_Item):
             env.tick_wall_time()
             next = expr._whnf_core(env)
             if next is None:
-                return (expr, made_progress)
+                next = expr.try_unfold_head(env)
+                if next is None:
+                    return (expr, made_progress)
             expr = next
             made_progress = True
+
+    def whnf_core(self, env):
+        """
+        Reduce to weak head normal form *without* delta-unfolding the
+        head: beta / iota / proj / quot / zeta only. Mirrors lean4's
+        `whnf_core` (type_checker.cpp:401). Lazy delta uses this
+        between single unfold steps so heads can be compared at every
+        definition layer.
+        """
+        expr = self
+        while True:
+            # A full-WHNF inline cache entry mapping the expr to
+            # *itself* means it's in WHNF proper, which is also
+            # whnf_core-normal — the common case on def_eq's entry
+            # path, where most operands are already normal.
+            if isinstance(expr, W_App):
+                if (expr._whnf_cache_env is env
+                        and expr._whnf_cache_result is expr):
+                    return expr
+            env.tracer.whnf_step(expr, env.declarations)
+            env.tick_wall_time()
+            next = expr._whnf_core(env)
+            if next is None:
+                return expr
+            expr = next
+
+    def try_unfold_head(self, env):
+        """
+        Delta-unfold this expression's head constant by exactly one
+        definition layer, re-applying any spine args. Returns ``None``
+        when the head isn't an unfoldable constant — lean4's
+        `unfold_definition` / `unfold_definition_core`
+        (type_checker.cpp:488).
+        """
+        head, args = self.unapp()
+        if not isinstance(head, W_Const):
+            return None
+        if head.name not in env.declarations:
+            return None
+        val = head.try_delta_reduce(env)
+        if val is None:
+            return None
+        result = val
+        i = len(args) - 1
+        while i >= 0:
+            result = result.app_in(env, args[i])
+            i -= 1
+        return result
 
     def whnf(self, env):
         """
@@ -2742,14 +2797,14 @@ class W_Const(W_Expr):
         return self
 
     def _whnf_core(self, env):
-        # Promote name and declarations so the JIT can specialise one trace
-        # per hot constant and fold the get_decl lookup to a compile-time
-        # constant via the @elidable annotation.
-        name = promote(self.name)
-        declarations = promote(env.declarations)
-        if name not in declarations:
-            return None
-        return self.try_delta_reduce(env)
+        # No delta here: `_whnf_core` is beta / iota / proj / quot /
+        # zeta only, mirroring lean4's `whnf_core`
+        # (type_checker.cpp:401). Delta-unfolding the head is the
+        # *outer* `whnf` loop's job (one layer per iteration, via
+        # `try_unfold_head`), so that `whnf_core`-level callers —
+        # lazy delta in particular — can compare heads after each
+        # definition layer instead of bulldozing to a normal form.
+        return None
 
     def try_delta_reduce(self, env, only_abbrev=False):
         # Promote for the same reason as _whnf_core: lets the JIT fold
@@ -4684,14 +4739,18 @@ def _whnf_iota_chain(env, expr):
 
     while True:
         # Reduce `cur` as far as possible without firing iota itself
-        # (so we don't recurse through `try_iota_reduce`).
+        # (so we don't recurse through `try_iota_reduce`). Major
+        # premises do need delta — `try_unfold_head` supplies it one
+        # layer at a time now that `_whnf_core` never deltas.
         while True:
             if isinstance(cur, W_App):
                 next_ = cur._whnf_core_no_iota(env)
             else:
                 next_ = cur._whnf_core(env)
             if next_ is None:
-                break
+                next_ = cur.try_unfold_head(env)
+                if next_ is None:
+                    break
             cur = next_
 
         # If `cur` is a recursor application, descend into its major.

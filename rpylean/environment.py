@@ -63,6 +63,11 @@ _OFFSET_UNDEF = 0
 _OFFSET_TRUE = 1
 _OFFSET_FALSE = 2
 
+#: `_try_lazy_delta` outcomes: proved equal, or undecided (with both
+#: sides advanced to whnf_core'd, delta-exhausted forms).
+_LD_TRUE = 1
+_LD_UNDEF = 0
+
 
 def _def_eq_printable_location(expr1_class):
     """
@@ -454,6 +459,7 @@ class TypeChecker(object):
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'start_time', '_whnf_tick',
         '_intern_w_app', '_intern_w_proj',
+        '_eqv_parent', '_defeq_failed',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -469,11 +475,13 @@ class TypeChecker(object):
     ]
 
     # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
-    # `expr.whnf` is idempotent (cached on the instance), so each side
-    # makes at most one step of progress and the loop bottoms out in a
-    # handful of iterations regardless; the cap is just to rule out
-    # runaway behaviour on pathological inputs.
-    _LAZY_DELTA_MAX_ITER = 32
+    # Each iteration peels exactly one definition layer off one (or
+    # both) sides, so legitimate comparisons that bottom out in
+    # evaluation can take as many iterations as the evaluation has
+    # delta steps — the cap exists only to bound truly pathological
+    # inputs; `tick_wall_time` (called from every `whnf_core` step
+    # inside the loop) is the real per-decl guard.
+    _LAZY_DELTA_MAX_ITER = 100000000
 
     # Mask for the wall-time sampling in `def_eq`. We only read `clock()`
     # every 1024th heartbeat to keep the per-call cost negligible —
@@ -499,6 +507,17 @@ class TypeChecker(object):
         # output never pollutes the persistent parse-time intern.
         self._intern_w_app = {}
         self._intern_w_proj = {}
+        # Union-find over expressions proven def-eq within this decl —
+        # mirrors lean4's `m_eqv_manager` (type_checker.h:34) and
+        # nanoda_lib's `eq_cache` (util.rs:823). Keyed by identity,
+        # which the W_App / W_Proj interning above makes structural
+        # for reduction-produced spines.
+        self._eqv_parent = {}
+        # Pairs whose lazy-delta same-head args comparison failed —
+        # mirrors lean4's `m_failure` (type_checker.h:35, checked by
+        # `failed_before` at type_checker.cpp:922 before re-exploring
+        # the args). Maps expr -> {expr: None}, stored symmetrically.
+        self._defeq_failed = {}
 
     def tick_wall_time(self):
         """
@@ -549,25 +568,56 @@ class TypeChecker(object):
         if expr1 is expr2:
             return tracer.result(True)
 
+        # Already proven def-eq earlier in this decl: the union-find
+        # makes every repeat comparison O(α). Mirrors lean4's
+        # `quick_is_def_eq` consulting `m_eqv_manager`
+        # (type_checker.cpp:741).
+        if self._eqv_find(expr1) is self._eqv_find(expr2):
+            return tracer.result(True)
+
+        result = self._def_eq_uncached(expr1, expr2)
+        if result:
+            self._eqv_union(expr1, expr2)
+        return tracer.result(result)
+
+    def _def_eq_uncached(self, expr1, expr2):
+        """
+        The def_eq check sequence proper, behind `def_eq`'s
+        bookkeeping (heartbeat / tracer) and equivalence cache.
+        """
         # Structural-equality fast path before WHNF: catches DAG
         # fragments that are equal but live in distinct instances —
         # e.g. things produced by reduction rather than parsed. The
         # walk piggy-backs on identity at each level (see
         # `syntactic_eq`) so it remains cheap for shared subtrees.
         if syntactic_eq(expr1, expr2):
-            return tracer.result(True)
+            return True
 
-        # Lazy delta reduction: when both sides are application spines
-        # headed by the same delta-reducible constant, compare args
-        # *before* unfolding either head. Mirrors lean4's
-        # `isDefEqLazyDelta`. Crucial for proof terms in the
-        # `String.Decode` / BitVec / UIntN family, whose bodies are
-        # long `congr (congrArg f h) (ite_congr ...)` chains: the
-        # spines line up structurally so we should never delta-reduce
-        # through `instHMod → UInt32.mod → BitVec.umod → Fin.mod`
-        # just to compare two identical arg subtrees.
-        if self._try_lazy_delta(expr1, expr2):
-            return tracer.result(True)
+        # Bring both sides to WHNF *without* delta (beta / iota /
+        # proj / quot only) — lean4's `is_def_eq_core` does exactly
+        # this before any unfolding (type_checker.cpp:1079). All
+        # delta from here on is lazy: one definition layer at a time
+        # inside `_try_lazy_delta`, never a full normalization.
+        expr1 = expr1.whnf_core(self)
+        expr2 = expr2.whnf_core(self)
+        if expr1 is expr2:
+            return True
+
+        # Proof irrelevance: two proofs of the same Prop are equal.
+        # Checked *before* lazy delta, mirroring lean4's ordering
+        # (`is_def_eq_proof_irrel` at type_checker.cpp:1087, ahead of
+        # `lazy_delta_reduction` at 1091): proof *terms* must never
+        # be reduced when comparing their *types* suffices. Proofs
+        # produced by `omega` / `decide` certificates otherwise force
+        # WHNF to evaluate the whole decision procedure — e.g.
+        # `Nat.rec` over `0x10ffff`-sized literals in the
+        # `String.Decode` UTF-8 lemmas.
+        expr1_ty = expr1.infer(self)
+        if syntactic_eq(expr1_ty.infer(self), PROP):
+            expr2_ty = expr2.infer(self)
+            if syntactic_eq(expr2_ty.infer(self), PROP):
+                if self.def_eq(expr1_ty, expr2_ty):
+                    return True
 
         # Nat-offset: short-circuit `Nat.zero =?= Nat.zero` and
         # `Nat.succ a =?= Nat.succ b` (and the `W_LitNat` analogues)
@@ -578,9 +628,9 @@ class TypeChecker(object):
         # spine doesn't get re-explored via WHNF + `_def_eq_core`.
         offset = self._def_eq_offset(expr1, expr2)
         if offset == _OFFSET_TRUE:
-            return tracer.result(True)
+            return True
         if offset == _OFFSET_FALSE:
-            return tracer.result(False)
+            return False
 
         # `decide`-tactic shortcut: when one side is the constant
         # `Bool.true`, WHNF only the other and check it reduces there
@@ -588,24 +638,92 @@ class TypeChecker(object):
         # and nanoda_lib (tc.rs:935). Proofs from `decide` come out as
         # `of_eq_true (Eq.refl true) : decide p = true`, so the spot
         # we hit this is the `decide p =?= true` def_eq — short-circuits
-        # away the full structural dispatch on the proof side.
+        # away the full structural dispatch on the proof side. This is
+        # the one place a full evaluating WHNF is intentional: the
+        # other side must actually compute down to `Bool.true`.
         if expr2 is _BOOL_TRUE:
             if expr1.whnf(self) is _BOOL_TRUE:
-                return tracer.result(True)
+                return True
         elif expr1 is _BOOL_TRUE:
             if expr2.whnf(self) is _BOOL_TRUE:
-                return tracer.result(True)
+                return True
 
-        # Reduce both to WHNF so heads are in canonical form.
-        expr1 = expr1.whnf(self)
-        expr2 = expr2.whnf(self)
+        # Lazy delta reduction: unfold one definition layer at a time,
+        # re-comparing heads after each, mirroring lean4's
+        # `lazy_delta_reduction` (type_checker.cpp:973). When both
+        # sides are spines headed by the same delta-reducible constant,
+        # compare args *before* unfolding either head — crucial for
+        # proof terms in the `String.Decode` / BitVec / UIntN family,
+        # whose bodies are long `congr (congrArg f h) (ite_congr ...)`
+        # chains: the spines line up structurally so we should never
+        # delta-reduce through `instHMod → UInt32.mod → BitVec.umod →
+        # Fin.mod` just to compare two identical arg subtrees.
+        #
+        # Whatever the outcome, both sides come back whnf_core'd with
+        # delta-exhausted heads — i.e. in WHNF — so `_def_eq_core`
+        # dispatches on them directly; there is no full-WHNF pass here
+        # to evaluate what lazy delta declined to.
+        status, expr1, expr2 = self._try_lazy_delta(expr1, expr2)
+        if status == _LD_TRUE:
+            return True
 
-        # Pointer equality after WHNF before invoking `_def_eq_core`'s
-        # structural dispatch — heads collapsed by WHNF often share.
+        # Pointer equality before `_def_eq_core`'s structural
+        # dispatch — heads collapsed by lazy delta often share.
         if expr1 is expr2:
-            return tracer.result(True)
+            return True
 
-        return tracer.result(self._def_eq_core(expr1, expr2))
+        return self._def_eq_core(expr1, expr2)
+
+    def _eqv_find(self, expr):
+        """
+        Union-find root of ``expr`` in the proven-def-eq forest, with
+        path compression. An expression with no entry is its own root.
+        """
+        parent = self._eqv_parent
+        root = expr
+        while True:
+            next = parent.get(root, None)
+            if next is None:
+                break
+            root = next
+        cur = expr
+        while cur is not root:
+            next = parent[cur]
+            parent[cur] = root
+            cur = next
+        return root
+
+    def _eqv_union(self, expr1, expr2):
+        """
+        Record that ``expr1`` and ``expr2`` are def-eq.
+        """
+        root1 = self._eqv_find(expr1)
+        root2 = self._eqv_find(expr2)
+        if root1 is not root2:
+            self._eqv_parent[root1] = root2
+
+    def _failed_before(self, expr1, expr2):
+        """
+        Whether this pair already failed a lazy-delta args comparison.
+        """
+        bucket = self._defeq_failed.get(expr1, None)
+        return bucket is not None and expr2 in bucket
+
+    def _cache_failure(self, expr1, expr2):
+        """
+        Record a failed lazy-delta args comparison, symmetrically.
+        """
+        failed = self._defeq_failed
+        bucket = failed.get(expr1, None)
+        if bucket is None:
+            bucket = {}
+            failed[expr1] = bucket
+        bucket[expr2] = None
+        bucket = failed.get(expr2, None)
+        if bucket is None:
+            bucket = {}
+            failed[expr2] = bucket
+        bucket[expr1] = None
 
     def infer(self, expr):
         """
@@ -685,14 +803,6 @@ class TypeChecker(object):
         # recursive def_eq call over a large expression tree.
         if cls1 is cls2 and syntactic_eq(expr1, expr2):
             return True
-
-        # Proof irrelevance: two proofs of the same Prop are equal.
-        expr1_ty = expr1.infer(self)
-        if syntactic_eq(expr1_ty.infer(self), PROP):
-            expr2_ty = expr2.infer(self)
-            if syntactic_eq(expr2_ty.infer(self), PROP):
-                if self.def_eq(expr1_ty, expr2_ty):
-                    return True
 
         if cls1 is cls2:
             if cls1 is W_Const:
@@ -783,14 +893,18 @@ class TypeChecker(object):
     def _try_lazy_delta(self, expr1, expr2):
         """
         Iterative lazy delta reduction, mirroring lean4's
-        ``isDefEqLazyDelta``: walk the heads of ``expr1`` and ``expr2``
-        in sync, unfolding one side at a time and short-circuiting
-        whenever a same-head args check succeeds.
+        ``lazy_delta_reduction`` (type_checker.cpp:973): walk the
+        heads of ``expr1`` and ``expr2`` in sync, unfolding exactly
+        one definition layer at a time (``try_unfold_head`` +
+        ``whnf_core``, never an evaluating full WHNF) and
+        short-circuiting whenever the sides converge or a same-head
+        args check succeeds.
 
-        Returns ``True`` iff a same-head args check passes; returns
-        ``False`` to mean "can't decide here, fall through to the
-        WHNF + ``_def_eq_core`` path". **Never** returns ``False``
-        meaning "the expressions are unequal".
+        Returns ``(status, expr1, expr2)``: ``_LD_TRUE`` when the
+        sides were proven def-equal, else ``_LD_UNDEF`` with both
+        sides advanced — whnf_core'd, heads delta-exhausted, i.e. in
+        WHNF — for the caller's structural dispatch. **Never** decides
+        "unequal".
 
         Which side to unfold is decided by ``W_Definition.hint``:
         an abbrev (``HINT_ABBREV``) unfolds before a regular def, and
@@ -800,43 +914,47 @@ class TypeChecker(object):
         form.
         """
         for _ in range(self._LAZY_DELTA_MAX_ITER):
+            if expr1 is expr2:
+                return _LD_TRUE, expr1, expr2
+
             kind1 = self._delta_kind(expr1.head())
             kind2 = self._delta_kind(expr2.head())
 
             # Neither side is delta-reducible: lazy delta has nothing
-            # more to offer; let the caller's WHNF + _def_eq_core path
-            # handle it.
+            # more to offer; let the caller's _def_eq_core dispatch
+            # handle the (now head-canonical) forms.
             if kind1 is None and kind2 is None:
-                return False
+                return _LD_UNDEF, expr1, expr2
 
             # Exactly one side reducible: unfold that one and retry.
             # First, if the non-delta side is a projection-headed app,
-            # try WHNFing it instead — the proj may resolve cheaply via
-            # struct-eta or constructor iota, avoiding an expensive
-            # well-founded-recursion delta-unfold on the other side.
-            # Mirrors lean4's `try_unfold_proj_app` (type_checker.cpp:868,
-            # called from `lazy_delta_reduction_step` at lines 898/905).
+            # try whnf_core'ing it instead — the proj may resolve
+            # cheaply via struct-eta or constructor iota, avoiding an
+            # expensive well-founded-recursion delta-unfold on the
+            # other side. Mirrors lean4's `try_unfold_proj_app`
+            # (type_checker.cpp:868, called from
+            # `lazy_delta_reduction_step` at lines 898/905).
             if kind1 is None:
                 if isinstance(expr1.head(), W_Proj):
-                    new_e1 = expr1.whnf(self)
+                    new_e1 = expr1.whnf_core(self)
                     if new_e1 is not expr1:
                         expr1 = new_e1
                         continue
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
+                new_e2 = expr2.try_unfold_head(self)
+                if new_e2 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr2 = new_e2.whnf_core(self)
                 continue
             if kind2 is None:
                 if isinstance(expr2.head(), W_Proj):
-                    new_e2 = expr2.whnf(self)
+                    new_e2 = expr2.whnf_core(self)
                     if new_e2 is not expr2:
                         expr2 = new_e2
                         continue
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
+                new_e1 = expr1.try_unfold_head(self)
+                if new_e1 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr1 = new_e1.whnf_core(self)
                 continue
 
             # Both delta-reducible. Pick which side to unfold.
@@ -844,58 +962,67 @@ class TypeChecker(object):
             hint2 = kind2.hint
 
             if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
+                new_e1 = expr1.try_unfold_head(self)
+                if new_e1 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr1 = new_e1.whnf_core(self)
                 continue
             if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
+                new_e2 = expr2.try_unfold_head(self)
+                if new_e2 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr2 = new_e2.whnf_core(self)
                 continue
 
             # Same-head args fast path. Two app spines headed by the
             # same `W_Const` (with matching levels) are def-equal iff
             # their args are pairwise def-equal — no need to unfold
-            # the head at all.
+            # the head at all. Guarded by the failure cache so a pair
+            # whose args comparison already failed isn't re-explored
+            # on every later encounter — mirrors lean4's
+            # `failed_before` check (type_checker.cpp:922): nested
+            # congruence chains (e.g. omega certificates) otherwise
+            # re-pay the failed comparison at every nesting level.
             head1, args1 = expr1.unapp()
             head2, args2 = expr2.unapp()
             if syntactic_eq(head1, head2) and len(args1) == len(args2):
-                all_eq = True
-                for j in range(len(args1)):
-                    if not self.def_eq(args1[j], args2[j]):
-                        all_eq = False
-                        break
-                if all_eq:
-                    return True
+                if not self._failed_before(expr1, expr2):
+                    all_eq = True
+                    for j in range(len(args1)):
+                        if not self.def_eq(args1[j], args2[j]):
+                            all_eq = False
+                            break
+                    if all_eq:
+                        return _LD_TRUE, expr1, expr2
+                    self._cache_failure(expr1, expr2)
 
             # Heights differ: unfold the higher one.
             if hint1 > hint2:
-                new_e1 = expr1.whnf(self)
-                if new_e1 is expr1:
-                    return False
-                expr1 = new_e1
+                new_e1 = expr1.try_unfold_head(self)
+                if new_e1 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr1 = new_e1.whnf_core(self)
                 continue
             if hint1 < hint2:
-                new_e2 = expr2.whnf(self)
-                if new_e2 is expr2:
-                    return False
-                expr2 = new_e2
+                new_e2 = expr2.try_unfold_head(self)
+                if new_e2 is None:
+                    return _LD_UNDEF, expr1, expr2
+                expr2 = new_e2.whnf_core(self)
                 continue
 
             # Same height, and same-head args either failed or
             # arities/heads didn't match. Unfold both; if neither made
             # progress, bail.
-            new_e1 = expr1.whnf(self)
-            new_e2 = expr2.whnf(self)
-            if new_e1 is expr1 and new_e2 is expr2:
-                return False
-            expr1 = new_e1
-            expr2 = new_e2
+            new_e1 = expr1.try_unfold_head(self)
+            new_e2 = expr2.try_unfold_head(self)
+            if new_e1 is None and new_e2 is None:
+                return _LD_UNDEF, expr1, expr2
+            if new_e1 is not None:
+                expr1 = new_e1.whnf_core(self)
+            if new_e2 is not None:
+                expr2 = new_e2.whnf_core(self)
 
-        return False
+        return _LD_UNDEF, expr1, expr2
 
     def _delta_kind(self, head):
         """Return ``head``'s ``W_Definition`` kind if ``head`` is a
