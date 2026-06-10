@@ -1027,14 +1027,14 @@ def _mk_binder_strict_implicit(name, type):
 # so identity-keyed bucket lookup finds duplicates reliably during
 # reduction (the case `assemble*`-family `init.ndjson` decls hit).
 #
-# W_Lambda / W_ForAll are NOT hash-consed: their binders carry a
-# mutable `_fvar` slot used by `binder.fvar()` to hand out a stable
-# FVar for that *binding occurrence*, so binders themselves can't
-# be interned (see the comment by `_mk_binder_default`). Without
-# binder interning, identity-keyed W_Lambda lookup would almost never
-# find a match (each instantiation creates a fresh binder via
-# `binder.instantiate(...)`), so interning would only pay for the
-# bucket scan without yielding sharing.
+# W_Lambda / W_ForAll have no *persistent* intern table: their binders
+# carry a mutable `_fvar` slot used by `binder.fvar()` to hand out a
+# stable FVar for that *binding occurrence*, so binders themselves
+# can't be interned (see the comment by `_mk_binder_default`). They DO
+# participate in the per-decl arenas (`_mk_w_lambda_in` /
+# `_mk_w_forall_in`), keyed on the identity of the binder's components
+# and of the body — see `_binder_key_hash` for the key shape and why
+# it leaves the `_fvar` sharing story unchanged.
 
 def _mk_app(fn, arg):
     """
@@ -1122,6 +1122,101 @@ def _mk_w_lambda(binder, body):
 
 def _mk_w_forall(binder, body):
     return W_ForAll(binder, body)
+
+
+def _binder_key_hash(binder, body):
+    """
+    Arena key for a lambda/forall node: identity of the binder's
+    *components* (name, type, style) plus identity of the body — NOT
+    identity of the binder object itself. `binder.instantiate` /
+    `with_type` allocate a fresh `Binder` whenever the binder type is
+    touched by substitution, so a binder-identity key would miss every
+    rebuild of such a spine, and each miss mints a fresh `_fvar` for
+    what is semantically the same binding occurrence.
+
+    Keying on the components is safe for the `_fvar` slot: each
+    distinct key keeps the binder of its first-seen node, so two
+    *different* interned lambdas never share a binder object that
+    wasn't already shared — the merge only drops never-used duplicate
+    binders.
+    """
+    h = _mix2(
+        compute_identity_hash(binder.name),
+        compute_identity_hash(binder.type),
+    )
+    return _mix3(h, compute_hash(binder.left), compute_identity_hash(body))
+
+
+def _binder_key_eq(existing, binder, body):
+    eb = existing.binder
+    return (
+        existing.body is body
+        and eb.name is binder.name
+        and eb.type is binder.type
+        and eb.left == binder.left
+    )
+
+
+def _mk_w_lambda_in(tc, binder, body):
+    """
+    Allocate a `W_Lambda(binder, body)` for a reduction-time call
+    site, against the per-decl arena on `tc`.
+
+    Keyed per `_binder_key_hash` — see also the hash-consing comment
+    block above `_mk_app`. Sharing the rebuilt lambda node is what
+    lets the identity-keyed inline caches (`_whnf_cache_*`,
+    `_infer_cache_*`, `_inst_cache_*`) on the apps *above* it hit:
+    without it every instantiation that rebuilds a lambda spine cuts
+    the sharing chain and the whole tower re-reduces from scratch.
+
+    There is no persistent fallback — lambdas have no persistent
+    intern table.
+    """
+    if tc is None:
+        return W_Lambda(binder, body)
+    arena = tc._intern_w_lambda
+    if arena is None:
+        return W_Lambda(binder, body)
+    assert isinstance(binder, Binder)
+    assert isinstance(body, W_Expr)
+    hi = _binder_key_hash(binder, body)
+    bucket = arena.get(hi, None)
+    if bucket is not None:
+        for existing in bucket:
+            if _binder_key_eq(existing, binder, body):
+                return existing
+    e = W_Lambda(binder, body)
+    if bucket is None:
+        arena[hi] = [e]
+    else:
+        bucket.append(e)
+    return e
+
+
+def _mk_w_forall_in(tc, binder, body):
+    """
+    Reduction-path companion to `_mk_w_forall`. Same per-decl arena
+    scheme as `_mk_w_lambda_in`.
+    """
+    if tc is None:
+        return W_ForAll(binder, body)
+    arena = tc._intern_w_forall
+    if arena is None:
+        return W_ForAll(binder, body)
+    assert isinstance(binder, Binder)
+    assert isinstance(body, W_Expr)
+    hi = _binder_key_hash(binder, body)
+    bucket = arena.get(hi, None)
+    if bucket is not None:
+        for existing in bucket:
+            if _binder_key_eq(existing, binder, body):
+                return existing
+    e = W_ForAll(binder, body)
+    if bucket is None:
+        arena[hi] = [e]
+    else:
+        bucket.append(e)
+    return e
 
 
 def _mk_w_proj(struct_name, field_index, struct_expr):
@@ -3887,12 +3982,14 @@ class W_ForAll(W_FunBase):
         new_body = self.body.bind_fvar(tc, fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return forall(new_binder)(new_body)
+        return _mk_w_forall_in(tc, new_binder, new_body)
 
     def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return forall(self.binder.incr_free_bvars(tc, count, depth))(
+        return _mk_w_forall_in(
+            tc,
+            self.binder.incr_free_bvars(tc, count, depth),
             self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
@@ -3901,7 +3998,7 @@ class W_ForAll(W_FunBase):
         new_body = self.body.subst_levels(tc, levels)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return forall(new_binder)(new_body)
+        return _mk_w_forall_in(tc, new_binder, new_body)
 
     def tokens(self, constants, mark=None, span_holder=None):
         """
@@ -4054,7 +4151,7 @@ class W_Lambda(W_FunBase):
         new_body = self.body.bind_fvar(tc, fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return fun(new_binder)(new_body)
+        return _mk_w_lambda_in(tc, new_binder, new_body)
 
     def instantiate(self, tc, expr, depth=0):
         return _iter_instantiate(tc, self, expr, depth)
@@ -4062,7 +4159,9 @@ class W_Lambda(W_FunBase):
     def incr_free_bvars(self, tc, count, depth):
         if self.loose_bvar_range <= depth:
             return self
-        return fun(self.binder.incr_free_bvars(tc, count, depth))(
+        return _mk_w_lambda_in(
+            tc,
+            self.binder.incr_free_bvars(tc, count, depth),
             self.body.incr_free_bvars(tc, count, depth + 1),
         )
 
@@ -4074,7 +4173,7 @@ class W_Lambda(W_FunBase):
         new_body = self.body.subst_levels(tc, substs)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return fun(new_binder)(new_body)
+        return _mk_w_lambda_in(tc, new_binder, new_body)
 
 
 class W_Let(W_Expr):
@@ -6021,7 +6120,7 @@ def _inst_lambda(tc, fun, sub, depth):
     if new_binder is fun.binder and new_body is fun.body:
         result = fun
     else:
-        result = _mk_w_lambda(new_binder, new_body)
+        result = _mk_w_lambda_in(tc, new_binder, new_body)
     if fun._inst_cache_expr is None:
         _note_cache_write(fun)
     fun._inst_cache_expr = sub
@@ -6039,7 +6138,7 @@ def _inst_forall(tc, fun, sub, depth):
     if new_binder is fun.binder and new_body is fun.body:
         result = fun
     else:
-        result = _mk_w_forall(new_binder, new_body)
+        result = _mk_w_forall_in(tc, new_binder, new_body)
     if fun._inst_cache_expr is None:
         _note_cache_write(fun)
     fun._inst_cache_expr = sub
@@ -6092,7 +6191,7 @@ def _instantiate_multi(tc, cur, substs, depth):
         new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
         if new_binder is cur.binder and new_body is cur.body:
             return cur
-        return _mk_w_lambda(new_binder, new_body)
+        return _mk_w_lambda_in(tc, new_binder, new_body)
     if cls is W_ForAll:
         assert isinstance(cur, W_ForAll)
         new_binder = cur.binder
@@ -6103,7 +6202,7 @@ def _instantiate_multi(tc, cur, substs, depth):
         new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
         if new_binder is cur.binder and new_body is cur.body:
             return cur
-        return _mk_w_forall(new_binder, new_body)
+        return _mk_w_forall_in(tc, new_binder, new_body)
     if cls is W_Proj:
         assert isinstance(cur, W_Proj)
         new_struct = _instantiate_multi(tc, cur.struct_expr, substs, depth)

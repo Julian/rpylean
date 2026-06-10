@@ -496,6 +496,7 @@ class TypeChecker(object):
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
         '_whnf_tick',
         '_intern_w_app', '_intern_w_proj',
+        '_intern_w_lambda', '_intern_w_forall',
         '_eqv_parent', '_defeq_failed',
     ]
     # `declarations` etc. are mirrored from the env at construction so
@@ -538,14 +539,17 @@ class TypeChecker(object):
         self.start_time = clock()
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
-        # Per-decl arenas for reduction-produced W_App / W_Proj —
-        # mirrors nanoda_lib's fresh per-decl `LeanDag` dag created
-        # in `with_tc_and_declar` (util.rs:239+). Stays bounded by
-        # the *distinct* sub-expressions reduction visits within this
-        # decl; dropped when the TC goes out of scope so reduction
-        # output never pollutes the persistent parse-time intern.
+        # Per-decl arenas for reduction-produced W_App / W_Proj /
+        # W_Lambda / W_ForAll — mirrors nanoda_lib's fresh per-decl
+        # `LeanDag` dag created in `with_tc_and_declar` (util.rs:239+).
+        # Stays bounded by the *distinct* sub-expressions reduction
+        # visits within this decl; dropped when the TC goes out of
+        # scope so reduction output never pollutes the persistent
+        # parse-time intern.
         self._intern_w_app = {}
         self._intern_w_proj = {}
+        self._intern_w_lambda = {}
+        self._intern_w_forall = {}
         # Union-find over expressions proven def-eq within this decl —
         # mirrors lean4's `m_eqv_manager` (type_checker.h:34) and
         # nanoda_lib's `eq_cache` (util.rs:823). Keyed by identity,
@@ -1402,6 +1406,7 @@ class Environment(object):
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory',
         '_intern_w_app', '_intern_w_proj',
+        '_intern_w_lambda', '_intern_w_forall',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -1433,6 +1438,8 @@ class Environment(object):
         # isinstance checks.
         self._intern_w_app = None
         self._intern_w_proj = None
+        self._intern_w_lambda = None
+        self._intern_w_forall = None
 
     def tick_wall_time(self):
         """No-op: wall-time tracking is a per-decl `TypeChecker` concern;
@@ -1558,6 +1565,8 @@ class Environment(object):
             # high-water mark into swap.
             tc._intern_w_app = {}
             tc._intern_w_proj = {}
+            tc._intern_w_lambda = {}
+            tc._intern_w_forall = {}
             tc._eqv_parent = {}
             tc._defeq_failed = {}
             rgc.collect()
