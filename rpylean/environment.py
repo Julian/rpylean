@@ -54,6 +54,7 @@ from rpylean.objects import (
     _is_nat_zero_const,
     _mk_w_bvar,
     _nat_succ_pred,
+    _try_reduce_nat,
     fun,
     get_decl,
     name_dict,
@@ -962,6 +963,25 @@ class TypeChecker(object):
         for _ in range(self._LAZY_DELTA_MAX_ITER):
             if expr1 is expr2:
                 return _LD_TRUE, expr1, expr2
+
+            # Native nat probe, only when both sides are closed —
+            # lean4's `!has_fvar(t_n) && !has_fvar(s_n)` guard
+            # (type_checker.cpp:978). The probe WHNFs the op's
+            # arguments — full evaluation — and evaluating
+            # fvar-containing arithmetic can grind through unary
+            # recursion towers under huge literals (the SInt range
+            # instances compare `toNat hi + 2^15`-shaped subterms
+            # whose Nat.add would otherwise build a 2^15-level
+            # brecOn below-tower just to probe for a literal).
+            if not expr1.has_fvar and not expr2.has_fvar:
+                reduced1 = _try_reduce_nat(expr1, self)
+                if reduced1 is not None:
+                    expr1 = reduced1
+                    continue
+                reduced2 = _try_reduce_nat(expr2, self)
+                if reduced2 is not None:
+                    expr2 = reduced2
+                    continue
 
             kind1 = self._delta_kind(expr1.head())
             kind2 = self._delta_kind(expr2.head())

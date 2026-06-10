@@ -2237,8 +2237,8 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
-    _attrs_ = ['_hash', 'loose_bvar_range']
-    _immutable_fields_ = ['_hash', 'loose_bvar_range']
+    _attrs_ = ['_hash', 'loose_bvar_range', 'has_fvar']
+    _immutable_fields_ = ['_hash', 'loose_bvar_range', 'has_fvar']
 
     @elidable
     def hash(self):
@@ -2422,9 +2422,19 @@ class W_Expr(_Item):
             env.tick_wall_time()
             next = expr._whnf_core(env)
             if next is None:
-                next = expr.try_unfold_head(env)
+                # Native nat reduction sits between whnf_core and
+                # delta — lean4's whnf loop ordering (whnf_core →
+                # reduce_nat → unfold_definition, type_checker.cpp:
+                # 644). It must NOT live inside `_whnf_core`: probing
+                # a binary nat op WHNFs its arguments, which is full
+                # evaluation, and whnf_core callers (def_eq's lazy
+                # delta) must never evaluate.
+                if isinstance(expr, W_App):
+                    next = _try_reduce_nat(expr, env)
                 if next is None:
-                    return (expr, made_progress)
+                    next = expr.try_unfold_head(env)
+                    if next is None:
+                        return (expr, made_progress)
             expr = next
             made_progress = True
 
@@ -2521,6 +2531,7 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = id
         self.loose_bvar_range = id + 1
+        self.has_fvar = False
         self._hash = ((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF
 
     def __repr__(self):
@@ -2590,6 +2601,7 @@ class W_FVar(W_Expr):
         assert isinstance(binder, Binder)
         self.binder = binder
         self.loose_bvar_range = 0
+        self.has_fvar = True
         # FVars are unique by id, so hashing on id alone is fine.
         self._hash = ((self.id * 1000003) ^ 0xF7A8) & 0xFFFFFFFF
 
@@ -2636,6 +2648,7 @@ class W_LitStr(W_Expr):
         assert isinstance(val, str)
         self.val = val
         self.loose_bvar_range = 0
+        self.has_fvar = False
         self._hash = ((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF
 
     def __repr__(self):
@@ -2715,6 +2728,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
         self.loose_bvar_range = 0
+        self.has_fvar = False
         self._hash = ((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF
 
     def __repr__(self):
@@ -2818,6 +2832,7 @@ class W_Const(W_Expr):
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
         self.loose_bvar_range = 0
+        self.has_fvar = False
         # Inline caches, tagged with the env — hash-consing shares this
         # instance across `Environment`s and both the inferred type
         # and the delta-unfolded value depend on the env's declarations.
@@ -3082,6 +3097,7 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
         self.loose_bvar_range = 0
+        self.has_fvar = False
         self._hash = ((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF
 
     def __repr__(self):
@@ -3379,6 +3395,7 @@ class W_Proj(W_Expr):
         self._struct_whnf_env = None
         self._struct_whnf = None
         self.loose_bvar_range = struct_expr.loose_bvar_range
+        self.has_fvar = struct_expr.has_fvar
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ struct_expr.hash()
         self._hash = ((h * 1000003) ^ 0x9709) & 0xFFFFFFFF
@@ -3707,6 +3724,7 @@ class W_FunBase(W_Expr):
             self.loose_bvar_range = binder_range
         else:
             self.loose_bvar_range = body_range
+        self.has_fvar = binder.type.has_fvar or body.has_fvar
         # 1-entry inline instantiate cache (env-independent).
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
@@ -4062,6 +4080,7 @@ class W_Let(W_Expr):
         if body_range > r:
             r = body_range
         self.loose_bvar_range = r
+        self.has_fvar = type.has_fvar or value.has_fvar or body.has_fvar
         h = (name.hash() * 1000003) ^ type.hash()
         h = (h * 1000003) ^ value.hash()
         h = (h * 1000003) ^ body.hash()
@@ -4199,6 +4218,7 @@ class W_App(W_Expr):
             self.loose_bvar_range = fn_range
         else:
             self.loose_bvar_range = arg_range
+        self.has_fvar = fn.has_fvar or arg.has_fvar
         # 1-entry inline instantiate cache (env-independent).
         self._inst_cache_expr = None
         self._inst_cache_depth = -1
@@ -4425,9 +4445,6 @@ class W_App(W_Expr):
         Used inside the iterative iota driver to drive WHNF of a major
         premise without triggering recursive `try_iota_reduce` calls.
         """
-        reduced = _try_reduce_nat(self, env)
-        if reduced is not None:
-            return reduced
         fn_next = self.fn._whnf_core(env)
         if fn_next is not None:
             return fn_next.app_in(env, self.arg)
@@ -4750,12 +4767,13 @@ class W_App(W_Expr):
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def _whnf_core(self, env):
-        # Try native nat reduction before any WHNF on subexpressions.
-        # This must happen first because WHNF'ing fn would delta-reduce
-        # Nat.add etc. into their recursive definitions.
-        reduced = _try_reduce_nat(self, env)
-        if reduced is not None:
-            return reduced
+        # No native nat probe here: probing a binary nat op WHNFs its
+        # arguments — full evaluation — and whnf_core must never
+        # evaluate. The probe lives in the evaluating loops
+        # (`whnf_with_progress`, `_whnf_iota_chain`) and, fvar-gated,
+        # in `_try_lazy_delta`, mirroring lean4 (reduce_nat is called
+        # from `whnf` at type_checker.cpp:670 and from
+        # `lazy_delta_reduction` at :979, never from `whnf_core`).
 
         # Reduce the head by a single step rather than calling
         # whnf_with_progress (which spawns its own JIT-driver loop).
@@ -4869,11 +4887,15 @@ def _whnf_iota_chain(env, expr):
     while True:
         # Reduce `cur` as far as possible without firing iota itself
         # (so we don't recurse through `try_iota_reduce`). Major
-        # premises do need delta — `try_unfold_head` supplies it one
-        # layer at a time now that `_whnf_core` never deltas.
+        # premises are evaluated with full-whnf semantics: native nat
+        # reduction and delta (`try_unfold_head`, one layer at a time)
+        # both apply here, like lean4's `reduce_recursor` calling the
+        # evaluating `whnf` on the major.
         while True:
             if isinstance(cur, W_App):
                 next_ = cur._whnf_core_no_iota(env)
+                if next_ is None:
+                    next_ = _try_reduce_nat(cur, env)
             else:
                 next_ = cur._whnf_core(env)
             if next_ is None:
@@ -4968,6 +4990,13 @@ class W_Closure(W_Expr):
             if v.loose_bvar_range > max_loose:
                 max_loose = v.loose_bvar_range
         self.loose_bvar_range = max_loose
+        fvar = body.has_fvar
+        if not fvar:
+            for v in env:
+                if v.has_fvar:
+                    fvar = True
+                    break
+        self.has_fvar = fvar
         # Inline whnf/infer caches, env-tagged for hash-consing safety.
         self._whnf_cache_env = None
         self._whnf_cache_result = None

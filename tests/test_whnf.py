@@ -742,6 +742,21 @@ class TestIotaReduction(object):
                 and syntactic_eq(result.fn, Nat_succ))
 
 
+#: Native nat reduction probes only declared constants: the probe runs
+#: after `whnf_core` (whose iota path looks the head up in the
+#: environment), so the op must exist — as it always does in a real
+#: export. The axiom type is irrelevant; only the declaration's
+#: presence matters on this path.
+NAT_OPS_ENV = Environment.having([
+    Name.simple("Nat").child(op).axiom(type=NAT)
+    for op in [
+        "add", "sub", "mul", "pow", "div", "mod", "gcd",
+        "beq", "ble", "land", "lor", "xor",
+        "shiftLeft", "shiftRight",
+    ]
+])
+
+
 class TestNativeNatReduction(object):
     """Native nat kernel operations reduce in WHNF without unfolding definitions."""
 
@@ -761,7 +776,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(3))
             .app(W_LitNat.int(7))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "10"
 
@@ -773,7 +788,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(10))
             .app(W_LitNat.int(3))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "7"
 
@@ -785,7 +800,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(3))
             .app(W_LitNat.int(10))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "0"
 
@@ -797,7 +812,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(6))
             .app(W_LitNat.int(7))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "42"
 
@@ -809,7 +824,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(2))
             .app(W_LitNat.int(32))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "4294967296"
 
@@ -821,7 +836,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(10))
             .app(W_LitNat.int(3))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "3"
 
@@ -833,7 +848,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(10))
             .app(W_LitNat.int(0))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "0"
 
@@ -845,7 +860,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(10))
             .app(W_LitNat.int(3))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "1"
 
@@ -857,7 +872,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(10))
             .app(W_LitNat.int(0))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "10"
 
@@ -871,7 +886,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(5))
             .app(W_LitNat.int(5))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_TRUE)
 
     def test_nat_beq_false(self):
@@ -884,7 +899,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(5))
             .app(W_LitNat.int(3))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_FALSE)
 
     def test_nat_ble_true(self):
@@ -897,7 +912,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(3))
             .app(W_LitNat.int(5))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_TRUE)
 
     def test_nat_ble_equal(self):
@@ -910,7 +925,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(5))
             .app(W_LitNat.int(5))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_TRUE)
 
     def test_nat_ble_false(self):
@@ -923,7 +938,7 @@ class TestNativeNatReduction(object):
             .app(W_LitNat.int(5))
             .app(W_LitNat.int(3))
         )
-        result = app.whnf(Environment.EMPTY)
+        result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_FALSE)
 
     def test_non_literal_arg_falls_through(self):
