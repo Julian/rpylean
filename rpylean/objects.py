@@ -4808,17 +4808,16 @@ class W_Closure(W_Expr):
         persistent table, recreating the leak the per-decl arena was
         meant to bound.
         """
-        n = len(self.env)
-        result = self.body
-        # Substitute outermost-first (env[n-1] for bvar(n-1) at depth n-1)
-        # down to innermost (env[0] for bvar(0) at depth 0). This keeps
-        # already-substituted env entries' free bvars from being
-        # over-substituted by later iterations.
-        k = n - 1
-        while k >= 0:
-            result = result.instantiate(tc, self.env[k], k)
-            k -= 1
-        return result
+        # Multi-arg substitute: one walk of `self.body` substituting
+        # every `env[i]` for bvar `i` at once. Replaces the N sequential
+        # `instantiate` calls of the previous loop — for closures
+        # accumulated across a curried-Lambda peel, this is the savings
+        # nanoda_lib gets from `inst(body, &substs)` (tc.rs:786) versus
+        # what would otherwise be N body walks. The previous outermost-
+        # first ordering was only needed for the sequential case; with
+        # parallel substitution the rel-mapping in `_instantiate_multi`
+        # handles every bvar in its own pass.
+        return _instantiate_multi(tc, self.body, self.env, 0)
 
     def syntactic_eq(self, other):
         return syntactic_eq(self.force(None), other)
@@ -5788,6 +5787,90 @@ def _inst_forall(tc, fun, sub, depth):
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
     fun._inst_cache_result = result
+    return result
+
+
+def _instantiate_multi(tc, cur, substs, depth):
+    """
+    Substitute multiple expressions simultaneously for bvars in `cur`.
+
+    `substs[i]` is the substitute for bvar `i` (at depth 0); when called
+    with `depth > 0`, the mapping is bvar `depth + i` → `substs[i]`. A
+    bvar at or above `depth + len(substs)` is decremented by `len(substs)`
+    to account for the removed binders.
+
+    This is the multi-arg analog of `_instantiate`: substituting N values
+    in one walk rather than calling `_instantiate` N times costs O(|body|)
+    instead of O(N·|body|). Mirrors nanoda_lib's `inst_aux` (expr.rs:170)
+    used in its `whnf_no_unfolding` multi-Lambda peel (tc.rs:780-789) and
+    its `Let`/`Var` handlers.
+    """
+    if cur.loose_bvar_range <= depth:
+        return cur
+    cls = cur.__class__
+    if cls is W_BVar:
+        assert isinstance(cur, W_BVar)
+        if cur.id < depth:
+            return cur
+        rel = cur.id - depth
+        n = len(substs)
+        if rel < n:
+            return substs[rel].incr_free_bvars(tc, depth, 0)
+        return _mk_w_bvar(cur.id - n)
+    if cls is W_App:
+        assert isinstance(cur, W_App)
+        new_fn = _instantiate_multi(tc, cur.fn, substs, depth)
+        new_arg = _instantiate_multi(tc, cur.arg, substs, depth)
+        if new_fn is cur.fn and new_arg is cur.arg:
+            return cur
+        return new_fn.app_in(tc, new_arg)
+    if cls is W_Lambda:
+        assert isinstance(cur, W_Lambda)
+        new_binder = cur.binder
+        if cur.binder.type.loose_bvar_range > depth:
+            new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
+            if new_type is not cur.binder.type:
+                new_binder = cur.binder.with_type(type=new_type)
+        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
+        if new_binder is cur.binder and new_body is cur.body:
+            return cur
+        return _mk_w_lambda(new_binder, new_body)
+    if cls is W_ForAll:
+        assert isinstance(cur, W_ForAll)
+        new_binder = cur.binder
+        if cur.binder.type.loose_bvar_range > depth:
+            new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
+            if new_type is not cur.binder.type:
+                new_binder = cur.binder.with_type(type=new_type)
+        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
+        if new_binder is cur.binder and new_body is cur.body:
+            return cur
+        return _mk_w_forall(new_binder, new_body)
+    if cls is W_Proj:
+        assert isinstance(cur, W_Proj)
+        new_struct = _instantiate_multi(tc, cur.struct_expr, substs, depth)
+        if new_struct is cur.struct_expr:
+            return cur
+        return cur.struct_name.proj_in(tc, cur.field_index, new_struct)
+    if cls is W_Let:
+        assert isinstance(cur, W_Let)
+        new_type = _instantiate_multi(tc, cur.type, substs, depth)
+        new_value = _instantiate_multi(tc, cur.value, substs, depth)
+        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
+        if (new_type is cur.type
+                and new_value is cur.value
+                and new_body is cur.body):
+            return cur
+        return _mk_w_let(cur.name, new_type, new_value, new_body)
+    # W_Closure / other: fall back to a sequence of single-arg
+    # `instantiate` calls. Closures aren't expected to be substituted
+    # into during a force — they'd have been peeled earlier — but the
+    # fallback keeps semantics correct if one slips through.
+    result = cur
+    k = len(substs) - 1
+    while k >= 0:
+        result = result.instantiate(tc, substs[k], depth + k)
+        k -= 1
     return result
 
 
