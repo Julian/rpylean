@@ -1087,12 +1087,22 @@ def _mk_app_in(tc, fn, arg):
         return _mk_app(fn, arg)
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
-    h = _mix2(fn._hash, arg._hash)
-    bucket = arena.get(h, None)
+    # The arena's equality is identity (`existing.fn is fn`), so its
+    # key must mix *identity* hashes, not content hashes: W_Lambda /
+    # W_ForAll aren't interned, so big proof terms carry thousands of
+    # structurally-equal-but-distinct lambda subtrees — under a
+    # content-hash key those all collide into one bucket and every
+    # allocation degenerates to a linear scan of it (98% of wall time
+    # on Vector.pmap_pmap).
+    hi = _mix2(compute_identity_hash(fn), compute_identity_hash(arg))
+    bucket = arena.get(hi, None)
     if bucket is not None:
         for existing in bucket:
             if existing.fn is fn and existing.arg is arg:
                 return existing
+    # The persistent table is content-keyed (parse-time dedup), so the
+    # fallback probe recomputes the content key.
+    h = _mix2(fn._hash, arg._hash)
     persistent = _INTERN_W_APP.get(h, None)
     if persistent is not None:
         for existing in persistent:
@@ -1100,7 +1110,7 @@ def _mk_app_in(tc, fn, arg):
                 return existing
     e = W_App(fn, arg)
     if bucket is None:
-        arena[h] = [e]
+        arena[hi] = [e]
     else:
         bucket.append(e)
     return e
@@ -1145,14 +1155,20 @@ def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
         return _mk_w_proj(struct_name, field_index, struct_expr)
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
-    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
-    bucket = arena.get(h, None)
+    # Identity-keyed like `_mk_app_in`'s arena — see the comment there.
+    hi = _mix3(
+        compute_identity_hash(struct_name),
+        field_index,
+        compute_identity_hash(struct_expr),
+    )
+    bucket = arena.get(hi, None)
     if bucket is not None:
         for existing in bucket:
             if (existing.struct_name is struct_name
                     and existing.field_index == field_index
                     and existing.struct_expr is struct_expr):
                 return existing
+    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
     persistent = _INTERN_W_PROJ.get(h, None)
     if persistent is not None:
         for existing in persistent:
@@ -1162,7 +1178,7 @@ def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
                 return existing
     e = W_Proj(struct_name, field_index, struct_expr)
     if bucket is None:
-        arena[h] = [e]
+        arena[hi] = [e]
     else:
         bucket.append(e)
     return e

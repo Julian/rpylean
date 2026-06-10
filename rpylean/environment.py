@@ -305,6 +305,15 @@ class Tracer(object):
         ``op_name`` is the kernel-op ``Name`` (e.g. `Nat.add`).
         """
 
+    def eqv_hit(self):
+        """Called when def_eq resolves via the equivalence union-find."""
+
+    def syntactic_hit(self):
+        """Called when def_eq resolves via the syntactic fast path."""
+
+    def pi_hit(self):
+        """Called when def_eq resolves via proof irrelevance."""
+
     def print_summary(self, writer):
         """Called by the progress signal handler (and end-of-run with
         ``--stats``) to dump whatever rolling counters the tracer holds.
@@ -328,6 +337,8 @@ class StreamTracer(Tracer):
         'def_eq_count', 'whnf_step_count', 'beta_count',
         'whnf_cache_hit_count', 'whnf_cache_miss_count',
         'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
+        'eqv_hit_count', 'syntactic_hit_count', 'pi_hit_count',
+        'false_count',
     ]
 
     def __init__(self, writer):
@@ -342,6 +353,10 @@ class StreamTracer(Tracer):
         self.iota_by_name = name_dict()
         self.delta_by_name = name_dict()
         self.nat_reduce_by_name = name_dict()
+        self.eqv_hit_count = 0
+        self.syntactic_hit_count = 0
+        self.pi_hit_count = 0
+        self.false_count = 0
 
     def _flush_pending(self):
         if self._pending_newline:
@@ -364,6 +379,8 @@ class StreamTracer(Tracer):
         self._depth += 1
 
     def result(self, value):
+        if not value:
+            self.false_count += 1
         if self._writer is None:
             return value
         self._depth -= 1
@@ -412,6 +429,15 @@ class StreamTracer(Tracer):
             self.nat_reduce_by_name.get(op_name, 0) + 1
         )
 
+    def eqv_hit(self):
+        self.eqv_hit_count += 1
+
+    def syntactic_hit(self):
+        self.syntactic_hit_count += 1
+
+    def pi_hit(self):
+        self.pi_hit_count += 1
+
     def print_summary(self, writer):
         """Write a human-readable summary of collected counts to ``writer``.
 
@@ -419,6 +445,12 @@ class StreamTracer(Tracer):
         """
         writer.write_plain("\n--- tracer stats ---\n")
         writer.write_plain("def_eq calls:   %d\n" % self.def_eq_count)
+        writer.write_plain("def_eq false:   %d\n" % self.false_count)
+        writer.write_plain("def_eq eqv hits: %d\n" % self.eqv_hit_count)
+        writer.write_plain("def_eq syntactic hits: %d\n"
+                           % self.syntactic_hit_count)
+        writer.write_plain("def_eq proof-irrelevance hits: %d\n"
+                           % self.pi_hit_count)
         writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
         writer.write_plain("whnf calls (cache hit): %d\n"
                            % self.whnf_cache_hit_count)
@@ -600,6 +632,7 @@ class TypeChecker(object):
         # `quick_is_def_eq` consulting `m_eqv_manager`
         # (type_checker.cpp:741).
         if self._eqv_find(expr1) is self._eqv_find(expr2):
+            tracer.eqv_hit()
             return tracer.result(True)
 
         result = self._def_eq_uncached(expr1, expr2)
@@ -618,6 +651,7 @@ class TypeChecker(object):
         # walk piggy-backs on identity at each level (see
         # `syntactic_eq`) so it remains cheap for shared subtrees.
         if syntactic_eq(expr1, expr2):
+            self.tracer.syntactic_hit()
             return True
 
         # Bring both sides to WHNF *without* delta (beta / iota /
@@ -653,6 +687,7 @@ class TypeChecker(object):
                 expr2_sort = expr2_sort.whnf(self)
             if syntactic_eq(expr2_sort, PROP):
                 if self.def_eq(expr1_ty, expr2_ty):
+                    self.tracer.pi_hit()
                     return True
 
         # Nat-offset: short-circuit `Nat.zero =?= Nat.zero` and
