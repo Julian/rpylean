@@ -69,6 +69,12 @@ COLOR = (
             "(suffixes: s/ms/m, default seconds; sampled every 1024 def_eq calls)",
         ),
         (
+            "max-memory-per-decl",
+            "give up on the declaration being checked when the process' "
+            "live heap exceeds this size (suffixes: K/M/G, default bytes; "
+            "sampled with the wall-time check)",
+        ),
+        (
             "print",
             (
                 "print something for each declaration (valid values are "
@@ -121,6 +127,7 @@ def check(self, args, stdin, stdout, stderr):
     max_fail = int(args.options["max-fail"] or "0")
     max_heartbeat = int(args.options["max-heartbeat"] or "0")
     max_wall_time = _parse_seconds(args.options["max-wall-time-per-decl"])
+    max_memory = _parse_bytes(args.options["max-memory-per-decl"])
     printer = Printer.from_str(args.options["print"], stdoutw)
     slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
@@ -167,6 +174,7 @@ def check(self, args, stdin, stdout, stderr):
             abort_at,
             max_heartbeat,
             max_wall_time,
+            max_memory,
             trace,
             break_at,
             stats,
@@ -315,6 +323,7 @@ def _check_one_file(
     abort_at,
     max_heartbeat,
     max_wall_time,
+    max_memory,
     trace,
     break_at,
     stats,
@@ -354,6 +363,8 @@ def _check_one_file(
                 builder.env.max_heartbeat = max_heartbeat
             if max_wall_time > 0.0:
                 builder.env.max_wall_time = max_wall_time
+            if max_memory > 0:
+                builder.env.max_memory = max_memory
             if (
                 slow_secs >= 0.0
                 or slow_hb >= 0
@@ -783,6 +794,33 @@ def _parse_seconds(s):
         assert end >= 0
         return _pos_int(s, s[:end]) * 60.0
     return float(_pos_int(s, s))
+
+
+def _parse_bytes(s):
+    """Parse a memory size into bytes. Returns 0 for `None`.
+
+    Bare numbers are bytes; `K`/`M`/`G` (or `KB`/`MB`/`GB`) suffixes
+    are binary multiples.
+    """
+    if s is None:
+        return 0
+    scaled = s
+    if scaled.endswith("B"):
+        end = len(scaled) - 1
+        assert end >= 0
+        scaled = scaled[:end]
+    multiplier = 1
+    if scaled.endswith("K"):
+        multiplier = 1024
+    elif scaled.endswith("M"):
+        multiplier = 1024 * 1024
+    elif scaled.endswith("G"):
+        multiplier = 1024 * 1024 * 1024
+    if multiplier > 1:
+        end = len(scaled) - 1
+        assert end >= 0
+        scaled = scaled[:end]
+    return _pos_int(s, scaled) * multiplier
 
 
 def _pos_int(orig, n):

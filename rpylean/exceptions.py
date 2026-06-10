@@ -371,3 +371,31 @@ class WallTimeExceeded(W_Error):
                 % (self.elapsed, self.max_wall_time)
             ),
         ]
+
+
+class MemoryExceeded(W_Error):
+    """
+    The memory limit was exceeded while checking a declaration —
+    either the live heap or the declaration's growth of the process
+    footprint high-water mark crossed it. Sampled together with the
+    wall-time check, so the value at raise may overshoot the limit by
+    whatever a single sampling window allocates.
+    """
+
+    _attrs_ = ['declaration', 'used', 'max_memory']
+
+    def __init__(self, declaration, used, max_memory):
+        self.declaration = declaration
+        self.used = used
+        self.max_memory = max_memory
+
+    def tokens(self):
+        return [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.declaration.name.str()),
+            ERROR.emit(
+                "\nmemory limit exceeded (%d MB, limit %d MB)"
+                % (self.used // (1024 * 1024),
+                   self.max_memory // (1024 * 1024))
+            ),
+        ]

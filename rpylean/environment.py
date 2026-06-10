@@ -6,7 +6,7 @@ from traceback import print_exc
 import pdb
 
 from rpython.rlib import rgc
-from rpython.rlib.jit import JitDriver, promote
+from rpython.rlib.jit import JitDriver, dont_look_inside, promote
 from rpython.rlib.objectmodel import (
     not_rpython,
     we_are_translated,
@@ -20,6 +20,7 @@ from rpylean.exceptions import (
     DuplicateLevels,
     HeartbeatExceeded,
     IndexGapError,
+    MemoryExceeded,
     UnknownQuotient,
     W_Error,
     W_InvalidDeclaration,
@@ -41,6 +42,7 @@ from rpylean.objects import (
     W_ForAll,
     W_FunBase,
     W_HeartbeatError,
+    W_MemoryError,
     W_WallTimeError,
     W_Inductive,
     W_Lambda,
@@ -55,6 +57,7 @@ from rpylean.objects import (
     fun,
     get_decl,
     name_dict,
+    reset_decl_caches,
     syntactic_eq,
 )
 
@@ -457,7 +460,8 @@ class TypeChecker(object):
         'env', 'decl', 'heartbeat',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time', 'start_time', '_whnf_tick',
+        'max_wall_time', 'max_memory', 'start_time', 'start_peak',
+        '_whnf_tick',
         '_intern_w_app', '_intern_w_proj',
         '_eqv_parent', '_defeq_failed',
     ]
@@ -471,7 +475,7 @@ class TypeChecker(object):
         'env', 'decl',
         'declarations',
         'tracer?', 'max_heartbeat?', 'count_heartbeats?',
-        'max_wall_time?', 'start_time',
+        'max_wall_time?', 'max_memory?', 'start_time', 'start_peak',
     ]
 
     # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
@@ -497,7 +501,9 @@ class TypeChecker(object):
         self.max_heartbeat = env.max_heartbeat
         self.count_heartbeats = env.count_heartbeats
         self.max_wall_time = env.max_wall_time
+        self.max_memory = env.max_memory
         self.start_time = clock()
+        self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
         # Per-decl arenas for reduction-produced W_App / W_Proj —
         # mirrors nanoda_lib's fresh per-decl `LeanDag` dag created
@@ -522,23 +528,43 @@ class TypeChecker(object):
     def tick_wall_time(self):
         """
         Increment the wall-time tick counter; every 1024th call, check
-        whether `max_wall_time` has been exceeded and raise if so. Called
-        from the hot WHNF loop (`whnf_with_progress`) and from `def_eq`.
+        whether `max_wall_time` or `max_memory` has been exceeded and
+        raise if so. Called from the hot WHNF loop
+        (`whnf_with_progress`) and from `def_eq`.
 
-        No-op when `max_wall_time` is zero (the common case), so the JIT
-        can fold the check away when the limit isn't set.
+        No-op when neither limit is set (the common case), so the JIT
+        can fold the check away.
         """
         max_wall_time = self.max_wall_time
-        if max_wall_time <= 0.0:
+        max_memory = self.max_memory
+        if max_wall_time <= 0.0 and max_memory <= 0:
             return
         self._whnf_tick += 1
         if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
             return
-        elapsed = clock() - self.start_time
-        if elapsed > max_wall_time:
-            raise WallTimeExceeded(
-                self.decl, elapsed, max_wall_time,
-            )
+        if max_wall_time > 0.0:
+            elapsed = clock() - self.start_time
+            if elapsed > max_wall_time:
+                raise WallTimeExceeded(
+                    self.decl, elapsed, max_wall_time,
+                )
+        if max_memory > 0:
+            # Two triggers: live heap above the cap (even a major
+            # collection can't shrink below this), or this decl pushing
+            # the process-wide footprint high-water mark up by more
+            # than the cap (`TOTAL_MEMORY` oscillates with the major
+            # collection cycle, so it alone misses footprint spikes —
+            # the thing that actually drives the machine into swap).
+            live = _live_memory()
+            if live > max_memory:
+                raise MemoryExceeded(
+                    self.decl, live, max_memory,
+                )
+            growth = _peak_memory() - self.start_peak
+            if growth > max_memory:
+                raise MemoryExceeded(
+                    self.decl, growth, max_memory,
+                )
 
     # ---- public def_eq / infer entry points ----------------------------
 
@@ -1181,25 +1207,31 @@ def _bytes_allocated():
     return 0
 
 
+@dont_look_inside
 def _live_memory():
     """
     Current live heap size in bytes. Returns 0 in untranslated mode.
 
     Unlike `_bytes_allocated` (a monotonically-increasing cumulative
     counter), this reflects what the GC has not yet reclaimed — useful
-    for spotting per-decl working-set growth.
+    for spotting per-decl working-set growth. `dont_look_inside`
+    because `gc_get_stats` has no JIT equivalent and this is reached
+    from traced code via `tick_wall_time`.
     """
     if we_are_translated():
         return rgc.get_stats(rgc.TOTAL_MEMORY)
     return 0
 
 
+@dont_look_inside
 def _peak_memory():
     """
     Process-wide peak heap size so far in bytes. Returns 0 in
     untranslated mode. Monotonically non-decreasing across a run — a
     *delta* across one decl tells you how much that decl raised the
-    high-water mark.
+    high-water mark. `dont_look_inside` because `gc_get_stats` has no
+    JIT equivalent and this is reached from traced code via
+    `tick_wall_time`.
     """
     if we_are_translated():
         return rgc.get_stats(rgc.PEAK_MEMORY)
@@ -1214,7 +1246,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time',
+        'max_wall_time', 'max_memory',
         '_intern_w_app', '_intern_w_proj',
     ]
     # `declarations` is fully immutable: the reference is set in
@@ -1231,6 +1263,7 @@ class Environment(object):
         'max_heartbeat?',
         'count_heartbeats?',
         'max_wall_time?',
+        'max_memory?',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -1239,6 +1272,7 @@ class Environment(object):
         self.max_heartbeat = 0
         self.count_heartbeats = False
         self.max_wall_time = 0.0
+        self.max_memory = 0
         # `None` is the sentinel routing `_mk_app_in` / `_mk_w_proj_in`
         # back to the persistent intern. Same attribute name as on
         # `TypeChecker` so the duck-typed dispatch works without
@@ -1303,7 +1337,10 @@ class Environment(object):
         scripts that want a one-shot check; production paths should
         use `type_check_one`.
         """
-        return decl.type_check(TypeChecker(self, decl))
+        try:
+            return decl.type_check(TypeChecker(self, decl))
+        finally:
+            reset_decl_caches()
 
     def type_check_one(self, decl, printer=None):
         """
@@ -1332,6 +1369,12 @@ class Environment(object):
                 err.elapsed,
                 err.max_wall_time,
             )
+        except MemoryExceeded as err:
+            error = W_MemoryError(
+                decl.name,
+                err.used,
+                err.max_memory,
+            )
         except W_CheckError as err:
             if err.name is None:
                 err.name = decl.name
@@ -1349,6 +1392,21 @@ class Environment(object):
         elapsed = clock() - start
         gc_elapsed = _gc_time_seconds() - gc_start
         bytes_allocated = _bytes_allocated() - bytes_start
+        # Reset the per-decl inline caches before measuring live memory
+        # so the reading reflects what this decl *permanently* added —
+        # stale caches on persistent nodes would otherwise pin this
+        # decl's reduction towers for the rest of the run.
+        reset_decl_caches()
+        if isinstance(error, W_MemoryError):
+            # The decl blew the memory cap: drop the per-decl arenas
+            # eagerly and force a major collection so the next decl
+            # starts from a shrunken heap instead of riding the
+            # high-water mark into swap.
+            tc._intern_w_app = {}
+            tc._intern_w_proj = {}
+            tc._eqv_parent = {}
+            tc._defeq_failed = {}
+            rgc.collect()
         live_memory = _live_memory()
         peak_growth = _peak_memory() - peak_start
         result = CheckResult(

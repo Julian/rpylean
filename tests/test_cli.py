@@ -5,7 +5,8 @@ from rpylean._rcli import CLI, Args
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
 from rpylean._rcli import UsageError
 from rpylean.cli import (
-    Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_threshold,
+    Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_bytes,
+    _parse_threshold,
 )
 from rpylean.environment import CheckResult, Environment
 from rpylean.objects import TYPE, Name
@@ -507,6 +508,34 @@ class TestParseThreshold(object):
     def test_invalid_unit_value(self):
         try:
             _parse_threshold("xms")
+        except UsageError as err:
+            assert "Invalid threshold" in err.message
+        else:
+            assert False, "expected UsageError"
+
+
+class TestParseBytes(object):
+    def test_none(self):
+        assert _parse_bytes(None) == 0
+
+    def test_bare_number_is_bytes(self):
+        assert _parse_bytes("4096") == 4096
+
+    def test_kilobytes(self):
+        assert _parse_bytes("4K") == 4096
+        assert _parse_bytes("4KB") == 4096
+
+    def test_megabytes(self):
+        assert _parse_bytes("2M") == 2 * 1024 * 1024
+        assert _parse_bytes("2MB") == 2 * 1024 * 1024
+
+    def test_gigabytes(self):
+        assert _parse_bytes("8G") == 8 * 1024 * 1024 * 1024
+        assert _parse_bytes("8GB") == 8 * 1024 * 1024 * 1024
+
+    def test_invalid(self):
+        try:
+            _parse_bytes("nope")
         except UsageError as err:
             assert "Invalid threshold" in err.message
         else:

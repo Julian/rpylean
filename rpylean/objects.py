@@ -454,6 +454,31 @@ class W_WallTimeError(W_CheckError):
         return Diagnostic(tokens, NO_SPAN, message)
 
 
+class W_MemoryError(W_CheckError):
+    """
+    The per-declaration memory limit was exceeded.
+    """
+
+    _attrs_ = ['used', 'max_memory']
+
+    def __init__(self, name, used, max_memory):
+        self.name = name
+        self.used = used
+        self.max_memory = max_memory
+
+    def as_diagnostic(self):
+        tokens = [
+            PLAIN.emit("in "),
+            DECL_NAME.emit(self.name.str()),
+        ]
+        message = [MESSAGE.emit(
+            ":\nmemory limit exceeded (%d MB, limit %d MB)"
+            % (self.used // (1024 * 1024),
+               self.max_memory // (1024 * 1024)),
+        )]
+        return Diagnostic(tokens, NO_SPAN, message)
+
+
 class W_UniverseTooHigh(W_CheckError):
     """
     A constructor field's type lives in a universe too high for the inductive.
@@ -756,6 +781,33 @@ _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 #     interning blows up the permanent live heap.
 #   * Binder — `_fvar` is *per-binding-position* mutable state that
 #     interning would silently share across distinct positions.
+
+
+# Every node whose per-instance inline caches were populated since the
+# last `reset_decl_caches()` call. The inline caches are keyed on
+# per-declaration identities (the `TypeChecker`, a closure env, a
+# substitute), so after a decl's check returns they can never hit again
+# — but their `*_result` references would pin entire reduction towers
+# on nodes that outlive the decl (parsed / interned ones). Write sites
+# register the node here on the first write into an empty slot; the
+# checker resets every registered node between decls.
+_DECL_CACHE_WRITES = []
+
+
+def _note_cache_write(expr):
+    _DECL_CACHE_WRITES.append(expr)
+
+
+def reset_decl_caches():
+    """
+    Reset the inline caches of every node registered since the last
+    call. Called by the checker after each declaration so dead caches
+    don't pin that decl's reduction output for the rest of the run.
+    """
+    writes = _DECL_CACHE_WRITES
+    for i in range(len(writes)):
+        writes[i]._reset_caches()
+    del writes[:]
 
 
 def _mk_str_name(parent, suffix):
@@ -2161,6 +2213,21 @@ class W_Expr(_Item):
         """
         return self._hash
 
+    def _reset_caches(self):
+        """
+        Drop every per-instance inline cache on this node.
+
+        The inline caches (`_whnf_cache_*` / `_infer_cache_*` /
+        `_delta_cache_*` / `_closure_cache_*` / `_inst_cache_*`) are
+        keyed on per-declaration identities — the `TypeChecker`, a
+        reduction-produced closure env, or a reduction-produced
+        substitute — so once the decl's check returns they can never
+        hit again, but the dangling `*_result` references pin whole
+        reduction towers on nodes that outlive the decl (parsed /
+        interned ones). The `TypeChecker` records every node whose
+        caches it populated and resets them here when it's torn down.
+        """
+
     def collect_consts_into(self, out, seen):
         """
         Append every `W_Const` name reachable from this expression
@@ -2828,6 +2895,8 @@ class W_Const(W_Expr):
         if self._delta_cache_env is env:
             return self._delta_cache_result
         result = apply_const_level_params(self, val, env)
+        if self._delta_cache_env is None:
+            _note_cache_write(self)
         self._delta_cache_env = env
         self._delta_cache_result = result
         return result
@@ -2841,9 +2910,17 @@ class W_Const(W_Expr):
             result = decl.type
         else:
             result = apply_const_level_params(self, decl.type, env)
+        if self._infer_cache_env is None:
+            _note_cache_write(self)
         self._infer_cache_env = env
         self._infer_cache_result = result
         return result
+
+    def _reset_caches(self):
+        self._infer_cache_env = None
+        self._infer_cache_result = None
+        self._delta_cache_env = None
+        self._delta_cache_result = None
 
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
@@ -3614,9 +3691,20 @@ class W_FunBase(W_Expr):
         if self._closure_cache_env is env:
             return self._closure_cache_result
         result = W_Closure(env, self)
+        if self._closure_cache_env is None:
+            _note_cache_write(self)
         self._closure_cache_env = env
         self._closure_cache_result = result
         return result
+
+    def _reset_caches(self):
+        self._inst_cache_expr = None
+        self._inst_cache_depth = -1
+        self._inst_cache_result = None
+        self._infer_cache_env = None
+        self._infer_cache_result = None
+        self._closure_cache_env = None
+        self._closure_cache_result = None
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -4235,9 +4323,20 @@ class W_App(W_Expr):
             return self._whnf_cache_result
         env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
+        if self._whnf_cache_env is None:
+            _note_cache_write(self)
         self._whnf_cache_env = env
         self._whnf_cache_result = expr
         return expr
+
+    def _reset_caches(self):
+        self._inst_cache_expr = None
+        self._inst_cache_depth = -1
+        self._inst_cache_result = None
+        self._infer_cache_env = None
+        self._infer_cache_result = None
+        self._whnf_cache_env = None
+        self._whnf_cache_result = None
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
@@ -4781,9 +4880,13 @@ def _whnf_iota_chain(env, expr):
         # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
         # returns immediately instead of recursing.
         if isinstance(major_arg, W_App):
+            if major_arg._whnf_cache_env is None:
+                _note_cache_write(major_arg)
             major_arg._whnf_cache_env = env
             major_arg._whnf_cache_result = cur
         elif isinstance(major_arg, W_Closure):
+            if major_arg._whnf_cache_env is None:
+                _note_cache_write(major_arg)
             major_arg._whnf_cache_env = env
             major_arg._whnf_cache_result = cur
 
@@ -4846,9 +4949,17 @@ class W_Closure(W_Expr):
             return self._whnf_cache_result
         env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
+        if self._whnf_cache_env is None:
+            _note_cache_write(self)
         self._whnf_cache_env = env
         self._whnf_cache_result = expr
         return expr
+
+    def _reset_caches(self):
+        self._whnf_cache_env = None
+        self._whnf_cache_result = None
+        self._infer_cache_env = None
+        self._infer_cache_result = None
 
     def _whnf_core(self, env):
         return self.body._whnf_under_closure(env, self.env)
@@ -5817,6 +5928,8 @@ def _inst_app(tc, app, sub, depth):
         result = app
     else:
         result = new_fn.app_in(tc, new_arg)
+    if app._inst_cache_expr is None:
+        _note_cache_write(app)
     app._inst_cache_expr = sub
     app._inst_cache_depth = depth
     app._inst_cache_result = result
@@ -5833,6 +5946,8 @@ def _inst_lambda(tc, fun, sub, depth):
         result = fun
     else:
         result = _mk_w_lambda(new_binder, new_body)
+    if fun._inst_cache_expr is None:
+        _note_cache_write(fun)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
     fun._inst_cache_result = result
@@ -5849,6 +5964,8 @@ def _inst_forall(tc, fun, sub, depth):
         result = fun
     else:
         result = _mk_w_forall(new_binder, new_body)
+    if fun._inst_cache_expr is None:
+        _note_cache_write(fun)
     fun._inst_cache_expr = sub
     fun._inst_cache_depth = depth
     fun._inst_cache_result = result
@@ -6155,15 +6272,23 @@ def _iter_infer(env, root):
             target = item.expr
             result = values[len(values) - 1]
             if isinstance(target, W_App):
+                if target._infer_cache_env is None:
+                    _note_cache_write(target)
                 target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_FunBase):
+                if target._infer_cache_env is None:
+                    _note_cache_write(target)
                 target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_Closure):
+                if target._infer_cache_env is None:
+                    _note_cache_write(target)
                 target._infer_cache_env = env
                 target._infer_cache_result = result
             elif isinstance(target, W_Const):
+                if target._infer_cache_env is None:
+                    _note_cache_write(target)
                 target._infer_cache_env = env
                 target._infer_cache_result = result
     return values[0]
