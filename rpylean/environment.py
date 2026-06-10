@@ -830,6 +830,13 @@ class TypeChecker(object):
         if cls1 is cls2 and syntactic_eq(expr1, expr2):
             return True
 
+        # Two literals that aren't syntactically equal are unequal —
+        # lean4's quick_is_def_eq decides Lit pairs definitively
+        # (type_checker.cpp:758). Falling through would materialise
+        # them as constructor chains just to fail.
+        if cls1 is cls2 and (cls1 is W_LitStr or cls1 is W_LitNat):
+            return False
+
         if cls1 is cls2:
             if cls1 is W_Const:
                 assert isinstance(expr1, W_Const)
@@ -837,10 +844,14 @@ class TypeChecker(object):
                 names_eq = expr1.name.syntactic_eq(expr2.name)
             else:
                 names_eq = True
-            if names_eq:
-                if expr1.def_eq(expr2, self):
-                    return True
-                return self.def_eq_unit(expr1, expr2)
+            if names_eq and expr1.def_eq(expr2, self):
+                return True
+            # A failed structural comparison is not definitive: fall
+            # through — lean4's is_def_eq_core likewise tries eta,
+            # structure eta and unit-likeness after a same-head app
+            # comparison fails (e.g. a stuck `Option.rec` application
+            # against a `Std.Iter.mk` constructor application is
+            # proven equal by structure eta, never structurally).
 
         # Only perform this check after we've already tried reduction,
         # since this check can get fail in cases like
@@ -1106,7 +1117,10 @@ class TypeChecker(object):
         return self.def_eq(expr1_ty, expr2_ty)
 
     def try_eta_expand(self, expr1, expr2):
-        if isinstance(expr1, W_Lambda):
+        # Only when the other side is *not* already a lambda — lean4's
+        # try_eta_expansion_core guard. Without it, two structurally
+        # unequal lambdas would eta-wrap each other forever.
+        if isinstance(expr1, W_Lambda) and not isinstance(expr2, W_Lambda):
             expr2_ty = expr2.infer(self).whnf(self)
             if isinstance(expr2_ty, W_Closure):
                 expr2_ty = expr2_ty.force(self)
