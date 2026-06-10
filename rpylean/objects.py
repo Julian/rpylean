@@ -4650,18 +4650,13 @@ class W_App(W_Expr):
             fn = fn.force(env)
         if isinstance(fn, W_FunBase):
             env.tracer.beta()
-            # Curried-call batching for 3+ binder Lambda chains: the
-            # outer WHNF loop will beta more args into this, and the
-            # eventual `W_Closure.force` does one multi-arg substitute
-            # rather than N body walks. 2-arg curries are NOT wrapped —
-            # the `_whnf_under_closure` indirection costs more than the
-            # single batched walk saves at that scale (measured ~5×
-            # regression on `Int*.shiftLeft_and` if applied to all
-            # 2-arg cases).
-            body = fn.body
-            if isinstance(body, W_Lambda) and isinstance(body.body, W_Lambda):
-                return body.closure([self.arg])
-            return body.instantiate(env, self.arg)
+            # No curried-call closure batching here: `W_Closure` is
+            # identity-hashed, so wrapping the hot brecOn matcher
+            # minors (3-binder lambdas) in fresh closures defeats the
+            # W_App interning that keeps reconstructed recursor
+            # sub-terms shared — every below-tower layer became a
+            # fresh subtree and the per-decl arena never deduped it.
+            return fn.body.instantiate(env, self.arg)
 
         # Handle recursor in head position
         iota_progress, reduced = self.try_iota_reduce(env)
