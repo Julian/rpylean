@@ -638,10 +638,19 @@ class TypeChecker(object):
         # WHNF to evaluate the whole decision procedure — e.g.
         # `Nat.rec` over `0x10ffff`-sized literals in the
         # `String.Decode` UTF-8 lemmas.
+        # The sort needs a WHNF before the Prop test — lean4's
+        # `is_prop` is `whnf(infer_type(e)) == Prop` — but only on the
+        # slow path: inference usually hands back the literal `Prop`.
         expr1_ty = expr1.infer(self)
-        if syntactic_eq(expr1_ty.infer(self), PROP):
+        expr1_sort = expr1_ty.infer(self)
+        if not syntactic_eq(expr1_sort, PROP):
+            expr1_sort = expr1_sort.whnf(self)
+        if syntactic_eq(expr1_sort, PROP):
             expr2_ty = expr2.infer(self)
-            if syntactic_eq(expr2_ty.infer(self), PROP):
+            expr2_sort = expr2_ty.infer(self)
+            if not syntactic_eq(expr2_sort, PROP):
+                expr2_sort = expr2_sort.whnf(self)
+            if syntactic_eq(expr2_sort, PROP):
                 if self.def_eq(expr1_ty, expr2_ty):
                     return True
 
