@@ -6,8 +6,9 @@ from __future__ import print_function
 
 from time import time
 import errno
+import os
 
-from rpython.rlib import debug
+from rpython.rlib import debug, rgc
 from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
@@ -26,11 +27,14 @@ from rpylean.environment import (
     DeclarationHook,
     EnvironmentBuilder,
     StreamTracer,
+    _arena_memory,
     _bytes_allocated,
+    _live_memory,
     _peak_memory,
+    _rawmalloced_memory,
     from_export,
 )
-from rpylean.objects import Name, name_dict
+from rpylean.objects import Name, intern_stats, name_dict
 
 
 cli = CLI(
@@ -234,9 +238,18 @@ class _StreamingChecker(DeclarationHook):
         # `decl.name.str()` we print *is* what we were stuck on (the
         # decl that just blocked the loop on the prior iteration).
         if _progress.poll():
+            apps, projs, consts, pending = intern_stats()
+            _MB = 1024 * 1024
             self.stderrw.write_plain(
-                "[progress] seen=%d checked=%d failures=%d cur=%s\n" % (
+                "[progress] seen=%d checked=%d failures=%d "
+                "live=%dMB arena=%dMB rawmalloc=%dMB "
+                "interned(apps=%d projs=%d consts=%d) pending=%d "
+                "cur=%s\n" % (
                     self.n_seen, self.n_checked, self.failures,
+                    _live_memory() // _MB,
+                    _arena_memory() // _MB,
+                    _rawmalloced_memory() // _MB,
+                    apps, projs, consts, pending,
                     decl.name.str(),
                 ),
             )
@@ -245,6 +258,34 @@ class _StreamingChecker(DeclarationHook):
             # snapshot up to *this point* rather than waiting for the
             # final summary (which never arrives if the run is stuck).
             self.env.tracer.print_summary(self.stderrw)
+            # Also dump the full heap graph for offline analysis with
+            # pypy/tool/gcdump.py (decompress the typeids blob first:
+            # `python3 -c "import zlib,sys;
+            #   sys.stdout.write(zlib.decompress(
+            #     open('/tmp/rpylean-typeids.z','rb').read()).decode())"
+            #   > /tmp/rpylean-typeids.txt`). Translated only —
+            # `dump_rpy_heap` is a GC hook with no untranslated
+            # equivalent. Pauses the check for the dump's duration,
+            # which is fine for a manual `kill -INFO` probe.
+            if we_are_translated():
+                fd = os.open(
+                    "/tmp/rpylean-heap.dump",
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0644,
+                )
+                rgc.dump_rpy_heap(fd)
+                os.close(fd)
+                fd = os.open(
+                    "/tmp/rpylean-typeids.z",
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0644,
+                )
+                # `get_typeids_z` hands back a low-level char array,
+                # not a str — join it the way pypy's gc module does.
+                array = rgc.get_typeids_z()
+                blob = ''.join([array[i] for i in range(len(array))])
+                os.write(fd, blob)
+                os.close(fd)
             # `stderr` is block-buffered when redirected to a file, so
             # without an explicit flush the user's `kill -INFO` probe
             # would set the flag and write the line but it'd stay in

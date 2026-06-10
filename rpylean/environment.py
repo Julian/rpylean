@@ -1249,6 +1249,27 @@ def _live_memory():
 
 
 @dont_look_inside
+def _arena_memory():
+    """
+    Live GC-arena bytes (small objects). Returns 0 untranslated.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.TOTAL_ARENA_MEMORY)
+    return 0
+
+
+@dont_look_inside
+def _rawmalloced_memory():
+    """
+    Live raw-malloced bytes (large objects: big lists/dicts/strings).
+    Returns 0 untranslated.
+    """
+    if we_are_translated():
+        return rgc.get_stats(rgc.TOTAL_RAWMALLOCED_MEMORY)
+    return 0
+
+
+@dont_look_inside
 def _peak_memory():
     """
     Process-wide peak heap size so far in bytes. Returns 0 in
