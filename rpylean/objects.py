@@ -101,7 +101,7 @@ def _app_args_printable_location():
 # case) flows through here.
 app_args_jitdriver = JitDriver(
     greens=[],
-    reds=["i", "self_args", "other_args", "def_eq"],
+    reds=["i", "self_args", "other_args", "tc"],
     name="app_args",
     get_printable_location=_app_args_printable_location,
 )
@@ -2274,7 +2274,7 @@ class W_Expr(_Item):
             expr = expr.fn
         return expr, args
 
-    def open_all_binders(self):
+    def open_all_binders(self, tc):
         """
         Open all leading forall binders, instantiating each with a fresh fvar.
 
@@ -2285,7 +2285,7 @@ class W_Expr(_Item):
         while isinstance(expr, W_ForAll):
             fvar = expr.binder.fvar()
             fvars.append(fvar)
-            expr = expr.body.instantiate(None, fvar, 0)
+            expr = expr.body.instantiate(tc, fvar, 0)
         return fvars, expr
 
     def contains_const(self, name):
@@ -2558,7 +2558,7 @@ class W_FVar(W_Expr):
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_FVar)
         return self.id == other.id
 
@@ -2610,7 +2610,7 @@ class W_LitStr(W_Expr):
         )
         return eid
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_LitStr)
         return self.val == other.val
 
@@ -2683,7 +2683,7 @@ class W_Sort(W_Expr):
         # No class name here, as we wouldn't want to see <Sort Type>
         return "<%s>" % (self.str(),)
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_Sort)
         return self.level.eq(other.level)
 
@@ -2827,7 +2827,7 @@ class W_Const(W_Expr):
     def is_named(self, name):
         return self.name.syntactic_eq(name)
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_Const)
         if len(self.levels) != len(other.levels):
             return False
@@ -3061,7 +3061,7 @@ class W_LitNat(W_Expr):
     def long(i):
         return _mk_w_litnat(rbigint.fromlong(i))
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
 
@@ -3364,12 +3364,12 @@ class W_Proj(W_Expr):
     def _any_subexpr_invalid_index(self, inductive):
         return inductive._has_invalid_index_occurrence(self.struct_expr)
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_Proj)
         return (
             self.struct_name.syntactic_eq(other.struct_name)
             and self.field_index == other.field_index
-            and def_eq(self.struct_expr, other.struct_expr)
+            and tc.def_eq(self.struct_expr, other.struct_expr)
         )
 
     def _field_name(self, constants):
@@ -3751,26 +3751,21 @@ class W_FunBase(W_Expr):
             inductive, env,
         )
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         """
         Compare binders and bodies without regard for bound variable names.
 
         (This is alpha equivalence.)
         """
         assert isinstance(other, W_FunBase)
-        if not def_eq(self.binder.type, other.binder.type):
+        if not tc.def_eq(self.binder.type, other.binder.type):
             return False
 
         fvar = self.binder.fvar()
-        # No `tc` in scope here — the per-class `def_eq` only gets the
-        # bound `def_eq` callback. Reduction-time callers route the
-        # body through `tc.def_eq` → `_def_eq_core`, which has its own
-        # tc; the binder instantiation here is for the comparison
-        # framework only and goes through the persistent table.
-        body = self.body.instantiate(None, fvar)
-        other_body = other.body.instantiate(None, fvar)
+        body = self.body.instantiate(tc, fvar)
+        other_body = other.body.instantiate(tc, fvar)
 
-        return def_eq(body, other_body)
+        return tc.def_eq(body, other_body)
 
     def _whnf_under_closure(self, tc, closure_env):
         # Closure-of-lambda (or -ForAll) is itself a value in WHNF.
@@ -4197,31 +4192,27 @@ class W_App(W_Expr):
         args.reverse()
         return "<W_App fn={!r} args={!r}>".format(current, args)
 
-    def def_eq(self, other, def_eq):
+    def def_eq(self, other, tc):
         assert isinstance(other, W_App)
         self_fn = self.fn
         if isinstance(self_fn, W_Closure):
             self_fn_body = self_fn.body
             if isinstance(self_fn_body, W_Lambda):
                 new_env = [self.arg] + list(self_fn.env)
-                if def_eq(self_fn_body.body.closure(new_env), other):
+                if tc.def_eq(self_fn_body.body.closure(new_env), other):
                     return True
         elif isinstance(self_fn, W_FunBase):
-            # No `tc` in scope at this per-class method; the beta-reduction
-            # intermediates here are only used to feed back into the def_eq
-            # callback and aren't expected to survive past this comparison,
-            # so allocating against the persistent table is acceptable.
-            if def_eq(self_fn.body.instantiate(None, self.arg), other):
+            if tc.def_eq(self_fn.body.instantiate(tc, self.arg), other):
                 return True
         other_fn = other.fn
         if isinstance(other_fn, W_Closure):
             other_fn_body = other_fn.body
             if isinstance(other_fn_body, W_Lambda):
                 new_env = [other.arg] + list(other_fn.env)
-                if def_eq(self, other_fn_body.body.closure(new_env)):
+                if tc.def_eq(self, other_fn_body.body.closure(new_env)):
                     return True
         elif isinstance(other_fn, W_FunBase):
-            if def_eq(self, other_fn.body.instantiate(None, other.arg)):
+            if tc.def_eq(self, other_fn.body.instantiate(tc, other.arg)):
                 return True
         # Iterative spine walk to avoid stack overflow on deep W_App trees.
         # Collect args from both sides while both fns are W_App, then
@@ -4235,7 +4226,7 @@ class W_App(W_Expr):
             other_args.append(rhs.arg)
             lhs = lhs.fn
             rhs = rhs.fn
-        if not def_eq(lhs, rhs):
+        if not tc.def_eq(lhs, rhs):
             return False
         if len(self_args) != len(other_args):
             return False
@@ -4245,9 +4236,9 @@ class W_App(W_Expr):
                 i=i,
                 self_args=self_args,
                 other_args=other_args,
-                def_eq=def_eq,
+                tc=tc,
             )
-            if not def_eq(self_args[i], other_args[i]):
+            if not tc.def_eq(self_args[i], other_args[i]):
                 return False
             i -= 1
         return True
@@ -5013,14 +5004,10 @@ class W_Closure(W_Expr):
     def subst_levels(self, tc, substs):
         return self.force(tc).subst_levels(tc, substs)
 
-    def def_eq(self, other, def_eq):
-        # Re-dispatch through env.def_eq so the forced LHS gets WHNF'd
+    def def_eq(self, other, tc):
+        # Re-dispatch through tc.def_eq so the forced LHS gets WHNF'd
         # against ``other`` (which may itself still be a closure).
-        # `def_eq` here is the TC's bound method, so we don't have direct
-        # access to the TC reference; route force through the persistent
-        # intern (None) and let the surrounding TC pick up any W_Apps
-        # that need pinning to its arena via its own reduction calls.
-        return def_eq(self.force(None), other)
+        return tc.def_eq(self.force(tc), other)
 
     def tokens(self, constants, mark=None, span_holder=None):
         return self.force(None).tokens(constants, mark=mark, span_holder=span_holder)
@@ -5460,7 +5447,7 @@ class W_Inductive(W_DeclarationKind):
         assert num_params >= 0
         ind_name = self.all[0]
         error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
-        all_fvars, ctor_type = ctor.type.open_all_binders()
+        all_fvars, ctor_type = ctor.type.open_all_binders(env)
         if len(all_fvars) < num_params:
             return error
         param_fvars = all_fvars[:num_params]

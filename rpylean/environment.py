@@ -838,7 +838,7 @@ class TypeChecker(object):
             else:
                 names_eq = True
             if names_eq:
-                if expr1.def_eq(expr2, self.def_eq):
+                if expr1.def_eq(expr2, self):
                     return True
                 return self.def_eq_unit(expr1, expr2)
 
