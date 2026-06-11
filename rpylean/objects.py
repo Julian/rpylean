@@ -1071,9 +1071,11 @@ def _mk_app_in(tc, fn, arg):
     the run. Mirrors nanoda_lib's two-tier dag scheme
     (`util.rs:218-227`, `alloc_expr` at `util.rs:394`).
 
-    A parsed (fn, arg) pair is still shared via the persistent
-    fallback so reduction-time W_Apps that happen to coincide with
-    parser output stay folded together.
+    There is deliberately no fallback probe of the persistent
+    parse-time table: it serves a 5.7% hit rate against two extra
+    dict probes (content-hash) per arena miss — a reduction-built
+    node that coincides with a parsed one is simply allocated anew
+    and shared via the arena from then on.
 
     `tc` may also be a bare `Environment` (tests / REPL / cold paths
     outside a check); its `_intern_w_app` slot is `None` and we route
@@ -1099,15 +1101,9 @@ def _mk_app_in(tc, fn, arg):
     if bucket is not None:
         for existing in bucket:
             if existing.fn is fn and existing.arg is arg:
+                tc.tracer.arena_app_hit()
                 return existing
-    # The persistent table is content-keyed (parse-time dedup), so the
-    # fallback probe recomputes the content key.
-    h = _mix2(fn._hash, arg._hash)
-    persistent = _INTERN_W_APP.get(h, None)
-    if persistent is not None:
-        for existing in persistent:
-            if existing.fn is fn and existing.arg is arg:
-                return existing
+    tc.tracer.arena_app_miss()
     e = W_App(fn, arg)
     if bucket is None:
         arena[hi] = [e]
@@ -1184,7 +1180,9 @@ def _mk_w_lambda_in(tc, binder, body):
     if bucket is not None:
         for existing in bucket:
             if _binder_key_eq(existing, binder, body):
+                tc.tracer.arena_lambda_hit()
                 return existing
+    tc.tracer.arena_lambda_miss()
     e = W_Lambda(binder, body)
     if bucket is None:
         arena[hi] = [e]
@@ -1210,7 +1208,9 @@ def _mk_w_forall_in(tc, binder, body):
     if bucket is not None:
         for existing in bucket:
             if _binder_key_eq(existing, binder, body):
+                tc.tracer.arena_forall_hit()
                 return existing
+    tc.tracer.arena_forall_miss()
     e = W_ForAll(binder, body)
     if bucket is None:
         arena[hi] = [e]
@@ -1240,8 +1240,9 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
 
 def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
     """
-    Reduction-path companion to `_mk_w_proj`. Same two-tier scheme as
-    `_mk_app_in`: per-decl arena first, then persistent fallback.
+    Reduction-path companion to `_mk_w_proj`. Same per-decl arena
+    scheme as `_mk_app_in` (and likewise no persistent fallback
+    probe).
     """
     if tc is None:
         return _mk_w_proj(struct_name, field_index, struct_expr)
@@ -1262,15 +1263,9 @@ def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
             if (existing.struct_name is struct_name
                     and existing.field_index == field_index
                     and existing.struct_expr is struct_expr):
+                tc.tracer.arena_proj_hit()
                 return existing
-    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
-    persistent = _INTERN_W_PROJ.get(h, None)
-    if persistent is not None:
-        for existing in persistent:
-            if (existing.struct_name is struct_name
-                    and existing.field_index == field_index
-                    and existing.struct_expr is struct_expr):
-                return existing
+    tc.tracer.arena_proj_miss()
     e = W_Proj(struct_name, field_index, struct_expr)
     if bucket is None:
         arena[hi] = [e]

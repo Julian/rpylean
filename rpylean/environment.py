@@ -314,6 +314,41 @@ class Tracer(object):
     def pi_hit(self):
         """Called when def_eq resolves via proof irrelevance."""
 
+    def identity_hit(self):
+        """Called when def_eq resolves via `expr1 is expr2` at entry."""
+
+    def arena_app_hit(self):
+        """Called when `_mk_app_in` finds the pair in the per-decl arena."""
+
+    def arena_app_miss(self):
+        """Called when `_mk_app_in` allocates a fresh `W_App`."""
+
+    def arena_proj_hit(self):
+        """Called when `_mk_w_proj_in` finds the node in the per-decl arena."""
+
+    def arena_proj_miss(self):
+        """Called when `_mk_w_proj_in` allocates a fresh `W_Proj`."""
+
+    def arena_lambda_hit(self):
+        """Called when `_mk_w_lambda_in` finds the node in the per-decl
+        arena."""
+
+    def arena_lambda_miss(self):
+        """Called when `_mk_w_lambda_in` allocates a fresh `W_Lambda`."""
+
+    def arena_forall_hit(self):
+        """Called when `_mk_w_forall_in` finds the node in the per-decl
+        arena."""
+
+    def arena_forall_miss(self):
+        """Called when `_mk_w_forall_in` allocates a fresh `W_ForAll`."""
+
+    def failed_probe(self):
+        """Called when lazy delta consults the failed-pair cache."""
+
+    def failed_hit(self):
+        """Called when the failed-pair cache short-circuits a compare."""
+
     def print_summary(self, writer):
         """Called by the progress signal handler (and end-of-run with
         ``--stats``) to dump whatever rolling counters the tracer holds.
@@ -339,6 +374,12 @@ class StreamTracer(Tracer):
         'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
         'eqv_hit_count', 'syntactic_hit_count', 'pi_hit_count',
         'false_count',
+        'identity_hit_count',
+        'arena_app_hit_count', 'arena_app_miss_count',
+        'arena_proj_hit_count', 'arena_proj_miss_count',
+        'arena_lambda_hit_count', 'arena_lambda_miss_count',
+        'arena_forall_hit_count', 'arena_forall_miss_count',
+        'failed_probe_count', 'failed_hit_count',
     ]
 
     def __init__(self, writer):
@@ -357,6 +398,17 @@ class StreamTracer(Tracer):
         self.syntactic_hit_count = 0
         self.pi_hit_count = 0
         self.false_count = 0
+        self.identity_hit_count = 0
+        self.arena_app_hit_count = 0
+        self.arena_app_miss_count = 0
+        self.arena_proj_hit_count = 0
+        self.arena_proj_miss_count = 0
+        self.arena_lambda_hit_count = 0
+        self.arena_lambda_miss_count = 0
+        self.arena_forall_hit_count = 0
+        self.arena_forall_miss_count = 0
+        self.failed_probe_count = 0
+        self.failed_hit_count = 0
 
     def _flush_pending(self):
         if self._pending_newline:
@@ -438,6 +490,39 @@ class StreamTracer(Tracer):
     def pi_hit(self):
         self.pi_hit_count += 1
 
+    def identity_hit(self):
+        self.identity_hit_count += 1
+
+    def arena_app_hit(self):
+        self.arena_app_hit_count += 1
+
+    def arena_app_miss(self):
+        self.arena_app_miss_count += 1
+
+    def arena_proj_hit(self):
+        self.arena_proj_hit_count += 1
+
+    def arena_proj_miss(self):
+        self.arena_proj_miss_count += 1
+
+    def arena_lambda_hit(self):
+        self.arena_lambda_hit_count += 1
+
+    def arena_lambda_miss(self):
+        self.arena_lambda_miss_count += 1
+
+    def arena_forall_hit(self):
+        self.arena_forall_hit_count += 1
+
+    def arena_forall_miss(self):
+        self.arena_forall_miss_count += 1
+
+    def failed_probe(self):
+        self.failed_probe_count += 1
+
+    def failed_hit(self):
+        self.failed_hit_count += 1
+
     def print_summary(self, writer):
         """Write a human-readable summary of collected counts to ``writer``.
 
@@ -451,6 +536,28 @@ class StreamTracer(Tracer):
                            % self.syntactic_hit_count)
         writer.write_plain("def_eq proof-irrelevance hits: %d\n"
                            % self.pi_hit_count)
+        writer.write_plain("def_eq identity hits: %d\n"
+                           % self.identity_hit_count)
+        writer.write_plain("arena app hit/miss: %d/%d\n" % (
+            self.arena_app_hit_count,
+            self.arena_app_miss_count,
+        ))
+        writer.write_plain("arena proj hit/miss: %d/%d\n" % (
+            self.arena_proj_hit_count,
+            self.arena_proj_miss_count,
+        ))
+        writer.write_plain("arena lambda hit/miss: %d/%d\n" % (
+            self.arena_lambda_hit_count,
+            self.arena_lambda_miss_count,
+        ))
+        writer.write_plain("arena forall hit/miss: %d/%d\n" % (
+            self.arena_forall_hit_count,
+            self.arena_forall_miss_count,
+        ))
+        writer.write_plain("defeq-failed probe/hit: %d/%d\n" % (
+            self.failed_probe_count,
+            self.failed_hit_count,
+        ))
         writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
         writer.write_plain("whnf calls (cache hit): %d\n"
                            % self.whnf_cache_hit_count)
@@ -629,6 +736,7 @@ class TypeChecker(object):
         # produces is heavily shared), so WHNFing the same instance
         # twice just to discover it's equal to itself wastes work.
         if expr1 is expr2:
+            tracer.identity_hit()
             return tracer.result(True)
 
         # Already proven def-eq earlier in this decl: the union-find
@@ -781,8 +889,12 @@ class TypeChecker(object):
         """
         Whether this pair already failed a lazy-delta args comparison.
         """
+        self.tracer.failed_probe()
         bucket = self._defeq_failed.get(expr1, None)
-        return bucket is not None and expr2 in bucket
+        if bucket is not None and expr2 in bucket:
+            self.tracer.failed_hit()
+            return True
+        return False
 
     def _cache_failure(self, expr1, expr2):
         """
