@@ -64,12 +64,16 @@ def validate_export_metadata(stream):
     """
     Read and validate the metadata line of an export. Raises
     ``ExportVersionError`` on mismatch.
+
+    A metadata line carrying no version at all (e.g. the bare ``{}``
+    of hand-written arena fixtures) is accepted: only an explicitly
+    different version is grounds for rejecting the export.
     """
     line = stream.readline()
     if not line:
         raise ExportVersionError(None)
     version = _parse_metadata_version(line)
-    if version != EXPORT_VERSION:
+    if version != "" and version != EXPORT_VERSION:
         raise ExportVersionError(version)
 
 
@@ -999,6 +1003,8 @@ def _parse_metadata_version(line):
     cursor = LineCursor(line)
     cursor.expect('{')
     version = ""
+    if cursor.maybe('}'):
+        return version
     while True:
         key = cursor.read_key()
         if key == "meta":
@@ -1013,6 +1019,8 @@ def _parse_metadata_version(line):
 def _parse_meta_inner(cursor):
     cursor.expect('{')
     version = ""
+    if cursor.maybe('}'):
+        return version
     while True:
         key = cursor.read_key()
         if key == "format" or key == "exporter":
@@ -1027,6 +1035,8 @@ def _parse_meta_inner(cursor):
 def _parse_format_inner(cursor):
     cursor.expect('{')
     version = ""
+    if cursor.maybe('}'):
+        return version
     while True:
         key = cursor.read_key()
         if key == "version":
