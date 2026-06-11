@@ -5065,14 +5065,25 @@ def _whnf_iota_chain(env, expr):
 
         progress, reduced = parent.try_iota_reduce(env)
         if not progress:
-            # Iota didn't fire at this level. Leave `parent` un-iota'd
-            # and propagate it up; any frame above us has `parent` as
-            # part of its major-chain, so they can't iota either.
-            cur = parent
-            while chain:
-                higher, _, _ = chain.pop()
-                cur = higher
-            return cur
+            # Iota didn't fire at this level. Struct-eta and quot-lift
+            # can still unstick it — same fallback order as
+            # `_whnf_core` — e.g. a `Prod.rec` whose major is stuck on
+            # an fvar application reduces to the minor applied to
+            # projections, exposing a constructor for the frame above
+            # (`EStateM.Result.rec` over `EStateM.run` chains in
+            # `Std.Do.WP` lemmas).
+            reduced = parent.try_struct_eta_reduce(env)
+            if reduced is None:
+                reduced = parent.try_quot_lift_reduce(env)
+            if reduced is None:
+                # Leave `parent` un-reduced and propagate it up; any
+                # frame above us has `parent` as part of its
+                # major-chain, so they can't iota either.
+                cur = parent
+                while chain:
+                    higher, _, _ = chain.pop()
+                    cur = higher
+                return cur
         cur = reduced
 
 

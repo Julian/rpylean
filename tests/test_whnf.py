@@ -1164,6 +1164,162 @@ def test_struct_eta_reduction_on_stuck_major():
     assert syntactic_eq(rec_app.whnf(env), expected)
 
 
+def test_struct_eta_inside_outer_recursor_major():
+    """
+    Struct-eta must also fire when the stuck structure-recursor
+    application is itself the *major* of an outer recursor — the
+    `_whnf_iota_chain` walk-up path, not `_whnf_core`'s. Mirrors
+    `Std.Do.WP.modifyGet_EStateM`, where `EStateM.Result.rec` is stuck
+    on a `Prod.casesOn (f s)` major until `(f s)` eta-expands::
+
+        E.rec M ok_case err_case (Pair.rec M' (fun a b ↦ E.ok a) stuck)
+          ≡ ok_case stuck.fst
+    """
+    Pair = Name.simple("Pair")
+    Pair_mk = Pair.child("mk")
+    Pair_rec = Pair.child("rec")
+    u_name = Name.simple("u")
+    u_level = u_name.level()
+    one = u.succ()
+
+    fst_name = Name.simple("fst")
+    snd_name = Name.simple("snd")
+    mk_decl = Pair_mk.constructor(
+        type=forall(
+            fst_name.binder(type=NAT),
+            snd_name.binder(type=NAT),
+        )(Pair.const()),
+        num_params=0,
+        num_fields=2,
+    )
+    pair_decl = Pair.inductive(type=TYPE, constructors=[mk_decl])
+
+    motive = Name.simple("motive")
+    s_name = Name.simple("s")
+    pair_motive_type = forall(s_name.binder(type=Pair.const()))(
+        u_level.sort(),
+    )
+    mk_case_type = forall(
+        fst_name.binder(type=NAT),
+        snd_name.binder(type=NAT),
+    )(W_BVar(2).app(Pair_mk.const().app(W_BVar(1), W_BVar(0))))
+    pair_rec_type = forall(
+        motive.binder(type=pair_motive_type),
+        Name.simple("mk_case").binder(type=mk_case_type),
+        s_name.binder(type=Pair.const()),
+    )(W_BVar(2).app(W_BVar(0)))
+    mk_rule_val = fun(
+        motive.binder(type=pair_motive_type),
+        Name.simple("mk_case").binder(type=mk_case_type),
+        fst_name.binder(type=NAT),
+        snd_name.binder(type=NAT),
+    )(W_BVar(2).app(W_BVar(1), W_BVar(0)))
+    pair_rec_decl = Pair_rec.recursor(
+        type=pair_rec_type,
+        rules=[
+            W_RecRule(ctor_name=Pair_mk, num_fields=2, rhs=mk_rule_val),
+        ],
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=1,
+        levels=[u_name],
+    )
+
+    # E is a two-constructor inductive (Result-like), so struct-eta
+    # can never apply to `E.rec` itself: its major has to become a
+    # constructor for reduction to proceed.
+    E = Name.simple("E")
+    E_ok = E.child("ok")
+    E_err = E.child("err")
+    E_rec = E.child("rec")
+    n_name = Name.simple("n")
+    ok_decl = E_ok.constructor(
+        type=forall(n_name.binder(type=NAT))(E.const()),
+        num_params=0,
+        num_fields=1,
+    )
+    err_decl = E_err.constructor(
+        type=forall(n_name.binder(type=NAT))(E.const()),
+        num_params=0,
+        num_fields=1,
+        cidx=1,
+    )
+    e_decl = E.inductive(type=TYPE, constructors=[ok_decl, err_decl])
+
+    t_name = Name.simple("t")
+    e_motive_type = forall(t_name.binder(type=E.const()))(u_level.sort())
+    ok_case_type = forall(n_name.binder(type=NAT))(
+        W_BVar(1).app(E_ok.const().app(W_BVar(0))),
+    )
+    err_case_type = forall(n_name.binder(type=NAT))(
+        W_BVar(2).app(E_err.const().app(W_BVar(0))),
+    )
+    e_rec_type = forall(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        t_name.binder(type=E.const()),
+    )(W_BVar(3).app(W_BVar(0)))
+    ok_rule_val = fun(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        n_name.binder(type=NAT),
+    )(W_BVar(2).app(W_BVar(0)))
+    err_rule_val = fun(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        n_name.binder(type=NAT),
+    )(W_BVar(1).app(W_BVar(0)))
+    e_rec_decl = E_rec.recursor(
+        type=e_rec_type,
+        rules=[
+            W_RecRule(ctor_name=E_ok, num_fields=1, rhs=ok_rule_val),
+            W_RecRule(ctor_name=E_err, num_fields=1, rhs=err_rule_val),
+        ],
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=2,
+        levels=[u_name],
+    )
+
+    Nat_decl = Name.simple("Nat").inductive(type=TYPE)
+    stuck = Name.simple("stuck").axiom(type=Pair.const())
+    env = Environment.having([
+        pair_decl, mk_decl, pair_rec_decl,
+        e_decl, ok_decl, err_decl, e_rec_decl,
+        Nat_decl, stuck,
+    ])
+
+    # Pair.rec.{1} (fun _ => E) (fun fst snd => E.ok fst) stuck —
+    # stuck major, so only struct-eta can reduce it (to `E.ok
+    # stuck.fst`).
+    inner = (
+        Pair_rec.const(levels=[one])
+        .app(fun(Name.simple("_t").binder(type=Pair.const()))(E.const()))
+        .app(fun(
+            fst_name.binder(type=NAT),
+            snd_name.binder(type=NAT),
+        )(E_ok.const().app(W_BVar(1))))
+        .app(stuck.const())
+    )
+
+    # E.rec.{1} (fun _ => Nat) (fun n => n) (fun n => n) inner
+    outer = (
+        E_rec.const(levels=[one])
+        .app(fun(t_name.binder(type=E.const()))(NAT))
+        .app(fun(n_name.binder(type=NAT))(W_BVar(0)))
+        .app(fun(n_name.binder(type=NAT))(W_BVar(0)))
+        .app(inner)
+    )
+
+    expected = Pair.proj(0, stuck.const())
+    assert syntactic_eq(outer.whnf(env), expected)
+
+
 class TestTracer(object):
     """The tracer is invoked with each intermediate expression during WHNF."""
 
