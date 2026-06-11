@@ -79,6 +79,13 @@ COLOR = (
             "sampled with the wall-time check)",
         ),
         (
+            "flush-memory-per-decl",
+            "drop the per-decl caches mid-decl whenever the process' live "
+            "heap exceeds this size, trading recomputation for a bounded "
+            "footprint (suffixes: K/M/G, default bytes; sampled with the "
+            "wall-time check)",
+        ),
+        (
             "print",
             (
                 "print something for each declaration (valid values are "
@@ -132,6 +139,7 @@ def check(self, args, stdin, stdout, stderr):
     max_heartbeat = int(args.options["max-heartbeat"] or "0")
     max_wall_time = _parse_seconds(args.options["max-wall-time-per-decl"])
     max_memory = _parse_bytes(args.options["max-memory-per-decl"])
+    flush_memory = _parse_bytes(args.options["flush-memory-per-decl"])
     printer = Printer.from_str(args.options["print"], stdoutw)
     slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
 
@@ -179,6 +187,7 @@ def check(self, args, stdin, stdout, stderr):
             max_heartbeat,
             max_wall_time,
             max_memory,
+            flush_memory,
             trace,
             break_at,
             stats,
@@ -365,6 +374,7 @@ def _check_one_file(
     max_heartbeat,
     max_wall_time,
     max_memory,
+    flush_memory,
     trace,
     break_at,
     stats,
@@ -406,6 +416,8 @@ def _check_one_file(
                 builder.env.max_wall_time = max_wall_time
             if max_memory > 0:
                 builder.env.max_memory = max_memory
+            if flush_memory > 0:
+                builder.env.flush_memory = flush_memory
             if (
                 slow_secs >= 0.0
                 or slow_hb >= 0

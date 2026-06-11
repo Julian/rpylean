@@ -601,6 +601,7 @@ class TypeChecker(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
+        'flush_memory', '_flush_floor',
         '_whnf_tick',
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
@@ -616,7 +617,8 @@ class TypeChecker(object):
         'env', 'decl',
         'declarations',
         'tracer?', 'max_heartbeat?', 'count_heartbeats?',
-        'max_wall_time?', 'max_memory?', 'start_time', 'start_peak',
+        'max_wall_time?', 'max_memory?', 'flush_memory?',
+        'start_time', 'start_peak',
     ]
 
     # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
@@ -643,6 +645,8 @@ class TypeChecker(object):
         self.count_heartbeats = env.count_heartbeats
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
+        self.flush_memory = env.flush_memory
+        self._flush_floor = env.flush_memory
         self.start_time = clock()
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
@@ -681,7 +685,8 @@ class TypeChecker(object):
         """
         max_wall_time = self.max_wall_time
         max_memory = self.max_memory
-        if max_wall_time <= 0.0 and max_memory <= 0:
+        flush_memory = self.flush_memory
+        if max_wall_time <= 0.0 and max_memory <= 0 and flush_memory <= 0:
             return
         self._whnf_tick += 1
         if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
@@ -709,6 +714,43 @@ class TypeChecker(object):
                 raise MemoryExceeded(
                     self.decl, growth, max_memory,
                 )
+        if flush_memory > 0 and _live_memory() > self._flush_floor:
+            self.flush_decl_caches()
+
+    @dont_look_inside
+    def flush_decl_caches(self):
+        """
+        Drop every per-decl cache mid-decl and collect, then continue.
+
+        Long evaluations over wide state (the BVDecide `blastUdiv`
+        lemmas rebuild an O(width) circuit term per iteration) pin
+        O(steps × width) nodes through the arenas, the inline caches
+        and the eqv union-find, even though the truly reachable
+        working set is a fraction of that. The official kernel
+        survives these decls in constant memory because dead
+        intermediates are freed as reduction proceeds; flushing is
+        our equivalent — it trades re-deriving some equalities and
+        re-reducing some towers for a bounded live set.
+
+        Re-arms with hysteresis: the next flush fires only once live
+        memory exceeds twice what survived this one, so a working set
+        that genuinely exceeds the threshold doesn't trigger a flush
+        per sample tick (the `--max-memory-per-decl` cap, when set,
+        remains the abort backstop).
+        """
+        reset_decl_caches()
+        self._intern_w_app = {}
+        self._intern_w_proj = {}
+        self._intern_w_lambda = {}
+        self._intern_w_forall = {}
+        self._eqv_parent = {}
+        self._defeq_failed = {}
+        rgc.collect()
+        survived = _live_memory()
+        floor = survived * 2
+        if floor < self.flush_memory:
+            floor = self.flush_memory
+        self._flush_floor = floor
 
     # ---- public def_eq / infer entry points ----------------------------
 
@@ -1516,7 +1558,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time', 'max_memory',
+        'max_wall_time', 'max_memory', 'flush_memory',
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
     ]
@@ -1535,6 +1577,7 @@ class Environment(object):
         'count_heartbeats?',
         'max_wall_time?',
         'max_memory?',
+        'flush_memory?',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -1544,6 +1587,7 @@ class Environment(object):
         self.count_heartbeats = False
         self.max_wall_time = 0.0
         self.max_memory = 0
+        self.flush_memory = 0
         # `None` is the sentinel routing `_mk_app_in` / `_mk_w_proj_in`
         # back to the persistent intern. Same attribute name as on
         # `TypeChecker` so the duck-typed dispatch works without
