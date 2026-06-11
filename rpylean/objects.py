@@ -1036,6 +1036,7 @@ def _mk_binder_strict_implicit(name, type):
 # and of the body — see `_binder_key_hash` for the key shape and why
 # it leaves the `_fvar` sharing story unchanged.
 
+@elidable
 def _mk_app(fn, arg):
     """
     Allocate a `W_App(fn, arg)` against the persistent intern table.
@@ -1058,6 +1059,7 @@ def _mk_app(fn, arg):
     return e
 
 
+@elidable
 def _mk_app_in(tc, fn, arg):
     """
     Allocate a `W_App(fn, arg)` for a reduction-time call site,
@@ -1153,6 +1155,7 @@ def _binder_key_eq(existing, binder, body):
     )
 
 
+@elidable
 def _mk_w_lambda_in(tc, binder, body):
     """
     Allocate a `W_Lambda(binder, body)` for a reduction-time call
@@ -1191,6 +1194,7 @@ def _mk_w_lambda_in(tc, binder, body):
     return e
 
 
+@elidable
 def _mk_w_forall_in(tc, binder, body):
     """
     Reduction-path companion to `_mk_w_forall`. Same per-decl arena
@@ -1219,6 +1223,7 @@ def _mk_w_forall_in(tc, binder, body):
     return e
 
 
+@elidable
 def _mk_w_proj(struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
@@ -1238,6 +1243,7 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
     return e
 
 
+@elidable
 def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
     """
     Reduction-path companion to `_mk_w_proj`. Same per-decl arena
