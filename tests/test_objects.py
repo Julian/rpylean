@@ -159,6 +159,7 @@ class TestName(object):
             type=TYPE,
             levels=[],
             w_kind=W_Inductive(
+                name=Empty,
                 all=[Empty],
                 constructors=[],
                 recursors=[],

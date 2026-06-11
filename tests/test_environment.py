@@ -304,6 +304,36 @@ class TestTypeError(object):
         errors = type_check(env=env)
         assert isinstance(errors[0], W_InvalidConstructorResult)
 
+    def test_mutual_block_member_constructors_validate(self):
+        """Every member of a mutual block validates its own constructors.
+
+        The members share one ``all`` list, so validating against
+        ``all[0]`` instead of each member's own name rejects every
+        member but the first (the `Lean.Compiler.LCNF.Code` family in
+        the Mathlib export).
+        """
+        A = Name.simple("A")
+        B = Name.simple("B")
+        a_ctor = A.child("mk").constructor(type=A.const())
+        b_ctor = B.child("mk").constructor(type=B.const())
+        a_decl = A.inductive(type=TYPE, constructors=[a_ctor], all=[A, B])
+        b_decl = B.inductive(type=TYPE, constructors=[b_ctor], all=[A, B])
+        env = Environment.having([a_decl, a_ctor, b_decl, b_ctor])
+        assert type_check(env=env) == []
+
+    def test_mutual_block_member_still_rejects_wrong_head(self):
+        """A block member's constructor must still name *that* member."""
+        A = Name.simple("A")
+        B = Name.simple("B")
+        a_ctor = A.child("mk").constructor(type=A.const())
+        # B's constructor wrongly returns A.
+        b_ctor = B.child("mk").constructor(type=A.const())
+        a_decl = A.inductive(type=TYPE, constructors=[a_ctor], all=[A, B])
+        b_decl = B.inductive(type=TYPE, constructors=[b_ctor], all=[A, B])
+        env = Environment.having([a_decl, a_ctor, b_decl, b_ctor])
+        errors = type_check(env=env)
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
     def test_constructor_result_too_few_args(self):
         """Rejects a constructor whose result type applies too few arguments."""
         ind_name = Name.simple("Ind")

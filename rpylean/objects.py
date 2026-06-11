@@ -1576,6 +1576,7 @@ class Name(_Item):
         ``InductiveVal.all``.
         """
         inductive = W_Inductive(
+            name=self,
             all=[self] if all is None else all,
             constructors=[] if constructors is None else constructors,
             recursors=[] if recursors is None else recursors,
@@ -5518,20 +5519,21 @@ class W_Quotient(W_DeclarationKind):
 
 class W_Inductive(W_DeclarationKind):
     _attrs_ = [
-        'all', 'constructors', 'recursors',
+        'name', 'all', 'constructors', 'recursors',
         'num_nested', 'num_params', 'num_indices',
         'is_reflexive', 'is_recursive', 'ctor_names',
     ]
     # `constructors` is appended to by the parser when registering
     # mutual-inductive blocks; everything else is set-once at construction.
     _immutable_fields_ = [
-        'all', 'recursors',
+        'name', 'all', 'recursors',
         'num_nested', 'num_params', 'num_indices',
         'is_reflexive', 'is_recursive', 'ctor_names',
     ]
 
     def __init__(
         self,
+        name,
         all,
         constructors,
         recursors,
@@ -5542,6 +5544,11 @@ class W_Inductive(W_DeclarationKind):
         is_recursive,
         ctor_names=None,
     ):
+        #: This inductive's own name. NOT `all[0]`: in a mutual block
+        #: every member shares the same `all` list, so constructor
+        #: validation keyed on `all[0]` would reject every member but
+        #: the first.
+        self.name = name
         #: All inductives in this mutual block (just `[self]` for a
         #: non-mutual inductive). Matches Lean's `InductiveVal.all`.
         self.all = all
@@ -5645,7 +5652,7 @@ class W_Inductive(W_DeclarationKind):
         assert isinstance(ctor_kind, W_Constructor)
         num_params = ctor_kind.num_params
         assert num_params >= 0
-        ind_name = self.all[0]
+        ind_name = self.name
         error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
         all_fvars, ctor_type = ctor.type.open_all_binders(env)
         if len(all_fvars) < num_params:
@@ -5675,9 +5682,9 @@ class W_Inductive(W_DeclarationKind):
         for i in range(num_params):
             if not syntactic_eq(rev_args[i], param_fvars[i]):
                 return error
-        # Index args must not contain the inductive being defined.
+        # Index args must not contain any inductive of this block.
         for i in range(num_params, len(rev_args)):
-            if rev_args[i].contains_const(ind_name):
+            if self._contains_any_inductive(rev_args[i]):
                 return error
         # Check field types for invalid occurrences of the inductive.
         for i in range(len(remaining_fvars)):
@@ -5716,16 +5723,24 @@ class W_Inductive(W_DeclarationKind):
 
     def _has_invalid_index_occurrence(self, expr):
         """
-        Whether *expr* contains an application of this inductive whose
-        index arguments themselves contain this inductive.
+        Whether *expr* contains an application of an inductive in this
+        block whose index arguments themselves contain a block member.
+
+        Mutual blocks share their parameter telescope, so
+        ``self.num_params`` is the params/indices boundary for every
+        member's application.
         """
-        ind_name = self.all[0]
         head, rev_args = expr.unapp()
-        if head.is_named(ind_name):
+        head_in_block = False
+        for member in self.all:
+            if head.is_named(member):
+                head_in_block = True
+                break
+        if head_in_block:
             # Check index args (those after the params) for occurrences.
             rev_args.reverse()
             for i in range(self.num_params, len(rev_args)):
-                if rev_args[i].contains_const(ind_name):
+                if self._contains_any_inductive(rev_args[i]):
                     return True
             # Recurse into all args for nested invalid occurrences.
             for i in range(len(rev_args)):
@@ -5818,7 +5833,7 @@ class W_Constructor(W_DeclarationKind):
         # inductive's name in Lean (e.g., `List.cons` inside `List`),
         # so display just the leaf part. Fall back to the full name
         # if the invariant doesn't hold.
-        if constructor_name.parent.syntactic_eq(inductive.all[0]):
+        if constructor_name.parent.syntactic_eq(inductive.name):
             short = constructor_name._part_str()
         else:
             short = constructor_name.str()
