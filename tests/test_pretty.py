@@ -809,3 +809,38 @@ class TestBVar(object):
 
     def test_tokens_match_str(self):
         assert FORMAT_PLAIN(W_BVar(3).tokens({})) == "#3"
+
+
+class TestDiagnosticRenderBudget(object):
+    def test_giant_dag_diagnostic_is_truncated(self):
+        """Rendering an error over a huge shared DAG terminates.
+
+        `tokens()` un-shares the DAG, so without the render budget a
+        doubling tree of depth 50 would walk 2^50 nodes.
+        """
+        from rpylean.environment import Environment
+        from rpylean.objects import W_TypeError
+
+        axiom = a.axiom(type=NAT)
+        expr = axiom.const()
+        for _ in range(50):
+            expr = expr.app(expr)
+        env = Environment.having([axiom])
+        error = W_TypeError(
+            env, expr, expected_type=NAT, inferred_type=NAT,
+        )
+        assert "diagnostic truncated" in FORMAT_PLAIN(error.tokens())
+
+    def test_small_diagnostics_render_in_full(self):
+        from rpylean.environment import Environment
+        from rpylean.objects import W_TypeError
+
+        axiom = a.axiom(type=NAT)
+        expr = axiom.const().app(axiom.const())
+        env = Environment.having([axiom])
+        error = W_TypeError(
+            env, expr, expected_type=NAT, inferred_type=NAT,
+        )
+        rendered = FORMAT_PLAIN(error.tokens())
+        assert "a a" in rendered
+        assert "truncated" not in rendered

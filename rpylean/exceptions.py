@@ -209,11 +209,19 @@ class W_InvalidDeclaration(W_Error):
         return self.inner.diagnostic_in(self.declaration, self.declarations)
 
     def tokens(self):
-        return self.as_diagnostic().tokens + self.as_diagnostic().message
+        from rpylean.objects import _RENDER_BUDGET, _DIAGNOSTIC_RENDER_LIMIT
+        _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
+        result = self.as_diagnostic().tokens + self.as_diagnostic().message
+        _RENDER_BUDGET.remaining = -1
+        return result
 
     def write_to(self, writer):
         """Write this error as a diagnostic with declaration context."""
-        writer.writeline_diagnostic(self.as_diagnostic())
+        from rpylean.objects import _RENDER_BUDGET, _DIAGNOSTIC_RENDER_LIMIT
+        _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
+        d = self.as_diagnostic()
+        _RENDER_BUDGET.remaining = -1
+        writer.writeline_diagnostic(d)
 
 
 class InvalidProjection(W_Error):

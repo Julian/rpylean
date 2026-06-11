@@ -140,7 +140,9 @@ class W_CheckError(W_Error):
 
     def tokens(self):
         """Return a flat token list (without caret spans)."""
+        _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
         d = self.as_diagnostic()
+        _RENDER_BUDGET.remaining = -1
         return d.tokens + d.message
 
     def __str__(self):
@@ -148,7 +150,40 @@ class W_CheckError(W_Error):
 
     def write_to(self, writer):
         """Write this error as a diagnostic with caret underlines."""
-        writer.writeline_diagnostic(self.as_diagnostic())
+        _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
+        d = self.as_diagnostic()
+        _RENDER_BUDGET.remaining = -1
+        writer.writeline_diagnostic(d)
+
+
+class _RenderBudget(object):
+    """
+    A walk bound for diagnostic rendering.
+
+    `tokens()` un-shares the expression DAG: every occurrence of a
+    shared subterm is walked again, so rendering a failing
+    declaration whose value is a heavily-shared reduction product can
+    take effectively forever (a Mathlib `CategoryTheory.Quotient`
+    def_eq error spent an hour of GC-bound walking before being
+    killed) — and none of it ticks the wall-time guard. Diagnostic
+    entry points arm the budget; `_append_marked_tokens` spends one
+    unit per subexpression visit and cuts the walk off with an
+    ellipsis when it runs out. `remaining == -1` means unlimited (the
+    REPL / `dump` paths, where the caller asked for the full term).
+    """
+
+    _attrs_ = ['remaining']
+
+    def __init__(self):
+        self.remaining = -1
+
+
+_RENDER_BUDGET = _RenderBudget()
+
+#: Subexpression visits allowed per rendered diagnostic — generous
+#: enough for the megabyte-scale statements BVDecide lemmas print,
+#: while bounding the un-shared walk.
+_DIAGNOSTIC_RENDER_LIMIT = 200000
 
 
 def _append_marked_tokens(result, span_holder, expr, constants, mark):
@@ -166,6 +201,14 @@ def _append_marked_tokens(result, span_holder, expr, constants, mark):
     ``expr`` is any object with a ``tokens(constants, mark, span_holder)``
     method -- typically a ``W_Expr`` or ``Binder``.
     """
+    budget = _RENDER_BUDGET
+    if budget.remaining == 0:
+        return
+    if budget.remaining > 0:
+        budget.remaining -= 1
+        if budget.remaining == 0:
+            result.append(MESSAGE.emit(" …⟨diagnostic truncated⟩"))
+            return
     if mark is not None and mark is expr:
         start = len(result)
         result += expr.tokens(constants)
