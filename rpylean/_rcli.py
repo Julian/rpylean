@@ -25,7 +25,7 @@ USAGE
 OPTIONS
 
   --help: Show this help message
-  --jit OPTS: Configure the JIT (`off`, `default`, `help`, or `name=value,...`)
+  --jit OPTS: Configure the JIT, which is off unless this option is passed (`default` to enable, `help`, or `name=value,...`)
   --version: Show version information
 
 COMMANDS
@@ -64,8 +64,14 @@ def _extract_jit(argv):
     JIT params have to be set before any JIT-driven code runs, so we
     pull these out at the top level rather than threading them through
     per-subcommand options.
+
+    Without an explicit `--jit`, the JIT is *disabled*: the workload
+    is megamorphic tree-walking whose traces don't beat the static
+    code, while the merge-point bookkeeping alone costs ~15% wall
+    time, so paying it has to be opted into (`--jit default`).
     """
     result = [argv[0]]
+    seen = False
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -73,13 +79,17 @@ def _extract_jit(argv):
             if i + 1 >= len(argv):
                 raise UsageError("Option --jit requires an argument")
             _apply_jit(argv[i + 1])
+            seen = True
             i += 2
         elif a.startswith("--jit="):
             _apply_jit(a[len("--jit="):])
+            seen = True
             i += 1
         else:
             result.append(a)
             i += 1
+    if not seen:
+        _apply_jit("off")
     return result
 
 
