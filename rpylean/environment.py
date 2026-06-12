@@ -695,7 +695,15 @@ class TypeChecker(object):
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
         self.flush_memory = env.flush_memory
-        self._flush_floor = env.flush_memory
+        # The flush budget is *growth* above this decl's starting live
+        # heap, not an absolute size: the parsed environment alone can
+        # exceed any reasonable absolute threshold (Mathlib's is
+        # ~8.6GB), and an absolute floor re-armed per decl fires a
+        # full collection on virtually every declaration.
+        if env.flush_memory > 0:
+            self._flush_floor = _live_memory() + env.flush_memory
+        else:
+            self._flush_floor = 0
         self.start_time = clock()
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
@@ -781,11 +789,12 @@ class TypeChecker(object):
         our equivalent — it trades re-deriving some equalities and
         re-reducing some towers for a bounded live set.
 
-        Re-arms with hysteresis: the next flush fires only once live
-        memory exceeds twice what survived this one, so a working set
-        that genuinely exceeds the threshold doesn't trigger a flush
-        per sample tick (the `--max-memory-per-decl` cap, when set,
-        remains the abort backstop).
+        Re-arms at the surviving live heap plus another full budget,
+        so a working set the flush cannot shrink doesn't trigger a
+        flush per sample tick — at least `flush_memory` bytes of new
+        growth separate consecutive flushes (the
+        `--max-memory-per-decl` cap, when set, remains the abort
+        backstop).
         """
         reset_decl_caches()
         self._intern_w_app = {}
@@ -796,10 +805,7 @@ class TypeChecker(object):
         self._defeq_failed = {}
         rgc.collect()
         survived = _live_memory()
-        floor = survived * 2
-        if floor < self.flush_memory:
-            floor = self.flush_memory
-        self._flush_floor = floor
+        self._flush_floor = survived + self.flush_memory
 
     # ---- public def_eq / infer entry points ----------------------------
 

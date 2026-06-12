@@ -79,10 +79,10 @@ CHECK_OPTIONS = [
     ),
     (
         "flush-memory-per-decl",
-        "drop the per-decl caches mid-decl whenever the process' live "
-        "heap exceeds this size, trading recomputation for a bounded "
-        "footprint (suffixes: K/M/G, default bytes; sampled with the "
-        "wall-time check)",
+        "drop the per-decl caches mid-decl whenever the live heap "
+        "grows past the declaration's starting point by this much, "
+        "trading recomputation for a bounded footprint (suffixes: "
+        "K/M/G, default bytes; sampled with the wall-time check)",
     ),
     (
         "print",
