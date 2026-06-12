@@ -5056,6 +5056,19 @@ def _whnf_iota_chain(env, expr):
                 next_ = cur._whnf_core_no_iota(env)
                 if next_ is None:
                     next_ = _try_reduce_nat(cur, env)
+                if next_ is None:
+                    # Quot.lift is not a recursor, so a stuck
+                    # `Quot.lift f h (Quot.mk r a)` never becomes a
+                    # chain frame — without firing it here the whole
+                    # major chain above it dead-ends (Finset/Multiset
+                    # computations inside recursor majors reduce
+                    # through `Quot` constantly, e.g. every
+                    # `Polynomial.natDegree (0 : Polynomial R) ≡ 0`
+                    # obligation in Mathlib). Struct-eta stays out:
+                    # struct recursors do become frames, and the
+                    # walk-up handles them once their major is
+                    # exhausted.
+                    next_ = cur.try_quot_lift_reduce(env)
             else:
                 next_ = cur._whnf_core(env)
             if next_ is None:

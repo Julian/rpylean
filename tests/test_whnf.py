@@ -1463,3 +1463,110 @@ class TestTracer(object):
             whnf b
             """,
         )
+
+
+def test_quot_lift_inside_recursor_major():
+    """
+    A `Quot.lift` redex must reduce when it sits in a recursor's major
+    position. `Quot.lift` is not a recursor, so it never becomes a
+    frame in `_whnf_iota_chain`'s descent — the chain's inner loop has
+    to fire it directly, or the whole major chain dead-ends (the shape
+    of every `Polynomial.natDegree (0 : Polynomial R) ≡ 0` obligation
+    in Mathlib, which reduces through `Multiset`'s `Quot`).
+
+        E.rec M ok_case err_case (Quot.lift (fun n ↦ E.ok n) h (Quot.mk r a))
+          ≡ ok_case a
+    """
+    E = Name.simple("E")
+    E_ok = E.child("ok")
+    E_err = E.child("err")
+    E_rec = E.child("rec")
+    u_name = Name.simple("u")
+    u_level = u_name.level()
+    one = u.succ()
+    n_name = Name.simple("n")
+    t_name = Name.simple("t")
+    motive = Name.simple("motive")
+
+    ok_decl = E_ok.constructor(
+        type=forall(n_name.binder(type=NAT))(E.const()),
+        num_params=0,
+        num_fields=1,
+    )
+    err_decl = E_err.constructor(
+        type=forall(n_name.binder(type=NAT))(E.const()),
+        num_params=0,
+        num_fields=1,
+        cidx=1,
+    )
+    e_decl = E.inductive(type=TYPE, constructors=[ok_decl, err_decl])
+
+    e_motive_type = forall(t_name.binder(type=E.const()))(u_level.sort())
+    ok_case_type = forall(n_name.binder(type=NAT))(
+        W_BVar(1).app(E_ok.const().app(W_BVar(0))),
+    )
+    err_case_type = forall(n_name.binder(type=NAT))(
+        W_BVar(2).app(E_err.const().app(W_BVar(0))),
+    )
+    e_rec_type = forall(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        t_name.binder(type=E.const()),
+    )(W_BVar(3).app(W_BVar(0)))
+    ok_rule_val = fun(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        n_name.binder(type=NAT),
+    )(W_BVar(2).app(W_BVar(0)))
+    err_rule_val = fun(
+        motive.binder(type=e_motive_type),
+        Name.simple("ok_case").binder(type=ok_case_type),
+        Name.simple("err_case").binder(type=err_case_type),
+        n_name.binder(type=NAT),
+    )(W_BVar(1).app(W_BVar(0)))
+    e_rec_decl = E_rec.recursor(
+        type=e_rec_type,
+        rules=[
+            W_RecRule(ctor_name=E_ok, num_fields=1, rhs=ok_rule_val),
+            W_RecRule(ctor_name=E_err, num_fields=1, rhs=err_rule_val),
+        ],
+        num_motives=1,
+        num_params=0,
+        num_indices=0,
+        num_minors=2,
+        levels=[u_name],
+    )
+
+    a_decl = a.axiom(type=NAT)
+    r_decl = Name.simple("r").axiom(type=TYPE)
+    h_decl = Name.simple("h").axiom(type=TYPE)
+    env = Environment.having([
+        Name.simple("Nat").inductive(type=TYPE),
+        e_decl, ok_decl, err_decl, e_rec_decl,
+        a_decl, r_decl, h_decl,
+        Quot.child("mk").axiom(type=TYPE, levels=[u_name]),
+        Quot.child("lift").axiom(type=TYPE, levels=[u_name, Name.simple("v")]),
+    ])
+
+    # Quot.lift {Nat} {r} {E} (fun n ↦ E.ok n) h (Quot.mk {Nat} r a)
+    mk_app = Quot.child("mk").const(levels=[one]).app(
+        NAT, r_decl.const(), a_decl.const(),
+    )
+    lift_app = Quot.child("lift").const(levels=[one, one]).app(
+        NAT, r_decl.const(), E.const(),
+        fun(n_name.binder(type=NAT))(E_ok.const().app(W_BVar(0))),
+        h_decl.const(), mk_app,
+    )
+
+    # E.rec.{1} (fun _ ↦ Nat) (fun n ↦ n) (fun n ↦ n) lift_app
+    outer = (
+        E_rec.const(levels=[one])
+        .app(fun(t_name.binder(type=E.const()))(NAT))
+        .app(fun(n_name.binder(type=NAT))(W_BVar(0)))
+        .app(fun(n_name.binder(type=NAT))(W_BVar(0)))
+        .app(lift_app)
+    )
+
+    assert syntactic_eq(outer.whnf(env), a_decl.const())
