@@ -548,3 +548,33 @@ class TestParseBytes(object):
             assert "Invalid threshold" in err.message
         else:
             assert False, "expected UsageError"
+
+
+class TestFFICollector(object):
+    def test_already_registered_decl_is_checked_not_reregistered(self):
+        """
+        The walk reaching a constant the resolver already demand-loaded
+        must not raise `AlreadyDeclared`, and must check the registered
+        instance — the one other declarations resolved against.
+        """
+        from rpylean.cli import _FFICollector
+        from rpylean.environment import DeclarationHook, EnvironmentBuilder
+
+        class Record(DeclarationHook):
+            seen = ()
+
+            def on_declaration(self, decl):
+                self.seen += (decl,)
+                return False
+
+        A = Name.simple("A")
+        builder = EnvironmentBuilder()
+        registered = A.axiom(type=TYPE)
+        builder.register_declaration(registered)
+
+        hook = Record()
+        aborted = _FFICollector(builder, hook)._handle(A.axiom(type=TYPE))
+
+        assert not aborted
+        assert hook.seen == (registered,)
+        assert builder.env.declarations[A] is registered

@@ -1397,3 +1397,61 @@ class TestDuplicateLevels(object):
         assert str(exc_info.value) == (
             "Invalid declaration ax.{u, u}: duplicate level parameter u"
         )
+
+
+class TestResolver(object):
+    """
+    Demand-loading of declarations a `get_decl` lookup missed, via an
+    installed `Resolver` — the mechanism `ffi check` uses to survive
+    `each_constant`'s hash-ordered walk handing it declarations before
+    their dependencies.
+    """
+
+    def test_missing_decl_is_demand_loaded(self):
+        from rpylean.environment import EnvironmentBuilder
+        from rpylean.objects import Resolver, set_resolver
+
+        A = Name.simple("A")
+        builder = EnvironmentBuilder()
+
+        class DemandLoad(Resolver):
+            requested = ()
+
+            def resolve(self, name):
+                self.requested += (name,)
+                builder.register_declaration(A.axiom(type=TYPE))
+
+        resolver = DemandLoad()
+        set_resolver(resolver)
+        try:
+            error = builder.env.check_decl(
+                Name.simple("b").axiom(type=A.const()),
+            )
+        finally:
+            set_resolver(None)
+
+        assert error is None
+        assert resolver.requested == (A,)
+        assert A in builder.env.declarations
+
+    def test_resolver_which_cannot_provide_the_decl(self):
+        from rpylean.objects import Resolver, set_resolver
+
+        class Empty(Resolver):
+            def resolve(self, name):
+                pass
+
+        set_resolver(Empty())
+        try:
+            with pytest.raises(KeyError):
+                Environment.EMPTY.check_decl(
+                    Name.simple("b").axiom(type=Name.simple("A").const()),
+                )
+        finally:
+            set_resolver(None)
+
+    def test_no_resolver(self):
+        with pytest.raises(KeyError):
+            Environment.EMPTY.check_decl(
+                Name.simple("b").axiom(type=Name.simple("A").const()),
+            )

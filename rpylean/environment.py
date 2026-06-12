@@ -56,6 +56,7 @@ from rpylean.objects import (
     _nat_succ_pred,
     _try_reduce_nat,
     fun,
+    find_decl,
     get_decl,
     name_dict,
     reset_decl_caches,
@@ -349,6 +350,22 @@ class Tracer(object):
     def failed_hit(self):
         """Called when the failed-pair cache short-circuits a compare."""
 
+    def klike_fired(self):
+        """Called when K-like reduction replaces a stuck major."""
+
+    def klike_bail_head(self):
+        """Called when K-like bails: major's type head is not a const."""
+
+    def klike_bail_mutual(self):
+        """Called when K-like bails: recursor belongs to a mutual block."""
+
+    def klike_bail_ctors(self):
+        """Called when K-like bails: inductive is not single-ctor."""
+
+    def klike_bail_defeq(self):
+        """Called when K-like bails: ctor type is not def-eq to the
+        major's type."""
+
     def print_summary(self, writer):
         """Called by the progress signal handler (and end-of-run with
         ``--stats``) to dump whatever rolling counters the tracer holds.
@@ -380,6 +397,9 @@ class StreamTracer(Tracer):
         'arena_lambda_hit_count', 'arena_lambda_miss_count',
         'arena_forall_hit_count', 'arena_forall_miss_count',
         'failed_probe_count', 'failed_hit_count',
+        'klike_fired_count', 'klike_bail_head_count',
+        'klike_bail_mutual_count', 'klike_bail_ctors_count',
+        'klike_bail_defeq_count',
     ]
 
     def __init__(self, writer):
@@ -409,6 +429,11 @@ class StreamTracer(Tracer):
         self.arena_forall_miss_count = 0
         self.failed_probe_count = 0
         self.failed_hit_count = 0
+        self.klike_fired_count = 0
+        self.klike_bail_head_count = 0
+        self.klike_bail_mutual_count = 0
+        self.klike_bail_ctors_count = 0
+        self.klike_bail_defeq_count = 0
 
     def _flush_pending(self):
         if self._pending_newline:
@@ -523,6 +548,21 @@ class StreamTracer(Tracer):
     def failed_hit(self):
         self.failed_hit_count += 1
 
+    def klike_fired(self):
+        self.klike_fired_count += 1
+
+    def klike_bail_head(self):
+        self.klike_bail_head_count += 1
+
+    def klike_bail_mutual(self):
+        self.klike_bail_mutual_count += 1
+
+    def klike_bail_ctors(self):
+        self.klike_bail_ctors_count += 1
+
+    def klike_bail_defeq(self):
+        self.klike_bail_defeq_count += 1
+
     def print_summary(self, writer):
         """Write a human-readable summary of collected counts to ``writer``.
 
@@ -558,6 +598,15 @@ class StreamTracer(Tracer):
             self.failed_probe_count,
             self.failed_hit_count,
         ))
+        writer.write_plain(
+            "k-like fired/bail head/mutual/ctors/defeq: %d/%d/%d/%d/%d\n" % (
+                self.klike_fired_count,
+                self.klike_bail_head_count,
+                self.klike_bail_mutual_count,
+                self.klike_bail_ctors_count,
+                self.klike_bail_defeq_count,
+            ),
+        )
         writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
         writer.write_plain("whnf calls (cache hit): %d\n"
                            % self.whnf_cache_hit_count)
@@ -1346,7 +1395,7 @@ class TypeChecker(object):
         """
         if not isinstance(head, W_Const):
             return None
-        decl = self.env.declarations.get(head.name, None)
+        decl = find_decl(self.env.declarations, head.name)
         if decl is None:
             return None
         kind = decl.w_kind
@@ -1375,7 +1424,7 @@ class TypeChecker(object):
             return False
         if ind.num_indices != 0:
             return False
-        first_ctor_kind = ind.constructors[0].w_kind
+        first_ctor_kind = ind.constructor_decls(self.declarations)[0].w_kind
         assert isinstance(first_ctor_kind, W_Constructor)
         if first_ctor_kind.num_fields != 0:
             return False

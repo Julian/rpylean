@@ -34,7 +34,9 @@ from rpylean.environment import (
     _rawmalloced_memory,
     from_export,
 )
-from rpylean.objects import Name, intern_stats, name_dict
+from rpylean.objects import (
+    Name, Resolver, intern_stats, name_dict, set_resolver,
+)
 
 
 cli = CLI(
@@ -46,83 +48,87 @@ COLOR = (
     "colorize output (yes|no|auto, default: auto)",
 )
 
+#: The options shared by `check` and `ffi check`, parsed by `_CheckRun`.
+CHECK_OPTIONS = [
+    (
+        "max-fail",
+        "the maximum number of type errors to report before giving up",
+    ),
+    (
+        "filter",
+        "only check the given declaration(s), separated by commas",
+    ),
+    (
+        "filter-match",
+        "only check declarations whose name contains this substring",
+    ),
+    (
+        "max-heartbeat",
+        "maximum number of def_eq calls per declaration before giving up",
+    ),
+    (
+        "max-wall-time-per-decl",
+        "maximum wall-clock seconds per declaration before giving up "
+        "(suffixes: s/ms/m, default seconds; sampled every 1024 def_eq calls)",
+    ),
+    (
+        "max-memory-per-decl",
+        "give up on the declaration being checked when the process' "
+        "live heap exceeds this size (suffixes: K/M/G, default bytes; "
+        "sampled with the wall-time check)",
+    ),
+    (
+        "flush-memory-per-decl",
+        "drop the per-decl caches mid-decl whenever the process' live "
+        "heap exceeds this size, trading recomputation for a bounded "
+        "footprint (suffixes: K/M/G, default bytes; sampled with the "
+        "wall-time check)",
+    ),
+    (
+        "print",
+        (
+            "print something for each declaration (valid values are "
+            "name|dots|timing|jsonl|decls|declarations|all)"
+        ),
+    ),
+    (
+        "slower-than",
+        (
+            "print each declaration that exceeded this threshold "
+            "to check (bare numbers are heartbeats; suffixes: "
+            "s/ms/m for time, h for heartbeats)"
+        ),
+    ),
+    (
+        "break-at",
+        "drop into pdb before checking each declaration whose name "
+        "contains this substring; requires running rpylean "
+        "untranslated (`pypy -m rpylean check ...`)",
+    ),
+    COLOR,
+]
+CHECK_FLAGS = [
+    (
+        "trace",
+        "enable tracing some def eq and reduction steps",
+        "",
+        "yes",  # we can't use StreamTracer here, thanks static typing
+    ),
+    (
+        "stats",
+        "collect reduction counts (def_eq, whnf, iota, beta, delta, "
+        "native nat) and print a summary after the check",
+        "",
+        "yes",
+    ),
+]
+
 
 @cli.subcommand(
     ["*EXPORT_FILES"],
     help="Type check an exported Lean environment.",
-    options=[
-        (
-            "max-fail",
-            "the maximum number of type errors to report before giving up",
-        ),
-        (
-            "filter",
-            "only check the given declaration(s), separated by commas",
-        ),
-        (
-            "filter-match",
-            "only check declarations whose name contains this substring",
-        ),
-        (
-            "max-heartbeat",
-            "maximum number of def_eq calls per declaration before giving up",
-        ),
-        (
-            "max-wall-time-per-decl",
-            "maximum wall-clock seconds per declaration before giving up "
-            "(suffixes: s/ms/m, default seconds; sampled every 1024 def_eq calls)",
-        ),
-        (
-            "max-memory-per-decl",
-            "give up on the declaration being checked when the process' "
-            "live heap exceeds this size (suffixes: K/M/G, default bytes; "
-            "sampled with the wall-time check)",
-        ),
-        (
-            "flush-memory-per-decl",
-            "drop the per-decl caches mid-decl whenever the process' live "
-            "heap exceeds this size, trading recomputation for a bounded "
-            "footprint (suffixes: K/M/G, default bytes; sampled with the "
-            "wall-time check)",
-        ),
-        (
-            "print",
-            (
-                "print something for each declaration (valid values are "
-                "name|dots|timing|jsonl|decls|declarations|all)"
-            ),
-        ),
-        (
-            "slower-than",
-            (
-                "print each declaration that exceeded this threshold "
-                "to check (bare numbers are heartbeats; suffixes: "
-                "s/ms/m for time, h for heartbeats)"
-            ),
-        ),
-        (
-            "break-at",
-            "drop into pdb before checking each declaration whose name "
-            "contains this substring; requires running rpylean "
-            "untranslated (`pypy -m rpylean check ...`)",
-        ),
-        COLOR,
-    ],
-    flags=[
-        (
-            "trace",
-            "enable tracing some def eq and reduction steps",
-            "",
-            "yes",  # we can't use StreamTracer here, thanks static typing
-        ),
-        (
-            "stats",
-            "collect reduction counts (def_eq, whnf, iota, beta, delta, "
-            "native nat) and print a summary after the check",
-            "",
-            "yes",
-        ),
-    ],
+    options=CHECK_OPTIONS,
+    flags=CHECK_FLAGS,
 )
 def check(self, args, stdin, stdout, stderr):
     stdoutw = writer_from_arg(args.options["color"], stdout)
@@ -133,66 +139,20 @@ def check(self, args, stdin, stdout, stderr):
     # — one flag-test per declaration, zero work on the no-signal path.
     _progress.install()
 
+    run = _CheckRun(args, stdoutw, stderrw)
     failures = 0
-
-    max_fail = int(args.options["max-fail"] or "0")
-    max_heartbeat = int(args.options["max-heartbeat"] or "0")
-    max_wall_time = _parse_seconds(args.options["max-wall-time-per-decl"])
-    max_memory = _parse_bytes(args.options["max-memory-per-decl"])
-    flush_memory = _parse_bytes(args.options["flush-memory-per-decl"])
-    printer = Printer.from_str(args.options["print"], stdoutw)
-    slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
-
-    filter_match = args.options["filter-match"]
-    filter_names = None
-    if filter_match is None and args.options["filter"] is not None:
-        filter_names = name_dict()
-        for each in args.options["filter"].split(","):
-            filter_names[Name.from_str(each)] = True
-
-    break_at = args.options["break-at"]
-    if break_at is not None and we_are_translated():
-        raise UsageError(
-            "--break-at requires running rpylean untranslated "
-            "(`pypy -m rpylean check ...`); pdb is unavailable in the "
-            "translated binary."
-        )
-
-    trace = args.options["trace"]
-    stats = args.options["stats"]
-
     for path in args.varargs:
         start = time()
-        if max_fail > 0:
+        if run.max_fail > 0:
             # `max(1, ...)` preserves a quirk of the original: once we've hit
             # max_fail, subsequent files still parse and emit a single error
             # each before aborting.
-            abort_at = max_fail - failures
+            abort_at = run.max_fail - failures
             if abort_at < 1:
                 abort_at = 1
         else:
             abort_at = 0
-        new_failures = _check_one_file(
-            path,
-            stdin,
-            stderr,
-            stdoutw,
-            stderrw,
-            printer,
-            slow_secs,
-            slow_hb,
-            filter_match,
-            filter_names,
-            abort_at,
-            max_heartbeat,
-            max_wall_time,
-            max_memory,
-            flush_memory,
-            trace,
-            break_at,
-            stats,
-        )
-        failures += new_failures
+        failures += _check_one_file(path, stdin, stderr, run, abort_at)
         elapsed = time() - start
         stderr.write("checked in %fs\n" % (elapsed,))
     return 1 if failures else 0
@@ -359,87 +319,109 @@ class _StreamingChecker(DeclarationHook):
             pdb.set_trace()
 
 
-def _check_one_file(
-    path,
-    stdin,
-    stderr,
-    stdoutw,
-    stderrw,
-    printer,
-    slow_secs,
-    slow_hb,
-    filter_match,
-    filter_names,
-    abort_at,
-    max_heartbeat,
-    max_wall_time,
-    max_memory,
-    flush_memory,
-    trace,
-    break_at,
-    stats,
-):
+class _CheckRun(object):
     """
-    Stream-check a single export file, returning the number of new failures.
+    The option set shared by `check` and `ffi check`, parsed once, plus
+    the builder/checker wiring derived from it.
 
-    ``abort_at`` is the failure count at which to stop (0 means unlimited).
+    `check` calls `start` once per export file (each file is its own
+    environment); `ffi check` calls it once per invocation.
     """
-    file = _open_export(path, stdin)
-    builder = EnvironmentBuilder()
-    checker = _StreamingChecker(
-        env=builder.env,
-        stdoutw=stdoutw,
-        stderrw=stderrw,
-        printer=printer,
-        slow_secs=slow_secs,
-        slow_hb=slow_hb,
-        filter_match=filter_match,
-        filter_names=filter_names,
-        abort_at=abort_at,
-        break_at=break_at,
-    )
-    # When either --trace or --stats is set, install a `StreamTracer`.
-    # The writer is None for --stats-only (no stream output, just count);
-    # --trace points the writer at stderr. A single class covers both
-    # because counting is cheap and harmless to keep on whenever the
-    # stream tracer is active.
-    tracer = None
-    if trace or stats:
-        tracer = StreamTracer(stderrw if trace else None)
-        builder.env.tracer = tracer
-    bytes_at_start = _bytes_allocated()
-    try:
-        try:
-            if max_heartbeat > 0:
-                builder.env.max_heartbeat = max_heartbeat
-            if max_wall_time > 0.0:
-                builder.env.max_wall_time = max_wall_time
-            if max_memory > 0:
-                builder.env.max_memory = max_memory
-            if flush_memory > 0:
-                builder.env.flush_memory = flush_memory
-            if (
-                slow_secs >= 0.0
-                or slow_hb >= 0
-                or (printer is not None and printer.wants_heartbeats)
-            ):
-                builder.env.count_heartbeats = True
-            parser.validate_export_metadata(file)
-            builder.consume(file, hook=checker)
-        except ExportError as err:
-            stderrw.writeline(err.tokens())
-            stderrw.write_plain("\n")
-            return checker.failures + 1
-        except UsageError:
-            raise
-        except:
-            stderr.write("Unexpected error during type checking\n")
-            raise
-    finally:
-        if path != "-":
-            file.close()
-        if stats and tracer is not None:
-            tracer.print_summary(stderrw)
+
+    _attrs_ = [
+        'stdoutw', 'stderrw',
+        'max_fail', 'max_heartbeat', 'max_wall_time', 'max_memory',
+        'flush_memory', 'printer', 'slow_secs', 'slow_hb',
+        'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
+    ]
+
+    def __init__(self, args, stdoutw, stderrw):
+        self.stdoutw = stdoutw
+        self.stderrw = stderrw
+
+        self.max_fail = int(args.options["max-fail"] or "0")
+        self.max_heartbeat = int(args.options["max-heartbeat"] or "0")
+        self.max_wall_time = _parse_seconds(
+            args.options["max-wall-time-per-decl"],
+        )
+        self.max_memory = _parse_bytes(args.options["max-memory-per-decl"])
+        self.flush_memory = _parse_bytes(
+            args.options["flush-memory-per-decl"],
+        )
+        self.printer = Printer.from_str(args.options["print"], stdoutw)
+        self.slow_secs, self.slow_hb = _parse_threshold(
+            args.options["slower-than"],
+        )
+
+        self.filter_match = args.options["filter-match"]
+        filter_names = None
+        if self.filter_match is None and args.options["filter"] is not None:
+            filter_names = name_dict()
+            for each in args.options["filter"].split(","):
+                filter_names[Name.from_str(each)] = True
+        self.filter_names = filter_names
+
+        self.break_at = args.options["break-at"]
+        if self.break_at is not None and we_are_translated():
+            raise UsageError(
+                "--break-at requires running rpylean untranslated "
+                "(`pypy -m rpylean check ...`); pdb is unavailable in the "
+                "translated binary."
+            )
+
+        self.trace = args.options["trace"]
+        self.stats = args.options["stats"]
+
+    def start(self, abort_at):
+        """
+        A fresh ``(builder, checker, tracer)`` wired with the parsed
+        limits.
+
+        ``abort_at`` is the failure count at which to stop (0 means
+        unlimited).
+        """
+        builder = EnvironmentBuilder()
+        env = builder.env
+        if self.max_heartbeat > 0:
+            env.max_heartbeat = self.max_heartbeat
+        if self.max_wall_time > 0.0:
+            env.max_wall_time = self.max_wall_time
+        if self.max_memory > 0:
+            env.max_memory = self.max_memory
+        if self.flush_memory > 0:
+            env.flush_memory = self.flush_memory
+        if (
+            self.slow_secs >= 0.0
+            or self.slow_hb >= 0
+            or (self.printer is not None and self.printer.wants_heartbeats)
+        ):
+            env.count_heartbeats = True
+        checker = _StreamingChecker(
+            env=env,
+            stdoutw=self.stdoutw,
+            stderrw=self.stderrw,
+            printer=self.printer,
+            slow_secs=self.slow_secs,
+            slow_hb=self.slow_hb,
+            filter_match=self.filter_match,
+            filter_names=self.filter_names,
+            abort_at=abort_at,
+            break_at=self.break_at,
+        )
+        # When either --trace or --stats is set, install a `StreamTracer`.
+        # The writer is None for --stats-only (no stream output, just count);
+        # --trace points the writer at stderr. A single class covers both
+        # because counting is cheap and harmless to keep on whenever the
+        # stream tracer is active.
+        tracer = None
+        if self.trace or self.stats:
+            tracer = StreamTracer(self.stderrw if self.trace else None)
+            env.tracer = tracer
+        return builder, checker, tracer
+
+    def summarize(self, checker, tracer, bytes_at_start):
+        if self.stats and tracer is not None:
+            tracer.print_summary(self.stderrw)
         # One-line aggregate so two runs are comparable at a glance
         # without grepping `--slower-than` output. RPython's `%`
         # formatter doesn't accept `%.1f`, so the MB figures are
@@ -449,7 +431,7 @@ def _check_one_file(
         # that mode rather than emit three misleading zeros.
         if we_are_translated():
             _MB = 1024 * 1024
-            stderrw.write_plain(
+            self.stderrw.write_plain(
                 "summary: %d/%d decls checked, peak %d MB, "
                 "allocated %d MB, heartbeats %d\n" % (
                     checker.n_checked,
@@ -460,13 +442,41 @@ def _check_one_file(
                 )
             )
         else:
-            stderrw.write_plain(
+            self.stderrw.write_plain(
                 "summary: %d/%d decls checked, heartbeats %d\n" % (
                     checker.n_checked,
                     checker.n_seen,
                     checker.total_heartbeats,
                 )
             )
+
+
+def _check_one_file(path, stdin, stderr, run, abort_at):
+    """
+    Stream-check a single export file, returning the number of new failures.
+
+    ``abort_at`` is the failure count at which to stop (0 means unlimited).
+    """
+    file = _open_export(path, stdin)
+    builder, checker, tracer = run.start(abort_at)
+    bytes_at_start = _bytes_allocated()
+    try:
+        try:
+            parser.validate_export_metadata(file)
+            builder.consume(file, hook=checker)
+        except ExportError as err:
+            run.stderrw.writeline(err.tokens())
+            run.stderrw.write_plain("\n")
+            return checker.failures + 1
+        except UsageError:
+            raise
+        except:
+            stderr.write("Unexpected error during type checking\n")
+            raise
+    finally:
+        if path != "-":
+            file.close()
+        run.summarize(checker, tracer, bytes_at_start)
     return checker.failures
 
 
@@ -492,25 +502,20 @@ def dump(self, args, stdin, stdout, stderr):
     return 0
 
 
-@cli.subcommand(
-    ["EXPORT_FILE"],
-    help="Open a REPL with the given export's environment loaded into it.",
-    options=[
-        (
-            "command",
-            "run a single REPL command and exit instead of starting an interactive session",
-        ),
-    ],
-)
-def repl(self, args, stdin, stdout, stderr):
-    (path,) = args.args
-    try:
-        environment = environment_from(path=path, stdin=stdin)
-    except ExportError as err:
-        stderrw = writer_from_arg("auto", stderr)
-        stderrw.writeline(err.tokens())
-        stderrw.write_plain("\n")
-        return 1
+#: The options shared by `repl` and `ffi repl`.
+REPL_OPTIONS = [
+    (
+        "command",
+        "run a single REPL command and exit instead of starting an interactive session",
+    ),
+]
+
+
+def _run_repl(environment, args, stdin, stdout, stderr):
+    """
+    Run a single REPL `--command` (if given) or start an interactive
+    session on the environment.
+    """
     from rpylean import repl
 
     command = args.options["command"]
@@ -522,6 +527,23 @@ def repl(self, args, stdin, stdout, stderr):
 
     repl.interact(environment)
     return 0
+
+
+@cli.subcommand(
+    ["EXPORT_FILE"],
+    help="Open a REPL with the given export's environment loaded into it.",
+    options=REPL_OPTIONS,
+)
+def repl(self, args, stdin, stdout, stderr):
+    (path,) = args.args
+    try:
+        environment = environment_from(path=path, stdin=stdin)
+    except ExportError as err:
+        stderrw = writer_from_arg("auto", stderr)
+        stderrw.writeline(err.tokens())
+        stderrw.write_plain("\n")
+        return 1
+    return _run_repl(environment, args, stdin, stdout, stderr)
 
 
 ffi = cli.subcli(
@@ -554,29 +576,8 @@ def _resolve_prefix(args, stderr):
 @ffi.subcommand(
     ["*MODULES"],
     help="Type-check declarations from a Lean toolchain via FFI.",
-    options=[
-        (
-            "filter",
-            "only check the given declaration(s), separated by commas",
-        ),
-        (
-            "filter-match",
-            "only check declarations whose name contains this substring",
-        ),
-        (
-            "max-fail",
-            "the maximum number of type errors to report before giving up",
-        ),
-        (
-            "slower-than",
-            (
-                "print each declaration that exceeded this threshold "
-                "to check (bare numbers are heartbeats; suffixes: "
-                "s/ms/m for time, h for heartbeats)"
-            ),
-        ),
-        COLOR,
-    ],
+    options=CHECK_OPTIONS,
+    flags=CHECK_FLAGS,
 )
 def check(self, args, stdin, stdout, stderr):
     modules = args.varargs
@@ -591,57 +592,46 @@ def check(self, args, stdin, stdout, stderr):
 
     _progress.install()
 
-    filter_match = args.options["filter-match"]
-    filter_names = None
-    if filter_match is None and args.options["filter"] is not None:
-        filter_names = name_dict()
-        for each in args.options["filter"].split(","):
-            filter_names[Name.from_str(each)] = True
-
-    max_fail = int(args.options["max-fail"] or "0")
-    slow_secs, slow_hb = _parse_threshold(args.options["slower-than"])
-
-    builder = EnvironmentBuilder()
-    if slow_secs >= 0.0 or slow_hb >= 0:
-        builder.env.count_heartbeats = True
-    checker = _StreamingChecker(
-        env=builder.env, stdoutw=stdoutw, stderrw=stderrw, printer=None,
-        slow_secs=slow_secs, slow_hb=slow_hb,
-        filter_match=filter_match, filter_names=filter_names,
-        abort_at=max_fail if max_fail > 0 else 0,
-        break_at=None,
-    )
+    run = _CheckRun(args, stdoutw, stderrw)
+    start = time()
+    abort_at = run.max_fail if run.max_fail > 0 else 0
+    builder, checker, tracer = run.start(abort_at)
     collector = _FFICollector(builder, checker)
-    with FFI.from_prefix(prefix) as ffi_obj:
-        env_obj = ffi_obj.import_modules(modules)
-        if filter_names is not None:
-            # Fast path: look up each filtered name individually rather
-            # than walking the entire SMap.
-            for fname in filter_names:
-                opt = ffi_obj.find_constant(env_obj, fname.str())
-                if _lean.obj_tag(opt) == 0:
-                    stderr.write("%s: not found\n" % fname.str())
-                    continue
-                aborted = collector.on_constant(_lean.box(0),
-                                                _lean.ctor_get(opt, 0))
-                ffi_obj.release(opt)
-                if aborted:
-                    break
-        else:
-            ffi_obj.each_constant(env_obj, collector)
-        ffi_obj.release(env_obj)
+    bytes_at_start = _bytes_allocated()
+    try:
+        with FFI.from_prefix(prefix) as ffi_obj:
+            env_obj = ffi_obj.import_modules(modules)
+            set_resolver(_FFIResolver(ffi_obj, env_obj, builder))
+            try:
+                if run.filter_names is not None:
+                    # Fast path: look up each filtered name individually
+                    # rather than walking the entire SMap.
+                    for fname in run.filter_names:
+                        opt = ffi_obj.find_constant_named(env_obj, fname)
+                        if _lean.obj_tag(opt) == 0:
+                            stderr.write("%s: not found\n" % fname.str())
+                            continue
+                        aborted = collector.on_constant(
+                            _lean.box(0), _lean.ctor_get(opt, 0),
+                        )
+                        ffi_obj.release(opt)
+                        if aborted:
+                            break
+                else:
+                    ffi_obj.each_constant(env_obj, collector)
+            finally:
+                set_resolver(None)
+                ffi_obj.release(env_obj)
+    finally:
+        run.summarize(checker, tracer, bytes_at_start)
+    stderr.write("checked in %fs\n" % (time() - start,))
     return 1 if checker.failures else 0
 
 
 @ffi.subcommand(
     ["*MODULES"],
     help="Open a REPL with a Lean toolchain's environment loaded via FFI.",
-    options=[
-        (
-            "command",
-            "run a single REPL command and exit instead of starting an interactive session",
-        ),
-    ],
+    options=REPL_OPTIONS,
 )
 def repl(self, args, stdin, stdout, stderr):
     modules = args.varargs
@@ -657,18 +647,7 @@ def repl(self, args, stdin, stdout, stderr):
         env_obj = ffi_obj.import_modules(modules)
         ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
-
-    from rpylean import repl
-
-    command = args.options["command"]
-    if command is not None:
-        stdoutw = writer_from_arg("auto", stdout)
-        stderrw = writer_from_arg("auto", stderr)
-        ok = repl.dispatch(builder.env, command, stdin, stdoutw, stderrw)
-        return 0 if ok else 1
-
-    repl.interact(builder.env)
-    return 0
+    return _run_repl(builder.env, args, stdin, stdout, stderr)
 
 
 @ffi.subcommand(
@@ -768,8 +747,42 @@ class _FFICollector(_FFICollectorBase):
         self.checker = checker
 
     def _handle(self, decl):
-        self.builder.register_declaration(decl)
+        declarations = self.builder.env.declarations
+        if decl.name in declarations:
+            # Already demand-loaded by the `_FFIResolver` as a
+            # dependency of an earlier-walked decl; check the registered
+            # instance — it's the one other decls resolved against.
+            decl = declarations[decl.name]
+        else:
+            self.builder.register_declaration(decl)
         return self.checker.on_declaration(decl)
+
+
+class _FFIResolver(Resolver):
+    """
+    Demand-load missing declarations from the Lean environment.
+
+    `each_constant` walks `Environment.constants` in hash-bucket order,
+    so a streamed declaration may reference constants the walk hasn't
+    reached yet; this resolver fetches each one by name the moment a
+    lookup misses. It only registers — checking stays with the walk,
+    which still visits every constant exactly once.
+    """
+
+    _attrs_ = ['ffi', 'env_obj', 'builder']
+
+    def __init__(self, ffi, env_obj, builder):
+        self.ffi = ffi
+        self.env_obj = env_obj
+        self.builder = builder
+
+    def resolve(self, name):
+        opt = self.ffi.find_constant_named(self.env_obj, name)
+        if _lean.obj_tag(opt) != 0:
+            self.builder.register_declaration(
+                read_constant_info(_lean.ctor_get(opt, 0)),
+            )
+        self.ffi.release(opt)
 
 
 def _open_export(path, stdin):

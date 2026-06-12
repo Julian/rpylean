@@ -49,6 +49,7 @@ from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean.ffi import _lltypes as _lean
 from rpylean.ffi import _runtime
+from rpylean.objects import NumName, StrName
 
 
 def detect_prefix():
@@ -127,6 +128,7 @@ class FFI(object):
         'prefix', 'Init_shared', 'leanshared', 'leanshared_1',
         '_close', '_deep_self_test_done',
         '_alloc_object', '_mk_string', '_name_mk_string',
+        '_name_mk_numeral',
         '_array_empty', '_array_push',
         '_init_sp', '_import_modules',
         '_env_find', '_env_constants', '_options_empty', '_dec_ref_cold',
@@ -183,6 +185,8 @@ class FFI(object):
                                     dlsym(S, "lean_mk_string"))
         self._name_mk_string = rffi.cast(_lean.name_mk_string,
                                          dlsym(S, "lean_name_mk_string"))
+        self._name_mk_numeral = rffi.cast(_lean.name_mk_string,
+                                          dlsym(S, "lean_name_mk_numeral"))
         self._array_empty = rffi.cast(_lean.array_empty_fn,
                                       dlsym(S, "l_Array_empty"))
         self._array_push = rffi.cast(_lean.array_push,
@@ -345,6 +349,29 @@ class FFI(object):
             n = self._name_mk_string(n, self._mk_string(rffi.str2charp(piece)))
         return n
 
+    def _build_w_name(self, name):
+        """
+        Build a Lean.Name mirroring an rpylean `Name`, preserving
+        str/num component kinds — `_build_name`'s dotted-string split
+        would turn a `Name.num` part like `_hyg.123` into a str part
+        and miss on lookup.
+        """
+        parts = []
+        cur = name
+        while not cur.is_anonymous():
+            parts.append(cur)
+            cur = cur.parent
+        n = _lean.box(0)  # Name.anonymous
+        for i in range(len(parts) - 1, -1, -1):
+            part = parts[i]
+            if isinstance(part, StrName):
+                n = self._name_mk_string(
+                    n, self._mk_string(rffi.str2charp(part.suffix)))
+            else:
+                assert isinstance(part, NumName)
+                n = self._name_mk_numeral(n, _lean.box(part.idx.toint()))
+        return n
+
     def _build_import(self, module_name):
         """
         Build a `Lean.Import { module := <name>, isExported := true }`.
@@ -431,6 +458,15 @@ class FFI(object):
         """
         _lean.inc(env)
         return self._env_find(env, self._build_name(dotted_name),
+                              rffi.cast(rffi.UCHAR, 0))
+
+    def find_constant_named(self, env, name):
+        """
+        `find_constant` for an rpylean `Name`, built component-by-
+        component so numeric parts survive the round trip.
+        """
+        _lean.inc(env)
+        return self._env_find(env, self._build_w_name(name),
                               rffi.cast(rffi.UCHAR, 0))
 
     def release(self, o):

@@ -1,4 +1,6 @@
-from rpython.rlib.jit import JitDriver, elidable, promote, unroll_safe
+from rpython.rlib.jit import (
+    JitDriver, dont_look_inside, elidable, promote, unroll_safe,
+)
 from rpython.rlib.objectmodel import (
     compute_hash, compute_identity_hash, newlist_hint, not_rpython, specialize,
 )
@@ -116,12 +118,85 @@ def get_decl(declarations, name):
     so every call site benefits from JIT-time folding, not only the ones
     that happen to promote on their own.
     """
-    return _get_decl(promote(declarations), promote(name))
+    try:
+        return _get_decl(promote(declarations), promote(name))
+    except KeyError:
+        return _demand_decl(declarations, name)
 
 
 @elidable
 def _get_decl(declarations, name):
     return declarations[name]
+
+
+@dont_look_inside
+def _demand_decl(declarations, name):
+    """
+    Miss path for `get_decl`: ask the installed `Resolver` (if any) to
+    demand-load `name`, then re-read the dict.
+
+    Kept outside the `@elidable` inner so the fast path stays foldable:
+    a name misses at most once — after the resolver registers it the
+    binding is immutable, the same effective-purity argument the
+    streaming parser's append-only dict already relies on. The fresh
+    dict read (rather than trusting `_get_decl`'s raise) also keeps
+    this correct if the JIT baked a miss into a trace.
+    """
+    if name not in declarations:
+        resolver = _RESOLVER.current
+        if resolver is not None:
+            resolver.resolve(name)
+    return declarations[name]
+
+
+def find_decl(declarations, name):
+    """
+    `get_decl`, but with a `None` miss instead of a `KeyError`.
+
+    For "classify this constant" probes (is it a recursor? is it
+    delta-reducible?) which bail out of a reduction strategy when the
+    name is absent — routing them through `get_decl` keeps them
+    demand-loading under `ffi check`, where a raw `.get` would
+    misclassify a merely not-yet-walked constant.
+    """
+    try:
+        return get_decl(declarations, name)
+    except KeyError:
+        return None
+
+
+class Resolver(object):
+    """
+    Demand-loads declarations that a `get_decl` lookup missed.
+
+    Installed via `set_resolver` when a backing store can produce
+    declarations the environment hasn't registered yet — `ffi check`'s
+    hash-ordered bucket walk being the motivating case. `resolve`
+    registers the named declaration when the store has it and returns
+    nothing either way; the caller re-reads the dict afterwards and
+    raises `KeyError` if the name is still absent.
+    """
+
+    _attrs_ = []
+
+    def resolve(self, name):
+        raise NotImplementedError
+
+
+class _ResolverHolder(object):
+    def __init__(self):
+        self.current = None
+
+
+_RESOLVER = _ResolverHolder()
+
+
+def set_resolver(resolver):
+    """
+    Install the `Resolver` consulted on declaration-lookup misses, or
+    uninstall it by passing `None`.
+    """
+    _RESOLVER.current = resolver
 
 
 class W_CheckError(W_Error):
@@ -2630,7 +2705,7 @@ class W_Expr(_Item):
         head, args = self.unapp()
         if not isinstance(head, W_Const):
             return None
-        if head.name not in env.declarations:
+        if find_decl(env.declarations, head.name) is None:
             return None
         val = head.try_delta_reduce(env)
         if val is None:
@@ -3722,10 +3797,10 @@ class W_Proj(W_Expr):
         assert isinstance(struct_type, W_Declaration)
         struct_kind = struct_type.w_kind
         assert isinstance(struct_kind, W_Inductive)
-        if len(struct_kind.constructors) != 1:
+        if len(struct_kind.ctor_names) != 1:
             raise InvalidProjection.not_a_structure(
                 self.struct_name, self.field_index,
-                len(struct_kind.constructors), self.struct_expr,
+                len(struct_kind.ctor_names), self.struct_expr,
             )
 
         ind_type_whnf = apply_const_level_params(
@@ -3735,7 +3810,7 @@ class W_Proj(W_Expr):
             W_LEVEL_ZERO
         )
 
-        ctor_decl = struct_kind.constructors[0]
+        ctor_decl = struct_kind.constructor_decls(env.declarations)[0]
         assert isinstance(ctor_decl, W_Declaration)
         assert isinstance(ctor_decl.w_kind, W_Constructor)
 
@@ -4061,7 +4136,12 @@ class W_ForAll(W_FunBase):
         """
         lhs_type = self.binder.type
         if isinstance(lhs_type, W_Const):
-            lhs_type = constants[lhs_type.name].type
+            # Tolerate names `constants` doesn't have (a partially
+            # registered environment, e.g. mid-`ffi check`): rendering
+            # must never raise, it just loses the ∀-vs-→ refinement.
+            decl = constants.get(lhs_type.name, None)
+            if decl is not None:
+                lhs_type = decl.type
         elif isinstance(lhs_type, W_FVar):
             lhs_type = lhs_type.binder.type
 
@@ -4671,7 +4751,11 @@ class W_App(W_Expr):
             # before we get rid of it
             self.infer(env)
 
-            old_ty = major_premise.infer(env)
+            # Full whnf, not just `.head()`: the major is typically an
+            # opened binder's fvar whose type may sit under a closure
+            # or behind a definition unfolding to the inductive —
+            # lean4's to_cnstr_when_K does `whnf(infer_type(e))`.
+            old_ty = major_premise.infer(env).whnf(env)
             old_ty_base = old_ty.head()
             # The major premise's inferred-type head can be non-W_Const
             # when iota is invoked inside an unfinished def-eq probe
@@ -4682,23 +4766,25 @@ class W_App(W_Expr):
             # def-eq attempt fails up the stack, and a real type error
             # surfaces in a context where we can report it.
             if not isinstance(old_ty_base, W_Const):
+                env.tracer.klike_bail_head()
                 return False, self
 
             # Mutual-inductive blocks legitimately have `len(all) > 1`;
             # k-like reduction can only operate on a single-inductive
             # context. Same bail-out reasoning.
             if len(rec_kind.all) != 1:
+                env.tracer.klike_bail_mutual()
                 return False, self
             inductive_decl = get_decl(env.declarations, rec_kind.all[0])
             ind_kind = inductive_decl.w_kind
             assert isinstance(ind_kind, W_Inductive)
 
-            # `_register_mutual_inductive` leaves `constructors=[]`,
-            # so k-like for a mutual block's inductive would index out
-            # of range. Stay safe.
-            if len(ind_kind.constructors) != 1:
+            # K-like reduction only makes sense for a single-ctor
+            # inductive.
+            if len(ind_kind.ctor_names) != 1:
+                env.tracer.klike_bail_ctors()
                 return False, self
-            ctor_decl = ind_kind.constructors[0]
+            ctor_decl = ind_kind.constructor_decls(env.declarations)[0]
             ctor_kind = ctor_decl.w_kind
             assert isinstance(ctor_kind, W_Constructor)
 
@@ -4713,8 +4799,9 @@ class W_App(W_Expr):
 
             new_ty = major_premise_ctor.infer(env)
             if not env.def_eq(old_ty, new_ty):
+                env.tracer.klike_bail_defeq()
                 return False, self
-            # print("Built new major premise: %s" % major_premise_ctor.pretty())
+            env.tracer.klike_fired()
             major_premise = major_premise_ctor
 
             # major_premise_ty = major_premise.infer(env)
@@ -4789,7 +4876,7 @@ class W_App(W_Expr):
             # `Array.mk`, whose parent has its own param count). Slice
             # the ctor's args using the *ctor's* num_params, not the
             # recursor's. For non-nested cases the two coincide.
-            ctor_decl = env.declarations.get(rec_rule.ctor_name, None)
+            ctor_decl = find_decl(env.declarations, rec_rule.ctor_name)
             if ctor_decl is None or not ctor_decl.w_kind.is_constructor():
                 return False, self
             ctor_kind = ctor_decl.w_kind
@@ -4884,7 +4971,7 @@ class W_App(W_Expr):
             return None
         if not inductive.is_non_recursive_structure():
             return None
-        ctor_decl = inductive.constructors[0]
+        ctor_decl = inductive.constructor_decls(env.declarations)[0]
         ctor = ctor_decl.w_kind
         if not isinstance(ctor, W_Constructor):
             return None
@@ -5082,7 +5169,7 @@ def _whnf_iota_chain(env, expr):
         if isinstance(cur, W_App):
             target, args = cur.unapp()
             if isinstance(target, W_Const):
-                decl = env.declarations.get(target.name, None)
+                decl = find_decl(env.declarations, target.name)
                 if decl is not None:
                     rec = decl.w_kind
                     if isinstance(rec, W_Recursor):
@@ -5632,10 +5719,30 @@ class W_Inductive(W_DeclarationKind):
         no indices, and not (mutually) recursive.
         """
         return (
-            len(self.constructors) == 1
+            len(self.ctor_names) == 1
             and self.num_indices == 0
             and not self.is_recursive
         )
+
+    def constructor_decls(self, declarations):
+        """
+        The constructor `W_Declaration`s, in `ctor_names` order.
+
+        `self.constructors` is complete whenever the parser registered
+        this inductive (blocks register types and ctors together), but
+        the FFI walk hands constructors out as separate constants in
+        hash order — so when the walked list is short, derive it from
+        the authoritative `ctor_names` via `get_decl`, which
+        demand-loads under `ffi check`.
+        """
+        constructors = self.constructors
+        if len(constructors) == len(self.ctor_names):
+            return constructors
+        constructors = [
+            get_decl(declarations, each) for each in self.ctor_names
+        ]
+        self.constructors = constructors
+        return constructors
 
     def register_exporter_index(self, exporter, name):
         exporter.register_inductive_ctors(name, self.ctor_names)
@@ -5683,16 +5790,26 @@ class W_Inductive(W_DeclarationKind):
 
     def type_check(self, type, tc):
         target = type
-        for depth in range(self.num_params + self.num_indices):
+        for _ in range(self.num_params + self.num_indices):
+            if not isinstance(target, W_ForAll):
+                # The remaining arity can hide behind a definition —
+                # e.g. `Presieve.ofArrows : … → Presieve X`, where
+                # `Presieve X` unfolds to a pi ending in a Sort and
+                # the export counts its binders among the indices.
+                target = target.whnf(tc)
             if not isinstance(target, W_ForAll):
                 return W_NotASort(tc, type, inferred_type=target, name=None)
-            target = target.body.instantiate(tc, target.binder.fvar(), depth)
+            # The peeled binder is bvar(0) of the body — depth 0, not
+            # the loop index (an index-i substitution targets bvar(i)
+            # at the body's top level, which never exists, silently
+            # leaving every binder after the first loose).
+            target = target.body.instantiate(tc, target.binder.fvar(), 0)
         target_sort = target.whnf(tc)
         if not isinstance(target_sort, W_Sort):
             return W_NotASort(
                 tc, type, inferred_type=target.infer(tc), name=None,
             )
-        for ctor in self.constructors:
+        for ctor in self.constructor_decls(tc.declarations):
             error = self._check_constructor(ctor, target_sort.level, tc)
             if error is not None:
                 return error
@@ -5976,16 +6093,18 @@ class W_Recursor(W_DeclarationKind):
         # rhs derivation + def-eq comparison would be a separate piece
         # of work.
         #
-        # Skip validation entirely if the parent inductive isn't yet in
-        # scope — for the streaming FFI checker, recursors can arrive
-        # before their inductive is registered. The check will fire
-        # later under the standard (parser-based) flow where inductives
-        # are registered in their block before their recursors.
+        # Skip validation entirely if the parent inductive isn't in
+        # scope and can't be demand-loaded — under the standard
+        # (parser-based) flow inductives are registered in their block
+        # before their recursors, and under `ffi check` `get_decl`
+        # demand-loads them, so the skip only fires for genuinely
+        # incomplete environments.
         all_ctors = []
         for ind_name in self.all:
-            if ind_name not in env.declarations:
+            try:
+                ind_decl = get_decl(env.declarations, ind_name)
+            except KeyError:
                 return None
-            ind_decl = env.declarations[ind_name]
             ind_kind = ind_decl.w_kind
             if not isinstance(ind_kind, W_Inductive):
                 return W_InvalidRecursorRule(
@@ -5993,7 +6112,7 @@ class W_Recursor(W_DeclarationKind):
                     "recursor refers to %s which is not an inductive"
                     % ind_name.str(),
                 )
-            for ctor in ind_kind.constructors:
+            for ctor in ind_kind.constructor_decls(env.declarations):
                 all_ctors.append(ctor)
         # Split recursors (one per motive in a mutual or nested-inductive
         # block) only have rules for ctors whose return matches *their*
@@ -6021,7 +6140,10 @@ class W_Recursor(W_DeclarationKind):
         for rule_idx, rule in enumerate(self.rules):
             ctor = ctor_by_name.get(rule.ctor_name, None)
             if ctor is None:
-                env_decl = env.declarations.get(rule.ctor_name, None)
+                try:
+                    env_decl = get_decl(env.declarations, rule.ctor_name)
+                except KeyError:
+                    env_decl = None
                 if env_decl is None or not env_decl.w_kind.is_constructor():
                     return W_InvalidRecursorRule(
                         env,
