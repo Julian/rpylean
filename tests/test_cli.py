@@ -1,9 +1,8 @@
 from io import BytesIO
 from StringIO import StringIO
 
-from rpylean._rcli import CLI, Args
+from rpylean._rlib.rcli import CLI, Args, UsageError
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
-from rpylean._rcli import UsageError
 from rpylean.cli import (
     Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_bytes,
     _parse_threshold,

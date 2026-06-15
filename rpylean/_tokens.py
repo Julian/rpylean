@@ -288,7 +288,7 @@ def writer_from_arg(string, stream):
     elif string == "no":
         formatter = FORMAT_PLAIN
     else:
-        from rpylean._rcli import UsageError
+        from rpylean._rlib.rcli import UsageError
 
         raise UsageError("Unknown color choice: %s" % (string,))
     return TokenWriter(stream, formatter)

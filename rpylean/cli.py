@@ -13,7 +13,7 @@ from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean import _progress, parser
-from rpylean._rcli import CLI, UsageError
+from rpylean._rlib.rcli import CLI, UsageError
 from rpylean._tokens import (
     ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3, HEAT_4,
     PLAIN, writer_from_arg,
@@ -513,8 +513,7 @@ REPL_OPTIONS = [
 
 def _run_repl(environment, args, stdin, stdout, stderr):
     """
-    Run a single REPL `--command` (if given) or start an interactive
-    session on the environment.
+    Run a REPL `--command` (if given) or start an interactive session.
     """
     from rpylean import repl
 
