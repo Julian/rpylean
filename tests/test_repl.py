@@ -11,7 +11,7 @@ from rpylean._rlib.rlineedit import _bare_prompt, _marked_prompt
 from rpylean._tokens import FORMAT_PLAIN, TokenWriter
 from rpylean.environment import Environment
 from rpylean.objects import NAT, Name
-from rpylean.repl import _Quit, dispatch
+from rpylean.repl import _Quit, _matching_completions, dispatch
 
 
 def _writers():
@@ -37,6 +37,26 @@ class TestPrompt(object):
         """With no colour, both assemblers yield the bare prompt text."""
         assert _marked_prompt("", "> ", self.RESET) == "> "
         assert _bare_prompt("", "> ", self.RESET) == "> "
+
+
+class TestCompletions(object):
+    def test_includes_commands_and_public_decls(self):
+        """Completions cover both REPL commands and public declaration names."""
+        a_decl = Name.simple("a").axiom(type=NAT)
+        env = Environment.having([a_decl])
+
+        completions = _matching_completions(env, "")
+        assert "check" in completions
+        assert "a" in completions
+
+    def test_filters_by_prefix(self):
+        """Only candidates starting with the prefix are returned."""
+        a_decl = Name.simple("alpha").axiom(type=NAT)
+        env = Environment.having([a_decl])
+
+        assert _matching_completions(env, "ch") == ["check"]
+        assert _matching_completions(env, "alph") == ["alpha"]
+        assert _matching_completions(env, "zzz") == []
 
 
 class TestDispatch(object):

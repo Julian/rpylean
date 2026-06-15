@@ -13,6 +13,7 @@ import os
 import sys
 
 from rpython.rlib import rlocale
+from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.rdynload import (
     DLOpenError,
     RTLD_NOW,
@@ -20,6 +21,7 @@ from rpython.rlib.rdynload import (
     dlopen,
     dlsym,
 )
+from rpython.rtyper.annlowlevel import llhelper
 from rpython.rtyper.lltypesystem import lltype, rffi
 from rpython.rtyper.lltypesystem.lltype import FuncType, Ptr, Void
 
@@ -32,12 +34,58 @@ RL_ADD_HISTORY = Ptr(FuncType([rffi.CCHARP], Void))
 RL_HISTORY_FILE = Ptr(FuncType([rffi.CCHARP], rffi.INT))
 #: ``int history_truncate_file(const char *, int nlines)``
 RL_TRUNCATE_FILE = Ptr(FuncType([rffi.CCHARP, rffi.INT], rffi.INT))
+#: ``char *rl_compentry_func_t(const char *text, int state)``, the type of
+#: the ``rl_completion_entry_function`` generator we install.
+RL_COMPENTRY = Ptr(FuncType([rffi.CCHARP, rffi.INT], rffi.CCHARP))
 
 #: Cap on the saved history file, so it doesn't grow without bound.
 HISTORY_MAX = 1000
 
 #: ``readline`` hands back a ``malloc``'d buffer the caller must ``free``.
 c_free = rffi.llexternal("free", [rffi.VOIDP], lltype.Void, _nowrapper=True)
+#: A ``malloc``'d copy, for completion matches that ``readline`` later frees.
+c_strdup = rffi.llexternal("strdup", [rffi.CCHARP], rffi.CCHARP)
+
+
+def _no_matches(prefix):
+    """The default matcher: complete nothing."""
+    return []
+
+
+class _Completion(object):
+    """Mutable state shared with the C completion callback."""
+
+    _attrs_ = ['matcher', 'matches']
+
+    def __init__(self):
+        self.matcher = _no_matches
+        self.matches = []
+
+
+#: Singleton the C callback reads, since the callback is a bare function (it
+#: can't carry a ``self``). RPython forbids mutating module globals but allows
+#: mutating a prebuilt instance's fields, so the state lives on one here.
+_completion = _Completion()
+
+
+def _completion_generator(text, state):
+    """
+    Yield successive completions of ``text`` — the ``readline`` generator ABI.
+
+    Called with ``state`` 0, 1, 2, ..., it computes the matches once (lazily,
+    via the injected matcher) on the first call and returns one per call as a
+    fresh ``malloc``'d string ``readline`` takes ownership of, or NULL once
+    the matches are exhausted.
+    """
+    i = intmask(state)
+    if i == 0:
+        _completion.matches = _completion.matcher(rffi.charp2str(text))
+    if i >= len(_completion.matches):
+        return lltype.nullptr(rffi.CCHARP.TO)
+    ll_match = rffi.str2charp(_completion.matches[i])
+    out = c_strdup(ll_match)
+    rffi.free_charp(ll_match)
+    return out
 
 #: GNU readline's markers bracketing non-printing characters in a prompt.
 RL_IGNORE_START = "\001"
@@ -197,6 +245,18 @@ class LineEditor(object):
         line = rffi.charp2str(ll_line)
         c_free(rffi.cast(rffi.VOIDP, ll_line))
         return line
+
+    def enable_completion(self, matcher):
+        """Install TAB completion driven by ``matcher(prefix) -> [str]``."""
+        try:
+            slot = rffi.cast(
+                rffi.CArrayPtr(RL_COMPENTRY),
+                dlsym(self._handle, "rl_completion_entry_function"),
+            )
+        except KeyError:
+            return
+        _completion.matcher = matcher
+        slot[0] = llhelper(RL_COMPENTRY, _completion_generator)
 
     def add_history(self, line):
         if line == self._last_history:

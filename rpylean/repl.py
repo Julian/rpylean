@@ -249,6 +249,48 @@ def _editor_prompt(editor):
     )
 
 
+class _ReplState(object):
+    """Holds the active environment for the completion matcher.
+
+    The matcher runs inside readline's C callback, which is a bare function,
+    so the environment it completes against lives on this prebuilt singleton.
+    """
+
+    _attrs_ = ['env']
+
+    def __init__(self):
+        self.env = None
+
+
+_state = _ReplState()
+
+
+def _matching_completions(env, prefix):
+    """Command names and public declaration names that start with ``prefix``.
+
+    Computed lazily per TAB rather than materialised up front, so opening a
+    REPL on a large environment (e.g. Mathlib) stays cheap.
+    """
+    result = []
+    for name in COMMANDS:
+        if name.startswith(prefix):
+            result.append(name)
+    for decl_name in env.declarations:
+        if not decl_name.is_private:
+            name_str = decl_name.str()
+            if name_str.startswith(prefix):
+                result.append(name_str)
+    return result
+
+
+def _complete(prefix):
+    """The matcher injected into the line editor; reads the active env."""
+    env = _state.env
+    if env is None:
+        return []
+    return _matching_completions(env, prefix)
+
+
 def interact(env):
     stdin, stdout, stderr = create_stdio()
     stdoutw = TokenWriter(stdout, FORMAT_COLOR)
@@ -258,6 +300,8 @@ def interact(env):
     prompt = ""
     if editor is not None:
         prompt = _editor_prompt(editor)
+        _state.env = env
+        editor.enable_completion(_complete)
         editor.load_history()
 
     last = "help"
