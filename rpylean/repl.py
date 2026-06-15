@@ -4,14 +4,30 @@ Interactive REPL for rpylean.
 
 from __future__ import print_function
 from rpython.rlib.rfile import create_stdio
-import os
 
-from rpylean._tokens import ERROR, FORMAT_COLOR, PROMPT, TokenWriter
+from rpylean._rlib import rlineedit
+from rpylean._tokens import (
+    DEFAULT_THEME,
+    ERROR,
+    FORMAT_COLOR,
+    PROMPT,
+    TokenWriter,
+    _ANSI_RESET,
+)
 from rpylean.environment import StreamTracer, TypeChecker
 from rpylean.objects import Name
 
 
 COMMANDS, HELP = {}, {}
+
+
+class _Quit(Exception):
+    """Raised by a command to unwind out of the REPL loop with an exit code."""
+
+    _attrs_ = ['exit_code']
+
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
 
 #: Either 0 or 1 arguments.
 OPTIONAL = -2
@@ -197,24 +213,40 @@ def help(_, __, ___, stdoutw, ____):
 
 @command(["exit", "quit"], help="Quit the REPL.")
 def quit(*args):
-    os._exit(0)
+    raise _Quit()
 
 
 def dispatch(env, input, stdin, stdoutw, stderrw):
     """
-    Run a single REPL command line.
+    Run a single REPL command line, returning its exit code.
 
-    Returns ``True`` if the command was found (regardless of what it did),
-    or ``False`` when the command name is unknown.
+    The exit code is ``0`` if the command ran (regardless of what it did) or
+    ``1`` if the command name was unknown. A ``quit``/``exit`` command instead
+    raises ``_Quit``, whose ``exit_code`` carries the status to leave with.
     """
     split = input.split(" ", 1)
     command = split[0]
     fn = COMMANDS.get(command, None)
     if fn is None:
         stderrw.write_plain("Unknown command: %s\n" % command)
-        return False
+        return 1
     fn(env, split[1:], stdin, stdoutw, stderrw)
-    return True
+    return 0
+
+
+PROMPT_TEXT = "L∃∀N> "
+
+
+def _editor_prompt(editor):
+    """
+    Build the REPL prompt string for the line editor.
+
+    Coloured the way the editor's library renders correctly: the editor
+    injects the assembler (markers for GNU readline, inline escapes for libedit).
+    """
+    return editor.format_prompt(
+        DEFAULT_THEME.get("prompt", ""), PROMPT_TEXT, _ANSI_RESET,
+    )
 
 
 def interact(env):
@@ -222,21 +254,48 @@ def interact(env):
     stdoutw = TokenWriter(stdout, FORMAT_COLOR)
     stderrw = TokenWriter(stderr, FORMAT_COLOR)
 
+    editor = rlineedit.try_open()
+    prompt = ""
+    if editor is not None:
+        prompt = _editor_prompt(editor)
+        editor.load_history()
+
     last = "help"
 
     while True:
-        stdoutw.write([PROMPT.emit("L∃∀N> ")])
-        try:
-            input = stdin.readline()
-        except KeyboardInterrupt:
-            continue
+        if editor is None:
+            stdoutw.write([PROMPT.emit(PROMPT_TEXT)])
+            stdoutw.flush()
+            try:
+                line = stdin.readline()
+            except KeyboardInterrupt:
+                continue
+            if not line:
+                return
+        else:
+            stdoutw.flush()
+            stderrw.flush()
+            try:
+                maybe = editor.readline(prompt)
+            except KeyboardInterrupt:
+                continue
+            if maybe is None:
+                stdoutw.write_plain("\n")
+                stdoutw.flush()
+                editor.save_history()
+                return
+            line = maybe
+            if line.strip():
+                editor.add_history(line)
 
-        if not input:
-            return
-
-        input = input.strip()
+        input = line.strip()
         if not input:
             input = last
 
         last = input
-        dispatch(env, input, stdin, stdoutw, stderrw)
+        try:
+            dispatch(env, input, stdin, stdoutw, stderrw)
+        except _Quit:
+            if editor is not None:
+                editor.save_history()
+            return

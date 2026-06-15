@@ -38,9 +38,9 @@ pypy *ARGS:
 i $RPYLEAN_EXAMPLE='' *ARGS:
     @just pypy -i "{{ package }}/_pypy_repl.py"
 
-# Run the translated rpylean REPL under rlwrap.
+# Run the translated rpylean REPL.
 repl *ARGS:
-    rlwrap "{{ translated }}" repl {{ ARGS }}
+    "{{ translated }}" repl {{ ARGS }}
 
 # Run lean4export with the provided arguments.
 lean4export *ARGS:

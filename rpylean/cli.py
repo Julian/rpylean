@@ -521,8 +521,10 @@ def _run_repl(environment, args, stdin, stdout, stderr):
     if command is not None:
         stdoutw = writer_from_arg("auto", stdout)
         stderrw = writer_from_arg("auto", stderr)
-        ok = repl.dispatch(environment, command, stdin, stdoutw, stderrw)
-        return 0 if ok else 1
+        try:
+            return repl.dispatch(environment, command, stdin, stdoutw, stderrw)
+        except repl._Quit as quit:
+            return quit.exit_code
 
     repl.interact(environment)
     return 0
