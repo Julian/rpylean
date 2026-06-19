@@ -48,26 +48,6 @@ class ErrorAtSource(Exception):
         self.source_pos = source_pos
 
 
-class IndexGapError(ExportError):
-    """
-    An index in the export is not the next sequential value expected.
-    """
-
-    _attrs_ = ['kind', 'expected', 'got']
-
-    def __init__(self, kind, expected, got):
-        self.kind = kind
-        self.expected = expected
-        self.got = got
-
-    def tokens(self):
-        return [
-            ERROR.emit(
-                "expected %s index %d, got %d" % (self.kind, self.expected, self.got)
-            ),
-        ]
-
-
 class AlreadyDeclared(ExportError):
     """
     A declaration already exists in the environment.
@@ -222,6 +202,23 @@ class W_InvalidDeclaration(W_Error):
         d = self.as_diagnostic()
         _RENDER_BUDGET.remaining = -1
         writer.writeline_diagnostic(d)
+
+
+class UnknownDeclaration(W_Error):
+    """
+    A constant refers to a name that the environment does not declare.
+    """
+
+    _attrs_ = ['name']
+
+    def __init__(self, name):
+        self.name = name
+
+    def tokens(self):
+        return [
+            ERROR.emit("unknown declaration "),
+            DECL_NAME.emit(self.name.str()),
+        ]
 
 
 class InvalidProjection(W_Error):

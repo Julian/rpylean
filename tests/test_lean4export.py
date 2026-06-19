@@ -7,7 +7,6 @@ from textwrap import dedent
 
 from rpylean.exceptions import ReflexiveKError, UnknownQuotient
 from rpylean.environment import EnvironmentBuilder, Environment, from_str
-from rpylean.exceptions import ExportError
 from rpylean.objects import (
     W_LEVEL_ZERO,
     TYPE,
@@ -543,11 +542,25 @@ def test_reflexive_inductive_cannot_have_k_like_recursor():
     )
 
 
-def test_name_index_gap_raises_export_error():
-    with pytest.raises(ExportError):
-        from_str(
-            """
-            {"in":1,"str":{"pre":0,"str":"foo"}}
-            {"in":3,"str":{"pre":0,"str":"bar"}}
-            """
-        )
+def test_name_index_gap_is_stored_at_its_index():
+    # The format only requires references to be integers, so a gap is allowed.
+    builder = from_str(
+        """
+        {"in":1,"str":{"pre":0,"str":"foo"}}
+        {"in":3,"str":{"pre":0,"str":"bar"}}
+        """
+    )
+    assert builder.names[1] == Name.simple("foo")
+    assert builder.names[3] == Name.simple("bar")
+
+
+def test_name_index_backfills_a_skipped_slot():
+    # A later line may fill a slot an earlier line skipped over.
+    builder = from_str(
+        """
+        {"in":3,"str":{"pre":0,"str":"bar"}}
+        {"in":1,"str":{"pre":0,"str":"foo"}}
+        """
+    )
+    assert builder.names[1] == Name.simple("foo")
+    assert builder.names[3] == Name.simple("bar")

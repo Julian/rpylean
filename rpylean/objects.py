@@ -22,9 +22,10 @@ from rpylean._tokens import (
     PUNCT,
     SORT,
 )
-from rpylean._tokens import indent
+from rpylean import _format
 from rpylean.exceptions import (
     InvalidProjection,
+    UnknownDeclaration,
     W_Error,
 )
 
@@ -146,12 +147,14 @@ def _demand_decl(declarations, name):
         resolver = _RESOLVER.current
         if resolver is not None:
             resolver.resolve(name)
+    if name not in declarations:
+        raise UnknownDeclaration(name)
     return declarations[name]
 
 
 def find_decl(declarations, name):
     """
-    `get_decl`, but with a `None` miss instead of a `KeyError`.
+    `get_decl`, but with a `None` miss instead of an `UnknownDeclaration`.
 
     For "classify this constant" probes (is it a recursor? is it
     delta-reducible?) which bail out of a reduction strategy when the
@@ -161,7 +164,7 @@ def find_decl(declarations, name):
     """
     try:
         return get_decl(declarations, name)
-    except KeyError:
+    except UnknownDeclaration:
         return None
 
 
@@ -235,13 +238,13 @@ class _RenderBudget(object):
     """
     A walk bound for diagnostic rendering.
 
-    `tokens()` un-shares the expression DAG: every occurrence of a
+    `to_format()` un-shares the expression DAG: every occurrence of a
     shared subterm is walked again, so rendering a failing
     declaration whose value is a heavily-shared reduction product can
     take effectively forever (a Mathlib `CategoryTheory.Quotient`
     def_eq error spent an hour of GC-bound walking before being
     killed) — and none of it ticks the wall-time guard. Diagnostic
-    entry points arm the budget; `_append_marked_tokens` spends one
+    entry points arm the budget; `_sub` spends one
     unit per subexpression visit and cuts the walk off with an
     ellipsis when it runs out. `remaining == -1` means unlimited (the
     REPL / `dump` paths, where the caller asked for the full term).
@@ -3164,9 +3167,6 @@ class W_Const(W_Expr):
         name = promote(self.name)
         declarations = promote(env.declarations)
         decl = get_decl(declarations, name)
-        if decl is None:
-            print("Missing decl: %s" % self.name.str())
-            raise RuntimeError("Missing decl: %s" % self.str())
         # TODO - use hint to decide whether to delta reduce or not
         val = decl.w_kind.get_delta_reduce_target()
         if not isinstance(decl.w_kind, W_Definition):
@@ -3779,7 +3779,7 @@ class W_Proj(W_Expr):
 
         try:
             struct_type = get_decl(env.declarations, self.struct_name)
-        except KeyError:
+        except UnknownDeclaration:
             raise InvalidProjection.unknown_structure(
                 self.struct_name, self.field_index, self.struct_expr,
             )
@@ -6103,7 +6103,7 @@ class W_Recursor(W_DeclarationKind):
         for ind_name in self.all:
             try:
                 ind_decl = get_decl(env.declarations, ind_name)
-            except KeyError:
+            except UnknownDeclaration:
                 return None
             ind_kind = ind_decl.w_kind
             if not isinstance(ind_kind, W_Inductive):
@@ -6142,7 +6142,7 @@ class W_Recursor(W_DeclarationKind):
             if ctor is None:
                 try:
                     env_decl = get_decl(env.declarations, rule.ctor_name)
-                except KeyError:
+                except UnknownDeclaration:
                     env_decl = None
                 if env_decl is None or not env_decl.w_kind.is_constructor():
                     return W_InvalidRecursorRule(
