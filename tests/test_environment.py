@@ -4,7 +4,12 @@ import pytest
 
 from rpylean._tokens import FORMAT_PLAIN, MESSAGE
 from rpylean.environment import Environment
-from rpylean.exceptions import AlreadyDeclared, DuplicateLevels, W_InvalidDeclaration
+from rpylean.exceptions import (
+    AlreadyDeclared,
+    DuplicateLevels,
+    UnknownDeclaration,
+    W_InvalidDeclaration,
+)
 from rpylean.objects import (
     NAT,
     PROP,
@@ -1443,7 +1448,7 @@ class TestResolver(object):
 
         set_resolver(Empty())
         try:
-            with pytest.raises(KeyError):
+            with pytest.raises(UnknownDeclaration):
                 Environment.EMPTY.check_decl(
                     Name.simple("b").axiom(type=Name.simple("A").const()),
                 )
@@ -1451,7 +1456,7 @@ class TestResolver(object):
             set_resolver(None)
 
     def test_no_resolver(self):
-        with pytest.raises(KeyError):
+        with pytest.raises(UnknownDeclaration):
             Environment.EMPTY.check_decl(
                 Name.simple("b").axiom(type=Name.simple("A").const()),
             )

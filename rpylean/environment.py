@@ -9,6 +9,7 @@ from rpython.rlib import rgc
 from rpython.rlib.jit import JitDriver, dont_look_inside, promote
 from rpython.rlib.objectmodel import (
     not_rpython,
+    specialize,
     we_are_translated,
 )
 
@@ -19,7 +20,6 @@ from rpylean.exceptions import (
     AlreadyDeclared,
     DuplicateLevels,
     HeartbeatExceeded,
-    IndexGapError,
     MemoryExceeded,
     UnknownQuotient,
     W_Error,
@@ -101,6 +101,19 @@ def_eq_jitdriver = JitDriver(
 )
 
 
+@specialize.call_location()
+def _register_at(table, idx, value, placeholder):
+    n = len(table)
+    if idx == n:
+        table.append(value)
+    elif idx < n:
+        table[idx] = value
+    else:
+        while len(table) < idx:
+            table.append(placeholder)
+        table.append(value)
+
+
 class EnvironmentBuilder(object):
     """
     A mutable environment builder.
@@ -164,24 +177,19 @@ class EnvironmentBuilder(object):
                     return self
                 n += 1
 
-    # We assume nidx, eidx and uidx are always the next index to use.
-    # This seems to hold for exports we've seen, but if it ever weren't the
-    # case we could just have these methods renumber the indices so they're
-    # still contiguous.
+    # The export format only requires `in`/`ie`/`il` references to be integers,
+    # so an index may skip values or fill a previously-skipped one even though
+    # lean4export emits them densely and in order. Skipped slots are padded
+    # with a same-typed placeholder (never referenced by a valid export) so the
+    # tables stay homogeneous lists rather than `Optional` ones.
     def register_name(self, nidx, name):
-        if nidx != len(self.names):
-            raise IndexGapError("name", len(self.names), nidx)
-        self.names.append(name)
+        _register_at(self.names, nidx, name, Name.ANONYMOUS)
 
     def register_expr(self, eidx, w_expr):
-        if eidx != len(self.exprs):
-            raise IndexGapError("expr", len(self.exprs), eidx)
-        self.exprs.append(w_expr)
+        _register_at(self.exprs, eidx, w_expr, PROP)
 
     def register_level(self, uidx, level):
-        if uidx != len(self.levels):
-            raise IndexGapError("level", len(self.levels), uidx)
-        self.levels.append(level)
+        _register_at(self.levels, uidx, level, W_LEVEL_ZERO)
 
     def register_quotient(self, name, type, levels, kind):
         # Allowed: Quot, Quot.mk, Quot.ind, Quot.lift (all `Name.str` chains
