@@ -10,7 +10,6 @@ from rpylean._tokens import (
     DECL_NAME,
     FORMAT_PLAIN,
     KEYWORD,
-    LEVEL,
     LITERAL,
     OPERATOR,
     PLAIN,
@@ -155,8 +154,9 @@ def test_sort_tokens():
 
 class TestLet(object):
     def test_basic(self):
+        # The binder type is hidden (Lean's `pp.letVarTypes=false` default).
         let = a.let(type=NAT, value=NAT_ZERO, body=NAT_ZERO)
-        assert FORMAT_PLAIN(let.tokens({})) == "let a : Nat := Nat.zero\nNat.zero"
+        assert FORMAT_PLAIN(let.tokens({})) == "let a := Nat.zero\nNat.zero"
 
 
 Nat = Name.simple("Nat").axiom(type=TYPE)
@@ -339,7 +339,7 @@ def test_forall_arrow_uses_operator_token():
     expr = forall(x.binder(type=TYPE))(TYPE)
     tokens = expr.tokens({})
     arrows = [(tag, text) for tag, text in tokens if "→" in text]
-    assert arrows == [OPERATOR.emit(" → ")]
+    assert arrows == [OPERATOR.emit(" →")]
 
 
 def test_forall_prop_body_is_prop():
@@ -409,13 +409,16 @@ class TestAppImplicitSuppression(object):
 
 
 class TestConst(object):
+    # Universe levels are hidden on constant *references*, matching Lean's
+    # `pp.universes=false` default. (Declaration headers still show their
+    # level params; see `TestNameWithLevels` for `name_with_levels`.)
     def test_multiple_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
-        assert FORMAT_PLAIN(foo.tokens({})) == "foo.{u, v}"
+        assert FORMAT_PLAIN(foo.tokens({})) == "foo"
 
     def test_one_level(self):
         List = Name.simple("List").const(levels=[u])
-        assert FORMAT_PLAIN(List.tokens({})) == "List.{u}"
+        assert FORMAT_PLAIN(List.tokens({})) == "List"
 
     def test_no_levels(self):
         foo = Name.simple("foo").const()
@@ -423,30 +426,18 @@ class TestConst(object):
 
     def test_level_zero(self):
         ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
-        assert FORMAT_PLAIN(ofNat.tokens({})) == "ofNat.{0}"
+        assert FORMAT_PLAIN(ofNat.tokens({})) == "ofNat"
 
     def test_tokens(self):
         assert Name.simple("foo").const().tokens({}) == [DECL_NAME.emit("foo")]
 
     def test_tokens_with_levels(self):
         foo = Name.simple("foo").const(levels=[u, v])
-        assert foo.tokens({}) == [
-            DECL_NAME.emit("foo"),
-            PUNCT.emit(".{"),
-            LEVEL.emit("u"),
-            PUNCT.emit(", "),
-            LEVEL.emit("v"),
-            PUNCT.emit("}"),
-        ]
+        assert foo.tokens({}) == [DECL_NAME.emit("foo")]
 
     def test_tokens_with_level_zero(self):
         ofNat = Name.simple("ofNat").const(levels=[W_LEVEL_ZERO])
-        assert ofNat.tokens({}) == [
-            DECL_NAME.emit("ofNat"),
-            PUNCT.emit(".{"),
-            LEVEL.emit("0"),
-            PUNCT.emit("}"),
-        ]
+        assert ofNat.tokens({}) == [DECL_NAME.emit("ofNat")]
 
 
 class TestInductive(object):
@@ -519,14 +510,20 @@ class TestRecursor(object):
 class TestTheorem(object):
     def test_delaborate(self):
         # FIXME: this theorem is not a Prop, but that's too annoying now
+        # Like `def`, Lean breaks after `:=` onto an indented line.
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
-        assert FORMAT_PLAIN(theorem.tokens({})) == "theorem foo : Nat := Nat.zero"
+        assert FORMAT_PLAIN(theorem.tokens({})) == dedent(
+            """\
+            theorem foo : Nat :=
+              Nat.zero
+            """,
+        ).rstrip("\n")
 
     def test_assign_uses_operator_token(self):
         theorem = Name.simple("foo").theorem(type=NAT, value=NAT_ZERO)
         tokens = theorem.tokens({})
         assigns = [(tag, text) for tag, text in tokens if ":=" in text]
-        assert assigns == [OPERATOR.emit(" := ")]
+        assert assigns == [OPERATOR.emit(" :=")]
 
 
 class TestAxiom(object):
@@ -659,7 +656,7 @@ class TestLambda(object):
         lam = fun(x.binder(type=NAT))(NAT_ZERO)
         tokens = lam.tokens({})
         arrows = [(tag, text) for tag, text in tokens if "↦" in text]
-        assert arrows == [OPERATOR.emit(" ↦ ")]
+        assert arrows == [OPERATOR.emit(" ↦")]
 
     def test_nested_default(self):
         nested = fun(
@@ -714,11 +711,20 @@ class TestLambda(object):
         assert FORMAT_PLAIN(nested.tokens({}, [])) == "fun x {y} [Nat] f ↦ f"
 
     def test_nested_non_lambda_body(self):
+        # The `let`'s mandatory newline forces the enclosing `fun` group open.
         let = y.let(type=NAT, value=NAT_ZERO, body=b0)
         nested = fun(x.binder(type=NAT))(let)
-        assert FORMAT_PLAIN(nested.tokens({})) == "fun x ↦ let y : Nat := Nat.zero\ny"
+        assert FORMAT_PLAIN(nested.tokens({})) == dedent(
+            """\
+            fun x ↦
+              let y := Nat.zero
+              y
+            """,
+        ).rstrip("\n")
 
     def test_definition(self):
+        # Lean's `declValSimple` always breaks after `:=` (a hard newline),
+        # placing the value on its own line indented by 2.
         f = Name.simple("f").definition(
             type=forall(a.binder(type=NAT))(NAT),
             value=fun(a.binder(type=NAT))(b0),
@@ -738,7 +744,7 @@ class TestLambda(object):
         assert FORMAT_PLAIN(f.tokens({})) == dedent(
             """\
             def f : Nat :=
-              let a : Nat := Nat.zero
+              let a := Nat.zero
               Nat.zero
             """,
         ).rstrip("\n")
@@ -751,10 +757,193 @@ class TestLambda(object):
         assert FORMAT_PLAIN(f.tokens({Name.simple("Nat"): Nat})) == dedent(
             """\
             def f : Nat → Nat :=
-              fun a ↦ let x : Nat := Nat.zero
-              a
+              fun a ↦
+                let x := Nat.zero
+                a
             """,
         ).rstrip("\n")
+
+
+class TestRenderWidth(object):
+    def test_width_controls_wrapping(self):
+        from rpylean import _format
+
+        # A pi type long enough to wrap at a narrow width but not a wide one.
+        expr = NAT
+        for _ in range(8):
+            expr = forall(a.binder(type=NAT))(expr)
+
+        _format.set_render_width(20)
+        try:
+            narrow = FORMAT_PLAIN(expr.tokens({}))
+        finally:
+            _format.set_render_width(_format.DEFAULT_WIDTH)
+        wide = FORMAT_PLAIN(expr.tokens({}))
+
+        assert "\n" in narrow
+        assert "\n" not in wide
+
+
+class TestLeanLayoutFidelity(object):
+    """
+    Layouts checked against Lean 4.30's own pretty printer (`ppExpr` rendered
+    at explicit widths). The one intentional deviation is rpylean's `↦`/`:`
+    notation where Lean prints `=>`/`:`; the wrapping *structure* matches.
+    """
+
+    def _render(self, expr, width, constants={}):
+        from rpylean import _format
+
+        _format.set_render_width(width)
+        try:
+            return FORMAT_PLAIN(expr.tokens(constants))
+        finally:
+            _format.set_render_width(_format.DEFAULT_WIDTH)
+
+    def test_application_fill_wraps(self):
+        # Lean packs as many args per line as fit (`fill`), continuation
+        # indented by 2 — not one-arg-per-line.
+        app = f.const()
+        for _ in range(8):
+            app = app.app(a.const())
+        # Wide enough: stays on one line (17 columns).
+        assert self._render(app, 20) == "f a a a a a a a a"
+        # Narrower: packs five args, then wraps the rest indented by 2.
+        assert self._render(app, 12) == "f a a a a a\n  a a a"
+
+    def test_nested_application_paren_args_wrap(self):
+        gg = Name.simple("gg").const()
+        hh = Name.simple("hh").const()
+        ff = Name.simple("ff").const()
+        aaa = Name.simple("aaa").const()
+        expr = ff.app(gg.app(aaa)).app(hh.app(aaa).app(aaa)).app(gg.app(aaa))
+        assert self._render(expr, 18) == dedent(
+            """\
+            ff (gg aaa)
+              (hh aaa aaa)
+              (gg aaa)"""
+        )
+
+    def test_pi_type_progressive_nesting(self):
+        pi = NAT
+        for _ in range(8):
+            pi = forall(a.binder(type=NAT))(pi)
+        assert self._render(pi, 20) == dedent(
+            """\
+            Nat →
+              Nat →
+                Nat →
+                  Nat →
+                    Nat →
+                      Nat →
+                        Nat →
+                          Nat →
+                            Nat"""
+        )
+
+    def test_trailing_lambda_splices_into_application(self):
+        # Matching Lean's `ppAllowUngrouped` on `fun`: a trailing lambda is
+        # unparenthesized and spliced into the application's fill, so the head
+        # stays with the binders and only the lambda body breaks.
+        hof = Name.simple("hof").const()
+        x, y, z, w_ = names("x", "y", "z", "w")
+        lam = fun(
+            x.binder(type=NAT), y.binder(type=NAT),
+            z.binder(type=NAT), w_.binder(type=NAT),
+        )(a.const())
+        expr = hof.app(lam)
+        # Head + binders stay together; only the body breaks (indent 2).
+        assert self._render(expr, 18) == "hof fun x y z w ↦\n  a"
+        # Narrower: head breaks, binders fill-wrap (indent 4), body indent 2.
+        assert self._render(expr, 12) == dedent(
+            """\
+            hof
+              fun x y z
+                w ↦
+              a"""
+        )
+
+    def _forall_RaaaC(self):
+        # ∀ over a chain of binders ending in `R aaa` (R : Nat → Prop).
+        R = Name.simple("R")
+        Rd = R.axiom(type=forall(Name.simple("n").binder(type=NAT))(PROP))
+        return R, {R: Rd}
+
+    def test_forall_merges_same_type_binders(self):
+        R, C = self._forall_RaaaC()
+        aaa, bbb, ccc = names("aaa", "bbb", "ccc")
+        body = R.const().app(W_BVar(2))
+        e = forall(aaa.binder(type=NAT))(
+            forall(bbb.binder(type=NAT))(
+                forall(ccc.implicit_binder(type=NAT))(body),
+            ),
+        )
+        # Same-type explicit binders merge; the implicit forms its own group;
+        # all live under a single `∀`.
+        assert self._render(e, 100, C) == "∀ (aaa bbb : Nat) {ccc : Nat}, R aaa"
+
+    def test_forall_breaks_body_keeping_binders(self):
+        R, C = self._forall_RaaaC()
+        aaa, bbb, ccc = names("aaa", "bbb", "ccc")
+        body = R.const().app(W_BVar(2))
+        e = forall(aaa.binder(type=NAT))(
+            forall(bbb.binder(type=NAT))(
+                forall(ccc.implicit_binder(type=NAT))(body),
+            ),
+        )
+        # Binders stay together; only the body breaks after the comma.
+        assert self._render(e, 30, C) == dedent(
+            """\
+            ∀ (aaa bbb : Nat) {ccc : Nat},
+              R aaa"""
+        )
+
+    def test_forall_packs_binder_groups(self):
+        # Distinct-type binder groups pack as many per line as fit (a `fill`,
+        # not one-per-line), and the body joins the last binder line — exactly
+        # as Lean lays it out.
+        R = Name.simple("R")
+        Bool_ = Name.simple("Bool")
+        C = {
+            R: R.axiom(type=forall(Name.simple("n").binder(type=NAT))(PROP)),
+            Bool_: Bool_.axiom(type=TYPE),
+        }
+        aa, bb, cc, dd = names("aa", "bb", "cc", "dd")
+        Bool = Bool_.const()
+        body = R.const().app(W_BVar(3))
+        e = forall(aa.binder(type=NAT))(
+            forall(bb.binder(type=Bool))(
+                forall(cc.binder(type=NAT))(
+                    forall(dd.binder(type=Bool))(body),
+                ),
+            ),
+        )
+        assert self._render(e, 30, C) == dedent(
+            """\
+            ∀ (aa : Nat) (bb : Bool)
+              (cc : Nat) (dd : Bool), R aa"""
+        )
+
+    def test_forall_wide_binder_wraps_internally(self):
+        # A binder wider than the line: `∀` drops to its own line, the binder
+        # group wraps after the `:`, exactly as Lean lays it out.
+        R, C = self._forall_RaaaC()
+        aaa = names("aaa")[0]
+        body = R.const().app(W_BVar(0))
+        e = forall(aaa.binder(type=NAT))(
+            forall(aaa.binder(type=NAT))(
+                forall(aaa.binder(type=NAT))(
+                    forall(aaa.binder(type=NAT))(body),
+                ),
+            ),
+        )
+        assert self._render(e, 22, C) == dedent(
+            """\
+            ∀
+              (aaa aaa aaa aaa :
+                Nat),
+              R aaa"""
+        )
 
 
 class TestApp(object):
