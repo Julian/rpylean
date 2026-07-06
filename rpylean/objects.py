@@ -6320,6 +6320,7 @@ class W_Recursor(W_DeclarationKind):
         # demand-loads them, so the skip only fires for genuinely
         # incomplete environments.
         all_ctors = []
+        first_kind = None
         for ind_name in self.all:
             try:
                 ind_decl = get_decl(env.declarations, ind_name)
@@ -6332,8 +6333,14 @@ class W_Recursor(W_DeclarationKind):
                     "recursor refers to %s which is not an inductive"
                     % ind_name.str(),
                 )
+            if first_kind is None:
+                first_kind = ind_kind
             for ctor in ind_kind.constructor_decls(env.declarations):
                 all_ctors.append(ctor)
+        assert first_kind is not None
+        error = self._check_name(env, tc.decl.name, first_kind)
+        if error is not None:
+            return error
         # Split recursors (one per motive in a mutual or nested-inductive
         # block) only have rules for ctors whose return matches *their*
         # motive's type — so `len(rules) != len(ctors_of(all))` is fine
@@ -6393,6 +6400,47 @@ class W_Recursor(W_DeclarationKind):
                 error = self._check_rule_rhs_head(env, rule, rule_idx)
                 if error is not None:
                     return error
+
+    def _check_name(self, env, name, first_kind):
+        """
+        Verify this recursor's name is one the kernel could have
+        generated for its inductive block. The kernel constructs
+        recursors (names included) from the inductive types alone:
+        ``mk_rec_name(member)`` (`<member>.rec`) for each block
+        member, plus ``mk_rec_name(all[0]).append_after(k)``
+        (`<all[0]>.rec_<k>`) for ``1 <= k <= num_nested`` — the
+        auxiliary recursors `mk_aux_rec_name_map` (lean4
+        inductive.cpp) renames when restoring eliminated nested
+        occurrences. A recursor under any other name — e.g. arena's
+        `misnamed_rec.not_rec` — is a declaration the kernel would
+        never produce.
+        """
+        if isinstance(name, StrName):
+            suffix = name.suffix
+            if suffix == "rec":
+                for ind_name in self.all:
+                    if name.parent.syntactic_eq(ind_name):
+                        return None
+            elif (
+                suffix.startswith("rec_")
+                and len(suffix) <= 13
+                and suffix[4] != "0"
+                and name.parent.syntactic_eq(self.all[0])
+            ):
+                k = 0
+                for i in range(4, len(suffix)):
+                    ch = suffix[i]
+                    if ch < "0" or ch > "9":
+                        k = 0
+                        break
+                    k = k * 10 + (ord(ch) - ord("0"))
+                if 1 <= k <= first_kind.num_nested:
+                    return None
+        return W_InvalidRecursorRule(
+            env,
+            "recursor %s is not a name the kernel generates for %s"
+            % (name.str(), self.all[0].str()),
+        )
 
     def _check_rule_rhs_head(self, env, rule, ctor_idx):
         """Verify the rule's rhs is `λ params... motives... minors...

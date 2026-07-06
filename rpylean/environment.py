@@ -213,6 +213,15 @@ class EnvironmentBuilder(object):
             name.quotient(type=type, kind=kind, levels=levels),
         )
 
+    def check_name(self, name):
+        """
+        Lean's ``environment.check_name``: nothing may already be
+        declared under ``name``.
+        """
+        env_decls = self.env.declarations
+        if name in env_decls:
+            raise AlreadyDeclared(name, env_decls)
+
     def register_declaration(self, decl):
         env_decls = self.env.declarations
         if decl.name in env_decls:

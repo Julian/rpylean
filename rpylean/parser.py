@@ -18,7 +18,7 @@ from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
-from rpylean.exceptions import ExportError, ReflexiveKError
+from rpylean.exceptions import ExportError, MalformedLine, ReflexiveKError
 
 
 EXPORT_VERSION = "3.1.0"
@@ -137,7 +137,7 @@ def _parse_name(cursor, builder):
         parent = builder.names[parent_nidx]
         builder.register_name(nidx, parent.num_child(rbigint.fromint(id_val)))
     else:
-        raise ValueError("unknown name discriminator: %s" % second_key)
+        raise MalformedLine("unknown name discriminator: %s" % second_key)
 
 
 def _parse_name_str_inner(cursor):
@@ -151,7 +151,7 @@ def _parse_name_str_inner(cursor):
         elif key == "str":
             part = cursor.read_string()
         else:
-            raise ValueError("unexpected key %s in name str" % key)
+            raise MalformedLine("unexpected key %s in name str" % key)
         if cursor.maybe('}'):
             return parent_nidx, part
         cursor.expect(',')
@@ -168,7 +168,7 @@ def _parse_name_num_inner(cursor):
         elif key == "i":
             id_val = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in name num" % key)
+            raise MalformedLine("unexpected key %s in name num" % key)
         if cursor.maybe('}'):
             return parent_nidx, id_val
         cursor.expect(',')
@@ -210,7 +210,7 @@ def _parse_universe(cursor, builder):
         cursor.expect('}')
         builder.register_level(uidx, builder.names[nidx].as_level_param())
     else:
-        raise ValueError("unknown universe discriminator: %s" % disc)
+        raise MalformedLine("unknown universe discriminator: %s" % disc)
 
 
 # ---- Expressions ---------------------------------------------------------
@@ -261,7 +261,7 @@ def _read_expr_value(cursor, builder, disc):
         return objects._mk_w_litstr(cursor.read_string())
     if disc == "proj":
         return _read_proj(cursor, builder)
-    raise ValueError("unknown expr discriminator: %s" % disc)
+    raise MalformedLine("unknown expr discriminator: %s" % disc)
 
 
 def _read_app(cursor, builder):
@@ -275,7 +275,7 @@ def _read_app(cursor, builder):
         elif key == "arg":
             arg_eidx = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in app" % key)
+            raise MalformedLine("unexpected key %s in app" % key)
         if cursor.maybe('}'):
             return builder.exprs[fn_eidx].app(builder.exprs[arg_eidx])
         cursor.expect(',')
@@ -292,7 +292,7 @@ def _read_const(cursor, builder):
         elif key == "us":
             level_idxs = cursor.read_int_array()
         else:
-            raise ValueError("unexpected key %s in const" % key)
+            raise MalformedLine("unexpected key %s in const" % key)
         if cursor.maybe('}'):
             if level_idxs is None:
                 level_idxs = []
@@ -319,7 +319,7 @@ def _read_binder_expr(cursor, builder, is_lam):
         elif key == "type":
             type_eidx = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in binder" % key)
+            raise MalformedLine("unexpected key %s in binder" % key)
         if cursor.maybe('}'):
             bound = _binder(
                 builder.names[name_idx],
@@ -342,7 +342,7 @@ def _binder(name, info, type):
         return name.strict_implicit_binder(type=type)
     if info == "instImplicit":
         return name.instance_binder(type=type)
-    raise ValueError("Unknown binder info %s" % info)
+    raise MalformedLine("Unknown binder info %s" % info)
 
 
 def _read_let(cursor, builder):
@@ -364,7 +364,7 @@ def _read_let(cursor, builder):
         elif key == "value":
             value_eidx = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in letE" % key)
+            raise MalformedLine("unexpected key %s in letE" % key)
         if cursor.maybe('}'):
             return builder.names[name_idx].let(
                 type=builder.exprs[type_eidx],
@@ -388,7 +388,7 @@ def _read_proj(cursor, builder):
         elif key == "typeName":
             type_name_idx = cursor.read_int()
         else:
-            raise ValueError("unexpected key %s in proj" % key)
+            raise MalformedLine("unexpected key %s in proj" % key)
         if cursor.maybe('}'):
             return builder.names[type_name_idx].proj(
                 idx, builder.exprs[struct_eidx],
@@ -400,7 +400,7 @@ def _skip_value(cursor):
     """Skip a JSON value of any shape (for fields the parser ignores)."""
     cursor.skip_ws()
     if cursor.pos >= cursor.length:
-        raise ValueError("unexpected end of input")
+        raise MalformedLine("unexpected end of input")
     c = cursor.line[cursor.pos]
     if c == '"':
         cursor.read_string()
@@ -432,7 +432,7 @@ def _skip_value(cursor):
                 return
             cursor.expect(',')
     else:
-        raise ValueError("unsupported value at pos %d" % cursor.pos)
+        raise MalformedLine("unsupported value at pos %d" % cursor.pos)
 
 
 # ---- Declarations (axiom/def/opaque/thm/quot) ----------------------------
@@ -490,7 +490,7 @@ def _parse_quot(cursor, builder):
             if levels is None:
                 levels = []
             if kind < 0:
-                raise ValueError("quot record missing `kind`")
+                raise MalformedLine("quot record missing `kind`")
             builder.register_quotient(
                 builder.names[name_idx],
                 builder.exprs[type_eidx],
@@ -613,7 +613,7 @@ def _parse_def_hint(cursor):
             return objects.HINT_OPAQUE
         if raw == "abbrev":
             return objects.HINT_ABBREV
-        raise ValueError("unknown def hint: %s" % raw)
+        raise MalformedLine("unknown def hint: %s" % raw)
     cursor.expect('{')
     cursor.expect_key("regular")
     n = cursor.read_int()
@@ -729,6 +729,17 @@ def _parse_inductive(cursor, builder):
             cursor.expect('}')
             break
         cursor.expect(',')
+
+    # The kernel generates each member's recursor itself, so its name
+    # must be free before the block is added, whether or not the export
+    # includes it — `check_inductive_types` (lean4 inductive.cpp)
+    # checks both names up front. Without the `.rec` check an export
+    # can park a foreign declaration at the recursor's name and present
+    # its "real" recursor under some other name.
+    for type_data in types:
+        name = builder.names[type_data.nidx]
+        builder.check_name(name)
+        builder.check_name(name.child("rec"))
 
     if len(types) == 1:
         _register_single_inductive(builder, types[0], ctors, recs)
