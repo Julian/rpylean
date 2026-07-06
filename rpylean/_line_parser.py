@@ -16,6 +16,8 @@ from __future__ import print_function
 from rpython.rlib.rstring import StringBuilder
 from rpython.rlib.rutf8 import unichr_as_utf8_append
 
+from rpylean.exceptions import MalformedLine
+
 
 class LineCursor(object):
     """A stateful byte cursor over a single NDJSON line."""
@@ -42,7 +44,7 @@ class LineCursor(object):
     def expect(self, ch):
         self.skip_ws()
         if self.pos >= self.length or self.line[self.pos] != ch:
-            raise ValueError(
+            raise MalformedLine(
                 "expected %s at pos %d in %s" % (ch, self.pos, self.line)
             )
         self.pos += 1
@@ -64,7 +66,7 @@ class LineCursor(object):
             sign = -1
             i += 1
         if i >= n or line[i] < '0' or line[i] > '9':
-            raise ValueError("expected int at pos %d in %s" % (self.pos, line))
+            raise MalformedLine("expected int at pos %d in %s" % (self.pos, line))
         val = 0
         zero = ord('0')
         while i < n:
@@ -81,7 +83,7 @@ class LineCursor(object):
         line = self.line
         n = self.length
         if self.pos >= n or line[self.pos] != '"':
-            raise ValueError("expected string at pos %d" % self.pos)
+            raise MalformedLine("expected string at pos %d" % self.pos)
         i = self.pos + 1
         start = i
         has_escape = False
@@ -100,14 +102,14 @@ class LineCursor(object):
                     i += 2
             else:
                 i += 1
-        raise ValueError("unterminated string at pos %d" % start)
+        raise MalformedLine("unterminated string at pos %d" % start)
 
     def read_key(self):
         """Read ``"key":`` and return the key."""
         s = self.read_string()
         self.skip_ws()
         if self.pos >= self.length or self.line[self.pos] != ':':
-            raise ValueError("expected ':' after key at pos %d" % self.pos)
+            raise MalformedLine("expected ':' after key at pos %d" % self.pos)
         self.pos += 1
         return s
 
@@ -129,14 +131,14 @@ class LineCursor(object):
             or line[self.pos + elen + 1] != '"'
             or line[self.pos + elen + 2] != ':'
         ):
-            raise ValueError(
+            raise MalformedLine(
                 "expected key %s at pos %d in %s"
                 % (expected, self.pos, self.line)
             )
         j = self.pos + 1
         for k in range(elen):
             if line[j + k] != expected[k]:
-                raise ValueError(
+                raise MalformedLine(
                     "expected key %s at pos %d in %s"
                     % (expected, self.pos, self.line)
                 )
@@ -163,7 +165,7 @@ class LineCursor(object):
         if self.pos + 5 <= n and line[self.pos:self.pos + 5] == "false":
             self.pos += 5
             return False
-        raise ValueError("expected bool at pos %d" % self.pos)
+        raise MalformedLine("expected bool at pos %d" % self.pos)
 
 
 def _decode_escapes(line, start, end):
@@ -195,7 +197,7 @@ def _decode_escapes(line, start, end):
                 unichr_as_utf8_append(builder, code, allow_surrogates=True)
                 i += 4
             else:
-                raise ValueError("bad escape \\%s" % ec)
+                raise MalformedLine("bad escape \\%s" % ec)
             i += 1
         else:
             builder.append(c)

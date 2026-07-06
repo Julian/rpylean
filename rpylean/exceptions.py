@@ -48,6 +48,23 @@ class ErrorAtSource(Exception):
         self.source_pos = source_pos
 
 
+class MalformedLine(ExportError):
+    """
+    A line in the export file doesn't parse.
+    """
+
+    _attrs_ = ['message']
+
+    def __init__(self, message):
+        self.message = message
+
+    def tokens(self):
+        return [
+            ERROR.emit("Malformed export line: "),
+            PLAIN.emit(self.message),
+        ]
+
+
 class AlreadyDeclared(ExportError):
     """
     A declaration already exists in the environment.

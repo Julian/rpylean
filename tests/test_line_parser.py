@@ -5,6 +5,7 @@ Tests for the direct byte-level NDJSON line parser.
 import pytest
 
 from rpylean._line_parser import LineCursor
+from rpylean.exceptions import MalformedLine
 
 
 def test_read_int_simple():
@@ -38,7 +39,7 @@ def test_read_int_skips_whitespace():
 
 def test_read_int_no_digits():
     c = LineCursor("abc")
-    with pytest.raises(ValueError):
+    with pytest.raises(MalformedLine):
         c.read_int()
 
 
@@ -72,7 +73,7 @@ def test_read_string_with_unicode_escape():
 
 def test_read_string_unterminated():
     c = LineCursor('"oops')
-    with pytest.raises(ValueError):
+    with pytest.raises(MalformedLine):
         c.read_string()
 
 
@@ -94,7 +95,7 @@ def test_expect_key_matches():
 
 def test_expect_key_mismatch():
     c = LineCursor('"other":')
-    with pytest.raises(ValueError):
+    with pytest.raises(MalformedLine):
         c.expect_key("name")
 
 
@@ -126,7 +127,7 @@ def test_expect_consumes():
 
 def test_expect_mismatch():
     c = LineCursor("{abc}")
-    with pytest.raises(ValueError):
+    with pytest.raises(MalformedLine):
         c.expect("[")
 
 
@@ -164,5 +165,5 @@ def test_read_bool_with_whitespace():
 
 def test_read_bool_neither():
     c = LineCursor("null")
-    with pytest.raises(ValueError):
+    with pytest.raises(MalformedLine):
         c.read_bool()
