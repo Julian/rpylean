@@ -5093,6 +5093,20 @@ class W_App(W_Expr):
         # an N-deep Nat.succ chain up front for large literals.
         if isinstance(major_premise, W_LitNat):
             major_premise = major_premise.one_step_constructor(env)
+        else:
+            # A stuck major of non-recursive-structure type reduces by
+            # eta-expanding it to `C.mk params… major.0 … major.n`
+            # first, so the ctor's rule can fire — lean4's
+            # `to_cnstr_when_structure` (inductive.h), applied to the
+            # recursor's *major* inductive (`get_major_induct`), which
+            # for the split recursors of a nested block differs from
+            # `all[0]` (e.g. `CedarType.rec_1`'s major is a
+            # `Cedar.Data.Map`, whose single `Map.mk` rule fires).
+            expanded = self._to_cnstr_when_structure(
+                env, decl.type, rec_kind, major_premise,
+            )
+            if expanded is not None:
+                major_premise = expanded
 
         # If the inductive type has parameters, we need to extract them from the major premise
         # (e.g. the 'p' in 'Decidable.isFalse p')
@@ -5155,6 +5169,63 @@ class W_App(W_Expr):
 
         return False, self
 
+    def _to_cnstr_when_structure(self, env, rec_type, rec_kind, major):
+        """
+        Lean's ``to_cnstr_when_structure`` (inductive.h): if ``major``
+        is not a constructor application and its type is a non-Prop
+        non-recursive structure ``C params…``, return
+        ``C.mk params… major.0 … major.n`` (`expand_eta_struct`);
+        otherwise ``None``.
+
+        The structure consulted is the recursor's major-premise
+        inductive (``recursor_val::get_major_induct``), read off the
+        recursor's own type.
+        """
+        induct_name = rec_kind.major_induct_name(rec_type)
+        if induct_name is None:
+            return None
+        ind_decl = find_decl(env.declarations, induct_name)
+        if ind_decl is None:
+            return None
+        ind_kind = ind_decl.w_kind
+        if not isinstance(ind_kind, W_Inductive):
+            return None
+        if not ind_kind.is_non_recursive_structure():
+            return None
+        major_head, _ = major.unapp()
+        if isinstance(major_head, W_Const):
+            head_decl = find_decl(env.declarations, major_head.name)
+            if head_decl is not None and head_decl.w_kind.is_constructor():
+                return None
+        e_type = major.infer(env).whnf(env)
+        type_head, rev_type_args = e_type.unapp()
+        if not isinstance(type_head, W_Const):
+            return None
+        if not type_head.name.syntactic_eq(induct_name):
+            return None
+        e_type_sort = e_type.infer(env).whnf(env)
+        if (
+            isinstance(e_type_sort, W_Sort)
+            and e_type_sort.level.eq(W_LEVEL_ZERO)
+        ):
+            return None
+        ctor_decl = ind_kind.constructor_decls(env.declarations)[0]
+        ctor_kind = ctor_decl.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+        rev_type_args.reverse()
+        num_params = ctor_kind.num_params
+        assert num_params >= 0
+        if len(rev_type_args) < num_params:
+            return None
+        result = ctor_decl.name.const(type_head.levels)
+        for i in range(num_params):
+            result = result.app_in(env, rev_type_args[i])
+        for i in range(ctor_kind.num_fields):
+            result = result.app_in(
+                env, induct_name.proj_in(env, i, major),
+            )
+        return result
+
     def _maybe_iota_nat_rec_step(self, tc, target, args, major_idx):
         """One-step iota for `Nat.rec motive zero succ (W_LitNat N)`.
 
@@ -5189,84 +5260,6 @@ class W_App(W_Expr):
         pred = _mk_w_litnat(major.val.sub(rbigint.fromint(1)))
         rec_at_pred = target.app_in(tc, motive).app_in(tc, zero_case).app_in(tc, succ_case).app_in(tc, pred)
         return succ_case.app_in(tc, pred).app_in(tc, rec_at_pred)
-
-    def try_struct_eta_reduce(self, env):
-        """
-        Struct-eta on the casesOn side. If this is a fully-applied
-        recursor for a single-ctor non-recursive inductive (a
-        structure) and the major is stuck (not a constructor app),
-        reduce by replacing the would-be ctor fields with projections
-        of the major::
-
-            S.rec.{u} M m_1 stuck_major  ≡  m_1 (proj_0 stuck_major) … (proj_{k-1} stuck_major)
-
-        Returns the reduced expression, or `None` if struct-eta
-        doesn't apply. Lean's kernel uses this rule to unstick chains
-        like `(toNormPoly e).fst` where `toNormPoly` expands to a
-        casesOn over `Prod` whose major (a `Poly.cancel` call) is a
-        giant `Nat.brecOn` that won't reduce.
-        """
-        target, args = self.unapp()
-        if not isinstance(target, W_Const):
-            return None
-        decl = get_decl(env.declarations, target.name)
-        recursor = decl.w_kind
-        if not isinstance(recursor, W_Recursor):
-            return None
-
-        # Non-recursive structure: one inductive in the block, one
-        # ctor, no indices, no recursive args. The recursor must take
-        # exactly one motive + one minor (the single ctor's branch).
-        if recursor.num_motives != 1 or recursor.num_minors != 1:
-            return None
-        if len(recursor.all) != 1:
-            return None
-        inductive_decl = get_decl(env.declarations, recursor.all[0])
-        inductive = inductive_decl.w_kind
-        if not isinstance(inductive, W_Inductive):
-            return None
-        if not inductive.is_non_recursive_structure():
-            return None
-        ctor_decl = inductive.constructor_decls(env.declarations)[0]
-        ctor = ctor_decl.w_kind
-        if not isinstance(ctor, W_Constructor):
-            return None
-
-        # Need params + motive + minor + major all present.
-        skip_count = (
-            recursor.num_params
-            + recursor.num_indices
-            + recursor.num_motives
-            + recursor.num_minors
-        )
-        major_idx = len(args) - 1 - skip_count
-        if major_idx < 0:
-            return None
-        major = args[major_idx]
-
-        # Only fire on a genuinely stuck major. If the major heads with
-        # a constructor, regular iota handles it.
-        major_head, _ = major.unapp()
-        if isinstance(major_head, W_Const):
-            head_decl = get_decl(env.declarations, major_head.name)
-            if head_decl.w_kind.is_constructor():
-                return None
-
-        # Apply the minor to projections of the major.
-        minor = args[major_idx + 1]
-        struct_name = recursor.all[0]
-        new_app = minor
-        for i in range(ctor.num_fields):
-            new_app = new_app.app_in(env, struct_name.proj_in(env, i, major))
-
-        # Re-apply any args after the major (the recursor's own extra
-        # applications, peeled outermost-first by `unapp`).
-        i = major_idx - 1
-        while i >= 0:
-            new_app = new_app.app_in(env, args[i])
-            i -= 1
-
-        return new_app
 
     # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
     def _whnf_core(self, env):
@@ -5313,19 +5306,13 @@ class W_App(W_Expr):
             # fresh subtree and the per-decl arena never deduped it.
             return fn.body.instantiate(env, self.arg)
 
-        # Handle recursor in head position
+        # Handle recursor in head position. A stuck major of
+        # structure type is eta-expanded inside (`_to_cnstr_when_
+        # structure`), which unsticks reductions like
+        # `Prod.casesOn STUCK (fun l r => mk l r)` — the `Prod.mk`
+        # rule fires against `Prod.mk STUCK.fst STUCK.snd`.
         iota_progress, reduced = self.try_iota_reduce(env)
         if iota_progress:
-            return reduced
-
-        # Struct-eta on the casesOn side: when the major is stuck but
-        # the inductive is a single-ctor non-recursive structure, push
-        # projections of the major into the single minor. This unsticks
-        # reductions like `Prod.casesOn STUCK (fun l r => mk l r)`,
-        # turning them into `mk STUCK.fst STUCK.snd` so iota can fire
-        # on a surrounding casesOn over the same structure.
-        reduced = self.try_struct_eta_reduce(env)
-        if reduced is not None:
             return reduced
 
         # Quot.lift reduction: Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
@@ -5465,16 +5452,10 @@ def _whnf_iota_chain(env, expr):
 
         progress, reduced = parent.try_iota_reduce(env)
         if not progress:
-            # Iota didn't fire at this level. Struct-eta and quot-lift
-            # can still unstick it — same fallback order as
-            # `_whnf_core` — e.g. a `Prod.rec` whose major is stuck on
-            # an fvar application reduces to the minor applied to
-            # projections, exposing a constructor for the frame above
-            # (`EStateM.Result.rec` over `EStateM.run` chains in
-            # `Std.Do.WP` lemmas).
-            reduced = parent.try_struct_eta_reduce(env)
-            if reduced is None:
-                reduced = parent.try_quot_lift_reduce(env)
+            # Iota didn't fire at this level (struct-eta on a stuck
+            # major happens inside it). Quot-lift can still unstick it
+            # — same fallback order as `_whnf_core`.
+            reduced = parent.try_quot_lift_reduce(env)
             if reduced is None:
                 # Leave `parent` un-reduced and propagate it up; any
                 # frame above us has `parent` as part of its
@@ -6272,6 +6253,37 @@ class W_Recursor(W_DeclarationKind):
         self.all = all
         self.rules = rules
 
+    def major_induct_name(self, rec_type):
+        """
+        The name of this recursor's major-premise inductive, read off
+        the recursor's type: skip the params/motives/minors/indices
+        binders, then take the head constant of the major's domain.
+        Mirrors lean4's ``recursor_val::get_major_induct``
+        (declaration.cpp). ``None`` if the type isn't the expected pi
+        chain (malformed exports).
+
+        For an ordinary recursor this is `all[0]`; for the split
+        recursors of a nested block it's the nested container (e.g.
+        `Lean.Syntax.rec_1`'s major is an `Array Lean.Syntax`).
+        """
+        n = (
+            self.num_params
+            + self.num_motives
+            + self.num_minors
+            + self.num_indices
+        )
+        t = rec_type
+        for _ in range(n):
+            if not isinstance(t, W_ForAll):
+                return None
+            t = t.body
+        if not isinstance(t, W_ForAll):
+            return None
+        head = t.binder.type.head()
+        if not isinstance(head, W_Const):
+            return None
+        return head.name
+
     def rule_for_ctor(self, ctor_name):
         """The rec rule matching ``ctor_name``, or None if no rule does.
 
@@ -6337,7 +6349,10 @@ class W_Recursor(W_DeclarationKind):
                 first_kind = ind_kind
             for ctor in ind_kind.constructor_decls(env.declarations):
                 all_ctors.append(ctor)
-        assert first_kind is not None
+        if first_kind is None:
+            return W_InvalidRecursorRule(
+                env, "recursor targets no inductive types",
+            )
         error = self._check_name(env, tc.decl.name, first_kind)
         if error is not None:
             return error
