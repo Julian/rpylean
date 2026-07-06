@@ -12,8 +12,9 @@ from rpython.rlib import debug, rgc
 from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
-from rpylean import _progress, parser
+from rpylean import _format, _progress, parser
 from rpylean._rlib.rcli import CLI, UsageError
+from rpylean._rlib.rterminal import terminal_width
 from rpylean._tokens import (
     ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3, HEAT_4,
     PLAIN, writer_from_arg,
@@ -47,6 +48,36 @@ COLOR = (
     "color",
     "colorize output (yes|no|auto, default: auto)",
 )
+WIDTH = (
+    "width",
+    "wrap pretty-printed output at this many columns "
+    "(default: the terminal width, or 100 when not a terminal)",
+)
+
+
+def apply_width(width_arg, stdout):
+    """
+    Configure the pretty-printer's line width from ``--width``.
+
+    An explicit ``--width`` wins; otherwise we use the terminal width when
+    ``stdout`` is a terminal, falling back to the default width (which keeps
+    piped/redirected output stable and reproducible).
+    """
+    if width_arg:
+        try:
+            width = int(width_arg)
+        except ValueError:
+            raise UsageError("Invalid --width: %s" % (width_arg,))
+        if width <= 0:
+            raise UsageError("Invalid --width: %s" % (width_arg,))
+        _format.set_render_width(width)
+        return
+    if stdout.isatty():
+        width = terminal_width(stdout.fileno())
+        if width > 0:
+            _format.set_render_width(width)
+            return
+    _format.set_render_width(_format.DEFAULT_WIDTH)
 
 #: The options shared by `check` and `ffi check`, parsed by `_CheckRun`.
 CHECK_OPTIONS = [
@@ -106,6 +137,7 @@ CHECK_OPTIONS = [
         "untranslated (`pypy -m rpylean check ...`)",
     ),
     COLOR,
+    WIDTH,
 ]
 CHECK_FLAGS = [
     (
@@ -133,6 +165,7 @@ CHECK_FLAGS = [
 def check(self, args, stdin, stdout, stderr):
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
+    apply_width(args.options["width"], stdout)
 
     # Wire `kill -INFO <pid>` (macOS) / `kill -USR1 <pid>` (Linux) to
     # print a one-line progress dump from `_StreamingChecker`. Cheap
@@ -483,11 +516,12 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
 @cli.subcommand(
     ["EXPORT_FILE", "*DECLS"],
     help="Dump an exported Lean environment or specific declarations from it.",
-    options=[COLOR],
+    options=[COLOR, WIDTH],
 )
 def dump(self, args, stdin, stdout, stderr):
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
+    apply_width(args.options["width"], stdout)
 
     (path,) = args.args
     try:
@@ -508,6 +542,7 @@ REPL_OPTIONS = [
         "command",
         "run a single REPL command and exit instead of starting an interactive session",
     ),
+    WIDTH,
 ]
 
 
@@ -516,6 +551,8 @@ def _run_repl(environment, args, stdin, stdout, stderr):
     Run a REPL `--command` (if given) or start an interactive session.
     """
     from rpylean import repl
+
+    apply_width(args.options["width"], stdout)
 
     command = args.options["command"]
     if command is not None:
@@ -590,6 +627,7 @@ def check(self, args, stdin, stdout, stderr):
 
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
+    apply_width(args.options["width"], stdout)
 
     _progress.install()
 

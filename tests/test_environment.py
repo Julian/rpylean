@@ -823,11 +823,11 @@ class TestDiagnosticTokens(object):
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
             def bad : Prop :=
-              ∀ (x : Prop), ∀ (y : x), y → y
-                                   ^
-                                   has type
-                                     x
-                                   but is expected to be a Sort (Type or Prop)""",
+              ∀ (x : Prop) (y : x), y → y
+                                ^
+                                has type
+                                  x
+                                but is expected to be a Sort (Type or Prop)""",
         )
 
     def test_not_a_prop_diagnostic(self):
@@ -837,7 +837,7 @@ class TestDiagnosticTokens(object):
 
         assert error.as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
-            theorem nonPropThm : Prop := ∀ (x : Prop), x
+            theorem nonPropThm : Prop :=
                                  ^^^^
                                  has sort
                                    Type
@@ -1005,12 +1005,13 @@ class TestInvalidDeclaration(object):
         assert errors[0].inferred_type == True_.const()
         assert errors[0].as_diagnostic().format_with(FORMAT_PLAIN) == dedent(
             """\
-            theorem badFalse : False := (Wrapper.mk True.intro).p
-                                                    ^^^^^^^^^^
-                                                    has type
-                                                      True
-                                                    but is expected to have type
-                                                      False""",
+            theorem badFalse : False :=
+              (Wrapper.mk True.intro).p
+                          ^^^^^^^^^^
+                          has type
+                            True
+                          but is expected to have type
+                            False""",
         )
 
     def test_not_a_function_diagnostic(self):

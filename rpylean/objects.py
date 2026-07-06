@@ -264,44 +264,70 @@ _RENDER_BUDGET = _RenderBudget()
 _DIAGNOSTIC_RENDER_LIMIT = 200000
 
 
-def _append_marked_tokens(result, span_holder, expr, constants, mark):
+class _Marker(object):
     """
-    Append tokens for ``expr`` to ``result``, tracking ``mark``.
+    Tracks the sub-expression whose rendered span should be reported.
 
-    If ``mark`` is ``expr`` (by identity) *and* no span has been recorded
-    yet, record the token index range into ``span_holder[0]`` as a
-    ``(start, end)`` tuple. (Hash-consing means the same interned
-    sub-expression can appear at many syntactic positions; we report
-    the first occurrence in source order so the caret lands where a
-    reader would look for it.) Otherwise, pass ``mark`` through to
-    ``expr.tokens()`` so that subexpressions can be matched.
+    ``mark`` is the expression (by identity) to locate when building a
+    ``Format``; ``found`` records whether the (first) occurrence has been
+    wrapped already.  Hash-consing means the same interned sub-expression
+    can appear at many syntactic positions, so we wrap only the first one
+    seen in source order -- the caret then lands where a reader would look
+    for it.  A ``mark`` of ``None`` matches nothing.
+    """
 
-    ``expr`` is any object with a ``tokens(constants, mark, span_holder)``
-    method -- typically a ``W_Expr`` or ``Binder``.
+    _attrs_ = ['mark', 'found']
+
+    def __init__(self, mark):
+        self.mark = mark
+        self.found = False
+
+
+#: Shared marker for the common no-mark case (its ``found`` is never set,
+#: since a ``None`` mark matches nothing).
+_NO_MARK = _Marker(None)
+
+
+def _marker_for(mark):
+    if mark is None:
+        return _NO_MARK
+    return _Marker(mark)
+
+
+def _tokens_from_format(fmt, span_holder):
+    """
+    Render ``fmt`` to a flat token list, recording any marked span.
+
+    ``span_holder``, when given, is a one-element list whose slot is set to
+    the ``(start, end)`` token-index range covered by the marked
+    sub-expression (see :class:`_Marker`).
+    """
+    tokens, span = _format.render(fmt, _format.RENDER_WIDTH.width)
+    if span_holder is not None and span != NO_SPAN and span_holder[0] == NO_SPAN:
+        span_holder[0] = span
+    return tokens
+
+
+def _sub(marker, expr, constants):
+    """
+    Build the ``Format`` for the child ``expr``, threading diagnostics.
+
+    Spends one unit of the diagnostic render budget per visit, cutting the
+    walk off with an ellipsis when it runs out, and wraps the first
+    occurrence of ``marker.mark`` in a span tag.  ``expr`` is anything with
+    a ``to_format(constants, marker)`` method -- a ``W_Expr`` or ``Binder``.
     """
     budget = _RENDER_BUDGET
     if budget.remaining == 0:
-        return
+        return _format.NIL
     if budget.remaining > 0:
         budget.remaining -= 1
         if budget.remaining == 0:
-            result.append(MESSAGE.emit(" …⟨diagnostic truncated⟩"))
-            return
-    if mark is not None and mark is expr:
-        start = len(result)
-        result += expr.tokens(constants)
-        if span_holder is not None and span_holder[0] == NO_SPAN:
-            span_holder[0] = (start, len(result))
-        return
-    if mark is not None and span_holder is not None and span_holder[0] == NO_SPAN:
-        inner = [NO_SPAN]
-        tokens = expr.tokens(constants, mark, inner)
-        if inner[0] != NO_SPAN:
-            offset = len(result)
-            span_holder[0] = (inner[0][0] + offset, inner[0][1] + offset)
-        result += tokens
-    else:
-        result += expr.tokens(constants)
+            return _format.text(MESSAGE, " …⟨diagnostic truncated⟩")
+    if marker.mark is not None and not marker.found and marker.mark is expr:
+        marker.found = True
+        return _format.tag(_format.MARK_TAG, expr.to_format(constants, marker))
+    return expr.to_format(constants, marker)
 
 
 def _error_diagnostic(declaration, name, expr, prefix, message, declarations):
@@ -712,18 +738,57 @@ def name_with_levels(name, levels):
     return "%s.{%s}" % (pretty, ", ".join(strs))
 
 
-def name_with_levels_tokens(name, levels, constants):
-    """Produce tokens for a declaration name with optional universe levels."""
-    result = name.tokens(constants)
+def name_with_levels_format(name, levels, constants):
+    """A ``Format`` for a declaration name with optional universe levels."""
+    result = _format.text(DECL_NAME, name.user_name().str())
     if levels:
-        result.append(PUNCT.emit(".{"))
+        result = _format.append(result, _format.text(PUNCT, ".{"))
         for i, level in enumerate(levels):
             if i > 0:
-                result.append(PUNCT.emit(", "))
+                result = _format.append(result, _format.text(PUNCT, ", "))
             each = level.str()
-            result.append(LEVEL.emit(each if each else "0"))
-        result.append(PUNCT.emit("}"))
+            result = _format.append(
+                result, _format.text(LEVEL, each if each else "0"),
+            )
+        result = _format.append(result, _format.text(PUNCT, "}"))
     return result
+
+
+def _decl_signature_format(keyword, name, levels, type, constants, marker):
+    """A ``Format`` for ``<keyword> <name> : <type>`` (no value)."""
+    return _format.concat([
+        _format.text(KEYWORD, keyword),
+        _format.text(PLAIN, " "),
+        name_with_levels_format(name, levels, constants),
+        _format.text(PUNCT, " : "),
+        _sub(marker, type, constants),
+    ])
+
+
+def _decl_with_value_format(keyword, name, levels, type, value,
+                            constants, marker):
+    """
+    A ``Format`` for ``<keyword> <name> : <type> := <value>``.
+
+    The value always begins on its own line, indented by 2, matching Lean's
+    ``declValSimple`` (``" :=" >> ppHardLineUnlessUngrouped >> declBody``),
+    whose ``ppHardLineUnlessUngrouped`` is a mandatory newline in the
+    (grouped) declaration context.
+    """
+    head = _format.concat([
+        _format.text(KEYWORD, keyword),
+        _format.text(PLAIN, " "),
+        name_with_levels_format(name, levels, constants),
+        _format.text(PUNCT, " : "),
+        _sub(marker, type, constants),
+        _format.text(OPERATOR, " :="),
+    ])
+    return _format.concat([
+        head,
+        _format.nest(2, _format.append(
+            _format.text(PLAIN, "\n"), _sub(marker, value, constants),
+        )),
+    ])
 
 
 @elidable
@@ -1519,14 +1584,19 @@ class Name(_Item):
         # Default for `StrName` / `NumName`; `_AnonymousName` overrides.
         return False
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def to_format(self, constants, marker):
         """
-        Display tokens for this name. We display the user-facing name
+        A ``Format`` for this name. We display the user-facing name
         (the ``MacroScopesView.name`` recovered from any hygienic
         encoding), not the raw Lean-canonical string — so a hygienic
         ``a._@.M._hyg.1`` shows as just ``a``.
         """
-        return [DECL_NAME.emit(self.user_name().str())]
+        return _format.text(DECL_NAME, self.user_name().str())
+
+    def tokens(self, constants, mark=None, span_holder=None):
+        return _tokens_from_format(
+            self.to_format(constants, _marker_for(mark)), span_holder,
+        )
 
     def syntactic_eq(self, other):
         """
@@ -2018,13 +2088,19 @@ class Binder(_Item):
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
+    def to_format(self, constants, marker):
+        return _format.concat([
+            _format.text(PUNCT, self.left),
+            _format.text(BINDER_NAME, self.name.user_name().str()),
+            _format.text(PUNCT, " : "),
+            _sub(marker, self.type, constants),
+            _format.text(PUNCT, self.right),
+        ])
+
     def tokens(self, constants, mark=None, span_holder=None):
-        result = [PUNCT.emit(self.left)]
-        result.append(BINDER_NAME.emit(self.name.user_name().str()))
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, self.type, constants, mark)
-        result.append(PUNCT.emit(self.right))
-        return result
+        return _tokens_from_format(
+            self.to_format(constants, _marker_for(mark)), span_holder,
+        )
 
     def is_default(self):
         """
@@ -2753,9 +2829,15 @@ class W_Expr(_Item):
             expr = expr.body
         return None
 
+    def to_format(self, constants, marker):
+        """A ``Format`` for this expression, defaulting to plain text."""
+        return _format.text(PLAIN, self.str())
+
     def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list for this expression, defaulting to plain text."""
-        return [PLAIN.emit(self.str())]
+        """Render this expression to a flat token list."""
+        return _tokens_from_format(
+            self.to_format(constants, _marker_for(mark)), span_holder,
+        )
 
 
 class W_BVar(W_Expr):
@@ -2774,8 +2856,8 @@ class W_BVar(W_Expr):
     def str(self):
         return "#%s" % (self.id,)
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        return [BINDER_NAME.emit(self.str())]
+    def to_format(self, constants, marker):
+        return _format.text(BINDER_NAME, self.str())
 
     def emit_to(self, exporter):
         eid = exporter.next_expr_id()
@@ -2849,8 +2931,8 @@ class W_FVar(W_Expr):
     def str(self):
         return self.binder.name.user_name().str()
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        return [BINDER_NAME.emit(self.str())]
+    def to_format(self, constants, marker):
+        return _format.text(BINDER_NAME, self.str())
 
     def incr_free_bvars(self, tc, count, depth):
         return self
@@ -2917,9 +2999,9 @@ class W_LitStr(W_Expr):
         result.append('"')
         return "".join(result)
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list tagging this string literal."""
-        return [LITERAL.emit(self.str())]
+    def to_format(self, constants, marker):
+        """A ``Format`` tagging this string literal."""
+        return _format.text(LITERAL, self.str())
 
     def build_str_expr(self, env):
         if len(self.val) > 5:
@@ -2979,9 +3061,9 @@ class W_Sort(W_Expr):
         exporter.stream.write('{"ie":%d,"sort":%d}\n' % (eid, lid))
         return eid
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list for this Sort, tagged as a sort."""
-        return [SORT.emit(self.str())]
+    def to_format(self, constants, marker):
+        """A ``Format`` for this Sort, tagged as a sort."""
+        return _format.text(SORT, self.str())
 
     def str(self):
         """Pretty format this Sort."""
@@ -3123,9 +3205,15 @@ class W_Const(W_Expr):
                 return False
         return True
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list for this constant reference."""
-        return name_with_levels_tokens(self.name, self.levels, constants)
+    def to_format(self, constants, marker):
+        """
+        A ``Format`` for this constant reference.
+
+        Universe levels are omitted, matching Lean's ``pp.universes=false``
+        default; declaration *headers* still show their level params (they
+        render via ``name_with_levels_format`` directly).
+        """
+        return name_with_levels_format(self.name, [], constants)
 
     def str(self):
         return name_with_levels(self.name, self.levels)
@@ -3361,9 +3449,9 @@ class W_LitNat(W_Expr):
     def str(self):
         return self.val.str()
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        """Return a token list tagging this nat literal."""
-        return [LITERAL.emit(self.str())]
+    def to_format(self, constants, marker):
+        """A ``Format`` tagging this nat literal."""
+        return _format.text(LITERAL, self.str())
 
     def instantiate(self, tc, expr, depth=0):
         return self
@@ -3671,31 +3759,33 @@ class W_Proj(W_Expr):
                 return name
         return "%d" % self.field_index
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def to_format(self, constants, marker):
         # When the struct_expr is the marked expression, widen the span
         # to cover the whole projection (struct_expr + "." + field_name)
         # rather than just the struct_expr alone.
         mark_whole = (
-            mark is not None
-            and span_holder is not None
-            and span_holder[0] == NO_SPAN
-            and mark is self.struct_expr
+            marker.mark is not None
+            and not marker.found
+            and marker.mark is self.struct_expr
         )
         field_name = self._field_name(constants)
-        result = []
         needs_parens = isinstance(self.struct_expr, W_App)
-        if needs_parens:
-            result.append(PUNCT.emit("("))
-        _append_marked_tokens(
-            result, span_holder, self.struct_expr, constants,
-            None if mark_whole else mark,
-        )
-        if needs_parens:
-            result.append(PUNCT.emit(")"))
-        result.append(PUNCT.emit("."))
-        result.append(DECL_NAME.emit(field_name))
         if mark_whole:
-            span_holder[0] = (0, len(result))
+            marker.found = True
+            inner = _sub(_NO_MARK, self.struct_expr, constants)
+        else:
+            inner = _sub(marker, self.struct_expr, constants)
+        parts = []
+        if needs_parens:
+            parts.append(_format.text(PUNCT, "("))
+        parts.append(inner)
+        if needs_parens:
+            parts.append(_format.text(PUNCT, ")"))
+        parts.append(_format.text(PUNCT, "."))
+        parts.append(_format.text(DECL_NAME, field_name))
+        result = _format.concat(parts)
+        if mark_whole:
+            result = _format.tag(_format.MARK_TAG, result)
         return result
 
     def _whnf_core(self, env):
@@ -4120,7 +4210,7 @@ class W_ForAll(W_FunBase):
             return self
         return _mk_w_forall_in(tc, new_binder, new_body)
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def to_format(self, constants, marker):
         """
         Render either as an arrow (``x → y``) or else really using ``∀ _, _``.
 
@@ -4132,57 +4222,76 @@ class W_ForAll(W_FunBase):
             * dependent function types
 
         We try to follow Lean's real pretty printer for deciding when to
-        render which.
+        render which.  Consecutive ``∀`` binders merge under a single ``∀``
+        (with same-kind, same-type runs grouped, e.g. ``∀ (a b : Nat)``),
+        matching Lean.  Either form breaks after the ``,``/``→`` and indents
+        its right-hand side when it does not fit on a line.
         """
-        lhs_type = self.binder.type
-        if isinstance(lhs_type, W_Const):
-            # Tolerate names `constants` doesn't have (a partially
-            # registered environment, e.g. mid-`ffi check`): rendering
-            # must never raise, it just loses the ∀-vs-→ refinement.
-            decl = constants.get(lhs_type.name, None)
-            if decl is not None:
-                lhs_type = decl.type
-        elif isinstance(lhs_type, W_FVar):
-            lhs_type = lhs_type.binder.type
-
-        rhs = self.body.instantiate(None, self.binder.fvar())
-        if (
-            not _is_prop_type(lhs_type, constants) and _is_prop_type(rhs, constants)
-        ) or (self.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants)):
-            result = [KEYWORD.emit("∀"), PLAIN.emit(" ")]
-            _append_marked_tokens(
-                result, span_holder, self.binder, constants, mark,
-            )
-            result.append(PUNCT.emit(", "))
-            _append_marked_tokens(result, span_holder, rhs, constants, mark)
-            return result
-        else:
-            result = []
-            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
-                if isinstance(self.binder.type, W_ForAll):
-                    result.append(PUNCT.emit("("))
-                _append_marked_tokens(
-                    result, span_holder, self.binder.type, constants, mark,
+        is_forall, rhs = _forall_quantifier_step(self, constants)
+        if is_forall:
+            # Collect the maximal run of binders that each render as ∀.
+            binders = [self.binder]
+            current = rhs
+            while isinstance(current, W_ForAll):
+                next_is_forall, next_rhs = _forall_quantifier_step(
+                    current, constants,
                 )
-                if isinstance(self.binder.type, W_ForAll):
-                    result.append(PUNCT.emit(")"))
+                if not next_is_forall:
+                    break
+                binders.append(current.binder)
+                current = next_rhs
+            body = current
+            # One `fill` over `∀ ppSpace binder ... , ppSpace term`, mirroring
+            # Lean's `forall` parser under the category `fill <| nest 2`. Each
+            # binder group is itself a `fill` (its names/type wrap minimally —
+            # see `_forall_binder_group_docs`) but is measured flattened by the
+            # outer fill, so binders pack as many per line as fit, a binder too
+            # wide for the line pushes `∀` onto its own line, and the body
+            # joins the last binder line unless it too must wrap. Everything
+            # nests by 2.
+            parts = [_format.text(KEYWORD, "∀")]
+            for group_doc in _forall_binder_group_docs(
+                binders, constants, marker,
+            ):
+                parts.append(_format.LINE)
+                parts.append(group_doc)
+            parts.append(_format.text(PUNCT, ","))
+            parts.append(_format.LINE)
+            parts.append(_sub(marker, body, constants))
+            return _format.fill(_format.nest(2, _format.concat(parts)))
+        else:
+            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
+                wrap = isinstance(self.binder.type, W_ForAll)
+                inner = _sub(marker, self.binder.type, constants)
+                if wrap:
+                    lhs = _format.concat([
+                        _format.text(PUNCT, "("),
+                        inner,
+                        _format.text(PUNCT, ")"),
+                    ])
+                else:
+                    lhs = inner
             elif (
                 self.binder.is_instance()
                 and not self.body.loose_bvar_range > 0
                 and self.binder.name.has_macro_scopes()
             ):
-                result.append(PUNCT.emit("["))
-                _append_marked_tokens(
-                    result, span_holder, self.binder.type, constants, mark,
-                )
-                result.append(PUNCT.emit("]"))
+                lhs = _format.concat([
+                    _format.text(PUNCT, "["),
+                    _sub(marker, self.binder.type, constants),
+                    _format.text(PUNCT, "]"),
+                ])
             else:
-                _append_marked_tokens(
-                    result, span_holder, self.binder, constants, mark,
-                )
-            result.append(OPERATOR.emit(" → "))
-            _append_marked_tokens(result, span_holder, rhs, constants, mark)
-            return result
+                lhs = _sub(marker, self.binder, constants)
+            head = _format.concat([lhs, _format.text(OPERATOR, " →")])
+            body = rhs
+
+        return _format.group(_format.concat([
+            head,
+            _format.nest(2, _format.append(
+                _format.LINE, _sub(marker, body, constants),
+            )),
+        ]))
 
 
 def group_to_str(group):
@@ -4195,18 +4304,98 @@ def group_to_str(group):
     return "%s%s%s" % (group[-1].left, names, group[-1].right)
 
 
-def _binder_group_tokens(group, constants):
-    names = " ".join([binder.name.user_name().str() for binder in group])
+def _binder_group_format(group, constants):
     if group[-1].is_default():
-        return [BINDER_NAME.emit(names)]
-    else:
-        result = [PUNCT.emit(group[-1].left)]
+        # Default binders carry no brackets; soft-break between names so a
+        # long binder list fill-wraps (as Lean does).
+        parts = []
         for i, binder in enumerate(group):
             if i > 0:
-                result.append(PLAIN.emit(" "))
-            result.append(BINDER_NAME.emit(binder.name.user_name().str()))
-        result.append(PUNCT.emit(group[-1].right))
-        return result
+                parts.append(_format.LINE)
+            parts.append(
+                _format.text(BINDER_NAME, binder.name.user_name().str()),
+            )
+        return _format.concat(parts)
+    parts = [_format.text(PUNCT, group[-1].left)]
+    for i, binder in enumerate(group):
+        if i > 0:
+            parts.append(_format.text(PLAIN, " "))
+        parts.append(_format.text(BINDER_NAME, binder.name.user_name().str()))
+    parts.append(_format.text(PUNCT, group[-1].right))
+    return _format.concat(parts)
+
+
+def _forall_quantifier_step(fa, constants):
+    """
+    Decide whether ``fa`` (a ``W_ForAll``) renders as a ``∀`` quantifier
+    rather than an arrow, returning ``(is_forall, rhs)`` where ``rhs`` is the
+    body with the binder instantiated to its free variable.
+
+    Mirrors Lean: a ``∀`` is used when the result is a proposition and the
+    binding is a genuine quantification (its variable is used, or its domain
+    is not itself a proposition).
+    """
+    lhs_type = fa.binder.type
+    if isinstance(lhs_type, W_Const):
+        # Tolerate names `constants` doesn't have (a partially registered
+        # environment, e.g. mid-`ffi check`): rendering must never raise,
+        # it just loses the ∀-vs-→ refinement.
+        decl = constants.get(lhs_type.name, None)
+        if decl is not None:
+            lhs_type = decl.type
+    elif isinstance(lhs_type, W_FVar):
+        lhs_type = lhs_type.binder.type
+    rhs = fa.body.instantiate(None, fa.binder.fvar())
+    is_forall = (
+        (not _is_prop_type(lhs_type, constants)
+         and _is_prop_type(rhs, constants))
+        or (fa.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants))
+    )
+    return is_forall, rhs
+
+
+def _forall_binder_group_docs(binders, constants, marker):
+    """
+    A list of ``Format``s, one per ``∀`` binder group, grouped as Lean
+    groups them: runs of adjacent binders with the same binder kind
+    (brackets) and a syntactically equal type collapse into one
+    ``(a b c : T)``.  The caller joins them with soft breaks.
+    """
+    docs = []
+    i = 0
+    n = len(binders)
+    while i < n:
+        b = binders[i]
+        j = i + 1
+        while (j < n
+               and binders[j].left == b.left
+               and binders[j].right == b.right
+               and syntactic_eq(binders[j].type, b.type)):
+            j += 1
+        # Inside the brackets the names soft-break between each other and the
+        # type breaks onto its own line after the `:`, all in a `fill` nested
+        # by 2 — so a binder wider than the line wraps minimally, exactly as
+        # Lean's does:
+        #   (aaa bbb ccc
+        #       ddd :
+        #       Nat)
+        inner = []
+        for k in range(i, j):
+            if inner:
+                inner.append(_format.LINE)
+            inner.append(
+                _format.text(BINDER_NAME, binders[k].name.user_name().str()),
+            )
+        inner.append(_format.text(PUNCT, " :"))
+        inner.append(_format.LINE)
+        inner.append(_sub(marker, b.type, constants))
+        docs.append(_format.concat([
+            _format.text(PUNCT, b.left),
+            _format.fill(_format.nest(2, _format.concat(inner))),
+            _format.text(PUNCT, b.right),
+        ]))
+        i = j
+    return docs
 
 
 class W_Lambda(W_FunBase):
@@ -4216,7 +4405,14 @@ class W_Lambda(W_FunBase):
     _ie_first_tag = True  # `'i' < 'l'`
     _hash_tag = 0x1A3B
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def _binders_and_body(self, constants, marker):
+        """
+        Collect this lambda's flattened binder groups and its (instantiated)
+        body, shared by the standalone and spliced renderings.
+
+        Returns ``(binder_doc, body)`` where ``binder_doc`` is the soft-break
+        joined binder list (a ``Format``) and ``body`` is the body expression.
+        """
         binders = []
         binder_used = []
         current = self
@@ -4225,45 +4421,83 @@ class W_Lambda(W_FunBase):
             binder_used.append(current.body.loose_bvar_range > 0)
             current = current.body
 
-        result = [KEYWORD.emit("fun"), PLAIN.emit(" ")]
-
-        groups, current_group, last_style = [], [], binders[0].left
+        # One Format per emitted binder group / instance binder; joined with
+        # soft breaks below so a long binder list fill-wraps (as Lean does).
+        binder_docs = []
+        current_group, last_style = [], binders[0].left
 
         for i, binder in enumerate(binders):
             if binder.is_instance():
                 if current_group:
-                    result += _binder_group_tokens(current_group, constants)
-                    result.append(PLAIN.emit(" "))
+                    binder_docs.append(
+                        _binder_group_format(current_group, constants),
+                    )
                     current_group = []
                 if binder_used[i]:
-                    result += binder.tokens(constants)
+                    binder_docs.append(binder.to_format(constants, marker))
                 else:
-                    result.append(PUNCT.emit("["))
-                    _append_marked_tokens(
-                        result, span_holder, binder.type, constants, mark,
-                    )
-                    result.append(PUNCT.emit("]"))
-                if i < len(binders) - 1:
-                    result.append(PLAIN.emit(" "))
+                    binder_docs.append(_format.concat([
+                        _format.text(PUNCT, "["),
+                        _sub(marker, binder.type, constants),
+                        _format.text(PUNCT, "]"),
+                    ]))
                 last_style = None
             elif binder.left != last_style and current_group:
-                result += _binder_group_tokens(current_group, constants)
-                result.append(PLAIN.emit(" "))
+                binder_docs.append(
+                    _binder_group_format(current_group, constants),
+                )
                 current_group, last_style = [binder], binder.left
             else:
                 current_group.append(binder)
                 last_style = binder.left
         if current_group:
-            result += _binder_group_tokens(current_group, constants)
+            binder_docs.append(_binder_group_format(current_group, constants))
 
-        result.append(OPERATOR.emit(" ↦ "))
+        binder_doc = _format.NIL
+        for i, doc in enumerate(binder_docs):
+            if i > 0:
+                binder_doc = _format.append(binder_doc, _format.LINE)
+            binder_doc = _format.append(binder_doc, doc)
 
         body = current
         for binder in reversed(binders):
             body = body.instantiate(None, binder.fvar())
 
-        _append_marked_tokens(result, span_holder, body, constants, mark)
-        return result
+        return binder_doc, body
+
+    def to_format(self, constants, marker):
+        binder_doc, body = self._binders_and_body(constants, marker)
+        # The binder list and the body break independently (matching Lean):
+        # the binders fill-wrap (continuation indented past `fun `), and the
+        # body breaks after `↦` onto an indented line of its own.
+        return _format.concat([
+            _format.text(KEYWORD, "fun"),
+            _format.text(PLAIN, " "),
+            _format.fill(_format.nest(4, binder_doc)),
+            _format.text(OPERATOR, " ↦"),
+            _format.group(_format.nest(2, _format.append(
+                _format.LINE, _sub(marker, body, constants),
+            ))),
+        ])
+
+    def splice_format(self, constants, marker):
+        """
+        Render this lambda for *splicing* into an enclosing ``fill`` (e.g. as
+        the final argument of an application), matching Lean's
+        ``ppAllowUngrouped`` on ``fun``: no surrounding group, so the body's
+        line break belongs to the enclosing fill rather than a group of its
+        own.  The caller supplies the base indentation (a ``nest 2``), so the
+        binders nest a further 2 and the body sits at the caller's level.
+        """
+        binder_doc, body = self._binders_and_body(constants, marker)
+        return _format.concat([
+            _format.text(KEYWORD, "fun"),
+            _format.text(PLAIN, " "),
+            _format.fill(_format.nest(2, binder_doc)),
+            _format.text(OPERATOR, " ↦"),
+            _format.LINE,
+            _sub(marker, body, constants),
+        ])
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Lambda)
@@ -4353,18 +4587,24 @@ class W_Let(W_Expr):
                 or inductive._has_invalid_index_occurrence(self.value)
                 or inductive._has_invalid_index_occurrence(self.body))
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def to_format(self, constants, marker):
         fvar = self.name.binder(type=self.type).fvar()
-        result = [KEYWORD.emit("let"), PLAIN.emit(" ")]
-        result.append(BINDER_NAME.emit(self.name.str()))
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, self.type, constants, mark)
-        result.append(OPERATOR.emit(" := "))
-        _append_marked_tokens(result, span_holder, self.value, constants, mark)
-        result.append(PLAIN.emit("\n"))
         body = self.body.instantiate(None, fvar)
-        _append_marked_tokens(result, span_holder, body, constants, mark)
-        return result
+        # The binder type is omitted, matching Lean's `pp.letVarTypes=false`
+        # default (`let x := v`). The value breaks onto its own indented line
+        # when it does not fit; the newline before the body is always
+        # mandatory, since the body would otherwise run into the binding.
+        return _format.concat([
+            _format.text(KEYWORD, "let"),
+            _format.text(PLAIN, " "),
+            _format.text(BINDER_NAME, self.name.str()),
+            _format.text(OPERATOR, " :="),
+            _format.group(_format.nest(2, _format.append(
+                _format.LINE, _sub(marker, self.value, constants),
+            ))),
+            _format.text(PLAIN, "\n"),
+            _sub(marker, body, constants),
+        ])
 
     def infer(self, env):
         self.type.infer(env).whnf(env).expect_sort(env)
@@ -4547,11 +4787,11 @@ class W_App(W_Expr):
             i -= 1
         return True
 
-    def tokens(self, constants, mark=None, span_holder=None):
+    def to_format(self, constants, marker):
         current, args = self.unapp()
 
         explicit_mask = None
-        fn_tokens = None
+        head_fmt = None
         if isinstance(current, W_Const):
             decl = constants.get(current.name, None)
             if decl is not None:
@@ -4576,19 +4816,21 @@ class W_App(W_Expr):
                         break
                 if has_implicit:
                     explicit_mask = mask
-                    fn_tokens = [DECL_NAME.emit(current.name.str())]
+                    head_fmt = _format.text(DECL_NAME, current.name.str())
 
-        result = []
-        if fn_tokens is None:
+        if head_fmt is None:
             wrap_fn = isinstance(current, W_Lambda)
+            inner = _sub(marker, current, constants)
             if wrap_fn:
-                result.append(PUNCT.emit("("))
-            _append_marked_tokens(result, span_holder, current, constants, mark)
-            if wrap_fn:
-                result.append(PUNCT.emit(")"))
-        else:
-            result = fn_tokens
+                head_fmt = _format.concat([
+                    _format.text(PUNCT, "("),
+                    inner,
+                    _format.text(PUNCT, ")"),
+                ])
+            else:
+                head_fmt = inner
 
+        parts = [head_fmt]
         n = len(args)
         for idx in range(n - 1, -1, -1):
             arg = args[idx]
@@ -4596,18 +4838,32 @@ class W_App(W_Expr):
                 mask_idx = n - 1 - idx
                 if not explicit_mask[mask_idx]:
                     continue
+            # A trailing lambda is spliced unparenthesized into this fill,
+            # matching Lean's `ppAllowUngrouped` on `fun`: `f fun x ↦ y` keeps
+            # `f fun x ↦` together and breaks only the lambda body.
+            if idx == 0 and isinstance(arg, W_Lambda):
+                parts.append(_format.append(
+                    _format.LINE, arg.splice_format(constants, marker),
+                ))
+                continue
             needs_parens = (
                 (idx == 0 and (isinstance(arg, W_App) or isinstance(arg, W_ForAll)))
                 or (idx > 0 and (isinstance(arg, W_FunBase) or isinstance(arg, W_App)))
             )
-            result.append(PLAIN.emit(" "))
+            arg_fmt = _sub(marker, arg, constants)
             if needs_parens:
-                result.append(PUNCT.emit("("))
-            _append_marked_tokens(result, span_holder, arg, constants, mark)
-            if needs_parens:
-                result.append(PUNCT.emit(")"))
+                arg_fmt = _format.concat([
+                    _format.text(PUNCT, "("),
+                    arg_fmt,
+                    _format.text(PUNCT, ")"),
+                ])
+            # A soft break before each argument: arguments wrap and indent
+            # under the function when the whole application does not fit.
+            parts.append(_format.append(_format.LINE, arg_fmt))
 
-        return result
+        # `fill`, matching Lean's category formatter (`fill <| indent <| …`):
+        # as many arguments as fit go on each line, the rest wrap, indented.
+        return _format.fill(_format.nest(2, _format.concat(parts)))
 
     def infer(self, env):
         return _iter_infer(env, self)
@@ -5353,8 +5609,8 @@ class W_Closure(W_Expr):
         # against ``other`` (which may itself still be a closure).
         return tc.def_eq(self.force(tc), other)
 
-    def tokens(self, constants, mark=None, span_holder=None):
-        return self.force(None).tokens(constants, mark=mark, span_holder=span_holder)
+    def to_format(self, constants, marker):
+        return self.force(None).to_format(constants, marker)
 
     def expect_sort(self, env):
         return self.force(env).expect_sort(env)
@@ -5419,6 +5675,11 @@ class W_Declaration(_Item):
             levels.append(param.as_level_param())
         return self.name.const(levels=levels)
 
+    def to_format(self, constants, marker):
+        return self.w_kind.decl_format(
+            self.name, self.levels, self.type, constants, marker,
+        )
+
     def tokens(self, constants, mark=None, span_holder=None):
         """
         Produce a token stream for syntax-highlighted output.
@@ -5427,9 +5688,8 @@ class W_Declaration(_Item):
         span should be recorded into ``span_holder[0]`` as a
         ``(start_idx, end_idx)`` tuple.
         """
-        return self.w_kind.decl_tokens(
-            self.name, self.levels, self.type, constants,
-            mark=mark, span_holder=span_holder,
+        return _tokens_from_format(
+            self.to_format(constants, _marker_for(mark)), span_holder,
         )
 
     def type_check(self, tc):
@@ -5506,21 +5766,10 @@ class W_Definition(W_DeclarationKind):
         if not tc.def_eq(type, val_type):
             return W_TypeError(tc, self.value, type, inferred_type=val_type)
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("def"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(OPERATOR.emit(" :="))
-        if mark is not None:
-            result.append(PLAIN.emit("\n  "))
-            _append_marked_tokens(result, span_holder, self.value, constants, mark)
-        else:
-            result += indent(
-                [PLAIN.emit("\n")] + self.value.tokens(constants),
-                "  ",
-            )
-        return result
+    def decl_format(self, name, levels, type, constants, marker):
+        return _decl_with_value_format(
+            "def", name, levels, type, self.value, constants, marker,
+        )
 
     def get_delta_reduce_target(self):
         return self.value
@@ -5572,25 +5821,19 @@ class W_Theorem(W_DeclarationKind):
         if not tc.def_eq(type, val_type):
             return W_TypeError(tc, self.value, type, inferred_type=val_type)
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("theorem"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        result.append(OPERATOR.emit(" := "))
-        _append_marked_tokens(result, span_holder, self.value, constants, mark)
-        return result
+    def decl_format(self, name, levels, type, constants, marker):
+        return _decl_with_value_format(
+            "theorem", name, levels, type, self.value, constants, marker,
+        )
 
 
 class W_Axiom(W_DeclarationKind):
     _attrs_ = []
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        return result
+    def decl_format(self, name, levels, type, constants, marker):
+        return _decl_signature_format(
+            "axiom", name, levels, type, constants, marker,
+        )
 
     def type_check(self, type, tc):
         type_type = type.infer(tc)
@@ -5651,13 +5894,11 @@ class W_Quotient(W_DeclarationKind):
         if not isinstance(type_type.whnf(tc), W_Sort):
             return W_NotASort(tc, type, inferred_type=type_type, name=None)
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
+    def decl_format(self, name, levels, type, constants, marker):
         # rpylean displays quot decls as ordinary axioms.
-        result = [KEYWORD.emit("axiom"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        return result
+        return _decl_signature_format(
+            "axiom", name, levels, type, constants, marker,
+        )
 
 
 class W_Inductive(W_DeclarationKind):
@@ -5929,37 +6170,19 @@ class W_Inductive(W_DeclarationKind):
                 return True
         return False
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("inductive"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
+    def decl_format(self, name, levels, type, constants, marker):
+        parts = [_decl_signature_format(
+            "inductive", name, levels, type, constants, marker,
+        )]
         for each in self.constructors:
-            result.append(PLAIN.emit("\n"))
-            inner = [NO_SPAN]
             each_kind = each.w_kind
             assert isinstance(each_kind, W_Constructor)
-            ctor_tokens = list(
-                each_kind.constructor_tokens(
-                    constructor_name=each.name,
-                    type=each.type,
-                    inductive=self,
-                    constants=constants,
-                    mark=mark,
-                    span_holder=inner,
-                )
-            )
-            if (
-                span_holder is not None
-                and span_holder[0] == NO_SPAN
-                and inner[0] != NO_SPAN
-            ):
-                offset = len(result)
-                span_holder[0] = (
-                    inner[0][0] + offset, inner[0][1] + offset,
-                )
-            result += ctor_tokens
-        return result
+            # Each constructor goes on its own line.
+            parts.append(_format.text(PLAIN, "\n"))
+            parts.append(each_kind.constructor_format(
+                each.name, each.type, self, constants, marker,
+            ))
+        return _format.concat(parts)
 
 
 class W_Constructor(W_DeclarationKind):
@@ -5991,16 +6214,13 @@ class W_Constructor(W_DeclarationKind):
         # This includes checking that num_params and num_fields match the declared ctype
         pass
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("constructor"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        return result
+    def decl_format(self, name, levels, type, constants, marker):
+        return _decl_signature_format(
+            "constructor", name, levels, type, constants, marker,
+        )
 
-    def constructor_tokens(
-        self, constructor_name, type, inductive, constants,
-        mark=None, span_holder=None,
+    def constructor_format(
+        self, constructor_name, type, inductive, constants, marker,
     ):
         # Constructor names are always a single-part child of their
         # inductive's name in Lean (e.g., `List.cons` inside `List`),
@@ -6010,11 +6230,11 @@ class W_Constructor(W_DeclarationKind):
             short = constructor_name._part_str()
         else:
             short = constructor_name.str()
-        result = [PUNCT.emit("| "), DECL_NAME.emit(short)]
+        parts = [_format.text(PUNCT, "| "), _format.text(DECL_NAME, short)]
         if type not in [each.const() for each in inductive.all]:
-            result.append(PUNCT.emit(" : "))
-            _append_marked_tokens(result, span_holder, type, constants, mark)
-        return result
+            parts.append(_format.text(PUNCT, " : "))
+            parts.append(_sub(marker, type, constants))
+        return _format.concat(parts)
 
 
 class W_Recursor(W_DeclarationKind):
@@ -6214,12 +6434,10 @@ class W_Recursor(W_DeclarationKind):
                 % (rule.ctor_name.str(), expected_bvar),
             )
 
-    def decl_tokens(self, name, levels, type, constants, mark=None, span_holder=None):
-        result = [KEYWORD.emit("recursor"), PLAIN.emit(" ")]
-        result += name_with_levels_tokens(name, levels, constants)
-        result.append(PUNCT.emit(" : "))
-        _append_marked_tokens(result, span_holder, type, constants, mark)
-        return result
+    def decl_format(self, name, levels, type, constants, marker):
+        return _decl_signature_format(
+            "recursor", name, levels, type, constants, marker,
+        )
 
 
 def syntactic_eq(expr1, expr2):
