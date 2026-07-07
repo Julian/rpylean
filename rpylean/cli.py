@@ -517,6 +517,15 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
     ["EXPORT_FILE", "*DECLS"],
     help="Dump an exported Lean environment or specific declarations from it.",
     options=[COLOR, WIDTH],
+    flags=[
+        (
+            "export",
+            "emit lean4export-format NDJSON (with transitive "
+            "dependencies) instead of pretty-printing",
+            "",
+            "yes",
+        ),
+    ],
 )
 def dump(self, args, stdin, stdout, stderr):
     stdoutw = writer_from_arg(args.options["color"], stdout)
@@ -530,6 +539,18 @@ def dump(self, args, stdin, stdout, stderr):
         stderrw.writeline(err.tokens())
         stderrw.write_plain("\n")
         return 1
+    if args.options["export"]:
+        exporter = Exporter(stdout)
+        for each in env.declarations.values():
+            exporter.register(each)
+        exporter.emit_meta()
+        if args.varargs:
+            exporter.dump_named(
+                [Name.from_str(each) for each in args.varargs],
+            )
+        else:
+            exporter.dump_all()
+        return 0
     declarations = env.only([Name.from_str(each) for each in args.varargs])
     for each in declarations:
         stdoutw.writeline(each.tokens(env.declarations))
