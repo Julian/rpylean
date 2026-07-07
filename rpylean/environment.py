@@ -672,6 +672,7 @@ class TypeChecker(object):
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
         '_eqv_parent', '_defeq_failed',
+        'infer_only',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -705,6 +706,17 @@ class TypeChecker(object):
         self.env = env
         self.decl = decl
         self.heartbeat = 0
+        # `infer_only` mirrors lean4's `infer_type_core(e, infer_only)`
+        # flag (type_checker.cpp). False (the fresh default) is the
+        # `check` mode used for a declaration's own type and value: it
+        # validates each application's argument type against the
+        # function's domain. True is the `infer_type` mode used for
+        # every inference spawned *while reasoning* — inside `def_eq`
+        # and the reductions it drives — where the term is already
+        # known well-typed and the argument check is both redundant
+        # and, on the unreduced beta-redex domains reduction produces,
+        # a source of spurious mismatches.
+        self.infer_only = False
         self.declarations = env.declarations
         self.tracer = env.tracer
         self.max_heartbeat = env.max_heartbeat
@@ -829,7 +841,23 @@ class TypeChecker(object):
     def def_eq(self, expr1, expr2):
         """
         Check if two expressions are definitionally equal.
+
+        Any type inference performed while deciding def-eq runs in
+        `infer_only` mode — the terms being compared are already
+        known well-typed, so re-checking application arguments inside
+        them is redundant, and reduction routinely exposes unreduced
+        beta-redexes in domains that the argument check would spuriously
+        reject. Mirrors lean4, where `is_def_eq`'s internal
+        `infer_type` calls pass `infer_only = true` (type_checker.cpp).
         """
+        saved = self.infer_only
+        self.infer_only = True
+        try:
+            return self._def_eq(expr1, expr2)
+        finally:
+            self.infer_only = saved
+
+    def _def_eq(self, expr1, expr2):
         env = self.env
         max_heartbeat = env.max_heartbeat
         if max_heartbeat > 0 or env.count_heartbeats:
@@ -1633,6 +1661,7 @@ class Environment(object):
         'max_wall_time', 'max_memory', 'flush_memory',
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
+        'infer_only',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -1668,6 +1697,11 @@ class Environment(object):
         self._intern_w_proj = None
         self._intern_w_lambda = None
         self._intern_w_forall = None
+        # A bare `Environment` (REPL / tests / cold inference) always
+        # checks application arguments — same attribute name as on
+        # `TypeChecker` so the duck-typed `env.infer_only` read in
+        # `_iter_infer` works without an isinstance check.
+        self.infer_only = False
 
     def tick_wall_time(self):
         """No-op: wall-time tracking is a per-decl `TypeChecker` concern;

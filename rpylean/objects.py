@@ -6930,11 +6930,18 @@ def _iter_infer(env, root):
                 raise W_NotAFunction(
                     env, item.spine_so_far(env), inferred_type=fn_type_base,
                 )
-            if not env.def_eq(fn_type.binder.type, arg_type):
-                raise W_TypeError(
-                    env, arg, fn_type.binder.type,
-                    inferred_type=arg_type,
-                )
+            # In `infer_only` mode the argument's type is trusted (the
+            # term is already known well-typed); only the declaration's
+            # own type and value, checked in the default mode, validate
+            # each argument against its function's domain. Mirrors
+            # lean4's `infer_app`, which runs `is_def_eq(a_type, d_type)`
+            # only when `infer_only` is false (type_checker.cpp).
+            if not env.infer_only:
+                if not env.def_eq(fn_type.binder.type, arg_type):
+                    raise W_TypeError(
+                        env, arg, fn_type.binder.type,
+                        inferred_type=arg_type,
+                    )
             values.append(fn_type.body.instantiate(env, arg))
         elif isinstance(item, _InferBindLambda):
             body_type = values.pop()
