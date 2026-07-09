@@ -5203,12 +5203,6 @@ class W_App(W_Expr):
             return None
         if not type_head.name.syntactic_eq(induct_name):
             return None
-        e_type_sort = e_type.infer(env).whnf(env)
-        if (
-            isinstance(e_type_sort, W_Sort)
-            and e_type_sort.level.eq(W_LEVEL_ZERO)
-        ):
-            return None
         ctor_decl = ind_kind.constructor_decls(env.declarations)[0]
         ctor_kind = ctor_decl.w_kind
         assert isinstance(ctor_kind, W_Constructor)
@@ -5779,27 +5773,12 @@ class W_Opaque(W_Definition):
         return None
 
 
-class W_Theorem(W_Definition):
-    """
-    A theorem: a definition whose type must live in Prop.
-
-    Delta-unfoldable like any value-bearing definition — lean4's
-    `is_delta` accepts theorems (`constant_info::has_value`) — but at
-    opaque priority, since `constant_info::get_hints` hands back
-    `opaque` for every non-`def` kind: lazy delta unfolds a theorem
-    only when nothing else can make progress. That unfolding is load-
-    bearing when a theorem sits as the major of a subsingleton-
-    eliminating recursor that produces *data* (matcher output like
-    `And.casesOn h (fun c d ↦ Rat.mk' …) : Rat`): proof irrelevance
-    can't equate the results, so iota needs the proof unfolded down
-    to its constructor.
-    """
-
-    _attrs_ = []
+class W_Theorem(W_DeclarationKind):
+    _attrs_ = ['value']
+    _immutable_fields_ = ['value']
 
     def __init__(self, value):
         self.value = value
-        self.hint = HINT_OPAQUE
 
     def dump_to(self, exporter, decl):
         exporter.begin_decl(decl)
