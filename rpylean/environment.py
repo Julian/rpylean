@@ -1070,19 +1070,23 @@ class TypeChecker(object):
         cls = expr.__class__
         if cls is W_App:
             assert isinstance(expr, W_App)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
+            c = expr._caches
+            if c is not None and c.infer_env is self:
+                return c.infer_result
             result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
+            c = expr._ensure_caches()
+            c.infer_env = self
+            c.infer_result = result
             return result
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(expr, W_FunBase)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
+            c = expr._caches
+            if c is not None and c.infer_env is self:
+                return c.infer_result
             result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
+            c = expr._ensure_caches()
+            c.infer_env = self
+            c.infer_result = result
             return result
         if cls is W_Const:
             assert isinstance(expr, W_Const)

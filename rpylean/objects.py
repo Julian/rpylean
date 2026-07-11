@@ -952,21 +952,64 @@ def _mk_w_litnat(val):
 
 _INTERN_STR_NAME = {}      # int -> list[StrName]
 _INTERN_NUM_NAME = {}      # int -> list[NumName]
-_INTERN_W_APP = {}         # int -> list[W_App]
-_INTERN_W_CONST = {}       # int -> list[W_Const]
-_INTERN_W_PROJ = {}        # int -> list[W_Proj]
-_INTERN_W_LET = {}         # int -> list[W_Let]
+# The expression tables map each content hash to a single node — on a
+# collision the newest node simply takes the slot. Losing the displaced
+# node only costs sharing (a future structurally-equal request allocates
+# anew); nothing relies on interned-expression identity for correctness.
+# One-node slots keep the table at a dict entry per node where chained
+# buckets cost a `list` + backing array apiece — tens of millions of
+# entries on Mathlib-sized exports. The name/level tables stay chained:
+# they are small, and keeping every name canonical preserves the `is`
+# fast paths and per-instance caches (`_level_cache`) at full strength.
+_INTERN_W_APP = {}         # int -> W_App
+_INTERN_W_CONST = {}       # int -> W_Const
+_INTERN_W_PROJ = {}        # int -> W_Proj
+_INTERN_W_LET = {}         # int -> W_Let
 _INTERN_W_SORT = {}        # int -> list[W_Sort]
 _INTERN_LEVEL_SUCC = {}    # int -> list[W_LevelSucc]
 _INTERN_LEVEL_MAX = {}     # int -> list[W_LevelMax]
 _INTERN_LEVEL_IMAX = {}    # int -> list[W_LevelIMax]
 _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 # NOT hash-consed (see comments by their `_mk_*` factories):
-#   * W_App / W_Lambda / W_ForAll — dominant per-reduction-step churn,
-#     redundancy is already captured by per-instance `_*_cache_*` slots,
-#     interning blows up the permanent live heap.
+#   * W_Lambda / W_ForAll — their binders can't be interned (below), so
+#     they only participate in the per-decl arenas (`_mk_w_lambda_in` /
+#     `_mk_w_forall_in`).
 #   * Binder — `_fvar` is *per-binding-position* mutable state that
 #     interning would silently share across distinct positions.
+
+
+class _ExprCaches(object):
+    """
+    The mutable inline-cache slots of a `W_App` / `W_FunBase`, hung off
+    the node's single `_caches` slot and allocated on the first cache
+    write. The overwhelming majority of parsed nodes are never reduced
+    — inlining these slots on every node costs multiple words apiece
+    across tens of millions of nodes, which is most of the parsed heap.
+
+    `inst_*` is the 1-entry instantiate cache (env-independent);
+    `infer_*` / `whnf_*` / `closure_*` are env-tagged (hash-consing
+    shares nodes across `Environment`s). `closure_*` is only used by
+    `W_FunBase`; `whnf_*` only by `W_App` — sharing one class keeps
+    both nodes at a single extra slot without a second allocation path.
+    """
+
+    _attrs_ = [
+        'inst_expr', 'inst_depth', 'inst_result',
+        'infer_env', 'infer_result',
+        'whnf_env', 'whnf_result',
+        'closure_env', 'closure_result',
+    ]
+
+    def __init__(self):
+        self.inst_expr = None
+        self.inst_depth = -1
+        self.inst_result = None
+        self.infer_env = None
+        self.infer_result = None
+        self.whnf_env = None
+        self.whnf_result = None
+        self.closure_env = None
+        self.closure_result = None
 
 
 class _CacheWriteRegistry(object):
@@ -1022,16 +1065,12 @@ def intern_stats():
     at any declaration boundary — a climbing value means
     `reset_decl_caches` isn't draining it.
     """
-    apps = 0
-    for bucket in _INTERN_W_APP.itervalues():
-        apps += len(bucket)
-    projs = 0
-    for bucket in _INTERN_W_PROJ.itervalues():
-        projs += len(bucket)
-    consts = 0
-    for bucket in _INTERN_W_CONST.itervalues():
-        consts += len(bucket)
-    return apps, projs, consts, len(_DECL_CACHE_WRITES.items)
+    return (
+        len(_INTERN_W_APP),
+        len(_INTERN_W_PROJ),
+        len(_INTERN_W_CONST),
+        len(_DECL_CACHE_WRITES.items),
+    )
 
 
 def _mk_str_name(parent, suffix):
@@ -1156,25 +1195,18 @@ def _mk_w_const(name, levels):
         assert isinstance(lvl, W_Level)
         h = (h * 1000003) ^ lvl._hash
     h = h & _HASH_MASK
-    bucket = _INTERN_W_CONST.get(h, None)
-    if bucket is None:
-        e = W_Const(name=name, levels=levels)
-        _INTERN_W_CONST[h] = [e]
-        return e
-    for existing in bucket:
-        if existing.name is not name:
-            continue
-        if len(existing.levels) != len(levels):
-            continue
-        match = True
-        for i in range(len(levels)):
-            if existing.levels[i] is not levels[i]:
-                match = False
-                break
-        if match:
-            return existing
+    existing = _INTERN_W_CONST.get(h, None)
+    if existing is not None and existing.name is name:
+        if len(existing.levels) == len(levels):
+            match = True
+            for i in range(len(levels)):
+                if existing.levels[i] is not levels[i]:
+                    match = False
+                    break
+            if match:
+                return existing
     e = W_Const(name=name, levels=levels)
-    bucket.append(e)
+    _INTERN_W_CONST[h] = e
     return e
 
 
@@ -1232,16 +1264,11 @@ def _mk_app(fn, arg):
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
     h = _mix2(fn._hash, arg._hash)
-    bucket = _INTERN_W_APP.get(h, None)
-    if bucket is None:
-        e = W_App(fn, arg)
-        _INTERN_W_APP[h] = [e]
-        return e
-    for existing in bucket:
-        if existing.fn is fn and existing.arg is arg:
-            return existing
+    existing = _INTERN_W_APP.get(h, None)
+    if existing is not None and existing.fn is fn and existing.arg is arg:
+        return existing
     e = W_App(fn, arg)
-    bucket.append(e)
+    _INTERN_W_APP[h] = e
     return e
 
 
@@ -1285,18 +1312,13 @@ def _mk_app_in(tc, fn, arg):
     # allocation degenerates to a linear scan of it (98% of wall time
     # on Vector.pmap_pmap).
     hi = _mix2(compute_identity_hash(fn), compute_identity_hash(arg))
-    bucket = arena.get(hi, None)
-    if bucket is not None:
-        for existing in bucket:
-            if existing.fn is fn and existing.arg is arg:
-                tc.tracer.arena_app_hit()
-                return existing
+    existing = arena.get(hi, None)
+    if existing is not None and existing.fn is fn and existing.arg is arg:
+        tc.tracer.arena_app_hit()
+        return existing
     tc.tracer.arena_app_miss()
     e = W_App(fn, arg)
-    if bucket is None:
-        arena[hi] = [e]
-    else:
-        bucket.append(e)
+    arena[hi] = e
     return e
 
 
@@ -1365,18 +1387,13 @@ def _mk_w_lambda_in(tc, binder, body):
     assert isinstance(binder, Binder)
     assert isinstance(body, W_Expr)
     hi = _binder_key_hash(binder, body)
-    bucket = arena.get(hi, None)
-    if bucket is not None:
-        for existing in bucket:
-            if _binder_key_eq(existing, binder, body):
-                tc.tracer.arena_lambda_hit()
-                return existing
+    existing = arena.get(hi, None)
+    if existing is not None and _binder_key_eq(existing, binder, body):
+        tc.tracer.arena_lambda_hit()
+        return existing
     tc.tracer.arena_lambda_miss()
     e = W_Lambda(binder, body)
-    if bucket is None:
-        arena[hi] = [e]
-    else:
-        bucket.append(e)
+    arena[hi] = e
     return e
 
 
@@ -1394,18 +1411,13 @@ def _mk_w_forall_in(tc, binder, body):
     assert isinstance(binder, Binder)
     assert isinstance(body, W_Expr)
     hi = _binder_key_hash(binder, body)
-    bucket = arena.get(hi, None)
-    if bucket is not None:
-        for existing in bucket:
-            if _binder_key_eq(existing, binder, body):
-                tc.tracer.arena_forall_hit()
-                return existing
+    existing = arena.get(hi, None)
+    if existing is not None and _binder_key_eq(existing, binder, body):
+        tc.tracer.arena_forall_hit()
+        return existing
     tc.tracer.arena_forall_miss()
     e = W_ForAll(binder, body)
-    if bucket is None:
-        arena[hi] = [e]
-    else:
-        bucket.append(e)
+    arena[hi] = e
     return e
 
 
@@ -1414,18 +1426,14 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
     h = _mix3(struct_name._hash, field_index, struct_expr._hash)
-    bucket = _INTERN_W_PROJ.get(h, None)
-    if bucket is None:
-        e = W_Proj(struct_name, field_index, struct_expr)
-        _INTERN_W_PROJ[h] = [e]
-        return e
-    for existing in bucket:
-        if (existing.struct_name is struct_name
-                and existing.field_index == field_index
-                and existing.struct_expr is struct_expr):
-            return existing
+    existing = _INTERN_W_PROJ.get(h, None)
+    if (existing is not None
+            and existing.struct_name is struct_name
+            and existing.field_index == field_index
+            and existing.struct_expr is struct_expr):
+        return existing
     e = W_Proj(struct_name, field_index, struct_expr)
-    bucket.append(e)
+    _INTERN_W_PROJ[h] = e
     return e
 
 
@@ -1449,20 +1457,16 @@ def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
         field_index,
         compute_identity_hash(struct_expr),
     )
-    bucket = arena.get(hi, None)
-    if bucket is not None:
-        for existing in bucket:
-            if (existing.struct_name is struct_name
-                    and existing.field_index == field_index
-                    and existing.struct_expr is struct_expr):
-                tc.tracer.arena_proj_hit()
-                return existing
+    existing = arena.get(hi, None)
+    if (existing is not None
+            and existing.struct_name is struct_name
+            and existing.field_index == field_index
+            and existing.struct_expr is struct_expr):
+        tc.tracer.arena_proj_hit()
+        return existing
     tc.tracer.arena_proj_miss()
     e = W_Proj(struct_name, field_index, struct_expr)
-    if bucket is None:
-        arena[hi] = [e]
-    else:
-        bucket.append(e)
+    arena[hi] = e
     return e
 
 
@@ -1472,17 +1476,13 @@ def _mk_w_let(name, type, value, body):
     assert isinstance(value, W_Expr)
     assert isinstance(body, W_Expr)
     h = _mix4(name._hash, type._hash, value._hash, body._hash)
-    bucket = _INTERN_W_LET.get(h, None)
-    if bucket is None:
-        e = W_Let(name=name, type=type, value=value, body=body)
-        _INTERN_W_LET[h] = [e]
-        return e
-    for existing in bucket:
-        if (existing.name is name and existing.type is type
-                and existing.value is value and existing.body is body):
-            return existing
+    existing = _INTERN_W_LET.get(h, None)
+    if (existing is not None
+            and existing.name is name and existing.type is type
+            and existing.value is value and existing.body is body):
+        return existing
     e = W_Let(name=name, type=type, value=value, body=body)
-    bucket.append(e)
+    _INTERN_W_LET[h] = e
     return e
 
 
@@ -2763,8 +2763,9 @@ class W_Expr(_Item):
             # whnf_core-normal — the common case on def_eq's entry
             # path, where most operands are already normal.
             if isinstance(expr, W_App):
-                if (expr._whnf_cache_env is env
-                        and expr._whnf_cache_result is expr):
+                c = expr._caches
+                if (c is not None and c.whnf_env is env
+                        and c.whnf_result is expr):
                     return expr
             env.tracer.whnf_step(expr, env.declarations)
             env.tick_wall_time()
@@ -4019,12 +4020,7 @@ def _is_prop_type(expr, constants):
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
-    _attrs_ = [
-        'binder', 'body', 'finished_reduce',
-        '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
-        '_infer_cache_env', '_infer_cache_result',
-        '_closure_cache_env', '_closure_cache_result',
-    ]
+    _attrs_ = ['binder', 'body', 'finished_reduce', '_caches']
     _immutable_fields_ = ['binder', 'body']
 
     # Subclasses set this to a distinct tag so structurally-equal
@@ -4046,24 +4042,24 @@ class W_FunBase(W_Expr):
         else:
             self.loose_bvar_range = body_range
         self.has_fvar = binder.type.has_fvar or body.has_fvar
-        # 1-entry inline instantiate cache (env-independent).
-        self._inst_cache_expr = None
-        self._inst_cache_depth = -1
-        self._inst_cache_result = None
-        # Inline infer cache, env-tagged for hash-consing safety.
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        # 1-entry inline closure cache, keyed on env identity. Critical
-        # for DAG-shared lambdas: when ``λ`` appears N times under the
+        # Instantiate / infer / closure caches, allocated on first
+        # write — see `_ExprCaches`. The closure cache is critical for
+        # DAG-shared lambdas: when ``λ`` appears N times under the
         # same env (e.g. wrap2 lam lam) all N calls return the same
         # ``W_Closure``, preserving the inferred-type cache across
         # references and avoiding exponential blowup.
-        self._closure_cache_env = None
-        self._closure_cache_result = None
+        self._caches = None
         # Content hash: mix binder's name + type + binder-info + body.
         h = (binder.name.hash() * 1000003) ^ binder.type.hash()
         h = (h * 1000003) ^ body.hash()
         self._hash = ((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF
+
+    def _ensure_caches(self):
+        c = self._caches
+        if c is None:
+            c = _ExprCaches()
+            self._caches = c
+        return c
 
     @unroll_safe
     def closure(self, env):
@@ -4071,23 +4067,19 @@ class W_FunBase(W_Expr):
             return self
         if self.loose_bvar_range == 0:
             return self
-        if self._closure_cache_env is env:
-            return self._closure_cache_result
+        c = self._caches
+        if c is not None and c.closure_env is env:
+            return c.closure_result
         result = W_Closure(env, self)
-        if self._closure_cache_env is None:
+        c = self._ensure_caches()
+        if c.closure_env is None:
             _note_cache_write(self)
-        self._closure_cache_env = env
-        self._closure_cache_result = result
+        c.closure_env = env
+        c.closure_result = result
         return result
 
     def _reset_caches(self):
-        self._inst_cache_expr = None
-        self._inst_cache_depth = -1
-        self._inst_cache_result = None
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._closure_cache_env = None
-        self._closure_cache_result = None
+        self._caches = None
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -4681,12 +4673,7 @@ class W_Let(W_Expr):
 
 
 class W_App(W_Expr):
-    _attrs_ = [
-        'fn', 'arg',
-        '_inst_cache_expr', '_inst_cache_depth', '_inst_cache_result',
-        '_infer_cache_env', '_infer_cache_result',
-        '_whnf_cache_env', '_whnf_cache_result',
-    ]
+    _attrs_ = ['fn', 'arg', '_caches']
     _immutable_fields_ = ['fn', 'arg']
 
     def __init__(self, fn, arg):
@@ -4699,17 +4686,18 @@ class W_App(W_Expr):
         else:
             self.loose_bvar_range = arg_range
         self.has_fvar = fn.has_fvar or arg.has_fvar
-        # 1-entry inline instantiate cache (env-independent).
-        self._inst_cache_expr = None
-        self._inst_cache_depth = -1
-        self._inst_cache_result = None
-        # Inline infer/whnf caches, env-tagged for hash-consing safety.
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._whnf_cache_env = None
-        self._whnf_cache_result = None
+        # Instantiate / infer / whnf caches, allocated on first write —
+        # see `_ExprCaches`.
+        self._caches = None
         h = (fn.hash() * 1000003) ^ arg.hash()
         self._hash = ((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF
+
+    def _ensure_caches(self):
+        c = self._caches
+        if c is None:
+            c = _ExprCaches()
+            self._caches = c
+        return c
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -4869,25 +4857,21 @@ class W_App(W_Expr):
         return _iter_infer(env, self)
 
     def whnf(self, env):
-        if self._whnf_cache_env is env:
+        c = self._caches
+        if c is not None and c.whnf_env is env:
             env.tracer.whnf_cache_hit()
-            return self._whnf_cache_result
+            return c.whnf_result
         env.tracer.whnf_cache_miss()
         (expr, _progress) = self.whnf_with_progress(env)
-        if self._whnf_cache_env is None:
+        c = self._ensure_caches()
+        if c.whnf_env is None:
             _note_cache_write(self)
-        self._whnf_cache_env = env
-        self._whnf_cache_result = expr
+        c.whnf_env = env
+        c.whnf_result = expr
         return expr
 
     def _reset_caches(self):
-        self._inst_cache_expr = None
-        self._inst_cache_depth = -1
-        self._inst_cache_result = None
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._whnf_cache_env = None
-        self._whnf_cache_result = None
+        self._caches = None
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
@@ -5359,8 +5343,9 @@ def _whnf_iota_chain(env, expr):
     circuits on the cache check below.
     """
     if isinstance(expr, W_App):
-        if expr._whnf_cache_env is env:
-            return expr._whnf_cache_result
+        c = expr._caches
+        if c is not None and c.whnf_env is env:
+            return c.whnf_result
     elif isinstance(expr, W_Closure):
         if expr._whnf_cache_env is env:
             return expr._whnf_cache_result
@@ -5434,10 +5419,11 @@ def _whnf_iota_chain(env, expr):
         # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
         # returns immediately instead of recursing.
         if isinstance(major_arg, W_App):
-            if major_arg._whnf_cache_env is None:
+            c = major_arg._ensure_caches()
+            if c.whnf_env is None:
                 _note_cache_write(major_arg)
-            major_arg._whnf_cache_env = env
-            major_arg._whnf_cache_result = cur
+            c.whnf_env = env
+            c.whnf_result = cur
         elif isinstance(major_arg, W_Closure):
             if major_arg._whnf_cache_env is None:
                 _note_cache_write(major_arg)
@@ -6565,8 +6551,9 @@ def _instantiate(tc, cur, sub, depth):
 
 @unroll_safe
 def _inst_app(tc, app, sub, depth):
-    if app._inst_cache_expr is sub and app._inst_cache_depth == depth:
-        return app._inst_cache_result
+    c = app._caches
+    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
+        return c.inst_result
     fn = app.fn
     arg = app.arg
     new_fn = fn
@@ -6583,47 +6570,52 @@ def _inst_app(tc, app, sub, depth):
         result = app
     else:
         result = new_fn.app_in(tc, new_arg)
-    if app._inst_cache_expr is None:
+    c = app._ensure_caches()
+    if c.inst_expr is None:
         _note_cache_write(app)
-    app._inst_cache_expr = sub
-    app._inst_cache_depth = depth
-    app._inst_cache_result = result
+    c.inst_expr = sub
+    c.inst_depth = depth
+    c.inst_result = result
     return result
 
 
 @unroll_safe
 def _inst_lambda(tc, fun, sub, depth):
-    if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
-        return fun._inst_cache_result
+    c = fun._caches
+    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
+        return c.inst_result
     new_binder = fun.binder.instantiate(tc, sub, depth)
     new_body = _instantiate(tc, fun.body, sub, depth + 1)
     if new_binder is fun.binder and new_body is fun.body:
         result = fun
     else:
         result = _mk_w_lambda_in(tc, new_binder, new_body)
-    if fun._inst_cache_expr is None:
+    c = fun._ensure_caches()
+    if c.inst_expr is None:
         _note_cache_write(fun)
-    fun._inst_cache_expr = sub
-    fun._inst_cache_depth = depth
-    fun._inst_cache_result = result
+    c.inst_expr = sub
+    c.inst_depth = depth
+    c.inst_result = result
     return result
 
 
 @unroll_safe
 def _inst_forall(tc, fun, sub, depth):
-    if fun._inst_cache_expr is sub and fun._inst_cache_depth == depth:
-        return fun._inst_cache_result
+    c = fun._caches
+    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
+        return c.inst_result
     new_binder = fun.binder.instantiate(tc, sub, depth)
     new_body = _instantiate(tc, fun.body, sub, depth + 1)
     if new_binder is fun.binder and new_body is fun.body:
         result = fun
     else:
         result = _mk_w_forall_in(tc, new_binder, new_body)
-    if fun._inst_cache_expr is None:
+    c = fun._ensure_caches()
+    if c.inst_expr is None:
         _note_cache_write(fun)
-    fun._inst_cache_expr = sub
-    fun._inst_cache_depth = depth
-    fun._inst_cache_result = result
+    c.inst_expr = sub
+    c.inst_depth = depth
+    c.inst_result = result
     return result
 
 
@@ -6810,13 +6802,15 @@ def _iter_infer(env, root):
             # fallback) and pushed straight onto the value stack.
             if cls is W_App:
                 assert isinstance(cur, W_App)
-                if cur._infer_cache_env is env:
-                    values.append(cur._infer_cache_result)
+                c = cur._caches
+                if c is not None and c.infer_env is env:
+                    values.append(c.infer_result)
                     continue
             elif cls is W_Lambda or cls is W_ForAll:
                 assert isinstance(cur, W_FunBase)
-                if cur._infer_cache_env is env:
-                    values.append(cur._infer_cache_result)
+                c = cur._caches
+                if c is not None and c.infer_env is env:
+                    values.append(c.infer_result)
                     continue
             elif cls is W_Closure:
                 assert isinstance(cur, W_Closure)
@@ -6934,15 +6928,17 @@ def _iter_infer(env, root):
             target = item.expr
             result = values[len(values) - 1]
             if isinstance(target, W_App):
-                if target._infer_cache_env is None:
+                c = target._ensure_caches()
+                if c.infer_env is None:
                     _note_cache_write(target)
-                target._infer_cache_env = env
-                target._infer_cache_result = result
+                c.infer_env = env
+                c.infer_result = result
             elif isinstance(target, W_FunBase):
-                if target._infer_cache_env is None:
+                c = target._ensure_caches()
+                if c.infer_env is None:
                     _note_cache_write(target)
-                target._infer_cache_env = env
-                target._infer_cache_result = result
+                c.infer_env = env
+                c.infer_result = result
             elif isinstance(target, W_Closure):
                 if target._infer_cache_env is None:
                     _note_cache_write(target)
