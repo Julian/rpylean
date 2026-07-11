@@ -762,20 +762,23 @@ class TypeChecker(object):
     def tick_wall_time(self):
         """
         Increment the wall-time tick counter; every 1024th call, check
-        whether `max_wall_time` or `max_memory` has been exceeded and
-        raise if so. Called from the hot WHNF loop
+        whether `max_wall_time` or `max_memory` has been exceeded (or
+        the flush budget's floor has been crossed) and raise or flush
+        accordingly. Called from the hot WHNF loop
         (`whnf_with_progress`) and from `def_eq`.
 
-        No-op when neither limit is set (the common case), so the JIT
-        can fold the check away.
+        The common path is a counter bump and a mask test; everything
+        else — including the are-any-limits-armed reads (flushing is
+        on by default, so some limit almost always is) — waits for the
+        1024th call.
         """
+        self._whnf_tick += 1
+        if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
+            return
         max_wall_time = self.max_wall_time
         max_memory = self.max_memory
         flush_memory = self.flush_memory
         if max_wall_time <= 0.0 and max_memory <= 0 and flush_memory <= 0:
-            return
-        self._whnf_tick += 1
-        if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
             return
         if max_wall_time > 0.0:
             elapsed = clock() - self.start_time

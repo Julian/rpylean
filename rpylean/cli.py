@@ -79,6 +79,16 @@ def apply_width(width_arg, stdout):
             return
     _format.set_render_width(_format.DEFAULT_WIDTH)
 
+#: How much a single declaration may grow the live heap before its
+#: caches are flushed mid-check, unless --flush-memory-per-decl says
+#: otherwise. A handful of pathological declarations (the BVDecide
+#: blastUdiv lemmas) otherwise pin many gigabytes of dead reduction
+#: state mid-decl and drive the incremental GC into walking the whole
+#: pile on every collection — without a bound the check wedges at ~90%
+#: GC time. Ordinary declarations never grow anywhere near this much,
+#: so the sampling check is their only cost.
+DEFAULT_FLUSH_MEMORY = "4G"
+
 #: The options shared by `check` and `ffi check`, parsed by `_CheckRun`.
 CHECK_OPTIONS = [
     (
@@ -113,7 +123,8 @@ CHECK_OPTIONS = [
         "drop the per-decl caches mid-decl whenever the live heap "
         "grows past the declaration's starting point by this much, "
         "trading recomputation for a bounded footprint (suffixes: "
-        "K/M/G, default bytes; sampled with the wall-time check)",
+        "K/M/G, default bytes; sampled with the wall-time check; "
+        "default 4G, pass 0 to never flush)",
     ),
     (
         "print",
@@ -378,9 +389,10 @@ class _CheckRun(object):
             args.options["max-wall-time-per-decl"],
         )
         self.max_memory = _parse_bytes(args.options["max-memory-per-decl"])
-        self.flush_memory = _parse_bytes(
-            args.options["flush-memory-per-decl"],
-        )
+        flush_memory = args.options["flush-memory-per-decl"]
+        if flush_memory is None:
+            flush_memory = DEFAULT_FLUSH_MEMORY
+        self.flush_memory = _parse_bytes(flush_memory)
         self.printer = Printer.from_str(args.options["print"], stdoutw)
         self.slow_secs, self.slow_hb = _parse_threshold(
             args.options["slower-than"],
