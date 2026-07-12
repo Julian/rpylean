@@ -1018,6 +1018,7 @@ class _ExprCaches(object):
 
     _attrs_ = [
         'inst_expr', 'inst_depth', 'inst_result',
+        'inst_menv', 'inst_mdepth', 'inst_mresult',
         'infer_env', 'infer_result',
         'whnf_env', 'whnf_result',
         'closure_env', 'closure_result',
@@ -1027,6 +1028,9 @@ class _ExprCaches(object):
         self.inst_expr = None
         self.inst_depth = -1
         self.inst_result = None
+        self.inst_menv = None
+        self.inst_mdepth = -1
+        self.inst_mresult = None
         self.infer_env = None
         self.infer_result = None
         self.whnf_env = None
@@ -6733,13 +6737,37 @@ def _instantiate_multi(tc, cur, substs, depth):
         return _mk_w_bvar(cur.id - n)
     if cls is W_App:
         assert isinstance(cur, W_App)
+        # 1-entry cache keyed on the substitute list (identity) + depth.
+        # A closure's `force` walks its body with a fixed `substs` (the
+        # closure env), so DAG-shared sub-spines that survive the
+        # `loose_bvar_range` early-out would otherwise be re-materialized
+        # once per occurrence — the mirror of `_inst_app`'s cache for the
+        # single-substitute path.
+        c = cur._caches
+        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
+            return c.inst_mresult
         new_fn = _instantiate_multi(tc, cur.fn, substs, depth)
         new_arg = _instantiate_multi(tc, cur.arg, substs, depth)
         if new_fn is cur.fn and new_arg is cur.arg:
-            return cur
-        return new_fn.app_in(tc, new_arg)
+            result = cur
+        else:
+            result = new_fn.app_in(tc, new_arg)
+        # Only populate the cache on nodes that already carry a `_caches`
+        # side object (i.e. were reduced). Allocating one here just for
+        # this cache would cost a side object per materialized node —
+        # pure overhead on substitution that has little DAG sharing (a
+        # ~50% cedar regression when it did). Such a node is already
+        # registered for reset via its other caches.
+        if c is not None:
+            c.inst_menv = substs
+            c.inst_mdepth = depth
+            c.inst_mresult = result
+        return result
     if cls is W_Lambda:
         assert isinstance(cur, W_Lambda)
+        c = cur._caches
+        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
+            return c.inst_mresult
         new_binder = cur.binder
         if cur.binder.type.loose_bvar_range() > depth:
             new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
@@ -6747,10 +6775,19 @@ def _instantiate_multi(tc, cur, substs, depth):
                 new_binder = cur.binder.with_type(type=new_type)
         new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
         if new_binder is cur.binder and new_body is cur.body:
-            return cur
-        return _mk_w_lambda_in(tc, new_binder, new_body)
+            result = cur
+        else:
+            result = _mk_w_lambda_in(tc, new_binder, new_body)
+        if c is not None:
+            c.inst_menv = substs
+            c.inst_mdepth = depth
+            c.inst_mresult = result
+        return result
     if cls is W_ForAll:
         assert isinstance(cur, W_ForAll)
+        c = cur._caches
+        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
+            return c.inst_mresult
         new_binder = cur.binder
         if cur.binder.type.loose_bvar_range() > depth:
             new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
@@ -6758,8 +6795,14 @@ def _instantiate_multi(tc, cur, substs, depth):
                 new_binder = cur.binder.with_type(type=new_type)
         new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
         if new_binder is cur.binder and new_body is cur.body:
-            return cur
-        return _mk_w_forall_in(tc, new_binder, new_body)
+            result = cur
+        else:
+            result = _mk_w_forall_in(tc, new_binder, new_body)
+        if c is not None:
+            c.inst_menv = substs
+            c.inst_mdepth = depth
+            c.inst_mresult = result
+        return result
     if cls is W_Proj:
         assert isinstance(cur, W_Proj)
         new_struct = _instantiate_multi(tc, cur.struct_expr, substs, depth)
