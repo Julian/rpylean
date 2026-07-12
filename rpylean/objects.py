@@ -2,7 +2,7 @@ from rpython.rlib.jit import (
     JitDriver, dont_look_inside, elidable, promote, unroll_safe,
 )
 from rpython.rlib.objectmodel import (
-    always_inline, compute_hash, compute_identity_hash, newlist_hint,
+    always_inline, compute_hash, newlist_hint,
     not_rpython, specialize,
 )
 from rpython.rlib.rbigint import rbigint
@@ -979,6 +979,28 @@ _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 #     interning would silently share across distinct positions.
 
 
+# A process-global monotonic id stamped on every `W_Expr` at
+# construction. The per-decl reduction arenas (`_mk_app_in`,
+# `_mk_w_lambda_in`, `_mk_w_proj_in`, …) are identity-keyed — a hit
+# requires `existing.fn is fn`, etc. — so their hash key only needs a
+# cheap, stable, per-node integer to spread distinct nodes across
+# buckets. `_uid` is that integer, replacing `compute_identity_hash`:
+# the GC's identity hash forced a shadow object + an address->hash
+# lookup for every `fn`/`arg`/`body` fed to an arena — billions per run,
+# ~14% of a cedar profile. Reading an immutable `_uid` field is free by
+# comparison, and identity semantics are preserved exactly (two
+# structurally-equal-but-distinct nodes still get distinct uids, unlike
+# a content hash, so nothing spuriously collapses).
+_EXPR_UID = count()
+
+
+@always_inline
+def _next_uid():
+    uid = _EXPR_UID.count
+    _EXPR_UID.count = uid + 1
+    return uid
+
+
 class _ExprCaches(object):
     """
     The mutable inline-cache slots of a `W_App` / `W_FunBase`, hung off
@@ -1306,13 +1328,16 @@ def _mk_app_in(tc, fn, arg):
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
     # The arena's equality is identity (`existing.fn is fn`), so its
-    # key must mix *identity* hashes, not content hashes: W_Lambda /
-    # W_ForAll aren't interned, so big proof terms carry thousands of
-    # structurally-equal-but-distinct lambda subtrees — under a
-    # content-hash key those all collide into one bucket and every
-    # allocation degenerates to a linear scan of it (98% of wall time
-    # on Vector.pmap_pmap).
-    hi = _mix2(compute_identity_hash(fn), compute_identity_hash(arg))
+    # key only needs a cheap per-node integer that spreads distinct
+    # nodes across buckets — the `_uid`. It must NOT be a content hash:
+    # W_Lambda / W_ForAll aren't persistently interned, so a proof term
+    # carries structurally-equal-but-distinct lambda subtrees, and a
+    # content key would collapse them onto one bucket and thrash
+    # (98% of wall time on Vector.pmap_pmap once upon a time). `_uid`
+    # keeps them distinct like an identity hash would, but without the
+    # GC shadow + address->hash lookup that `compute_identity_hash`
+    # billions of times made the hottest thing on a cedar profile.
+    hi = _mix2(fn._uid, arg._uid)
     existing = arena.get(hi, None)
     if existing is not None and existing.fn is fn and existing.arg is arg:
         tc.tracer.arena_app_hit()
@@ -1347,11 +1372,11 @@ def _binder_key_hash(binder, body):
     wasn't already shared — the merge only drops never-used duplicate
     binders.
     """
-    h = _mix2(
-        compute_identity_hash(binder.name),
-        compute_identity_hash(binder.type),
-    )
-    return _mix3(h, compute_hash(binder.left), compute_identity_hash(body))
+    # `binder.name` is an interned `Name` (structural equality is
+    # identity), so its content `hash()` is an identity-faithful key
+    # component; `binder.type` and `body` are `W_Expr`s keyed by `_uid`.
+    h = _mix2(binder.name.hash(), binder.type._uid)
+    return _mix3(h, compute_hash(binder.left), body._uid)
 
 
 def _binder_key_eq(existing, binder, body):
@@ -1453,11 +1478,9 @@ def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
     # Identity-keyed like `_mk_app_in`'s arena — see the comment there.
-    hi = _mix3(
-        compute_identity_hash(struct_name),
-        field_index,
-        compute_identity_hash(struct_expr),
-    )
+    # `struct_name` is an interned `Name` (content hash is identity);
+    # `struct_expr` is keyed by `_uid`.
+    hi = _mix3(struct_name.hash(), field_index, struct_expr._uid)
     existing = arena.get(hi, None)
     if (existing is not None
             and existing.struct_name is struct_name
@@ -2570,8 +2593,8 @@ class W_Expr(_Item):
     # off, so they must inline to a bare shift/mask rather than stay a
     # call for a tracer to fold. `_packed` is immutable, so the unpack is
     # still JIT-foldable.
-    _attrs_ = ['_packed']
-    _immutable_fields_ = ['_packed']
+    _attrs_ = ['_packed', '_uid']
+    _immutable_fields_ = ['_packed', '_uid']
 
     @always_inline
     def hash(self):
@@ -2880,6 +2903,7 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = id
         bf = (id + 1) << 1
+        self._uid = _next_uid()
         self._packed = (((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -2950,6 +2974,7 @@ class W_FVar(W_Expr):
         self.binder = binder
         bf = 1
         # FVars are unique by id, so hashing on id alone is fine.
+        self._uid = _next_uid()
         self._packed = (((self.id * 1000003) ^ 0xF7A8) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -2995,6 +3020,7 @@ class W_LitStr(W_Expr):
         assert isinstance(val, str)
         self.val = val
         bf = 0
+        self._uid = _next_uid()
         self._packed = (((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -3074,6 +3100,7 @@ class W_Sort(W_Expr):
     def __init__(self, level):
         self.level = level
         bf = 0
+        self._uid = _next_uid()
         self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -3192,6 +3219,7 @@ class W_Const(W_Expr):
         h = name.hash()
         for lvl in levels:
             h = (h * 1000003) ^ lvl.hash()
+        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -3444,6 +3472,7 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
         bf = 0
+        self._uid = _next_uid()
         self._packed = (((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -3746,6 +3775,7 @@ class W_Proj(W_Expr):
         )
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ struct_expr.hash()
+        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32)
 
     def _reset_caches(self):
@@ -4081,6 +4111,7 @@ class W_FunBase(W_Expr):
         # Content hash: mix binder's name + type + binder-info + body.
         h = (binder.name.hash() * 1000003) ^ binder.type.hash()
         h = (h * 1000003) ^ body.hash()
+        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32)
 
     def _ensure_caches(self):
@@ -4579,6 +4610,7 @@ class W_Let(W_Expr):
         h = (name.hash() * 1000003) ^ type.hash()
         h = (h * 1000003) ^ value.hash()
         h = (h * 1000003) ^ body.hash()
+        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF) | (bf << 32)
 
     def contains_const(self, name):
@@ -4720,6 +4752,7 @@ class W_App(W_Expr):
         # see `_ExprCaches`.
         self._caches = None
         h = (fn.hash() * 1000003) ^ arg.hash()
+        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32)
 
     def _ensure_caches(self):
@@ -5522,7 +5555,10 @@ class W_Closure(W_Expr):
         # Closures shouldn't reach the exporter (they're produced during
         # reduction, not by the walker), but give them an identity-based
         # hash so the RPython annotator sees `_hash` set on every W_Expr.
-        self._packed = (compute_identity_hash(self) & 0xFFFFFFFF) | (bf << 32)
+        self._uid = _next_uid()
+        # Closures aren't interned or exported; `_uid` is a fine, cheap
+        # content-hash stand-in (distinct per node, deterministic).
+        self._packed = (self._uid & 0xFFFFFFFF) | (bf << 32)
 
     def whnf(self, env):
         if self._whnf_cache_env is env:
