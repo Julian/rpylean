@@ -5640,7 +5640,20 @@ class W_Closure(W_Expr):
         return syntactic_eq(self.force(None), other)
 
     def infer(self, env):
-        return self.force(env).infer(env)
+        # Memoized in the (previously dead) `_infer_cache_*` slots: a
+        # closure's inferred type is asked for repeatedly (proof
+        # irrelevance infers both operands' types on every def_eq of
+        # them), and `force(env).infer(env)` otherwise re-infers the
+        # whole materialized term each time. Env-tagged for hash-consing
+        # safety; per-decl scoped via `_reset_caches`.
+        if self._infer_cache_env is env:
+            return self._infer_cache_result
+        result = self.force(env).infer(env)
+        if self._infer_cache_env is None:
+            _note_cache_write(self)
+        self._infer_cache_env = env
+        self._infer_cache_result = result
+        return result
 
     def instantiate(self, tc, expr, depth=0):
         return self.force(tc).instantiate(tc, expr, depth)
