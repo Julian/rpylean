@@ -5526,6 +5526,7 @@ class W_Closure(W_Expr):
         'env', 'body',
         '_whnf_cache_env', '_whnf_cache_result',
         '_infer_cache_env', '_infer_cache_result',
+        '_force_result',
     ]
     _immutable_fields_ = ['env', 'body']
 
@@ -5552,6 +5553,7 @@ class W_Closure(W_Expr):
         self._whnf_cache_result = None
         self._infer_cache_env = None
         self._infer_cache_result = None
+        self._force_result = None
         # Closures shouldn't reach the exporter (they're produced during
         # reduction, not by the walker), but give them an identity-based
         # hash so the RPython annotator sees `_hash` set on every W_Expr.
@@ -5577,6 +5579,7 @@ class W_Closure(W_Expr):
         self._whnf_cache_result = None
         self._infer_cache_env = None
         self._infer_cache_result = None
+        self._force_result = None
 
     def _whnf_core(self, env):
         return self.body._whnf_under_closure(env, self.env)
@@ -5610,7 +5613,24 @@ class W_Closure(W_Expr):
         # first ordering was only needed for the sequential case; with
         # parallel substitution the rel-mapping in `_instantiate_multi`
         # handles every bvar in its own pass.
-        return _instantiate_multi(tc, self.body, self.env, 0)
+        #
+        # Memoized: `def_eq`, `syntactic_eq` and `infer` all force the
+        # same closure, and def-eq-heavy proofs (representation /
+        # monoidal-category lemmas in Mathlib) force each one many
+        # times — the materialization (`_instantiate_multi`) was ~45%
+        # of such a decl's profile. The materialized term depends only
+        # on `body` and `env` (both immutable), not on `tc` (which only
+        # picks the allocation arena), so a single cached result is
+        # sound. Per-decl scoped: closures are reduction products, so
+        # `_reset_caches` clears this between decls.
+        cached = self._force_result
+        if cached is not None:
+            return cached
+        result = _instantiate_multi(tc, self.body, self.env, 0)
+        if self._force_result is None:
+            _note_cache_write(self)
+        self._force_result = result
+        return result
 
     def syntactic_eq(self, other):
         return syntactic_eq(self.force(None), other)
