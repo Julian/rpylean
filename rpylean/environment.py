@@ -1317,7 +1317,7 @@ class TypeChecker(object):
             # instances compare `toNat hi + 2^15`-shaped subterms
             # whose Nat.add would otherwise build a 2^15-level
             # brecOn below-tower just to probe for a literal).
-            if not expr1.has_fvar and not expr2.has_fvar:
+            if not expr1.has_fvar() and not expr2.has_fvar():
                 reduced1 = _try_reduce_nat(expr1, self)
                 if reduced1 is not None:
                     expr1 = reduced1

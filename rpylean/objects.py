@@ -2,7 +2,8 @@ from rpython.rlib.jit import (
     JitDriver, dont_look_inside, elidable, promote, unroll_safe,
 )
 from rpython.rlib.objectmodel import (
-    compute_hash, compute_identity_hash, newlist_hint, not_rpython, specialize,
+    always_inline, compute_hash, compute_identity_hash, newlist_hint,
+    not_rpython, specialize,
 )
 from rpython.rlib.rbigint import rbigint
 
@@ -1075,7 +1076,7 @@ def intern_stats():
 
 def _mk_str_name(parent, suffix):
     assert isinstance(parent, Name)
-    h = _mix2(parent._hash, compute_hash(suffix))
+    h = _mix2(parent.hash(), compute_hash(suffix))
     bucket = _INTERN_STR_NAME.get(h, None)
     if bucket is None:
         e = StrName(parent, suffix)
@@ -1092,7 +1093,7 @@ def _mk_str_name(parent, suffix):
 def _mk_num_name(parent, idx):
     assert isinstance(parent, Name)
     # `idx.hash()` here is rbigint's content hash — cheap, no string alloc.
-    h = _mix2(parent._hash, idx.hash())
+    h = _mix2(parent.hash(), idx.hash())
     bucket = _INTERN_NUM_NAME.get(h, None)
     if bucket is None:
         e = NumName(parent, idx)
@@ -1108,7 +1109,7 @@ def _mk_num_name(parent, idx):
 
 def _mk_level_succ(parent):
     assert isinstance(parent, W_Level)
-    h = _mix1(parent._hash)
+    h = _mix1(parent.hash())
     bucket = _INTERN_LEVEL_SUCC.get(h, None)
     if bucket is None:
         e = W_LevelSucc(parent)
@@ -1125,7 +1126,7 @@ def _mk_level_succ(parent):
 def _mk_level_max(lhs, rhs):
     assert isinstance(lhs, W_Level)
     assert isinstance(rhs, W_Level)
-    h = _mix2(lhs._hash, rhs._hash)
+    h = _mix2(lhs.hash(), rhs.hash())
     bucket = _INTERN_LEVEL_MAX.get(h, None)
     if bucket is None:
         e = W_LevelMax(lhs, rhs)
@@ -1142,7 +1143,7 @@ def _mk_level_max(lhs, rhs):
 def _mk_level_imax(lhs, rhs):
     assert isinstance(lhs, W_Level)
     assert isinstance(rhs, W_Level)
-    h = _mix2(lhs._hash, rhs._hash)
+    h = _mix2(lhs.hash(), rhs.hash())
     bucket = _INTERN_LEVEL_IMAX.get(h, None)
     if bucket is None:
         e = W_LevelIMax(lhs, rhs)
@@ -1158,7 +1159,7 @@ def _mk_level_imax(lhs, rhs):
 
 def _mk_level_param(name):
     assert isinstance(name, Name)
-    h = _mix1(name._hash)
+    h = _mix1(name.hash())
     bucket = _INTERN_LEVEL_PARAM.get(h, None)
     if bucket is None:
         e = W_LevelParam(name)
@@ -1174,7 +1175,7 @@ def _mk_level_param(name):
 
 def _mk_w_sort(level):
     assert isinstance(level, W_Level)
-    h = _mix1(level._hash)
+    h = _mix1(level.hash())
     bucket = _INTERN_W_SORT.get(h, None)
     if bucket is None:
         e = W_Sort(level)
@@ -1190,10 +1191,10 @@ def _mk_w_sort(level):
 
 def _mk_w_const(name, levels):
     assert isinstance(name, Name)
-    h = name._hash
+    h = name.hash()
     for lvl in levels:
         assert isinstance(lvl, W_Level)
-        h = (h * 1000003) ^ lvl._hash
+        h = (h * 1000003) ^ lvl.hash()
     h = h & _HASH_MASK
     existing = _INTERN_W_CONST.get(h, None)
     if existing is not None and existing.name is name:
@@ -1263,7 +1264,7 @@ def _mk_app(fn, arg):
     """
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
-    h = _mix2(fn._hash, arg._hash)
+    h = _mix2(fn.hash(), arg.hash())
     existing = _INTERN_W_APP.get(h, None)
     if existing is not None and existing.fn is fn and existing.arg is arg:
         return existing
@@ -1425,7 +1426,7 @@ def _mk_w_forall_in(tc, binder, body):
 def _mk_w_proj(struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
-    h = _mix3(struct_name._hash, field_index, struct_expr._hash)
+    h = _mix3(struct_name.hash(), field_index, struct_expr.hash())
     existing = _INTERN_W_PROJ.get(h, None)
     if (existing is not None
             and existing.struct_name is struct_name
@@ -1475,7 +1476,7 @@ def _mk_w_let(name, type, value, body):
     assert isinstance(type, W_Expr)
     assert isinstance(value, W_Expr)
     assert isinstance(body, W_Expr)
-    h = _mix4(name._hash, type._hash, value._hash, body._hash)
+    h = _mix4(name.hash(), type.hash(), value.hash(), body.hash())
     existing = _INTERN_W_LET.get(h, None)
     if (existing is not None
             and existing.name is name and existing.type is type
@@ -1950,7 +1951,7 @@ class StrName(Name):
         self.parent = parent
         self.suffix = suffix
         self._hash = (
-            (parent._hash * 1000003) ^ compute_hash(suffix)
+            (parent.hash() * 1000003) ^ compute_hash(suffix)
         ) & 0xFFFFFFFF
         self.is_internal = (
             parent.is_internal
@@ -1993,7 +1994,7 @@ class NumName(Name):
         # don't collide in the hash table; `syntactic_eq` also distinguishes
         # via subclass identity.
         h = compute_hash(idx.str()) ^ 0x5A5A5A5A
-        self._hash = ((parent._hash * 1000003) ^ h) & 0xFFFFFFFF
+        self._hash = ((parent.hash() * 1000003) ^ h) & 0xFFFFFFFF
         # Lean's `isInternal` / private-name checks: num parts don't
         # trigger themselves but they don't block parent propagation.
         self.is_internal = parent.is_internal
@@ -2134,12 +2135,12 @@ class Binder(_Item):
         return self.with_type(type=new_type)
 
     def incr_free_bvars(self, tc, expr, depth):
-        if self.type.loose_bvar_range <= depth:
+        if self.type.loose_bvar_range() <= depth:
             return self
         return self.with_type(type=self.type.incr_free_bvars(tc, expr, depth))
 
     def instantiate(self, tc, expr, depth=0):
-        if self.type.loose_bvar_range <= depth:
+        if self.type.loose_bvar_range() <= depth:
             return self
         return self.with_type(type=self.type.instantiate(tc, expr, depth))
 
@@ -2547,19 +2548,50 @@ class W_LevelParam(W_Level):
 
 
 class W_Expr(_Item):
-    _attrs_ = ['_hash', 'loose_bvar_range', 'has_fvar']
-    _immutable_fields_ = ['_hash', 'loose_bvar_range', 'has_fvar']
+    # Three per-node immutable scalars are packed into one `_packed` word:
+    #
+    #   bits  0-31 : the content `hash()` (already masked to 32 bits)
+    #   bit     32 : `has_fvar` (does any free variable occur)
+    #   bits 33-63 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #
+    # Each was its own machine word before (`_hash`, plus a `_bvar_fvar`
+    # that already folded the latter two). They are all small — a term's
+    # bvar depth is tiny and the hash is 32-bit — so one word holds them
+    # with `loose_bvar_range` never reaching bit 63 (it stays positive,
+    # so the `>> 33` unpack needs no mask). Tens of millions of nodes are
+    # live on a Mathlib-sized heap, so collapsing three words to one is a
+    # direct cut to the parsed-heap footprint and thus to GC
+    # survivor-tracing time. `Name` / `W_Level` keep their own separate
+    # `_hash` field — only `W_Expr` is packed.
+    #
+    # Accessors are `@always_inline` (not `@elidable`): they sit on hot
+    # paths — `loose_bvar_range() <= depth` in substitution, `hash()` in
+    # every node's construction — and the default binary runs the JIT
+    # off, so they must inline to a bare shift/mask rather than stay a
+    # call for a tracer to fold. `_packed` is immutable, so the unpack is
+    # still JIT-foldable.
+    _attrs_ = ['_packed']
+    _immutable_fields_ = ['_packed']
 
-    @elidable
+    @always_inline
     def hash(self):
         """
-        A content hash. Subclasses set ``self._hash`` eagerly in
-        ``__init__``, mixing the hashes of their sub-expressions /
-        levels / names — so this is O(1) and JIT-foldable. Used by
-        the exporter's content-keyed dedup to match `lean4export`'s
-        `HashMap Expr Nat`.
+        A content hash (the low 32 bits of `_packed`). Subclasses mix
+        the hashes of their sub-expressions / levels / names into it in
+        ``__init__``. Used by the exporter's content-keyed dedup to
+        match `lean4export`'s `HashMap Expr Nat`.
         """
-        return self._hash
+        return self._packed & 0xFFFFFFFF
+
+    @always_inline
+    def loose_bvar_range(self):
+        """The largest loose de-Bruijn index occurring + 1 (0 if none)."""
+        return self._packed >> 33
+
+    @always_inline
+    def has_fvar(self):
+        """Whether any free variable (`W_FVar`) occurs in this term."""
+        return ((self._packed >> 32) & 1) != 0
 
     def _reset_caches(self):
         """
@@ -2690,7 +2722,7 @@ class W_Expr(_Item):
         """
         if not env:
             return self
-        if self.loose_bvar_range == 0:
+        if self.loose_bvar_range() == 0:
             return self
         return W_Closure(env, self)
 
@@ -2847,9 +2879,8 @@ class W_BVar(W_Expr):
 
     def __init__(self, id):
         self.id = id
-        self.loose_bvar_range = id + 1
-        self.has_fvar = False
-        self._hash = ((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF
+        bf = (id + 1) << 1
+        self._packed = (((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         return "<BVar %s>" % (self.id,)
@@ -2917,10 +2948,9 @@ class W_FVar(W_Expr):
         self.id = next(self._counter)
         assert isinstance(binder, Binder)
         self.binder = binder
-        self.loose_bvar_range = 0
-        self.has_fvar = True
+        bf = 1
         # FVars are unique by id, so hashing on id alone is fine.
-        self._hash = ((self.id * 1000003) ^ 0xF7A8) & 0xFFFFFFFF
+        self._packed = (((self.id * 1000003) ^ 0xF7A8) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
@@ -2964,9 +2994,8 @@ class W_LitStr(W_Expr):
     def __init__(self, val):
         assert isinstance(val, str)
         self.val = val
-        self.loose_bvar_range = 0
-        self.has_fvar = False
-        self._hash = ((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF
+        bf = 0
+        self._packed = (((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         return repr(self.val)
@@ -3044,9 +3073,8 @@ class W_Sort(W_Expr):
 
     def __init__(self, level):
         self.level = level
-        self.loose_bvar_range = 0
-        self.has_fvar = False
-        self._hash = ((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF
+        bf = 0
+        self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
@@ -3148,8 +3176,7 @@ class W_Const(W_Expr):
         for each in levels:
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
         self.levels = levels
-        self.loose_bvar_range = 0
-        self.has_fvar = False
+        bf = 0
         # Inline caches, tagged with the env — hash-consing shares this
         # instance across `Environment`s and both the inferred type
         # and the delta-unfolded value depend on the env's declarations.
@@ -3165,7 +3192,7 @@ class W_Const(W_Expr):
         h = name.hash()
         for lvl in levels:
             h = (h * 1000003) ^ lvl.hash()
-        self._hash = ((h * 1000003) ^ 0xC057) & 0xFFFFFFFF
+        self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         return "`%s" % self.str()
@@ -3416,9 +3443,8 @@ class W_LitNat(W_Expr):
 
     def __init__(self, val):
         self.val = val
-        self.loose_bvar_range = 0
-        self.has_fvar = False
-        self._hash = ((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF
+        bf = 0
+        self._packed = (((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
         return "<LitNat %s>" % (self.val.str(),)
@@ -3714,11 +3740,13 @@ class W_Proj(W_Expr):
         # across `Environment`s and `whnf` is env-dependent.
         self._struct_whnf_env = None
         self._struct_whnf = None
-        self.loose_bvar_range = struct_expr.loose_bvar_range
-        self.has_fvar = struct_expr.has_fvar
+        bf = (
+            (struct_expr.loose_bvar_range() << 1)
+            | (1 if struct_expr.has_fvar() else 0)
+        )
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ struct_expr.hash()
-        self._hash = ((h * 1000003) ^ 0x9709) & 0xFFFFFFFF
+        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32)
 
     def _reset_caches(self):
         self._struct_whnf_env = None
@@ -3824,7 +3852,7 @@ class W_Proj(W_Expr):
         return None
 
     def incr_free_bvars(self, tc, count, depth):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return self.with_expr(tc, self.struct_expr.incr_free_bvars(tc, count, depth))
 
@@ -3835,7 +3863,7 @@ class W_Proj(W_Expr):
         return self.with_expr(tc, new_expr)
 
     def instantiate(self, tc, expr, depth=0):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return self.with_expr(tc, self.struct_expr.instantiate(tc, expr, depth))
 
@@ -3931,7 +3959,7 @@ class W_Proj(W_Expr):
                     self.struct_name, self.field_index, i + 1,
                     self.struct_expr,
                 )
-            if ctor_type.body.loose_bvar_range > 0:
+            if ctor_type.body.loose_bvar_range() > 0:
                 # Later fields depend on this one; for Prop structs the field must be Prop.
                 if is_prop_type:
                     field_sort = ctor_type.binder.type.infer(env).whnf(env)
@@ -4033,15 +4061,16 @@ class W_FunBase(W_Expr):
         self.binder = binder
         self.body = body
         self.finished_reduce = False
-        body_range = body.loose_bvar_range - 1
+        body_range = body.loose_bvar_range() - 1
         if body_range < 0:
             body_range = 0
-        binder_range = binder.type.loose_bvar_range
+        binder_range = binder.type.loose_bvar_range()
         if binder_range > body_range:
-            self.loose_bvar_range = binder_range
+            loose = binder_range
         else:
-            self.loose_bvar_range = body_range
-        self.has_fvar = binder.type.has_fvar or body.has_fvar
+            loose = body_range
+        fvar = binder.type.has_fvar() or body.has_fvar()
+        bf = (loose << 1) | (1 if fvar else 0)
         # Instantiate / infer / closure caches, allocated on first
         # write — see `_ExprCaches`. The closure cache is critical for
         # DAG-shared lambdas: when ``λ`` appears N times under the
@@ -4052,7 +4081,7 @@ class W_FunBase(W_Expr):
         # Content hash: mix binder's name + type + binder-info + body.
         h = (binder.name.hash() * 1000003) ^ binder.type.hash()
         h = (h * 1000003) ^ body.hash()
-        self._hash = ((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF
+        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32)
 
     def _ensure_caches(self):
         c = self._caches
@@ -4065,7 +4094,7 @@ class W_FunBase(W_Expr):
     def closure(self, env):
         if not env:
             return self
-        if self.loose_bvar_range == 0:
+        if self.loose_bvar_range() == 0:
             return self
         c = self._caches
         if c is not None and c.closure_env is env:
@@ -4187,7 +4216,7 @@ class W_ForAll(W_FunBase):
         return _mk_w_forall_in(tc, new_binder, new_body)
 
     def incr_free_bvars(self, tc, count, depth):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return _mk_w_forall_in(
             tc,
@@ -4252,7 +4281,7 @@ class W_ForAll(W_FunBase):
             parts.append(_sub(marker, body, constants))
             return _format.fill(_format.nest(2, _format.concat(parts)))
         else:
-            if self.binder.is_default() and not self.body.loose_bvar_range > 0:
+            if self.binder.is_default() and not self.body.loose_bvar_range() > 0:
                 wrap = isinstance(self.binder.type, W_ForAll)
                 inner = _sub(marker, self.binder.type, constants)
                 if wrap:
@@ -4265,7 +4294,7 @@ class W_ForAll(W_FunBase):
                     lhs = inner
             elif (
                 self.binder.is_instance()
-                and not self.body.loose_bvar_range > 0
+                and not self.body.loose_bvar_range() > 0
                 and self.binder.name.has_macro_scopes()
             ):
                 lhs = _format.concat([
@@ -4341,7 +4370,7 @@ def _forall_quantifier_step(fa, constants):
     is_forall = (
         (not _is_prop_type(lhs_type, constants)
          and _is_prop_type(rhs, constants))
-        or (fa.body.loose_bvar_range > 0 and _is_prop_type(rhs, constants))
+        or (fa.body.loose_bvar_range() > 0 and _is_prop_type(rhs, constants))
     )
     return is_forall, rhs
 
@@ -4410,7 +4439,7 @@ class W_Lambda(W_FunBase):
         current = self
         while isinstance(current, W_Lambda):
             binders.append(current.binder)
-            binder_used.append(current.body.loose_bvar_range > 0)
+            binder_used.append(current.body.loose_bvar_range() > 0)
             current = current.body
 
         # One Format per emitted binder group / instance binder; joined with
@@ -4508,7 +4537,7 @@ class W_Lambda(W_FunBase):
         return _iter_instantiate(tc, self, expr, depth)
 
     def incr_free_bvars(self, tc, count, depth):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return _mk_w_lambda_in(
             tc,
@@ -4536,21 +4565,21 @@ class W_Let(W_Expr):
         self.type = type
         self.value = value
         self.body = body
-        body_range = body.loose_bvar_range - 1
+        body_range = body.loose_bvar_range() - 1
         if body_range < 0:
             body_range = 0
-        r = type.loose_bvar_range
-        vr = value.loose_bvar_range
+        r = type.loose_bvar_range()
+        vr = value.loose_bvar_range()
         if vr > r:
             r = vr
         if body_range > r:
             r = body_range
-        self.loose_bvar_range = r
-        self.has_fvar = type.has_fvar or value.has_fvar or body.has_fvar
+        fvar = type.has_fvar() or value.has_fvar() or body.has_fvar()
+        bf = (r << 1) | (1 if fvar else 0)
         h = (name.hash() * 1000003) ^ type.hash()
         h = (h * 1000003) ^ value.hash()
         h = (h * 1000003) ^ body.hash()
-        self._hash = ((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF
+        self._packed = (((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF) | (bf << 32)
 
     def contains_const(self, name):
         return (self.type.contains_const(name)
@@ -4614,7 +4643,7 @@ class W_Let(W_Expr):
         return body_type.infer(env)
 
     def instantiate(self, tc, expr, depth=0):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return self.name.let(
             type=self.type.instantiate(tc, expr, depth),
@@ -4623,7 +4652,7 @@ class W_Let(W_Expr):
         )
 
     def incr_free_bvars(self, tc, count, depth):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return self.name.let(
             type=self.type.incr_free_bvars(tc, count, depth),
@@ -4679,18 +4708,19 @@ class W_App(W_Expr):
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
-        fn_range = fn.loose_bvar_range
-        arg_range = arg.loose_bvar_range
+        fn_range = fn.loose_bvar_range()
+        arg_range = arg.loose_bvar_range()
         if fn_range > arg_range:
-            self.loose_bvar_range = fn_range
+            loose = fn_range
         else:
-            self.loose_bvar_range = arg_range
-        self.has_fvar = fn.has_fvar or arg.has_fvar
+            loose = arg_range
+        fvar = fn.has_fvar() or arg.has_fvar()
+        bf = (loose << 1) | (1 if fvar else 0)
         # Instantiate / infer / whnf caches, allocated on first write —
         # see `_ExprCaches`.
         self._caches = None
         h = (fn.hash() * 1000003) ^ arg.hash()
-        self._hash = ((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF
+        self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32)
 
     def _ensure_caches(self):
         c = self._caches
@@ -5311,7 +5341,7 @@ class W_App(W_Expr):
         return _iter_instantiate(tc, self, expr, depth)
 
     def incr_free_bvars(self, tc, count, depth):
-        if self.loose_bvar_range <= depth:
+        if self.loose_bvar_range() <= depth:
             return self
         return self.fn.incr_free_bvars(tc, count, depth).app_in(
             tc, self.arg.incr_free_bvars(tc, count, depth),
@@ -5470,21 +5500,20 @@ class W_Closure(W_Expr):
         self.env = env
         self.body = body
         n = len(env)
-        body_outside = body.loose_bvar_range - n
+        body_outside = body.loose_bvar_range() - n
         if body_outside < 0:
             body_outside = 0
         max_loose = body_outside
         for v in env:
-            if v.loose_bvar_range > max_loose:
-                max_loose = v.loose_bvar_range
-        self.loose_bvar_range = max_loose
-        fvar = body.has_fvar
+            if v.loose_bvar_range() > max_loose:
+                max_loose = v.loose_bvar_range()
+        fvar = body.has_fvar()
         if not fvar:
             for v in env:
-                if v.has_fvar:
+                if v.has_fvar():
                     fvar = True
                     break
-        self.has_fvar = fvar
+        bf = (max_loose << 1) | (1 if fvar else 0)
         # Inline whnf/infer caches, env-tagged for hash-consing safety.
         self._whnf_cache_env = None
         self._whnf_cache_result = None
@@ -5493,7 +5522,7 @@ class W_Closure(W_Expr):
         # Closures shouldn't reach the exporter (they're produced during
         # reduction, not by the walker), but give them an identity-based
         # hash so the RPython annotator sees `_hash` set on every W_Expr.
-        self._hash = compute_identity_hash(self)
+        self._packed = (compute_identity_hash(self) & 0xFFFFFFFF) | (bf << 32)
 
     def whnf(self, env):
         if self._whnf_cache_env is env:
@@ -6525,7 +6554,7 @@ def _iter_instantiate(tc, root, expr, depth):
 
 
 def _instantiate(tc, cur, sub, depth):
-    if cur.loose_bvar_range <= depth:
+    if cur.loose_bvar_range() <= depth:
         return cur
     cls = cur.__class__
     # Merge point after the no-op early-out, so the trace doesn't
@@ -6558,9 +6587,9 @@ def _inst_app(tc, app, sub, depth):
     arg = app.arg
     new_fn = fn
     new_arg = arg
-    if fn.loose_bvar_range > depth:
+    if fn.loose_bvar_range() > depth:
         new_fn = _instantiate(tc, fn, sub, depth)
-    if arg.loose_bvar_range > depth:
+    if arg.loose_bvar_range() > depth:
         new_arg = _instantiate(tc, arg, sub, depth)
     # If neither side moved, reuse the existing app — avoids a fresh
     # `_mk_app_in` lookup per `_inst_app` call. For brecOn-style hot
@@ -6634,7 +6663,7 @@ def _instantiate_multi(tc, cur, substs, depth):
     used in its `whnf_no_unfolding` multi-Lambda peel (tc.rs:780-789) and
     its `Let`/`Var` handlers.
     """
-    if cur.loose_bvar_range <= depth:
+    if cur.loose_bvar_range() <= depth:
         return cur
     cls = cur.__class__
     if cls is W_BVar:
@@ -6656,7 +6685,7 @@ def _instantiate_multi(tc, cur, substs, depth):
     if cls is W_Lambda:
         assert isinstance(cur, W_Lambda)
         new_binder = cur.binder
-        if cur.binder.type.loose_bvar_range > depth:
+        if cur.binder.type.loose_bvar_range() > depth:
             new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
             if new_type is not cur.binder.type:
                 new_binder = cur.binder.with_type(type=new_type)
@@ -6667,7 +6696,7 @@ def _instantiate_multi(tc, cur, substs, depth):
     if cls is W_ForAll:
         assert isinstance(cur, W_ForAll)
         new_binder = cur.binder
-        if cur.binder.type.loose_bvar_range > depth:
+        if cur.binder.type.loose_bvar_range() > depth:
             new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
             if new_type is not cur.binder.type:
                 new_binder = cur.binder.with_type(type=new_type)
