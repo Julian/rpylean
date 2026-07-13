@@ -68,6 +68,21 @@ _OFFSET_UNDEF = 0
 _OFFSET_TRUE = 1
 _OFFSET_FALSE = 2
 
+#: Fed to the reused parser during the reference-counting pre-pass wherever
+#: it would otherwise splice in a real sub-expression. That pass builds
+#: exprs only to discard them (it keeps just the counts), so the operand it
+#: hands to each `.app()` / binder / `.proj()` is pure write-only scaffolding
+#: — never stored in the pool, never compared, never read as data. It must
+#: still be *some* valid `W_Expr` (you cannot call `.app()` on `None`), so a
+#: loose de Bruijn `#0` is used: syntactically incomplete on its own, so it
+#: reads as filler rather than a meaningful value like `PROP` would.
+#:
+#: This is the opposite situation to the two "this slot is dead" markers —
+#: a freed pool slot and a dropped theorem value — which ARE read back and
+#: so must be `None`, the one value no real expr can take (see `ref_expr`
+#: and `W_Theorem.drop_checked_value`).
+_SCAN_SCAFFOLD = _mk_w_bvar(0)
+
 #: `_try_lazy_delta` outcomes: proved equal, or undecided (with both
 #: sides advanced to whnf_core'd, delta-exhausted forms).
 _LD_TRUE = 1
@@ -121,7 +136,10 @@ class EnvironmentBuilder(object):
     Incrementally builds up an environment as we parse an export file.
     """
 
-    _attrs_ = ['levels', 'exprs', 'names', 'declarations', 'env']
+    _attrs_ = [
+        'levels', 'exprs', 'names', 'declarations', 'env',
+        '_refcount', '_scanning',
+    ]
 
     def __init__(self, levels=None, exprs=None, names=[]):
         self.levels = [W_LEVEL_ZERO] if levels is None else levels
@@ -129,6 +147,59 @@ class EnvironmentBuilder(object):
         self.names = [Name.ANONYMOUS] + names
         self.declarations = []
         self.env = Environment(declarations=name_dict())
+        # Expr-pool pruning (see `ref_expr`). `_refcount` is `None` on the
+        # default path (no pruning — REPL, tests, stdin); a `list[int]`
+        # of parse-time reference counts when a pre-scan has run. While
+        # `_scanning` is True this builder IS that counting pre-pass:
+        # `ref_expr` tallies references and hands back a dummy instead of
+        # a real expr, so no deep expr DAG is retained.
+        self._refcount = None
+        self._scanning = False
+
+    def start_scan(self):
+        """Configure this builder as the reference-counting pre-pass."""
+        self._scanning = True
+        self._refcount = []
+
+    def ref_expr(self, eidx):
+        """
+        Resolve one parse-time reference to expression index ``eidx``.
+
+        Every ``builder.exprs[...]`` read in the parser goes through here,
+        which is what makes expr-pool pruning possible in three modes:
+
+        * No pruning (``_refcount is None`` — REPL, tests, streamed stdin):
+          just return the pooled expr.
+        * Counting pre-pass (``_scanning``): tally this reference and hand
+          back scaffolding. Because it is the *same* parser walking the
+          *same* file, its tallies are exactly the reference counts the
+          real pass will make — no separate, drift-prone scanner.
+        * Real pass (counts present, not scanning): return the expr and
+          decrement its count; when the last reference is consumed, drop
+          the pool's hold so the sub-tree can be reclaimed once the owning
+          declaration lets go too.
+        """
+        counts = self._refcount
+        if counts is None:
+            e = self.exprs[eidx]
+            assert e is not None
+            return e
+        if self._scanning:
+            counts[eidx] += 1
+            return _SCAN_SCAFFOLD
+        # A slot the parser still references must have a positive count and
+        # a live expr. Either assertion failing means the pre-pass under-
+        # counted this index and its expr was freed too early: fail loudly
+        # rather than splice a released slot into a later expression.
+        c = counts[eidx]
+        assert c > 0
+        e = self.exprs[eidx]
+        assert e is not None
+        c -= 1
+        counts[eidx] = c
+        if c == 0:
+            self.exprs[eidx] = None
+        return e
 
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
@@ -186,6 +257,11 @@ class EnvironmentBuilder(object):
         _register_at(self.names, nidx, name, Name.ANONYMOUS)
 
     def register_expr(self, eidx, w_expr):
+        if self._scanning:
+            # The counting pre-pass keeps only the per-slot reference
+            # tally; the scaffolding-built expr itself is discarded.
+            _register_at(self._refcount, eidx, 0, 0)
+            return
         _register_at(self.exprs, eidx, w_expr, PROP)
 
     def register_level(self, uidx, level):

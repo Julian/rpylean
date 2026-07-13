@@ -277,7 +277,7 @@ def _read_app(cursor, builder):
         else:
             raise MalformedLine("unexpected key %s in app" % key)
         if cursor.maybe('}'):
-            return builder.exprs[fn_eidx].app(builder.exprs[arg_eidx])
+            return builder.ref_expr(fn_eidx).app(builder.ref_expr(arg_eidx))
         cursor.expect(',')
 
 
@@ -324,9 +324,9 @@ def _read_binder_expr(cursor, builder, is_lam):
             bound = _binder(
                 builder.names[name_idx],
                 binder_info,
-                builder.exprs[type_eidx],
+                builder.ref_expr(type_eidx),
             )
-            body = builder.exprs[body_eidx]
+            body = builder.ref_expr(body_eidx)
             if is_lam:
                 return objects.fun(bound)(body)
             return objects.forall(bound)(body)
@@ -367,9 +367,9 @@ def _read_let(cursor, builder):
             raise MalformedLine("unexpected key %s in letE" % key)
         if cursor.maybe('}'):
             return builder.names[name_idx].let(
-                type=builder.exprs[type_eidx],
-                value=builder.exprs[value_eidx],
-                body=builder.exprs[body_eidx],
+                type=builder.ref_expr(type_eidx),
+                value=builder.ref_expr(value_eidx),
+                body=builder.ref_expr(body_eidx),
             )
         cursor.expect(',')
 
@@ -391,7 +391,7 @@ def _read_proj(cursor, builder):
             raise MalformedLine("unexpected key %s in proj" % key)
         if cursor.maybe('}'):
             return builder.names[type_name_idx].proj(
-                idx, builder.exprs[struct_eidx],
+                idx, builder.ref_expr(struct_eidx),
             )
         cursor.expect(',')
 
@@ -459,7 +459,7 @@ def _parse_axiom(cursor, builder):
                 levels = []
             decl = builder.names[name_idx].axiom(
                 levels=[builder.names[i] for i in levels],
-                type=builder.exprs[type_eidx],
+                type=builder.ref_expr(type_eidx),
             )
             builder.register_declaration(decl)
             return
@@ -493,7 +493,7 @@ def _parse_quot(cursor, builder):
                 raise MalformedLine("quot record missing `kind`")
             builder.register_quotient(
                 builder.names[name_idx],
-                builder.exprs[type_eidx],
+                builder.ref_expr(type_eidx),
                 [builder.names[i] for i in levels],
                 kind,
             )
@@ -526,8 +526,8 @@ def _parse_theorem(cursor, builder):
                 levels = []
             decl = builder.names[name_idx].theorem(
                 levels=[builder.names[i] for i in levels],
-                type=builder.exprs[type_eidx],
-                value=builder.exprs[value_eidx],
+                type=builder.ref_expr(type_eidx),
+                value=builder.ref_expr(value_eidx),
             )
             builder.register_declaration(decl)
             return
@@ -559,8 +559,8 @@ def _parse_opaque(cursor, builder):
                 levels = []
             decl = builder.names[name_idx].opaque(
                 levels=[builder.names[i] for i in levels],
-                type=builder.exprs[type_eidx],
-                value=builder.exprs[value_eidx],
+                type=builder.ref_expr(type_eidx),
+                value=builder.ref_expr(value_eidx),
             )
             builder.register_declaration(decl)
             return
@@ -595,8 +595,8 @@ def _parse_definition(cursor, builder):
                 levels = []
             decl = builder.names[name_idx].definition(
                 levels=[builder.names[i] for i in levels],
-                type=builder.exprs[type_eidx],
-                value=builder.exprs[value_eidx],
+                type=builder.ref_expr(type_eidx),
+                value=builder.ref_expr(value_eidx),
                 hint=hint,
             )
             builder.register_declaration(decl)
@@ -759,7 +759,7 @@ def _register_single_inductive(builder, type_data, ctor_records, rec_records):
 
     inductive = name.inductive(
         levels=[builder.names[i] for i in type_data.levels],
-        type=builder.exprs[type_data.type_idx],
+        type=builder.ref_expr(type_data.type_idx),
         all=[builder.names[i] for i in type_data.name_idxs],
         constructors=ctor_decls,
         recursors=rec_decls,
@@ -786,7 +786,7 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
                     raise ReflexiveKError(name, builder.names[rec.nidx])
         inductive = name.inductive(
             levels=[builder.names[i] for i in type_data.levels],
-            type=builder.exprs[type_data.type_idx],
+            type=builder.ref_expr(type_data.type_idx),
             all=[builder.names[i] for i in type_data.name_idxs],
             constructors=[],
             recursors=[],
@@ -815,7 +815,7 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
 def _register_constructor(builder, ctor):
     decl = builder.names[ctor.nidx].constructor(
         levels=[builder.names[i] for i in ctor.levels],
-        type=builder.exprs[ctor.type_idx],
+        type=builder.ref_expr(ctor.type_idx),
         num_params=ctor.num_params,
         num_fields=ctor.num_fields,
         cidx=ctor.cidx,
@@ -827,13 +827,13 @@ def _register_constructor(builder, ctor):
 def _register_recursor(builder, rec):
     decl = builder.names[rec.nidx].recursor(
         levels=[builder.names[i] for i in rec.levels],
-        type=builder.exprs[rec.type_idx],
+        type=builder.ref_expr(rec.type_idx),
         all=[builder.names[i] for i in rec.ind_name_idxs],
         rules=[
             objects.W_RecRule(
                 ctor_name=builder.names[r.ctor_nidx],
                 num_fields=r.num_fields,
-                rhs=builder.exprs[r.rhs_eidx],
+                rhs=builder.ref_expr(r.rhs_eidx),
             ) for r in rec.rules
         ],
         k=rec.k,

@@ -5776,6 +5776,16 @@ class W_DeclarationKind(_Item):
     def get_delta_reduce_target(self):
         return None
 
+    def drop_checked_value(self):
+        """
+        Release any value expression that is dead once this declaration
+        has been type-checked, so its (often large) sub-tree can be
+        reclaimed mid-run. No-op by default; only kinds that are never
+        delta-unfolded — whose value the checker therefore never touches
+        again — override it (see ``W_Theorem``). A no-op for definitions,
+        whose value must survive for delta-reduction.
+        """
+
     def is_constructor(self):
         """Polymorphic predicate: `W_Constructor` overrides to True."""
         return False
@@ -5862,16 +5872,32 @@ class W_Opaque(W_Definition):
 
 
 class W_Theorem(W_DeclarationKind):
+    # `value` is `None` once `drop_checked_value` has run: a theorem is
+    # never delta-unfolded, so nothing reads its proof term after its own
+    # check, and `None` (impossible for a real expr) is a value the reader
+    # sites below must — and do — prove absent before use. It is also
+    # quasi-immutable (`?`): set once, read only during this theorem's
+    # check, then dropped.
     _attrs_ = ['value']
-    _immutable_fields_ = ['value']
+    _immutable_fields_ = ['value?']
 
     def __init__(self, value):
         self.value = value
 
+    def drop_checked_value(self):
+        # The proof term is dead now: a theorem is never a delta-reduce
+        # target, so no later declaration's check can reach it. Drop the
+        # reference so its sub-tree becomes collectable. `None` — not a
+        # stand-in expr — so that any read after the drop is a loud crash
+        # (or the assertions below), never a silently-wrong expression.
+        self.value = None
+
     def dump_to(self, exporter, decl):
+        value = self.value
+        assert value is not None
         exporter.begin_decl(decl)
-        exporter.dump_deps(self.value)
-        exporter.emit_thm(decl, self.value)
+        exporter.dump_deps(value)
+        exporter.emit_thm(decl, value)
 
     def type_check(self, type, tc):
         type_type = type.infer(tc)
@@ -5880,13 +5906,17 @@ class W_Theorem(W_DeclarationKind):
             return W_NotASort(tc, type, inferred_type=type_type, name=None)
         if not type_type_whnf.level.eq(W_LEVEL_ZERO):
             return W_NotAProp(tc, type, inferred_sort=type_type_whnf, name=None)
-        val_type = self.value.infer(tc)
+        value = self.value
+        assert value is not None
+        val_type = value.infer(tc)
         if not tc.def_eq(type, val_type):
-            return W_TypeError(tc, self.value, type, inferred_type=val_type)
+            return W_TypeError(tc, value, type, inferred_type=val_type)
 
     def decl_format(self, name, levels, type, constants, marker):
+        value = self.value
+        assert value is not None
         return _decl_with_value_format(
-            "theorem", name, levels, type, self.value, constants, marker,
+            "theorem", name, levels, type, value, constants, marker,
         )
 
 

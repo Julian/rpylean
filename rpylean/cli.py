@@ -348,6 +348,12 @@ class _StreamingChecker(DeclarationHook):
             self.failures += 1
             if 0 < self.abort_at <= self.failures:
                 return True
+        else:
+            # The proof term of a checked theorem is dead — release it so
+            # its sub-tree can be reclaimed instead of accumulating for the
+            # rest of the run. Paired with expr-pool pruning (`ref_expr`),
+            # this keeps the live heap to the declarations still in play.
+            decl.w_kind.drop_checked_value()
         return False
 
     def _break_for(self, decl):
@@ -496,14 +502,53 @@ class _CheckRun(object):
             )
 
 
+def _prescan_refcounts(path, stdin):
+    """
+    Parse ``path`` once with a scanning builder to tally, per expression
+    index, how many times the real parse will reference it.
+
+    The scan runs the identical parser, so the counts are exact by
+    construction; it hands every ``ref_expr`` a dummy and discards each
+    built expression, so it retains no expression DAG (only names, levels
+    and the integer count array). Returns the count list, or ``None`` if
+    the metadata line is malformed (the real pass will report the error).
+    """
+    scan_file = _open_export(path, stdin)
+    try:
+        try:
+            parser.validate_export_metadata(scan_file)
+            scan_builder = EnvironmentBuilder()
+            scan_builder.start_scan()
+            scan_builder.consume(scan_file)
+        except ExportError:
+            # Any malformed line makes the scan's counts unusable; fall
+            # back to the unpruned path and let the real parse surface the
+            # error (it is the authority on both checking and reporting).
+            return None
+        return scan_builder._refcount
+    finally:
+        scan_file.close()
+
+
 def _check_one_file(path, stdin, stderr, run, abort_at):
     """
     Stream-check a single export file, returning the number of new failures.
 
     ``abort_at`` is the failure count at which to stop (0 means unlimited).
     """
+    # A reference-counting pre-pass over the (reopenable) file lets the
+    # real pass free each expr-pool slot the moment its last parse-time
+    # reference is consumed, so proof terms of already-checked theorems
+    # don't pin the heap. Streamed stdin can't be rewound, so it keeps the
+    # single-pass path (no pruning).
+    refcount = None
+    if path != "-":
+        refcount = _prescan_refcounts(path, stdin)
+
     file = _open_export(path, stdin)
     builder, checker, tracer = run.start(abort_at)
+    if refcount is not None:
+        builder._refcount = refcount
     bytes_at_start = _bytes_allocated()
     try:
         try:
