@@ -1,5 +1,5 @@
 from rpython.rlib.jit import (
-    JitDriver, dont_look_inside, elidable, promote, unroll_safe,
+    dont_look_inside, elidable, promote, unroll_safe,
 )
 from rpython.rlib.objectmodel import (
     always_inline, compute_hash, newlist_hint,
@@ -28,86 +28,6 @@ from rpylean.exceptions import (
     InvalidProjection,
     UnknownDeclaration,
     W_Error,
-)
-
-
-def _whnf_printable_location(expr_class):
-    """
-    Return a human-readable description of the current WHNF trace.
-
-    Called by the JIT to label traces in PYPYLOG output.
-    """
-    return "whnf: %s" % expr_class.__name__
-
-
-# JIT driver for the WHNF reduction loop - the core hot path of type checking.
-# greens: expr_class determines which reduction rule applies
-# reds: the mutable state during reduction
-# is_recursive=True: WHNF can re-enter itself via subterm reduction (e.g.
-# `W_App._whnf_core` calling `expr.whnf(env)` on the function head, or
-# iota reduction going through def_eq → whnf again). Without the hint the
-# JIT bails on these mutually-recursive entries before specialising.
-whnf_jitdriver = JitDriver(
-    greens=["expr_class"],
-    reds=["made_progress", "expr", "env"],
-    name="whnf",
-    get_printable_location=_whnf_printable_location,
-    is_recursive=True,
-)
-
-
-# JIT driver for the Nat.succ chain walker. The loop is uniform —
-# every iteration unpeels one `Nat.succ` and recurses; the JIT
-# specialises on the (empty) green key and inlines the WHNF call.
-to_nat_val_jitdriver = JitDriver(
-    greens=[],
-    reds=["succs", "expr", "env"],
-    name="to_nat_val",
-    is_recursive=True,
-)
-
-
-def _inst_printable_location(cls):
-    return "instantiate: %s" % cls.__name__
-
-
-# JIT driver for `_instantiate`'s per-kind dispatch (W_App / W_Lambda /
-# W_ForAll). Each kind has its own helper (`_inst_app` / `_inst_lambda` /
-# `_inst_forall`) that may recurse into `_instantiate` for sub-terms;
-# `is_recursive=True` lets the JIT compile per-kind traces that can
-# tail-call themselves.
-#
-# History: a previous driver attached to the older work-stack version
-# (5-way polymorphic dispatch) caused a ~25% regression and 79+
-# bridges (see `_iter_instantiate`'s docstring). The current direct-
-# recursion split is a 3-way dispatch, which should be a friendlier
-# trace shape — but worth measuring before assuming it pays off.
-inst_jitdriver = JitDriver(
-    greens=["cls"],
-    reds=["depth", "tc", "cur", "sub"],
-    name="instantiate",
-    get_printable_location=_inst_printable_location,
-    is_recursive=True,
-)
-
-
-def _app_args_printable_location():
-    return "app_args"
-
-
-# JIT driver for `W_App.def_eq`'s args-spine comparison loop. The loop
-# body is uniform (`def_eq(self_args[i], other_args[i])`) so greens
-# are empty; reds carry the loop index and the two arg lists plus
-# the bound `env.def_eq` to call. Each iteration enters the
-# `def_eq_jitdriver` via that bound method, so this driver only needs
-# to compile the outer loop's dispatch — congruence over deep app
-# spines (the `assemble*` family in `init.ndjson` is the motivating
-# case) flows through here.
-app_args_jitdriver = JitDriver(
-    greens=[],
-    reds=["i", "self_args", "other_args", "tc"],
-    name="app_args",
-    get_printable_location=_app_args_printable_location,
 )
 
 
@@ -2780,13 +2700,6 @@ class W_Expr(_Item):
         expr = self
         made_progress = False
         while True:
-            expr_class = expr.__class__
-            whnf_jitdriver.jit_merge_point(
-                expr_class=expr_class,
-                expr=expr,
-                env=env,
-                made_progress=made_progress,
-            )
             env.tracer.whnf_step(expr, env.declarations)
             env.tick_wall_time()
             next = expr._whnf_core(env)
@@ -3416,9 +3329,6 @@ def _to_nat_val(expr, env):
     """
     succs = 0
     while True:
-        to_nat_val_jitdriver.jit_merge_point(
-            succs=succs, expr=expr, env=env,
-        )
         if isinstance(expr, W_LitNat):
             return expr.val.add(rbigint.fromint(succs))
         if isinstance(expr, W_Const):
@@ -4831,12 +4741,6 @@ class W_App(W_Expr):
             return False
         i = len(self_args) - 1
         while i >= 0:
-            app_args_jitdriver.jit_merge_point(
-                i=i,
-                self_args=self_args,
-                other_args=other_args,
-                tc=tc,
-            )
             if not tc.def_eq(self_args[i], other_args[i]):
                 return False
             i -= 1
@@ -6660,15 +6564,6 @@ def _instantiate(tc, cur, sub, depth):
     if cur.loose_bvar_range() <= depth:
         return cur
     cls = cur.__class__
-    # Merge point after the no-op early-out, so the trace doesn't
-    # specialise on a path that exits immediately.
-    inst_jitdriver.jit_merge_point(
-        cls=cls,
-        tc=tc,
-        cur=cur,
-        sub=sub,
-        depth=depth,
-    )
     if cls is W_App:
         assert isinstance(cur, W_App)
         return _inst_app(tc, cur, sub, depth)

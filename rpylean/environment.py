@@ -6,7 +6,7 @@ from traceback import print_exc
 import pdb
 
 from rpython.rlib import rgc
-from rpython.rlib.jit import JitDriver, dont_look_inside, promote
+from rpython.rlib.jit import dont_look_inside, promote
 from rpython.rlib.objectmodel import (
     not_rpython,
     specialize,
@@ -87,33 +87,6 @@ _SCAN_SCAFFOLD = _mk_w_bvar(0)
 #: sides advanced to whnf_core'd, delta-exhausted forms).
 _LD_TRUE = 1
 _LD_UNDEF = 0
-
-
-def _def_eq_printable_location(expr1_class):
-    """
-    Label `def_eq` traces by the left head class. We don't include
-    `expr2.__class__` because WHNF tends to canonicalise both heads
-    into the same class on hot paths — adding it as a second green
-    multiplied the specialisation space ~10× without proportionate
-    payback on init-prelude (bridges went 90 → 133 vs the no-driver
-    baseline).
-    """
-    return "def_eq: %s" % expr1_class.__name__
-
-
-# JIT driver covering the structural-dispatch core of def_eq. Merge
-# point lives at the top of `_def_eq_core` (after closure-peeling),
-# so the green sees the post-WHNF post-force left head — the same
-# class `_def_eq_core` dispatches on. `is_recursive=True` because the
-# core recurses into `def_eq` for sub-checks, and each recursive entry
-# hits this same merge point with its own green key.
-def_eq_jitdriver = JitDriver(
-    greens=["expr1_class"],
-    reds=["expr1", "expr2", "env"],
-    name="def_eq",
-    get_printable_location=_def_eq_printable_location,
-    is_recursive=True,
-)
 
 
 @specialize.call_location()
@@ -1192,20 +1165,6 @@ class TypeChecker(object):
         if isinstance(expr2, W_Closure):
             expr2 = expr2.force(self)
 
-        # Merge point sits at the structural-dispatch entry: heads are
-        # post-WHNF and post-closure-force here, so the JIT specializes
-        # on the left head's class — the same dispatch the code below
-        # switches on.
-        def_eq_jitdriver.jit_merge_point(
-            expr1_class=expr1.__class__,
-            expr1=expr1,
-            expr2=expr2,
-            env=self,
-        )
-
-        # The greens above already promote the classes for the JIT;
-        # the explicit `promote` calls give the annotator the same
-        # hint on the untranslated/non-JIT path.
         cls1 = promote(expr1.__class__)
         cls2 = promote(expr2.__class__)
 
