@@ -365,11 +365,16 @@ class Tracer(object):
     on `env.tracer` rather than gating on the tracer's identity.
     """
 
-    _attrs_ = ['_writer', '_depth', 'recording']
+    _attrs_ = ['_writer', '_depth', 'recording', 'writes']
 
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
+        # Whether this tracer renders terms (a stream is attached).
+        # A counting-only tracer must not be handed rendered terms: the
+        # machine would have to export both sides of every comparison
+        # just to be counted.
+        self.writes = False
         # Whether this tracer records anything. The hottest call sites
         # (arena probes, whnf steps, the def_eq prologue) fire billions
         # of times per heavy declaration; a virtual call into an empty
@@ -384,6 +389,13 @@ class Tracer(object):
     def raw_mismatch(self, name):
         """Called when the `RawMachine` rejected the declaration ``name``
         but the boxed kernel accepted it."""
+
+    def counted_enter(self):
+        """`enter` without the terms, for a tracer that only counts."""
+
+    def counted_result(self, result):
+        """`result` without rendering, for a tracer that only counts."""
+        return result
 
     def enter(self, expr1, expr2, declarations):
         """Called when entering a def_eq comparison."""
@@ -524,6 +536,7 @@ class StreamTracer(Tracer):
         self._writer = writer
         self._depth = 0
         self.recording = True
+        self.writes = writer is not None
         self._pending_newline = False
         self.raw_bail_by_reason = {}
         self.raw_mismatch_count = 0
@@ -575,6 +588,14 @@ class StreamTracer(Tracer):
         self._writer.write(expr2.tokens(declarations))
         self._pending_newline = True
         self._depth += 1
+
+    def counted_enter(self):
+        self.def_eq_count += 1
+
+    def counted_result(self, value):
+        if not value:
+            self.false_count += 1
+        return value
 
     def result(self, value):
         if not value:
@@ -1959,7 +1980,7 @@ class Environment(object):
         self.infer_only = False
         #: Whether definition-like declarations are checked by the
         #: `RawMachine` first, with the boxed kernel as the fallback.
-        self.raw_enabled = False
+        self.raw_enabled = True
 
     def tick_wall_time(self):
         """No-op: wall-time tracking is a per-decl `TypeChecker` concern;

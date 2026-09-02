@@ -55,6 +55,7 @@ def _outcomes(path):
     the declarations each engine rejects, by name.
     """
     boxed_env = from_export(path.open())
+    boxed_env.raw_enabled = False
     boxed = sorted(_rejected(e) for e in boxed_env.type_check(boxed_env.all()))
     raw_env = from_export(path.open())
     tracer = _BailTracer()

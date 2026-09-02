@@ -1809,31 +1809,37 @@ class RawMachine(object):
             if max_heartbeat > 0 and tc.heartbeat > max_heartbeat:
                 raise HeartbeatExceeded(tc.decl, tc.heartbeat, max_heartbeat)
         tc.tick_wall_time()
-        tracing = tc.tracer.recording
+        tracer = tc.tracer
+        tracing = tracer.recording
         if tracing:
-            tc.tracer.enter(self.export(h1), self.export(h2), tc.declarations)
+            # Rendering both sides is only worth it when the tracer
+            # writes them out; a counting tracer just takes the tally.
+            if tracer.writes:
+                tracer.enter(self.export(h1), self.export(h2), tc.declarations)
+            else:
+                tracer.counted_enter()
         if h1 == h2:
             if tracing:
-                tc.tracer.identity_hit()
-                return tc.tracer.result(True)
+                tracer.identity_hit()
+                return self._traced_result(True)
             return True
         if self._find(h1) == self._find(h2):
             if tracing:
-                tc.tracer.eqv_hit()
-                return tc.tracer.result(True)
+                tracer.eqv_hit()
+                return self._traced_result(True)
             return True
         key = self._pair_key(h1, h2)
         if key != 0 and self._neq.get(key, 0) != 0:
             if tracing:
-                return tc.tracer.result(False)
+                return self._traced_result(False)
             return False
         store = self.store
         if store.kind(h1) == KIND_APP and store.kind(h2) == KIND_APP:
             if self._spine_cheap_eq(h1, h2):
                 self._union(h1, h2)
                 if tracing:
-                    tc.tracer.eqv_hit()
-                    return tc.tracer.result(True)
+                    tracer.eqv_hit()
+                    return self._traced_result(True)
                 return True
         if stack_almost_full():
             raise RawBail("def_eq: stack")
@@ -1846,8 +1852,14 @@ class RawMachine(object):
             if key2 != 0:
                 self._neq.set(key2, 1)
         if tracing:
-            return tc.tracer.result(result)
+            return self._traced_result(result)
         return result
+
+    def _traced_result(self, result):
+        tracer = self.tc.tracer
+        if tracer.writes:
+            return tracer.result(result)
+        return tracer.counted_result(result)
 
     def _spine_cheap_eq(self, h1, h2):
         store = self.store
