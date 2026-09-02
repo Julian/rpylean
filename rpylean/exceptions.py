@@ -313,6 +313,47 @@ class InvalidProjection(W_Error):
         )
 
     @staticmethod
+    def mismatched_structure(struct_name, field_index, actual_name, expr):
+        """The projected value's type is a different structure."""
+        return InvalidProjection(
+            struct_name,
+            field_index,
+            expr,
+            [
+                ERROR.emit("expected a value of type "),
+                DECL_NAME.emit(struct_name.str()),
+                ERROR.emit(", got one of type "),
+                DECL_NAME.emit(actual_name.str()),
+            ],
+        )
+
+    @staticmethod
+    def not_a_structure_type(struct_name, field_index, expr):
+        """The projected value's type is not headed by a constant."""
+        return InvalidProjection(
+            struct_name,
+            field_index,
+            expr,
+            [
+                ERROR.emit("the projected value's type is not "),
+                DECL_NAME.emit(struct_name.str()),
+            ],
+        )
+
+    @staticmethod
+    def not_an_inductive(struct_name, field_index, expr):
+        """The projection names something which isn't an inductive type."""
+        return InvalidProjection(
+            struct_name,
+            field_index,
+            expr,
+            [
+                DECL_NAME.emit(struct_name.str()),
+                ERROR.emit(" is not an inductive type"),
+            ],
+        )
+
+    @staticmethod
     def out_of_bounds(struct_name, field_index, num_fields, expr):
         """The field index exceeds the number of fields in the structure."""
         if num_fields == 0:

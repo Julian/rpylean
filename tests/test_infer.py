@@ -198,6 +198,65 @@ class TestProj(object):
             proj.infer(env)
         assert str(e.value) == "invalid projection N.0: N is not a structure (it has 2 constructors)"
 
+    def test_mismatched_structure(self):
+        """
+        A projection whose structure name isn't the type of the value
+        being projected (leanprover/lean4#14576).
+        """
+        Foo = Name.simple("Foo")
+        Bar = Name.simple("Bar")
+        foo_mk, bar_mk = Foo.child("mk"), Bar.child("mk")
+        foo_mk_decl = foo_mk.constructor(
+            type=forall(a.binder(type=NAT))(Foo.const()),
+        )
+        bar_mk_decl = bar_mk.constructor(
+            type=forall(a.binder(type=NAT))(Bar.const()),
+        )
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[foo_mk_decl])
+        Bar_decl = Bar.inductive(type=TYPE, constructors=[bar_mk_decl])
+        nat_decl = NAT.name.axiom(type=TYPE)
+        env = Environment.having([
+            Foo_decl, foo_mk_decl, Bar_decl, bar_mk_decl, nat_decl,
+        ])
+        proj = Foo.proj(0, bar_mk.app(W_LitNat.int(0)))
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+        assert str(e.value) == (
+            "invalid projection Foo.0: "
+            "expected a value of type Foo, got one of type Bar"
+        )
+
+    def test_not_a_structure_type(self):
+        """The projected value's type isn't headed by a constant at all."""
+        Foo = Name.simple("Foo")
+        mk = Foo.child("mk")
+        mk_decl = mk.constructor(type=forall(a.binder(type=NAT))(Foo.const()))
+        Foo_decl = Foo.inductive(type=TYPE, constructors=[mk_decl])
+        nat_decl = NAT.name.axiom(type=TYPE)
+        # `q : Nat → Nat`, so the projected value's type is a pi.
+        q = Name.simple("q").axiom(type=forall(a.binder(type=NAT))(NAT))
+        env = Environment.having([Foo_decl, mk_decl, nat_decl, q])
+        proj = Foo.proj(0, q.const())
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+        assert str(e.value) == (
+            "invalid projection Foo.0: "
+            "the projected value's type is not Foo"
+        )
+
+    def test_not_an_inductive(self):
+        """The projection names a non-inductive declaration."""
+        Foo = Name.simple("Foo")
+        Foo_decl = Foo.axiom(type=TYPE)
+        q = Name.simple("q").axiom(type=Foo.const())
+        env = Environment.having([Foo_decl, q])
+        proj = Foo.proj(0, q.const())
+        with pytest.raises(InvalidProjection) as e:
+            proj.infer(env)
+        assert str(e.value) == (
+            "invalid projection Foo.0: Foo is not an inductive type"
+        )
+
     def test_unknown_structure(self):
         Foo = Name.simple("Foo")
         Bar = Name.simple("Bar")

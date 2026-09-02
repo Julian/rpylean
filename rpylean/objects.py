@@ -3847,18 +3847,26 @@ class W_Proj(W_Expr):
                 self.struct_name, self.field_index, self.struct_expr,
             )
 
-        # The base type should be a constant, referring to 'struct_type' (e.g. `MyList`)
-        assert isinstance(struct_expr_type, W_Const), (
-            "Expected W_Const, got %s" % struct_expr_type
-        )
-        target_const = get_decl(env.declarations, struct_expr_type.name)
-        assert target_const is struct_type, "Expected %s, got %s" % (
-            target_const,
-            struct_type,
-        )
+        # The base type must be a constant naming the projected structure
+        # (e.g. `MyList` for `MyList.0`). A projection whose structure name
+        # doesn't match the value being projected is ill-typed: the field
+        # type would be read out of a constructor the value never used.
+        if not isinstance(struct_expr_type, W_Const):
+            raise InvalidProjection.not_a_structure_type(
+                self.struct_name, self.field_index, self.struct_expr,
+            )
+        if not struct_expr_type.is_named(self.struct_name):
+            raise InvalidProjection.mismatched_structure(
+                self.struct_name, self.field_index,
+                struct_expr_type.name, self.struct_expr,
+            )
 
         assert isinstance(struct_type, W_Declaration)
         struct_kind = struct_type.w_kind
+        if not isinstance(struct_kind, W_Inductive):
+            raise InvalidProjection.not_an_inductive(
+                self.struct_name, self.field_index, self.struct_expr,
+            )
         assert isinstance(struct_kind, W_Inductive)
         if len(struct_kind.ctor_names) != 1:
             raise InvalidProjection.not_a_structure(
@@ -3887,7 +3895,10 @@ class W_Proj(W_Expr):
         # matching the constructor type's parameter order.
         for app in reversed(apps):
             ctor_type = ctor_type.whnf(env)
-            assert isinstance(ctor_type, W_ForAll)
+            if not isinstance(ctor_type, W_ForAll):
+                raise InvalidProjection.out_of_bounds(
+                    self.struct_name, self.field_index, 0, self.struct_expr,
+                )
             new_type = ctor_type.body.instantiate(env, app.arg)
             ctor_type = new_type
 
