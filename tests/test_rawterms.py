@@ -31,7 +31,7 @@ from rpylean.objects import (
 
 
 f, g, x, y, S = names("f", "g", "x", "y", "S")
-b0, b1, b2 = W_BVar(0), W_BVar(1), W_BVar(2)
+b0, b1, b2, b3_ = W_BVar(0), W_BVar(1), W_BVar(2), W_BVar(3)
 u = Name.simple("u").level()
 
 
@@ -304,3 +304,18 @@ class TestProjectionIdentity(object):
         q1 = store.import_term(S.proj(0, store.export_term(fv)))
         q2 = store.import_term(T.proj(0, store.export_term(fv)))
         assert store.bind_fvar(q1, fv, 0) != store.bind_fvar(q2, fv, 0)
+
+
+class TestInstantiateMulti(object):
+    def test_matches_sequential(self, store):
+        e = fun(x.binder(type=b2))(g.const().app(b0, b1, b2, b3_))
+        h = store.import_term(e)
+        s0 = store.import_term(x.const())
+        s1 = store.import_term(f.const().app(y.const()))
+        s2 = store.import_term(b0)
+        multi = store.instantiate_multi(h, [s0, s1, s2], 0)
+        # substs[i] replaces bvar i: apply innermost-first sequentially.
+        seq = store.instantiate(store.instantiate(store.instantiate(h, s0, 0), s1, 0), s2, 0)
+        assert multi == seq
+        assert store.instantiate_multi(h, [s0], 0) == store.instantiate(h, s0, 0)
+        assert store.instantiate_multi(h, [], 0) == h

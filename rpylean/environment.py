@@ -390,6 +390,10 @@ class Tracer(object):
         """Called when the `RawMachine` rejected the declaration ``name``
         but the boxed kernel accepted it."""
 
+    def raw_census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
+        """Called as a `RawMachine` is freed, with the sizes its tables
+        reached for that declaration."""
+
     def counted_enter(self):
         """`enter` without the terms, for a tracer that only counts."""
 
@@ -529,7 +533,7 @@ class StreamTracer(Tracer):
         'klike_fired_count', 'klike_bail_head_count',
         'klike_bail_mutual_count', 'klike_bail_ctors_count',
         'klike_bail_defeq_count',
-        'raw_bail_by_reason', 'raw_mismatch_count',
+        'raw_bail_by_reason', 'raw_mismatch_count', 'raw_max',
     ]
 
     def __init__(self, writer):
@@ -540,6 +544,9 @@ class StreamTracer(Tracer):
         self._pending_newline = False
         self.raw_bail_by_reason = {}
         self.raw_mismatch_count = 0
+        # Largest per-declaration table sizes seen: records, leaves,
+        # instantiate / shift / bind memos, eqv, neq, failed.
+        self.raw_max = [0] * 8
         self.def_eq_count = 0
         self.whnf_step_count = 0
         self.beta_count = 0
@@ -710,6 +717,12 @@ class StreamTracer(Tracer):
             self.raw_bail_by_reason.get(reason, 0) + 1
         )
 
+    def raw_census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
+        sizes = [nrecs, nleaves, inst, shift, bind, eqv, neq, failed]
+        for i in range(8):
+            if sizes[i] > self.raw_max[i]:
+                self.raw_max[i] = sizes[i]
+
     def raw_mismatch(self, name):
         self.raw_mismatch_count += 1
         if self._writer is not None:
@@ -759,6 +772,12 @@ class StreamTracer(Tracer):
         for reason, count in self.raw_bail_by_reason.iteritems():
             total += count
         writer.write_plain("raw machine bails: %d total\n" % total)
+        m = self.raw_max
+        writer.write_plain(
+            "raw machine max per decl: records %d, leaves %d, inst memo %d, "
+            "shift memo %d, bind memo %d, eqv %d, neq %d, failed %d\n"
+            % (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]),
+        )
         for reason, count in self.raw_bail_by_reason.iteritems():
             writer.write_plain("  %d\t%s\n" % (count, reason))
         writer.write_plain(

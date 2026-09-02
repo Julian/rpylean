@@ -16,7 +16,7 @@ A store is per declaration: the working set of one check, freed
 wholesale when the check ends.
 """
 
-from rpython.rlib.objectmodel import always_inline
+from rpython.rlib.objectmodel import always_inline, we_are_translated
 from rpython.rlib.rarithmetic import intmask, r_uint
 from rpython.rlib.rstack import stack_almost_full
 from rpython.rtyper.lltypesystem import lltype, rffi
@@ -150,6 +150,24 @@ def _raw_alloc(n):
 
 def _raw_free(arr):
     lltype.free(arr, flavor='raw')
+
+
+def _raw_grow(arr, used, cap):
+    """A fresh array of ``cap`` words holding ``arr``'s first ``used``
+    words; ``arr`` is freed."""
+    new = _raw_alloc(cap)
+    if we_are_translated():
+        rffi.c_memcpy(
+            rffi.cast(rffi.VOIDP, new), rffi.cast(rffi.CONST_VOIDP, arr),
+            used * rffi.sizeof(lltype.Signed),
+        )
+    else:
+        i = 0
+        while i < used:
+            new[i] = arr[i]
+            i += 1
+    _raw_free(arr)
+    return new
 
 
 @always_inline
@@ -286,7 +304,8 @@ class RawTermStore(object):
         'infos', 'names', '_name_ids',
         '_bvar_leaves', '_fvar_leaves', '_content_leaves',
         '_import_memo', '_export_memo',
-        '_inst_memo', '_shift_memo', '_bind_memo',
+        '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
+        '_bindm_memo',
         '_freed',
     ]
 
@@ -330,6 +349,8 @@ class RawTermStore(object):
         self._inst_memo = RawIntMap(1 << 12)
         self._shift_memo = RawIntMap(1 << 10)
         self._bind_memo = RawIntMap(1 << 10)
+        self._multi_memo = RawIntMap(1 << 10)
+        self._bindm_memo = RawIntMap(1 << 10)
         self._freed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -350,6 +371,8 @@ class RawTermStore(object):
         self._inst_memo.free()
         self._shift_memo.free()
         self._bind_memo.free()
+        self._multi_memo.free()
+        self._bindm_memo.free()
 
     # ---- record access ---------------------------------------------------
 
@@ -488,34 +511,12 @@ class RawTermStore(object):
         return rec_handle(idx)
 
     def _grow_records(self):
-        old = self.recs
-        old_info = self.rec_info
-        old_memos = self.memos
+        n = self.nrecs
         cap = self.cap * 2
-        recs = _raw_alloc(cap * REC_WORDS)
-        info = _raw_alloc(cap)
-        memos = _raw_alloc(cap * MEMO_SLOTS)
-        n = self.nrecs * REC_WORDS
-        i = 0
-        while i < n:
-            recs[i] = old[i]
-            i += 1
-        i = 0
-        while i < self.nrecs:
-            info[i] = old_info[i]
-            i += 1
-        n = self.nrecs * MEMO_SLOTS
-        i = 0
-        while i < n:
-            memos[i] = old_memos[i]
-            i += 1
-        self.recs = recs
-        self.rec_info = info
-        self.memos = memos
+        self.recs = _raw_grow(self.recs, n * REC_WORDS, cap * REC_WORDS)
+        self.rec_info = _raw_grow(self.rec_info, n, cap)
+        self.memos = _raw_grow(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
         self.cap = cap
-        _raw_free(old)
-        _raw_free(old_info)
-        _raw_free(old_memos)
 
     def _rehash(self):
         _raw_free(self.table)
@@ -575,29 +576,11 @@ class RawTermStore(object):
         j = self.nleaves
         if j == self.leaf_cap:
             cap = self.leaf_cap * 2
-            meta = _raw_alloc(cap)
-            bv = _raw_alloc(cap)
-            wh = _raw_alloc(cap)
-            inf = _raw_alloc(cap)
-            chk = _raw_alloc(cap)
-            i = 0
-            while i < j:
-                meta[i] = self.leaf_meta[i]
-                bv[i] = self.leaf_bvar[i]
-                wh[i] = self.leaf_whnf[i]
-                inf[i] = self.leaf_infer[i]
-                chk[i] = self.leaf_checked[i]
-                i += 1
-            _raw_free(self.leaf_meta)
-            _raw_free(self.leaf_bvar)
-            _raw_free(self.leaf_whnf)
-            _raw_free(self.leaf_infer)
-            _raw_free(self.leaf_checked)
-            self.leaf_meta = meta
-            self.leaf_bvar = bv
-            self.leaf_whnf = wh
-            self.leaf_infer = inf
-            self.leaf_checked = chk
+            self.leaf_meta = _raw_grow(self.leaf_meta, j, cap)
+            self.leaf_bvar = _raw_grow(self.leaf_bvar, j, cap)
+            self.leaf_whnf = _raw_grow(self.leaf_whnf, j, cap)
+            self.leaf_infer = _raw_grow(self.leaf_infer, j, cap)
+            self.leaf_checked = _raw_grow(self.leaf_checked, j, cap)
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_meta[j] = e._packed >> 32
@@ -768,6 +751,74 @@ class RawTermStore(object):
             self._inst_memo.set(key, r)
         return r
 
+    def instantiate_multi(self, h, substs, depth=0):
+        """
+        ``h`` with ``substs[i]`` substituted for the bound variable
+        ``depth + i`` for every ``i``, all at once, and every looser
+        bound variable moved down by ``len(substs)``.
+        """
+        n = len(substs)
+        if n == 1:
+            return self.instantiate(h, substs[0], depth)
+        if n == 0 or self.loose_bvar_range(h) <= depth:
+            return h
+        # The substitute list as a record chain, so the memo can key on
+        # it; the chain is consed, so equal lists share a key.
+        return self._instantiate_multi(h, substs, self.chain(substs), depth)
+
+    def _instantiate_multi(self, h, substs, chain, depth):
+        if self.loose_bvar_range(h) <= depth:
+            return h
+        n = len(substs)
+        if is_leaf(h):
+            id = self.leaf_bvar[leaf_index(h)]
+            rel = id - depth
+            if rel < n:
+                return self.shift(substs[rel], depth, 0)
+            return self.bvar(id - n)
+        key = _pack_key(h, chain, depth)
+        if key != 0:
+            r = self._multi_memo.get(key, 0)
+            if r != 0:
+                return r
+        if stack_almost_full():
+            raise RawBail("instantiate_multi: stack")
+        recs = self.recs
+        base = rec_index(h) * REC_WORDS
+        kind = recs[base + F_KIND]
+        a = recs[base + F_A]
+        b = recs[base + F_B]
+        info = self.rec_info[rec_index(h)]
+        if kind == KIND_APP:
+            na = self._instantiate_multi(a, substs, chain, depth)
+            nb = self._instantiate_multi(b, substs, chain, depth)
+            r = h if (na == a and nb == b) else self.cons(KIND_APP, na, nb, 0)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            na = self._instantiate_multi(a, substs, chain, depth)
+            nb = self._instantiate_multi(b, substs, chain, depth + 1)
+            r = h if (na == a and nb == b) else self.cons(kind, na, nb, 0, info)
+        elif kind == KIND_PROJ:
+            na = self._instantiate_multi(a, substs, chain, depth)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, recs[base + F_C], info)
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self._instantiate_multi(a, substs, chain, depth)
+            nv = self._instantiate_multi(value, substs, chain, depth)
+            nbody = self._instantiate_multi(body, substs, chain, depth + 1)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody, 0)
+                r = self.cons(KIND_LET, na, pair, 0, info)
+        if key != 0:
+            self._multi_memo.set(key, r)
+        return r
+
     def shift(self, h, count, depth=0):
         """
         ``h`` with every bound variable at or above ``depth`` moved up
@@ -868,6 +919,84 @@ class RawTermStore(object):
                 r = self.cons(KIND_LET, na, pair, 0, info)
         if key != 0:
             self._bind_memo.set(key, r)
+        return r
+
+    def chain(self, handles):
+        """The record chain standing for the list ``handles`` (at least
+        two of them), for keying memos on a list."""
+        n = len(handles)
+        chain = handles[n - 1]
+        i = n - 2
+        while i >= 0:
+            chain = self.cons(KIND_PAIR, handles[i], chain, 0)
+            i -= 1
+        return chain
+
+    def bind_fvars(self, h, fvars, depth=0):
+        """
+        ``h`` with the free variables ``fvars`` (in binding order)
+        abstracted in one pass: the last becomes the bound variable
+        ``depth``, the first ``depth + len(fvars) - 1``.
+        """
+        n = len(fvars)
+        if n == 1:
+            return self.bind_fvar(h, fvars[0], depth)
+        if n == 0 or not self.has_fvar(h):
+            return h
+        return self._bind_fvars(h, fvars, self.chain(fvars), depth)
+
+    def _bind_fvars(self, h, fvars, chain, depth):
+        if not self.has_fvar(h):
+            return h
+        n = len(fvars)
+        if is_leaf(h):
+            j = 0
+            while j < n:
+                if fvars[j] == h:
+                    return self.bvar(depth + n - 1 - j)
+                j += 1
+            return h
+        key = _pack_key(h, chain, depth)
+        if key != 0:
+            r = self._bindm_memo.get(key, 0)
+            if r != 0:
+                return r
+        if stack_almost_full():
+            raise RawBail("bind_fvars: stack")
+        recs = self.recs
+        base = rec_index(h) * REC_WORDS
+        kind = recs[base + F_KIND]
+        a = recs[base + F_A]
+        b = recs[base + F_B]
+        info = self.rec_info[rec_index(h)]
+        if kind == KIND_APP:
+            na = self._bind_fvars(a, fvars, chain, depth)
+            nb = self._bind_fvars(b, fvars, chain, depth)
+            r = h if (na == a and nb == b) else self.cons(KIND_APP, na, nb, 0)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            na = self._bind_fvars(a, fvars, chain, depth)
+            nb = self._bind_fvars(b, fvars, chain, depth + 1)
+            r = h if (na == a and nb == b) else self.cons(kind, na, nb, 0, info)
+        elif kind == KIND_PROJ:
+            na = self._bind_fvars(a, fvars, chain, depth)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, recs[base + F_C], info)
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self._bind_fvars(a, fvars, chain, depth)
+            nv = self._bind_fvars(value, fvars, chain, depth)
+            nbody = self._bind_fvars(body, fvars, chain, depth + 1)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody, 0)
+                r = self.cons(KIND_LET, na, pair, 0, info)
+        if key != 0:
+            self._bindm_memo.set(key, r)
         return r
 
     def sort_leaf(self, h):
@@ -1045,7 +1174,15 @@ class RawMachine(object):
         self.h_string = store.leaf_for(STRING)
 
     def free(self):
-        self.store.free()
+        store = self.store
+        tracer = self.tc.tracer
+        if tracer.recording:
+            tracer.raw_census(
+                store.nrecs, store.nleaves, store._inst_memo.size,
+                store._shift_memo.size, store._bind_memo.size,
+                self._eqv.size, self._neq.size, self._failed.size,
+            )
+        store.free()
         self._eqv.free()
         self._neq.free()
         self._failed.free()
@@ -1507,16 +1644,26 @@ class RawMachine(object):
     # ---- inference -------------------------------------------------------
 
     def fvar_for(self, h):
-        """The canonical free variable opening the binder record ``h``."""
-        fv = self._fvars.get(h, 0)
+        """The canonical free variable opening the binder record ``h``,
+        whose domain is closed."""
+        return self.fvar_for_domain(h, self.store.field_a(h))
+
+    def fvar_for_domain(self, h, domain):
+        """
+        The canonical free variable opening the binder record ``h``
+        when its domain, with the enclosing binders' variables
+        substituted in, is ``domain``.
+        """
+        key = (h << 31) | domain
+        fv = self._fvars.get(key, 0)
         if fv != 0:
             return fv
         store = self.store
         fv = store.leaf_for(W_FVar(store.binder_of(h)))
         j = leaf_index(fv)
-        store.leaf_infer[j] = store.field_a(h)
+        store.leaf_infer[j] = domain
         store.leaf_checked[j] = 1
-        self._fvars[h] = fv
+        self._fvars[key] = fv
         return fv
 
     def infer(self, h, check):
@@ -1618,51 +1765,152 @@ class RawMachine(object):
         head, args = store.unapp(h)
         fn_type = self.infer(head, check)
         n = len(args)
+        if not check:
+            return self._infer_app_only(head, args, fn_type)
         i = n - 1
         while i >= 0:
             arg = args[i]
             fn_type_whnf = self.whnf(fn_type)
             if store.kind(fn_type_whnf) != KIND_FORALL:
-                spine = head
-                j = n - 1
-                while j > i:
-                    spine = store.cons(KIND_APP, spine, args[j], 0)
-                    j -= 1
-                raise W_NotAFunction(
-                    tc, self.export(spine), inferred_type=self.export(fn_type),
+                self._not_a_function(head, args, i, fn_type)
+            arg_type = self.infer(arg, True)
+            domain = store.field_a(fn_type_whnf)
+            if not self.def_eq(domain, arg_type):
+                raise W_TypeError(
+                    tc, self.export(arg), self.export(domain),
+                    inferred_type=self.export(arg_type),
                 )
-            if check:
-                arg_type = self.infer(arg, True)
-                domain = store.field_a(fn_type_whnf)
-                if not self.def_eq(domain, arg_type):
-                    raise W_TypeError(
-                        tc, self.export(arg), self.export(domain),
-                        inferred_type=self.export(arg_type),
-                    )
             fn_type = store.instantiate(store.field_b(fn_type_whnf), arg, 0)
             i -= 1
         return fn_type
 
+    def _infer_app_only(self, head, args, fn_type):
+        """
+        The type of ``head args`` given ``head``'s type, trusting the
+        arguments. Walks straight through a Pi telescope's bodies and
+        substitutes the pending arguments in one pass only when it has
+        to reduce, so a well-typed n-ary application costs one
+        substitution rather than n.
+        """
+        store = self.store
+        n = len(args)
+        pending = []
+        i = n - 1
+        while i >= 0:
+            arg = args[i]
+            if store.kind(fn_type) != KIND_FORALL:
+                if pending:
+                    pending.reverse()
+                    fn_type = store.instantiate_multi(fn_type, pending, 0)
+                    pending = []
+                fn_type = self.whnf(fn_type)
+                if store.kind(fn_type) != KIND_FORALL:
+                    self._not_a_function(head, args, i, fn_type)
+            fn_type = store.field_b(fn_type)
+            pending.append(arg)
+            i -= 1
+        if pending:
+            pending.reverse()
+            fn_type = store.instantiate_multi(fn_type, pending, 0)
+        return fn_type
+
+    def _not_a_function(self, head, args, i, fn_type):
+        store = self.store
+        spine = head
+        j = len(args) - 1
+        while j > i:
+            spine = store.cons(KIND_APP, spine, args[j], 0)
+            j -= 1
+        raise W_NotAFunction(
+            self.tc, self.export(spine), inferred_type=self.export(fn_type),
+        )
+
+    def _open_telescope(self, h, kind, check):
+        """
+        Open every leading binder of the given kind at once: returns
+        ``(records, domains, fvars, body)`` with the domains and the
+        body instantiated with the free variables of the binders
+        before them. In check mode each domain is checked to be a sort.
+        """
+        store = self.store
+        records = []
+        domains = []
+        fvars = []
+        e = h
+        while store.kind(e) == kind:
+            domain = store.field_a(e)
+            n = len(fvars)
+            if n > 0 and store.loose_bvar_range(domain) > 0:
+                rev = fvars[:]
+                rev.reverse()
+                domain = store.instantiate_multi(domain, rev, 0)
+            if check:
+                self._ensure_sort(domain, True)
+            fvar = self.fvar_for_domain(e, domain)
+            records.append(e)
+            domains.append(domain)
+            fvars.append(fvar)
+            e = store.field_b(e)
+        rev = fvars[:]
+        rev.reverse()
+        body = store.instantiate_multi(e, rev, 0)
+        return records, domains, fvars, body
+
     def _infer_lambda(self, h, check):
         store = self.store
-        type_h = store.field_a(h)
-        if check:
-            self._ensure_sort(type_h, True)
-        fvar = self.fvar_for(h)
-        body_type = self.infer(store.instantiate(store.field_b(h), fvar, 0), check)
-        return store.cons(
-            KIND_FORALL, type_h, store.bind_fvar(body_type, fvar, 0), 0,
-            store.info(h),
-        )
+        records, domains, fvars, body = self._open_telescope(h, KIND_LAMBDA, check)
+        r = self._cheap_beta(self.infer(body, check))
+        # Close the telescope back up as a Pi: the body type over all
+        # the variables, each domain over the variables before it.
+        n = len(fvars)
+        r = store.bind_fvars(r, fvars, 0)
+        i = n - 1
+        while i >= 0:
+            domain = store.bind_fvars(domains[i], fvars[:i], 0)
+            r = store.cons(KIND_FORALL, domain, r, 0, store.info(records[i]))
+            i -= 1
+        return r
 
     def _infer_forall(self, h, check):
         store = self.store
-        type_h = store.field_a(h)
-        binder_level = self._ensure_sort(type_h, check)
-        fvar = self.fvar_for(h)
-        body = store.instantiate(store.field_b(h), fvar, 0)
-        body_level = self._ensure_sort(body, check)
-        return store.leaf_for(binder_level.imax(body_level).sort())
+        records, domains, fvars, body = self._open_telescope(h, KIND_FORALL, False)
+        levels = []
+        for domain in domains:
+            levels.append(self._ensure_sort(domain, check))
+        level = self._ensure_sort(body, check)
+        i = len(levels) - 1
+        while i >= 0:
+            level = levels[i].imax(level)
+            i -= 1
+        return store.leaf_for(level.sort())
+
+    def _cheap_beta(self, h):
+        """
+        Beta-reduce a head lambda application only when that costs
+        nothing: the lambda's body ignores its arguments, or is just
+        one of them.
+        """
+        store = self.store
+        if store.kind(h) != KIND_APP:
+            return h
+        head, args = store.unapp(h)
+        if store.kind(head) != KIND_LAMBDA:
+            return h
+        n = len(args)
+        i = 0
+        fn = head
+        while store.kind(fn) == KIND_LAMBDA and i < n:
+            i += 1
+            fn = store.field_b(fn)
+        if store.loose_bvar_range(fn) == 0:
+            return store.apply_rev(fn, args, n - 1 - i)
+        idx = store.bvar_id(fn)
+        if idx >= 0 and idx < i:
+            # args are outermost-first: the j-th consumed argument (in
+            # application order) is args[n - 1 - j]; bvar idx names
+            # the (i - 1 - idx)-th consumed one.
+            return store.apply_rev(args[n - 1 - (i - 1 - idx)], args, n - 1 - i)
+        return h
 
     def _infer_let(self, h, check):
         store = self.store
