@@ -6383,6 +6383,24 @@ class W_Recursor(W_DeclarationKind):
         error = self._check_name(env, tc.decl.name, first_kind)
         if error is not None:
             return error
+        # The kernel constructs one motive per type in the block —
+        # the mutual members (`all`) plus the auxiliary types nested
+        # occurrences are eliminated into (`num_nested`). A recursor
+        # claiming any other count is one the kernel never generates;
+        # in particular `num_motives = 0` would dodge every count-gated
+        # check below.
+        if self.num_motives != len(self.all) + first_kind.num_nested:
+            return W_InvalidRecursorRule(
+                env,
+                "recursor has %d motive(s) but its block has %d type(s)"
+                % (
+                    self.num_motives,
+                    len(self.all) + first_kind.num_nested,
+                ),
+            )
+        error = self._check_type_shape(env, type, first_kind)
+        if error is not None:
+            return error
         # Split recursors (one per motive in a mutual or nested-inductive
         # block) only have rules for ctors whose return matches *their*
         # motive's type — so `len(rules) != len(ctors_of(all))` is fine
@@ -6483,6 +6501,91 @@ class W_Recursor(W_DeclarationKind):
             "recursor %s is not a name the kernel generates for %s"
             % (name.str(), self.all[0].str()),
         )
+
+    def _check_type_shape(self, env, type, first_kind):
+        """
+        Verify this recursor's declared type has the one shape the
+        kernel ever generates:
+
+            Π params… motives… minors… indices… (major : I …) ⇒
+                motive_i indices… major
+
+        — a syntactic Pi telescope of exactly
+        ``num_params + num_motives + num_minors + num_indices`` binders,
+        then the major premise, whose domain is headed by an inductive
+        constant (a member of ``all``, or the nested container for the
+        split recursors of a nested block), with a result headed by one
+        of the motive binders.
+
+        Purely structural — binder *types* aren't derived and compared
+        here — but it pins the declared type to the recursor telescope,
+        so a recursor whose type is an arbitrary proposition (e.g.
+        `BogusRecursor.rec : False`) is rejected no matter how
+        plausible its counts and rules look: a telescope ending in an
+        application of its own motive binder cannot be a closed
+        statement.
+        """
+        t = type
+        n = (
+            self.num_params
+            + self.num_motives
+            + self.num_minors
+            + self.num_indices
+        )
+        for _ in range(n):
+            if not isinstance(t, W_ForAll):
+                return W_InvalidRecursorRule(
+                    env,
+                    "recursor type has fewer than %d binders "
+                    "(expected one each for params, motives, minors "
+                    "and indices)" % (n,),
+                )
+            t = t.body
+        if not isinstance(t, W_ForAll):
+            return W_InvalidRecursorRule(
+                env, "recursor type has no major premise binder",
+            )
+        major_head = t.binder.type.head()
+        if not isinstance(major_head, W_Const):
+            return W_InvalidRecursorRule(
+                env,
+                "recursor major premise is not headed by an inductive",
+            )
+        if first_kind.num_nested == 0:
+            ok = False
+            for ind_name in self.all:
+                if major_head.name.syntactic_eq(ind_name):
+                    ok = True
+                    break
+            if not ok:
+                return W_InvalidRecursorRule(
+                    env,
+                    "recursor major premise type %s is not one of the "
+                    "recursor's inductives" % (major_head.name.str(),),
+                )
+        else:
+            major_decl = find_decl(env.declarations, major_head.name)
+            if major_decl is None or not isinstance(
+                major_decl.w_kind, W_Inductive,
+            ):
+                return W_InvalidRecursorRule(
+                    env,
+                    "recursor major premise type %s is not an inductive"
+                    % (major_head.name.str(),),
+                )
+        result_head = t.body.head()
+        # Under params…motives…minors…indices…major, the motive
+        # binders sit at de Bruijn indices
+        # [num_indices + num_minors + 1, … + num_motives].
+        lo = self.num_indices + self.num_minors + 1
+        if not isinstance(result_head, W_BVar) or not (
+            lo <= result_head.id < lo + self.num_motives
+        ):
+            return W_InvalidRecursorRule(
+                env,
+                "recursor result is not an application of a motive",
+            )
+        return None
 
     def _check_rule_rhs_head(self, env, rule, ctor_idx):
         """Verify the rule's rhs is `λ params... motives... minors...

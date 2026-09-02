@@ -677,11 +677,29 @@ class TestRecursorRuleShape(object):
         ind = U.inductive(type=TYPE, constructors=[mk])
         return U, mk, ind
 
+    def _rec_type(self, ind_name, num_minors=1):
+        """A well-shaped recursor type for a 0-param 0-index inductive:
+        ``Π (motive : I → Sort) minors… (t : I), motive t``."""
+        from rpylean.objects import W_BVar
+        binders = [
+            Name.simple("motive").binder(
+                type=forall(x.binder(type=ind_name.const()))(TYPE),
+            ),
+        ]
+        for i in range(num_minors):
+            binders.append(Name.simple("m%d" % i).binder(type=TYPE))
+        binders.append(Name.simple("t").binder(type=ind_name.const()))
+        return forall(*binders)(
+            W_BVar(num_minors + 1).app(W_BVar(0)),
+        )
+
     def test_rule_count_mismatch_rejected(self):
         from rpylean.objects import W_RecRule, W_InvalidRecursorRule
         U, mk, ind = self._build_unit_ind()
         # Recursor with zero rules but inductive has one ctor.
-        bad_rec = U.child("rec").recursor(type=U.const(), rules=[], all=[U])
+        bad_rec = U.child("rec").recursor(
+            type=self._rec_type(U), num_minors=1, rules=[], all=[U],
+        )
         env = Environment.having([ind, mk, bad_rec])
         errors = list(env.type_check([bad_rec]))
         assert len(errors) == 1
@@ -692,7 +710,8 @@ class TestRecursorRuleShape(object):
         U, mk, ind = self._build_unit_ind()
         ghost = Name.of(["U", "ghost"])
         bad_rec = U.child("rec").recursor(
-            type=U.const(),
+            type=self._rec_type(U),
+            num_minors=1,
             rules=[W_RecRule(ctor_name=ghost, num_fields=0, rhs=U.const())],
             all=[U],
         )
@@ -706,8 +725,45 @@ class TestRecursorRuleShape(object):
         U, mk, ind = self._build_unit_ind()
         # mk has 0 fields, but the rule claims 1.
         bad_rec = U.child("rec").recursor(
-            type=U.const(),
+            type=self._rec_type(U),
+            num_minors=1,
             rules=[W_RecRule(ctor_name=mk.name, num_fields=1, rhs=U.const())],
+            all=[U],
+        )
+        env = Environment.having([ind, mk, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_motive_count_mismatch_rejected(self):
+        """The tutorial `BogusRecursor` shape: `num_motives = 0` (a
+        count the kernel never generates) used to dodge every
+        count-gated rule check, letting a recursor whose declared type
+        is `False` through."""
+        from rpylean.objects import W_InvalidRecursorRule
+        U, mk, ind = self._build_unit_ind()
+        bad_rec = U.child("rec").recursor(
+            type=self._rec_type(U), num_motives=0, rules=[], all=[U],
+        )
+        env = Environment.having([ind, mk, bad_rec])
+        errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_non_telescope_type_rejected(self):
+        """A recursor whose declared type is an arbitrary proposition
+        (not the motive-headed Pi telescope the kernel generates) is a
+        lie regardless of how plausible its counts and rules look."""
+        from rpylean.objects import W_RecRule, W_InvalidRecursorRule
+        U, mk, ind = self._build_unit_ind()
+        motive_binder = Name.simple("motive").binder(type=TYPE)
+        minor_binder = Name.simple("minor_mk").binder(type=U.const())
+        rhs = fun(motive_binder, minor_binder)(b0)
+        bad_rec = U.child("rec").recursor(
+            type=U.const(),
+            num_motives=1,
+            num_minors=1,
+            rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=rhs)],
             all=[U],
         )
         env = Environment.having([ind, mk, bad_rec])
@@ -726,7 +782,7 @@ class TestRecursorRuleShape(object):
         minor_binder = Name.simple("minor_mk").binder(type=U.const())
         good_rhs = fun(motive_binder, minor_binder)(b0)
         good_rec = U.child("rec").recursor(
-            type=U.const(),
+            type=self._rec_type(U),
             num_motives=1,
             num_minors=1,
             rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=good_rhs)],
