@@ -381,6 +381,10 @@ class Tracer(object):
         """Called when the `RawMachine` hands a declaration back to the
         boxed kernel; ``reason`` names what it could not decide."""
 
+    def raw_mismatch(self, name):
+        """Called when the `RawMachine` rejected the declaration ``name``
+        but the boxed kernel accepted it."""
+
     def enter(self, expr1, expr2, declarations):
         """Called when entering a def_eq comparison."""
 
@@ -513,6 +517,7 @@ class StreamTracer(Tracer):
         'klike_fired_count', 'klike_bail_head_count',
         'klike_bail_mutual_count', 'klike_bail_ctors_count',
         'klike_bail_defeq_count',
+        'raw_bail_by_reason', 'raw_mismatch_count',
     ]
 
     def __init__(self, writer):
@@ -520,6 +525,8 @@ class StreamTracer(Tracer):
         self._depth = 0
         self.recording = True
         self._pending_newline = False
+        self.raw_bail_by_reason = {}
+        self.raw_mismatch_count = 0
         self.def_eq_count = 0
         self.whnf_step_count = 0
         self.beta_count = 0
@@ -677,6 +684,18 @@ class StreamTracer(Tracer):
     def klike_bail_defeq(self):
         self.klike_bail_defeq_count += 1
 
+    def raw_bail(self, reason):
+        self.raw_bail_by_reason[reason] = (
+            self.raw_bail_by_reason.get(reason, 0) + 1
+        )
+
+    def raw_mismatch(self, name):
+        self.raw_mismatch_count += 1
+        if self._writer is not None:
+            self._writer.write_plain(
+                "raw machine rejected %s; boxed kernel accepted\n" % name.str(),
+            )
+
     def print_summary(self, writer):
         """Write a human-readable summary of collected counts to ``writer``.
 
@@ -712,6 +731,15 @@ class StreamTracer(Tracer):
             self.failed_probe_count,
             self.failed_hit_count,
         ))
+        writer.write_plain(
+            "raw machine mismatches: %d\n" % self.raw_mismatch_count,
+        )
+        total = 0
+        for reason, count in self.raw_bail_by_reason.iteritems():
+            total += count
+        writer.write_plain("raw machine bails: %d total\n" % total)
+        for reason, count in self.raw_bail_by_reason.iteritems():
+            writer.write_plain("  %d\t%s\n" % (count, reason))
         writer.write_plain(
             "k-like fired/bail head/mutual/ctors/defeq: %d/%d/%d/%d/%d\n" % (
                 self.klike_fired_count,
@@ -1833,10 +1861,15 @@ def _type_check_decl(decl, tc):
             except RawBail as bail:
                 tc.tracer.raw_bail(bail.reason)
             else:
-                if error is not None:
-                    error.name = decl.name
-                    error.declaration = decl
-                return error
+                if error is None:
+                    return None
+                # A rejection is confirmed by the boxed kernel before it
+                # is reported, so the machine can never reject more than
+                # the kernel does; a disagreement is recorded instead.
+                boxed = decl.type_check(tc)
+                if boxed is None:
+                    tc.tracer.raw_mismatch(decl.name)
+                return boxed
     return decl.type_check(tc)
 
 

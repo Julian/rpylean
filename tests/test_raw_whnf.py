@@ -212,7 +212,7 @@ def test_whnf_core_does_not_unfold():
         m.free()
 
 
-def test_struct_eta_major_bails_for_now():
+def test_struct_eta_on_stuck_major():
     Pair = Name.simple("Pair")
     Pair_mk = Pair.child("mk")
     Pair_rec = Pair.child("rec")
@@ -253,9 +253,5 @@ def test_struct_eta_major_bails_for_now():
     ctor_app = Pair_rec.const(levels=[u.succ()]).app(motive_lam).app(fst_minor).app(
         Pair_mk.const().app(W_LitNat.int(1), W_LitNat.int(2)))
     assert syntactic_eq(assert_whnf_parity(env, ctor_app), W_LitNat.int(1))
-    m = machine(env)
-    try:
-        with pytest.raises(RawBail):
-            m.whnf(m.store.import_term(rec_app))
-    finally:
-        m.free()
+    # A stuck major of structure type eta-expands so the rule fires.
+    assert syntactic_eq(assert_whnf_parity(env, rec_app), Pair.proj(0, stuck.const()))

@@ -17,14 +17,19 @@ wholesale when the check ends.
 """
 
 from rpython.rlib.objectmodel import always_inline
+from rpython.rlib.rarithmetic import intmask, r_uint
 from rpython.rlib.rstack import stack_almost_full
 from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpython.rlib.rbigint import rbigint
 
+from rpylean.exceptions import HeartbeatExceeded, InvalidProjection
 from rpylean.objects import (
-    NAT_SUCC,
+    HINT_ABBREV,
+    NAT,
     NAT_ZERO,
+    PROP,
+    STRING,
     W_App,
     W_BVar,
     W_Closure,
@@ -38,8 +43,15 @@ from rpylean.objects import (
     W_Let,
     W_LitNat,
     W_LitStr,
+    W_NotAFunction,
+    W_NotAProp,
+    W_NotASort,
     W_Proj,
     W_Recursor,
+    W_Sort,
+    W_TypeError,
+    W_LEVEL_ZERO,
+    _BOOL_TRUE,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
     _mk_app_in,
@@ -50,6 +62,7 @@ from rpylean.objects import (
     find_decl,
     get_decl,
     is_nat_binop,
+    name_dict,
     nat_binop_value,
     syntactic_eq,
 )
@@ -109,7 +122,7 @@ def leaf_handle(j):
 KIND_APP = 1      # a = fn, b = arg
 KIND_LAMBDA = 2   # a = binder type, b = body; info = the boxed Binder
 KIND_FORALL = 3   # a = binder type, b = body; info = the boxed Binder
-KIND_PROJ = 4     # a = struct, b = field index; info = the struct Name
+KIND_PROJ = 4     # a = struct, b = field index, c = struct Name id; info = the Name
 KIND_LET = 5      # a = type, b = PAIR(value, body); info = the let Name
 KIND_PAIR = 6     # a = value, b = body (auxiliary to KIND_LET)
 
@@ -146,9 +159,17 @@ def _mix(h, x):
 
 @always_inline
 def _spread(k):
-    # Handles and packed keys are small and sequential; smear the low
-    # bits before masking so neighbouring keys don't march in lockstep.
-    return (k * 1000003) ^ (k >> 17)
+    # Packed keys carry their most distinguishing bits high up (a
+    # record handle shifted by 38) and their least (a depth) low, so
+    # the table index has to depend on every bit: a full 64-bit
+    # finalizer (murmur3's fmix64) rather than a multiply.
+    x = r_uint(k)
+    x ^= x >> 33
+    x *= r_uint(0xff51afd7ed558ccd)
+    x ^= x >> 33
+    x *= r_uint(0xc4ceb9fe1a85ec53)
+    x ^= x >> 33
+    return intmask(x)
 
 
 @always_inline
@@ -260,12 +281,12 @@ class RawTermStore(object):
         'tc',
         'recs', 'rec_info', 'memos', 'nrecs', 'cap',
         'table', 'tmask',
-        'leaves', 'leaf_meta', 'leaf_bvar', 'leaf_whnf', 'nleaves',
-        'leaf_cap',
-        'infos', 'names',
+        'leaves', 'leaf_meta', 'leaf_bvar', 'leaf_whnf', 'leaf_infer',
+        'leaf_checked', 'nleaves', 'leaf_cap',
+        'infos', 'names', '_name_ids',
         '_bvar_leaves', '_fvar_leaves', '_content_leaves',
         '_import_memo', '_export_memo',
-        '_inst_memo', '_shift_memo',
+        '_inst_memo', '_shift_memo', '_bind_memo',
         '_freed',
     ]
 
@@ -290,11 +311,17 @@ class RawTermStore(object):
         self.leaf_meta = _raw_alloc(self.leaf_cap)
         self.leaf_bvar = _raw_alloc(self.leaf_cap)
         self.leaf_whnf = _raw_alloc(self.leaf_cap)
+        #: A leaf's inferred type (0 = not yet), and whether that type
+        #: was produced in check mode (a constant's reference check has
+        #: run).
+        self.leaf_infer = _raw_alloc(self.leaf_cap)
+        self.leaf_checked = _raw_alloc(self.leaf_cap)
         self.nleaves = 0
         #: Binder infos (boxed `Binder`s, for the name and style) and
         #: `Name`s (for projections and lets), by `rec_info` index.
         self.infos = []
         self.names = []
+        self._name_ids = name_dict()
         self._bvar_leaves = {}
         self._fvar_leaves = {}
         self._content_leaves = {}
@@ -302,6 +329,7 @@ class RawTermStore(object):
         self._export_memo = {}
         self._inst_memo = RawIntMap(1 << 12)
         self._shift_memo = RawIntMap(1 << 10)
+        self._bind_memo = RawIntMap(1 << 10)
         self._freed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -317,8 +345,11 @@ class RawTermStore(object):
         _raw_free(self.leaf_meta)
         _raw_free(self.leaf_bvar)
         _raw_free(self.leaf_whnf)
+        _raw_free(self.leaf_infer)
+        _raw_free(self.leaf_checked)
         self._inst_memo.free()
         self._shift_memo.free()
+        self._bind_memo.free()
 
     # ---- record access ---------------------------------------------------
 
@@ -515,9 +546,10 @@ class RawTermStore(object):
         return self.cons(KIND_FORALL, type, body, 0, self._info_index(binder))
 
     def proj(self, struct_name, field_index, struct):
-        return self.cons(
-            KIND_PROJ, struct, field_index, 0, self._name_index(struct_name),
-        )
+        # The structure's name is part of a projection's identity: it
+        # decides the field's type and which constructor it reads.
+        name_id = self._name_index(struct_name)
+        return self.cons(KIND_PROJ, struct, field_index, name_id, name_id)
 
     def let(self, name, type, value, body):
         pair = self.cons(KIND_PAIR, value, body, 0)
@@ -529,8 +561,12 @@ class RawTermStore(object):
         return i
 
     def _name_index(self, name):
+        i = self._name_ids.get(name, -1)
+        if i >= 0:
+            return i
         i = len(self.names)
         self.names.append(name)
+        self._name_ids[name] = i
         return i
 
     # ---- leaves ----------------------------------------------------------
@@ -542,18 +578,26 @@ class RawTermStore(object):
             meta = _raw_alloc(cap)
             bv = _raw_alloc(cap)
             wh = _raw_alloc(cap)
+            inf = _raw_alloc(cap)
+            chk = _raw_alloc(cap)
             i = 0
             while i < j:
                 meta[i] = self.leaf_meta[i]
                 bv[i] = self.leaf_bvar[i]
                 wh[i] = self.leaf_whnf[i]
+                inf[i] = self.leaf_infer[i]
+                chk[i] = self.leaf_checked[i]
                 i += 1
             _raw_free(self.leaf_meta)
             _raw_free(self.leaf_bvar)
             _raw_free(self.leaf_whnf)
+            _raw_free(self.leaf_infer)
+            _raw_free(self.leaf_checked)
             self.leaf_meta = meta
             self.leaf_bvar = bv
             self.leaf_whnf = wh
+            self.leaf_infer = inf
+            self.leaf_checked = chk
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_meta[j] = e._packed >> 32
@@ -769,6 +813,66 @@ class RawTermStore(object):
             self._shift_memo.set(key, r)
         return r
 
+    def bind_fvar(self, h, fvar, depth=0):
+        """
+        ``h`` with the free variable leaf ``fvar`` abstracted to the
+        bound variable ``depth``: the inverse of opening a binder.
+        """
+        if not self.has_fvar(h):
+            return h
+        if is_leaf(h):
+            if h == fvar:
+                return self.bvar(depth)
+            return h
+        key = _pack_key(h, fvar, depth)
+        if key != 0:
+            r = self._bind_memo.get(key, 0)
+            if r != 0:
+                return r
+        if stack_almost_full():
+            raise RawBail("bind_fvar: stack")
+        recs = self.recs
+        base = rec_index(h) * REC_WORDS
+        kind = recs[base + F_KIND]
+        a = recs[base + F_A]
+        b = recs[base + F_B]
+        info = self.rec_info[rec_index(h)]
+        if kind == KIND_APP:
+            na = self.bind_fvar(a, fvar, depth)
+            nb = self.bind_fvar(b, fvar, depth)
+            r = h if (na == a and nb == b) else self.cons(KIND_APP, na, nb, 0)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            na = self.bind_fvar(a, fvar, depth)
+            nb = self.bind_fvar(b, fvar, depth + 1)
+            r = h if (na == a and nb == b) else self.cons(kind, na, nb, 0, info)
+        elif kind == KIND_PROJ:
+            na = self.bind_fvar(a, fvar, depth)
+            r = h if na == a else self.cons(KIND_PROJ, na, b, 0, info)
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self.bind_fvar(a, fvar, depth)
+            nv = self.bind_fvar(value, fvar, depth)
+            nbody = self.bind_fvar(body, fvar, depth + 1)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody, 0)
+                r = self.cons(KIND_LET, na, pair, 0, info)
+        if key != 0:
+            self._bind_memo.set(key, r)
+        return r
+
+    def sort_leaf(self, h):
+        """The boxed `W_Sort` a leaf handle names, or ``None``."""
+        if not is_leaf(h):
+            return None
+        e = self.leaves[leaf_index(h)]
+        if isinstance(e, W_Sort):
+            return e
+        return None
+
     # ---- boundary --------------------------------------------------------
 
     def import_term(self, e):
@@ -898,27 +1002,53 @@ class RawMachine(object):
     A declaration checker over handles. Anything it cannot decide
     raises `RawBail`, and the caller runs the boxed kernel instead.
 
-    Reduction mirrors the boxed kernel step for step: `whnf_core` is
-    beta / zeta / projection / iota / quot only, `whnf` adds native Nat
-    arithmetic and one delta layer per iteration, and iota evaluates
-    the major premise with `whnf`.
+    Every step mirrors the boxed kernel: `whnf_core` is beta / zeta /
+    projection / iota / quot only, `whnf` adds native Nat arithmetic
+    and one delta layer per iteration, `def_eq` runs the same sequence
+    of checks in the same order, and `infer` opens each binder with one
+    canonical free variable per binder record.
     """
 
-    _attrs_ = ['tc', 'store', '_delta_memo', '_rule_memo']
+    _attrs_ = [
+        'tc', 'store', '_delta_memo', '_rule_memo', '_fvars',
+        '_eqv', '_neq', '_failed',
+        'h_prop', 'h_true', 'h_nat', 'h_string',
+    ]
+
+    _LAZY_DELTA_MAX_ITER = 100000
 
     def __init__(self, tc):
         self.tc = tc
-        self.store = RawTermStore(tc)
+        store = RawTermStore(tc)
+        self.store = store
         #: const leaf index -> handle of its unfolded value (0 = none)
         self._delta_memo = {}
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = {}
+        #: binder record -> its canonical free-variable leaf
+        self._fvars = {}
+        #: proven-def-eq forest over handles (handle -> parent)
+        self._eqv = RawIntMap(1 << 10)
+        #: pairs proven NOT def-eq
+        self._neq = RawIntMap(1 << 10)
+        #: pairs whose same-head argument comparison failed (symmetric)
+        self._failed = RawIntMap(1 << 8)
+        self.h_prop = store.leaf_for(PROP)
+        self.h_true = store.leaf_for(_BOOL_TRUE)
+        self.h_nat = store.leaf_for(NAT)
+        self.h_string = store.leaf_for(STRING)
 
     def free(self):
         self.store.free()
+        self._eqv.free()
+        self._neq.free()
+        self._failed.free()
 
     def _decl(self, const):
         return find_decl(self.tc.declarations, const.name)
+
+    def export(self, h):
+        return self.store.export_term(h)
 
     # ---- whnf ------------------------------------------------------------
 
@@ -937,6 +1067,8 @@ class RawMachine(object):
         cached = store.memo(h, M_WHNF)
         if cached == h:
             return h
+        if stack_almost_full():
+            raise RawBail("whnf_core: stack")
         start = h
         tc = self.tc
         while True:
@@ -983,7 +1115,6 @@ class RawMachine(object):
         if cached != 0:
             return cached
         start = h
-        tc = self.tc
         while True:
             h = self.whnf_core(h)
             if store.kind(h) == KIND_APP:
@@ -1013,6 +1144,21 @@ class RawMachine(object):
         if val == 0:
             return 0
         return store.apply_rev(val, args, len(args) - 1)
+
+    def _delta_kind(self, head):
+        """The `W_Definition` a delta-reducible head names, or None."""
+        const = self.store.const_leaf(head)
+        if const is None:
+            return None
+        decl = self._decl(const)
+        if decl is None:
+            return None
+        kind = decl.w_kind
+        if not isinstance(kind, W_Definition):
+            return None
+        if kind.get_delta_reduce_target() is None:
+            return None
+        return kind
 
     def _delta_value(self, head, const):
         j = leaf_index(head)
@@ -1079,6 +1225,31 @@ class RawMachine(object):
                     h = self.whnf(store.field_b(h))
                     continue
             return None
+
+    def _is_nat_zero(self, h):
+        store = self.store
+        lit = store.litnat_leaf(h)
+        if lit is not None:
+            return lit.val.eq(rbigint.fromint(0))
+        const = store.const_leaf(h)
+        if const is not None:
+            return const.name.syntactic_eq(NAT_ZERO.name)
+        return False
+
+    def _nat_succ_pred(self, h):
+        """The predecessor of a syntactic `Nat.succ pred` / non-zero
+        literal, or 0."""
+        store = self.store
+        lit = store.litnat_leaf(h)
+        if lit is not None:
+            if lit.val.eq(rbigint.fromint(0)):
+                return 0
+            return store.leaf_for(_mk_w_litnat(lit.val.sub(rbigint.fromint(1))))
+        if store.kind(h) == KIND_APP:
+            head = store.const_leaf(store.field_a(h))
+            if head is not None and head.name.syntactic_eq(_NAT_SUCC_NAME):
+                return store.field_b(h)
+        return 0
 
     def try_proj(self, h):
         """Projection of a constructor application, or 0."""
@@ -1169,7 +1340,9 @@ class RawMachine(object):
         major = self.whnf(args[major_idx])
 
         if rec.k == 1:
-            raise RawBail("iota: k-like")
+            major = self._to_cnstr_when_k(rec, args, major)
+            if major == 0:
+                return 0
 
         lit = store.litnat_leaf(major)
         if lit is not None:
@@ -1230,6 +1403,51 @@ class RawMachine(object):
         self._rule_memo[key] = rhs
         return rhs
 
+    def _to_cnstr_when_k(self, rec, args, major):
+        """
+        K-like reduction: the major premise of a recursor for a
+        single-constructor inductive whose type matches the
+        constructor's is replaced by that constructor. 0 when the
+        conditions don't hold (no iota).
+        """
+        store = self.store
+        tc = self.tc
+        tracer = tc.tracer
+        old_ty = self.whnf(self.infer(major, False))
+        old_const = store.const_leaf(store.head(old_ty))
+        if old_const is None:
+            if tracer.recording:
+                tracer.klike_bail_head()
+            return 0
+        if len(rec.all) != 1:
+            if tracer.recording:
+                tracer.klike_bail_mutual()
+            return 0
+        ind_kind = get_decl(tc.declarations, rec.all[0]).w_kind
+        assert isinstance(ind_kind, W_Inductive)
+        if len(ind_kind.ctor_names) != 1:
+            if tracer.recording:
+                tracer.klike_bail_ctors()
+            return 0
+        ctor_decl = ind_kind.constructor_decls(tc.declarations)[0]
+        ctor_kind = ctor_decl.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+        ctor = store.leaf_for(ctor_decl.name.const(old_const.levels))
+        n = len(args)
+        i = n - 1
+        stop = n - 1 - ctor_kind.num_params
+        while i > stop and i >= 0:
+            ctor = store.cons(KIND_APP, ctor, args[i], 0)
+            i -= 1
+        new_ty = self.infer(ctor, False)
+        if not self.def_eq(old_ty, new_ty):
+            if tracer.recording:
+                tracer.klike_bail_defeq()
+            return 0
+        if tracer.recording:
+            tracer.klike_fired()
+        return ctor
+
     def _to_cnstr_when_structure(self, rec_decl, rec, major):
         """
         A stuck major of non-recursive-structure type, eta-expanded to
@@ -1249,13 +1467,793 @@ class RawMachine(object):
             return 0
         if not ind.is_non_recursive_structure():
             return 0
-        head = store.head(major)
-        head_const = store.const_leaf(head)
+        head_const = store.const_leaf(store.head(major))
         if head_const is not None:
             head_decl = find_decl(tc.declarations, head_const.name)
             if head_decl is not None and head_decl.w_kind.is_constructor():
                 return 0
-        raise RawBail("iota: struct-eta major")
+        e_type = self.whnf(self.infer(major, False))
+        type_head, type_args = store.unapp(e_type)
+        type_const = store.const_leaf(type_head)
+        if type_const is None:
+            return 0
+        if not type_const.name.syntactic_eq(induct_name):
+            return 0
+        ctor_decl = ind.constructor_decls(tc.declarations)[0]
+        ctor_kind = ctor_decl.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+        num_params = ctor_kind.num_params
+        n = len(type_args)
+        if n < num_params:
+            return 0
+        result = store.leaf_for(ctor_decl.name.const(type_const.levels))
+        i = n - 1
+        stop = n - 1 - num_params
+        while i > stop:
+            result = store.cons(KIND_APP, result, type_args[i], 0)
+            i -= 1
+        for i in range(ctor_kind.num_fields):
+            result = store.cons(
+                KIND_APP, result, store.proj(induct_name, i, major), 0,
+            )
+        return result
+
+    # ---- inference -------------------------------------------------------
+
+    def fvar_for(self, h):
+        """The canonical free variable opening the binder record ``h``."""
+        fv = self._fvars.get(h, 0)
+        if fv != 0:
+            return fv
+        store = self.store
+        fv = store.leaf_for(W_FVar(store.binder_of(h)))
+        j = leaf_index(fv)
+        store.leaf_infer[j] = store.field_a(h)
+        store.leaf_checked[j] = 1
+        self._fvars[h] = fv
+        return fv
+
+    def infer(self, h, check):
+        """
+        The type of ``h``. In ``check`` mode every application argument
+        is checked against its domain, every binder type against being a
+        sort, every let value against its type, and every constant
+        against the declaration order and safety; otherwise the term is
+        trusted to be well-typed and only the type is computed.
+        """
+        store = self.store
+        if is_leaf(h):
+            j = leaf_index(h)
+            t = store.leaf_infer[j]
+            if t != 0:
+                if check and store.leaf_checked[j] == 0:
+                    self._check_leaf(h)
+                return t
+            return self._infer_leaf(h, check)
+        t = store.memo(h, M_INFER_CHECKED)
+        if t != 0:
+            return t
+        if not check:
+            t = store.memo(h, M_INFER)
+            if t != 0:
+                return t
+        if stack_almost_full():
+            raise RawBail("infer: stack")
+        kind = store.kind(h)
+        if kind == KIND_APP:
+            t = self._infer_app(h, check)
+        elif kind == KIND_LAMBDA:
+            t = self._infer_lambda(h, check)
+        elif kind == KIND_FORALL:
+            t = self._infer_forall(h, check)
+        elif kind == KIND_LET:
+            t = self._infer_let(h, check)
+        elif kind == KIND_PROJ:
+            t = self._infer_proj(h, check)
+        else:
+            raise RawBail("infer: pair")
+        if check:
+            store.set_memo(h, M_INFER_CHECKED, t)
+        store.set_memo(h, M_INFER, t)
+        return t
+
+    def _check_leaf(self, h):
+        store = self.store
+        e = store.leaf(h)
+        if isinstance(e, W_Const):
+            self.tc.check_reference(e, get_decl(self.tc.declarations, e.name))
+        store.leaf_checked[leaf_index(h)] = 1
+
+    def _infer_leaf(self, h, check):
+        store = self.store
+        tc = self.tc
+        j = leaf_index(h)
+        e = store.leaf(h)
+        if isinstance(e, W_Const):
+            decl = get_decl(tc.declarations, e.name)
+            if check:
+                tc.check_reference(e, decl)
+                store.leaf_checked[j] = 1
+            if not decl.levels:
+                t = store.import_term(decl.type)
+            else:
+                t = store.import_term(
+                    apply_const_level_params(e, decl.type, tc),
+                )
+        elif isinstance(e, W_Sort):
+            t = store.leaf_for(e.level.succ().sort())
+            store.leaf_checked[j] = 1
+        elif isinstance(e, W_LitNat):
+            t = self.h_nat
+            store.leaf_checked[j] = 1
+        elif isinstance(e, W_LitStr):
+            t = self.h_string
+            store.leaf_checked[j] = 1
+        elif isinstance(e, W_FVar):
+            t = store.import_term(e.binder.type)
+            store.leaf_checked[j] = 1
+        else:
+            raise RawBail("infer: loose bvar")
+        store.leaf_infer[j] = t
+        return t
+
+    def _ensure_sort(self, h, check):
+        """The level of the sort ``h`` has as its type."""
+        t = self.infer(h, check)
+        t_whnf = self.whnf(t)
+        sort = self.store.sort_leaf(t_whnf)
+        if sort is None:
+            raise W_NotASort(self.tc, self.export(h), inferred_type=self.export(t))
+        return sort.level
+
+    def _infer_app(self, h, check):
+        store = self.store
+        tc = self.tc
+        head, args = store.unapp(h)
+        fn_type = self.infer(head, check)
+        n = len(args)
+        i = n - 1
+        while i >= 0:
+            arg = args[i]
+            fn_type_whnf = self.whnf(fn_type)
+            if store.kind(fn_type_whnf) != KIND_FORALL:
+                spine = head
+                j = n - 1
+                while j > i:
+                    spine = store.cons(KIND_APP, spine, args[j], 0)
+                    j -= 1
+                raise W_NotAFunction(
+                    tc, self.export(spine), inferred_type=self.export(fn_type),
+                )
+            if check:
+                arg_type = self.infer(arg, True)
+                domain = store.field_a(fn_type_whnf)
+                if not self.def_eq(domain, arg_type):
+                    raise W_TypeError(
+                        tc, self.export(arg), self.export(domain),
+                        inferred_type=self.export(arg_type),
+                    )
+            fn_type = store.instantiate(store.field_b(fn_type_whnf), arg, 0)
+            i -= 1
+        return fn_type
+
+    def _infer_lambda(self, h, check):
+        store = self.store
+        type_h = store.field_a(h)
+        if check:
+            self._ensure_sort(type_h, True)
+        fvar = self.fvar_for(h)
+        body_type = self.infer(store.instantiate(store.field_b(h), fvar, 0), check)
+        return store.cons(
+            KIND_FORALL, type_h, store.bind_fvar(body_type, fvar, 0), 0,
+            store.info(h),
+        )
+
+    def _infer_forall(self, h, check):
+        store = self.store
+        type_h = store.field_a(h)
+        binder_level = self._ensure_sort(type_h, check)
+        fvar = self.fvar_for(h)
+        body = store.instantiate(store.field_b(h), fvar, 0)
+        body_level = self._ensure_sort(body, check)
+        return store.leaf_for(binder_level.imax(body_level).sort())
+
+    def _infer_let(self, h, check):
+        store = self.store
+        type_h = store.field_a(h)
+        pair = store.field_b(h)
+        value = store.field_a(pair)
+        body = store.field_b(pair)
+        if check:
+            self._ensure_sort(type_h, True)
+            value_type = self.infer(value, True)
+            if not self.def_eq(value_type, type_h):
+                raise W_TypeError(
+                    self.tc, self.export(value), self.export(type_h),
+                    inferred_type=self.export(value_type),
+                )
+        return self.infer(store.instantiate(body, value, 0), check)
+
+    def _infer_proj(self, h, check):
+        store = self.store
+        tc = self.tc
+        struct = store.field_a(h)
+        field_index = store.field_b(h)
+        struct_name = store.name_of(h)
+        struct_type = self.whnf(self.infer(struct, check))
+        type_head, type_args = store.unapp(struct_type)
+
+        struct_decl = find_decl(tc.declarations, struct_name)
+        if struct_decl is None:
+            raise InvalidProjection.unknown_structure(
+                struct_name, field_index, self.export(struct),
+            )
+        head_const = store.const_leaf(type_head)
+        if head_const is None:
+            raise InvalidProjection.not_a_structure_type(
+                struct_name, field_index, self.export(struct),
+            )
+        if not head_const.is_named(struct_name):
+            raise InvalidProjection.mismatched_structure(
+                struct_name, field_index, head_const.name, self.export(struct),
+            )
+        struct_kind = struct_decl.w_kind
+        if not isinstance(struct_kind, W_Inductive):
+            raise InvalidProjection.not_an_inductive(
+                struct_name, field_index, self.export(struct),
+            )
+        if len(struct_kind.ctor_names) != 1:
+            raise InvalidProjection.not_a_structure(
+                struct_name, field_index, len(struct_kind.ctor_names),
+                self.export(struct),
+            )
+        ind_type = self.whnf(store.import_term(
+            apply_const_level_params(head_const, struct_decl.type, tc),
+        ))
+        ind_sort = store.sort_leaf(ind_type)
+        is_prop_type = ind_sort is not None and ind_sort.level.eq(W_LEVEL_ZERO)
+
+        ctor_decl = struct_kind.constructor_decls(tc.declarations)[0]
+        ctor_type = store.import_term(
+            apply_const_level_params(head_const, ctor_decl.type, tc),
+        )
+        # Type arguments left to right.
+        i = len(type_args) - 1
+        while i >= 0:
+            ctor_type = self.whnf(ctor_type)
+            if store.kind(ctor_type) != KIND_FORALL:
+                raise InvalidProjection.out_of_bounds(
+                    struct_name, field_index, 0, self.export(struct),
+                )
+            ctor_type = store.instantiate(store.field_b(ctor_type), type_args[i], 0)
+            i -= 1
+        i = -1
+        for i in range(field_index):
+            ctor_type = self.whnf(ctor_type)
+            if store.kind(ctor_type) != KIND_FORALL:
+                raise InvalidProjection.out_of_bounds(
+                    struct_name, field_index, i + 1, self.export(struct),
+                )
+            body = store.field_b(ctor_type)
+            if store.loose_bvar_range(body) > 0:
+                if is_prop_type:
+                    if not self._is_prop(store.field_a(ctor_type), check):
+                        raise InvalidProjection.non_prop_field(
+                            struct_name, field_index, self.export(struct),
+                        )
+                ctor_type = store.instantiate(
+                    body, store.proj(struct_name, i, struct), 0,
+                )
+            else:
+                ctor_type = body
+        ctor_type = self.whnf(ctor_type)
+        if store.kind(ctor_type) != KIND_FORALL:
+            raise InvalidProjection.out_of_bounds(
+                struct_name, field_index, i + 1, self.export(struct),
+            )
+        field_type = store.field_a(ctor_type)
+        if is_prop_type:
+            if not self._is_prop(field_type, check):
+                raise InvalidProjection.non_prop_field(
+                    struct_name, field_index, self.export(struct),
+                )
+        return field_type
+
+    def _is_prop(self, h, check):
+        """Whether the type ``h`` lives in `Prop`."""
+        sort = self.store.sort_leaf(self.whnf(self.infer(h, check)))
+        return sort is not None and sort.level.eq(W_LEVEL_ZERO)
+
+    # ---- definitional equality --------------------------------------------
+
+    def _find(self, h):
+        eqv = self._eqv
+        root = h
+        while True:
+            parent = eqv.get(root, 0)
+            if parent == 0:
+                break
+            root = parent
+        cur = h
+        while cur != root:
+            parent = eqv.get(cur, 0)
+            eqv.set(cur, root)
+            cur = parent
+        return root
+
+    def _union(self, h1, h2):
+        r1 = self._find(h1)
+        r2 = self._find(h2)
+        if r1 != r2:
+            self._eqv.set(r1, r2)
+
+    @staticmethod
+    def _pair_key(h1, h2):
+        if h1 >= (1 << 31) or h2 >= (1 << 31):
+            return 0
+        return (h1 << 31) | h2
+
+    def def_eq(self, h1, h2):
+        """Whether ``h1`` and ``h2`` are definitionally equal."""
+        tc = self.tc
+        env = tc.env
+        max_heartbeat = env.max_heartbeat
+        if max_heartbeat > 0 or env.count_heartbeats:
+            tc.heartbeat += 1
+            if max_heartbeat > 0 and tc.heartbeat > max_heartbeat:
+                raise HeartbeatExceeded(tc.decl, tc.heartbeat, max_heartbeat)
+        tc.tick_wall_time()
+        tracing = tc.tracer.recording
+        if tracing:
+            tc.tracer.enter(self.export(h1), self.export(h2), tc.declarations)
+        if h1 == h2:
+            if tracing:
+                tc.tracer.identity_hit()
+                return tc.tracer.result(True)
+            return True
+        if self._find(h1) == self._find(h2):
+            if tracing:
+                tc.tracer.eqv_hit()
+                return tc.tracer.result(True)
+            return True
+        key = self._pair_key(h1, h2)
+        if key != 0 and self._neq.get(key, 0) != 0:
+            if tracing:
+                return tc.tracer.result(False)
+            return False
+        store = self.store
+        if store.kind(h1) == KIND_APP and store.kind(h2) == KIND_APP:
+            if self._spine_cheap_eq(h1, h2):
+                self._union(h1, h2)
+                if tracing:
+                    tc.tracer.eqv_hit()
+                    return tc.tracer.result(True)
+                return True
+        if stack_almost_full():
+            raise RawBail("def_eq: stack")
+        result = self._def_eq_uncached(h1, h2)
+        if result:
+            self._union(h1, h2)
+        elif key != 0:
+            self._neq.set(key, 1)
+            key2 = self._pair_key(h2, h1)
+            if key2 != 0:
+                self._neq.set(key2, 1)
+        if tracing:
+            return tc.tracer.result(result)
+        return result
+
+    def _spine_cheap_eq(self, h1, h2):
+        store = self.store
+        while True:
+            a1 = store.field_b(h1)
+            a2 = store.field_b(h2)
+            if a1 != a2 and self._find(a1) != self._find(a2):
+                return False
+            f1 = store.field_a(h1)
+            f2 = store.field_a(h2)
+            if f1 == f2:
+                return True
+            app1 = store.kind(f1) == KIND_APP
+            app2 = store.kind(f2) == KIND_APP
+            if app1 and app2:
+                h1 = f1
+                h2 = f2
+                continue
+            if app1 or app2:
+                return False
+            return self._find(f1) == self._find(f2)
+
+    def _def_eq_uncached(self, h1, h2):
+        store = self.store
+        tracer = self.tc.tracer
+        h1 = self.whnf_core(h1)
+        h2 = self.whnf_core(h2)
+        if h1 == h2:
+            return True
+
+        # Proof irrelevance, before any unfolding.
+        t1 = self.infer(h1, False)
+        s1 = self.infer(t1, False)
+        if s1 != self.h_prop:
+            s1 = self.whnf(s1)
+        if s1 == self.h_prop:
+            t2 = self.infer(h2, False)
+            s2 = self.infer(t2, False)
+            if s2 != self.h_prop:
+                s2 = self.whnf(s2)
+            if s2 == self.h_prop:
+                if self.def_eq(t1, t2):
+                    if tracer.recording:
+                        tracer.pi_hit()
+                    return True
+
+        offset = self._def_eq_offset(h1, h2)
+        if offset == _OFFSET_TRUE:
+            return True
+        if offset == _OFFSET_FALSE:
+            return False
+
+        if h2 == self.h_true:
+            if self.whnf(h1) == self.h_true:
+                return True
+        elif h1 == self.h_true:
+            if self.whnf(h2) == self.h_true:
+                return True
+
+        status, h1, h2 = self._try_lazy_delta(h1, h2)
+        if status == _LD_TRUE:
+            return True
+        if h1 == h2:
+            return True
+        return self._def_eq_core(h1, h2)
+
+    def _def_eq_offset(self, h1, h2):
+        store = self.store
+        while True:
+            lit1 = store.litnat_leaf(h1)
+            lit2 = store.litnat_leaf(h2)
+            if lit1 is not None and lit2 is not None:
+                if lit1.val.eq(lit2.val):
+                    return _OFFSET_TRUE
+                return _OFFSET_FALSE
+            if self._is_nat_zero(h1) and self._is_nat_zero(h2):
+                return _OFFSET_TRUE
+            pred1 = self._nat_succ_pred(h1)
+            if pred1 == 0:
+                return _OFFSET_UNDEF
+            pred2 = self._nat_succ_pred(h2)
+            if pred2 == 0:
+                return _OFFSET_UNDEF
+            self.tc.tick_wall_time()
+            h1 = pred1
+            h2 = pred2
+
+    def _try_lazy_delta(self, h1, h2):
+        store = self.store
+        for _ in range(self._LAZY_DELTA_MAX_ITER):
+            if h1 == h2:
+                return _LD_TRUE, h1, h2
+            peeled = False
+            while True:
+                lit1 = store.litnat_leaf(h1)
+                lit2 = store.litnat_leaf(h2)
+                if lit1 is not None and lit2 is not None:
+                    if lit1.val.eq(lit2.val):
+                        return _LD_TRUE, h1, h2
+                    break
+                pred1 = self._nat_succ_pred(h1)
+                if pred1 == 0:
+                    break
+                pred2 = self._nat_succ_pred(h2)
+                if pred2 == 0:
+                    break
+                self.tc.tick_wall_time()
+                h1 = pred1
+                h2 = pred2
+                peeled = True
+            if peeled:
+                h1 = self.whnf_core(h1)
+                h2 = self.whnf_core(h2)
+                if h1 == h2:
+                    return _LD_TRUE, h1, h2
+
+            if not store.has_fvar(h1) and not store.has_fvar(h2):
+                if store.kind(h1) == KIND_APP:
+                    reduced = self.try_reduce_nat(h1)
+                    if reduced != 0:
+                        h1 = reduced
+                        continue
+                if store.kind(h2) == KIND_APP:
+                    reduced = self.try_reduce_nat(h2)
+                    if reduced != 0:
+                        h2 = reduced
+                        continue
+
+            head1 = store.head(h1)
+            head2 = store.head(h2)
+            kind1 = self._delta_kind(head1)
+            kind2 = self._delta_kind(head2)
+            if kind1 is None and kind2 is None:
+                return _LD_UNDEF, h1, h2
+
+            if kind1 is None:
+                if store.kind(head1) == KIND_PROJ:
+                    new1 = self.whnf_core(h1)
+                    if new1 != h1:
+                        h1 = new1
+                        continue
+                new2 = self.try_unfold_head(h2)
+                if new2 == 0:
+                    return _LD_UNDEF, h1, h2
+                h2 = self.whnf_core(new2)
+                continue
+            if kind2 is None:
+                if store.kind(head2) == KIND_PROJ:
+                    new2 = self.whnf_core(h2)
+                    if new2 != h2:
+                        h2 = new2
+                        continue
+                new1 = self.try_unfold_head(h1)
+                if new1 == 0:
+                    return _LD_UNDEF, h1, h2
+                h1 = self.whnf_core(new1)
+                continue
+
+            hint1 = kind1.hint
+            hint2 = kind2.hint
+            if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
+                new1 = self.try_unfold_head(h1)
+                if new1 == 0:
+                    return _LD_UNDEF, h1, h2
+                h1 = self.whnf_core(new1)
+                continue
+            if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
+                new2 = self.try_unfold_head(h2)
+                if new2 == 0:
+                    return _LD_UNDEF, h1, h2
+                h2 = self.whnf_core(new2)
+                continue
+
+            if hint1 >= 0 and head1 == head2:
+                args1 = store.unapp(h1)[1]
+                args2 = store.unapp(h2)[1]
+                if len(args1) == len(args2):
+                    if not self._failed_before(h1, h2):
+                        all_eq = True
+                        j = len(args1) - 1
+                        while j >= 0:
+                            if not self.def_eq(args1[j], args2[j]):
+                                all_eq = False
+                                break
+                            j -= 1
+                        if all_eq:
+                            return _LD_TRUE, h1, h2
+                        self._cache_failure(h1, h2)
+
+            if hint1 > hint2:
+                new1 = self.try_unfold_head(h1)
+                if new1 == 0:
+                    return _LD_UNDEF, h1, h2
+                h1 = self.whnf_core(new1)
+                continue
+            if hint1 < hint2:
+                new2 = self.try_unfold_head(h2)
+                if new2 == 0:
+                    return _LD_UNDEF, h1, h2
+                h2 = self.whnf_core(new2)
+                continue
+
+            new1 = self.try_unfold_head(h1)
+            new2 = self.try_unfold_head(h2)
+            if new1 == 0 and new2 == 0:
+                return _LD_UNDEF, h1, h2
+            if new1 != 0:
+                h1 = self.whnf_core(new1)
+            if new2 != 0:
+                h2 = self.whnf_core(new2)
+        return _LD_UNDEF, h1, h2
+
+    def _failed_before(self, h1, h2):
+        key = self._pair_key(h1, h2)
+        return key != 0 and self._failed.get(key, 0) != 0
+
+    def _cache_failure(self, h1, h2):
+        key = self._pair_key(h1, h2)
+        if key != 0:
+            self._failed.set(key, 1)
+        key = self._pair_key(h2, h1)
+        if key != 0:
+            self._failed.set(key, 1)
+
+    def _def_eq_core(self, h1, h2):
+        store = self.store
+        kind1 = store.kind(h1)
+        kind2 = store.kind(h2)
+        if kind1 == 0 and kind2 == 0:
+            e1 = store.leaf(h1)
+            e2 = store.leaf(h2)
+            cls1 = e1.__class__
+            if cls1 is e2.__class__:
+                if cls1 is W_LitNat or cls1 is W_LitStr:
+                    # Distinct canonical literal leaves are unequal.
+                    return False
+                if cls1 is W_Sort:
+                    assert isinstance(e1, W_Sort)
+                    assert isinstance(e2, W_Sort)
+                    if e1.level.eq(e2.level):
+                        return True
+                elif cls1 is W_Const:
+                    assert isinstance(e1, W_Const)
+                    assert isinstance(e2, W_Const)
+                    if e1.name.syntactic_eq(e2.name) and e1.def_eq(e2, self.tc):
+                        return True
+                # Free variables are canonical by identity: unequal.
+        elif kind1 == kind2:
+            if kind1 == KIND_APP:
+                if self._def_eq_app(h1, h2):
+                    return True
+            elif kind1 == KIND_LAMBDA or kind1 == KIND_FORALL:
+                if self._def_eq_binders(h1, h2):
+                    return True
+            elif kind1 == KIND_PROJ:
+                if (store.field_b(h1) == store.field_b(h2)
+                        and store.name_of(h1).syntactic_eq(store.name_of(h2))
+                        and self.def_eq(store.field_a(h1), store.field_a(h2))):
+                    return True
+
+        eta2 = self.try_eta_expand(h1, h2)
+        if eta2 != 0:
+            return self.def_eq(h1, eta2)
+        eta1 = self.try_eta_expand(h2, h1)
+        if eta1 != 0:
+            return self.def_eq(eta1, h2)
+
+        if self.try_struct_eta(h1, h2):
+            return True
+        if self.try_struct_eta(h2, h1):
+            return True
+
+        if self.def_eq_unit(h1, h2):
+            return True
+
+        lit1 = store.litnat_leaf(h1)
+        if lit1 is not None:
+            return self.def_eq(
+                store.import_term(lit1.one_step_constructor(self.tc)), h2,
+            )
+        lit2 = store.litnat_leaf(h2)
+        if lit2 is not None:
+            return self.def_eq(
+                h1, store.import_term(lit2.one_step_constructor(self.tc)),
+            )
+        if is_leaf(h1):
+            s1 = store.leaf(h1)
+            if isinstance(s1, W_LitStr):
+                return self.def_eq(
+                    store.import_term(s1.build_str_expr(self.tc)), h2,
+                )
+        if is_leaf(h2):
+            s2 = store.leaf(h2)
+            if isinstance(s2, W_LitStr):
+                return self.def_eq(
+                    h1, store.import_term(s2.build_str_expr(self.tc)),
+                )
+        return False
+
+    def _def_eq_app(self, h1, h2):
+        store = self.store
+        fn1 = store.field_a(h1)
+        if store.kind(fn1) == KIND_LAMBDA:
+            if self.def_eq(store.instantiate(store.field_b(fn1), store.field_b(h1), 0), h2):
+                return True
+        fn2 = store.field_a(h2)
+        if store.kind(fn2) == KIND_LAMBDA:
+            if self.def_eq(h1, store.instantiate(store.field_b(fn2), store.field_b(h2), 0)):
+                return True
+        args1 = []
+        args2 = []
+        while store.kind(h1) == KIND_APP and store.kind(h2) == KIND_APP:
+            args1.append(store.field_b(h1))
+            args2.append(store.field_b(h2))
+            h1 = store.field_a(h1)
+            h2 = store.field_a(h2)
+        if not self.def_eq(h1, h2):
+            return False
+        if len(args1) != len(args2):
+            return False
+        i = len(args1) - 1
+        while i >= 0:
+            if not self.def_eq(args1[i], args2[i]):
+                return False
+            i -= 1
+        return True
+
+    def _def_eq_binders(self, h1, h2):
+        store = self.store
+        if not self.def_eq(store.field_a(h1), store.field_a(h2)):
+            return False
+        fvar = self.fvar_for(h1)
+        return self.def_eq(
+            store.instantiate(store.field_b(h1), fvar, 0),
+            store.instantiate(store.field_b(h2), fvar, 0),
+        )
+
+    def try_eta_expand(self, h1, h2):
+        """``fun x => h2 x`` when ``h1`` is a lambda and ``h2`` is not
+        but has a function type; 0 otherwise."""
+        store = self.store
+        if store.kind(h1) != KIND_LAMBDA or store.kind(h2) == KIND_LAMBDA:
+            return 0
+        t2 = self.whnf(self.infer(h2, False))
+        if store.kind(t2) != KIND_FORALL:
+            return 0
+        body = store.cons(KIND_APP, store.shift(h2, 1, 0), store.bvar(0), 0)
+        return store.cons(KIND_LAMBDA, store.field_a(t2), body, 0, store.info(t2))
+
+    def try_struct_eta(self, ctor_side, other_side):
+        """``S.mk (S.p₁ x) … (S.pₙ x) ≟ x``."""
+        store = self.store
+        tc = self.tc
+        head, args = store.unapp(ctor_side)
+        const = store.const_leaf(head)
+        if const is None:
+            return False
+        ctor_decl = self._decl(const)
+        if ctor_decl is None:
+            return False
+        ctor_kind = ctor_decl.w_kind
+        if not isinstance(ctor_kind, W_Constructor):
+            return False
+        num_params = ctor_kind.num_params
+        num_fields = ctor_kind.num_fields
+        n = len(args)
+        if n != num_params + num_fields:
+            return False
+        ctor_ty = self.whnf(self.infer(ctor_side, False))
+        result_const = store.const_leaf(store.head(ctor_ty))
+        if result_const is None:
+            return False
+        struct_name = result_const.name
+        ind_decl = find_decl(tc.declarations, struct_name)
+        if ind_decl is None or not isinstance(ind_decl.w_kind, W_Inductive):
+            return False
+        ind = ind_decl.w_kind
+        assert isinstance(ind, W_Inductive)
+        if not ind.is_non_recursive_structure():
+            return False
+        if not self.def_eq(ctor_ty, self.infer(other_side, False)):
+            return False
+        i = 0
+        while i < num_fields:
+            proj = store.proj(struct_name, i, other_side)
+            if not self.def_eq(proj, args[n - 1 - (num_params + i)]):
+                return False
+            i += 1
+        return True
+
+    def def_eq_unit(self, h1, h2):
+        store = self.store
+        tc = self.tc
+        t1 = self.whnf(self.infer(h1, False))
+        const = store.const_leaf(store.head(t1))
+        if const is None:
+            return False
+        decl = self._decl(const)
+        if decl is None:
+            return False
+        ind = decl.w_kind
+        if not isinstance(ind, W_Inductive):
+            return False
+        if not ind.is_non_recursive_structure():
+            return False
+        if ind.num_indices != 0:
+            return False
+        first_ctor = ind.constructor_decls(tc.declarations)[0].w_kind
+        assert isinstance(first_ctor, W_Constructor)
+        if first_ctor.num_fields != 0:
+            return False
+        return self.def_eq(t1, self.infer(h2, False))
 
     # ---- checking --------------------------------------------------------
 
@@ -1267,7 +2265,24 @@ class RawMachine(object):
         when rejected.
         """
         store = self.store
+        tc = self.tc
         ty = store.import_term(type)
-        store.import_term(value)
-        self.whnf(ty)
-        raise RawBail("check: unported")
+        val = store.import_term(value)
+        ty_ty = self.infer(ty, True)
+        ty_ty_whnf = self.whnf(ty_ty)
+        sort = store.sort_leaf(ty_ty_whnf)
+        if sort is None:
+            return W_NotASort(tc, type, inferred_type=self.export(ty_ty), name=None)
+        if prop and not sort.level.eq(W_LEVEL_ZERO):
+            return W_NotAProp(tc, type, inferred_sort=sort, name=None)
+        val_ty = self.infer(val, True)
+        if not self.def_eq(ty, val_ty):
+            return W_TypeError(tc, value, type, inferred_type=self.export(val_ty))
+        return None
+
+
+_OFFSET_UNDEF = 0
+_OFFSET_TRUE = 1
+_OFFSET_FALSE = 2
+_LD_TRUE = 1
+_LD_UNDEF = 0
