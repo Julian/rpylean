@@ -1856,13 +1856,18 @@ def _type_check_decl(decl, tc):
             value = kind.value
             prop = True
         if value is not None:
+            rejected = False
             try:
                 error = raw.check_value(decl.type, value, prop)
+                rejected = error is not None
             except RawBail as bail:
                 tc.tracer.raw_bail(bail.reason)
+            except W_Error:
+                rejected = True
             else:
-                if error is None:
+                if not rejected:
                     return None
+            if rejected:
                 # A rejection is confirmed by the boxed kernel before it
                 # is reported, so the machine can never reject more than
                 # the kernel does; a disagreement is recorded instead.

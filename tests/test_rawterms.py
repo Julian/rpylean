@@ -282,3 +282,25 @@ class TestSubstitution(object):
         store.instantiate(h, store.import_term(x.const()), 0)
         # g x, f (g x), f (g x) (g x), f (g x) (g x) (g x): four new records.
         assert store.nrecs - before == 4 + 4
+
+
+class TestProjectionIdentity(object):
+    def test_struct_name_survives_rebuilds(self, store):
+        T = Name.simple("T")
+        p1 = S.proj(0, b0)
+        p2 = T.proj(0, b0)
+        h1 = store.import_term(p1)
+        h2 = store.import_term(p2)
+        assert h1 != h2
+        sub = store.import_term(x.const())
+        r1 = store.instantiate(h1, sub, 0)
+        r2 = store.instantiate(h2, sub, 0)
+        assert r1 != r2
+        assert store.name_of(r1) is S and store.name_of(r2) is T
+        s1 = store.shift(h1, 1, 0)
+        s2 = store.shift(h2, 1, 0)
+        assert s1 != s2 and store.name_of(s2) is T
+        fv = store.import_term(x.binder(type=NAT).fvar())
+        q1 = store.import_term(S.proj(0, store.export_term(fv)))
+        q2 = store.import_term(T.proj(0, store.export_term(fv)))
+        assert store.bind_fvar(q1, fv, 0) != store.bind_fvar(q2, fv, 0)

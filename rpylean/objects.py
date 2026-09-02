@@ -3091,8 +3091,6 @@ class W_LitStr(W_Expr):
         return _format.text(LITERAL, self.str())
 
     def build_str_expr(self, env):
-        if len(self.val) > 5:
-            print("Building large str expr for %s" % self.val[:10])
         Char = Name.simple("Char").const()
         cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app_in(env, Char)
         expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app_in(env, Char)

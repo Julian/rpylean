@@ -751,7 +751,7 @@ class RawTermStore(object):
             if na == a:
                 r = h
             else:
-                r = self.cons(KIND_PROJ, na, b, 0, info)
+                r = self.cons(KIND_PROJ, na, b, recs[base + F_C], info)
         else:
             assert kind == KIND_LET
             value = self.field_a(b)
@@ -801,7 +801,10 @@ class RawTermStore(object):
                 self.shift(b, count, depth + 1), 0, info,
             )
         elif kind == KIND_PROJ:
-            r = self.cons(KIND_PROJ, self.shift(a, count, depth), b, 0, info)
+            r = self.cons(
+                KIND_PROJ, self.shift(a, count, depth), b,
+                recs[base + F_C], info,
+            )
         else:
             assert kind == KIND_LET
             pair = self.cons(
@@ -847,7 +850,10 @@ class RawTermStore(object):
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, 0, info)
         elif kind == KIND_PROJ:
             na = self.bind_fvar(a, fvar, depth)
-            r = h if na == a else self.cons(KIND_PROJ, na, b, 0, info)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, recs[base + F_C], info)
         else:
             assert kind == KIND_LET
             value = self.field_a(b)
