@@ -957,6 +957,19 @@ class TypeChecker(object):
                 return env.tracer.result(True)
             return True
 
+        # Cheap spine congruence: two applications whose corresponding
+        # parts are each pointer-identical or already proven def-eq are
+        # def-eq, decided in one lockstep walk rather than one recursive
+        # def_eq call (and prologue) per argument. Uses only established
+        # facts (identity + the eqv forest), so False means undecided.
+        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
+            if self._spine_cheap_eq(expr1, expr2):
+                self._eqv_union(expr1, expr2)
+                if tracing:
+                    env.tracer.eqv_hit()
+                    return env.tracer.result(True)
+                return True
+
         result = self._def_eq_uncached(expr1, expr2)
         if result:
             self._eqv_union(expr1, expr2)
@@ -1068,6 +1081,32 @@ class TypeChecker(object):
             return True
 
         return self._def_eq_core(expr1, expr2)
+
+    def _spine_cheap_eq(self, expr1, expr2):
+        """Lockstep walk of two application spines using only identity
+        and the proven-def-eq forest per part. ``True`` is a proof;
+        ``False`` only means this cheap pass couldn't decide."""
+        while True:
+            arg1 = expr1.arg
+            arg2 = expr2.arg
+            if arg1 is not arg2:
+                if self._eqv_find(arg1) is not self._eqv_find(arg2):
+                    return False
+            fn1 = expr1.fn
+            fn2 = expr2.fn
+            if fn1 is fn2:
+                return True
+            fn1_app = isinstance(fn1, W_App)
+            fn2_app = isinstance(fn2, W_App)
+            if fn1_app and fn2_app:
+                assert isinstance(fn1, W_App)
+                assert isinstance(fn2, W_App)
+                expr1 = fn1
+                expr2 = fn2
+                continue
+            if fn1_app or fn2_app:
+                return False
+            return self._eqv_find(fn1) is self._eqv_find(fn2)
 
     def _eqv_find(self, expr):
         """
