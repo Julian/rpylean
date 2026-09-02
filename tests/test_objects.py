@@ -330,7 +330,8 @@ class TestLevel(object):
             (u, u.succ(), u.succ()),
             (u, u.max(v), u.max(v)),
             (v, u.max(v), u.max(v)),
-            (u, u.imax(v), u.imax(v)),
+            # `imax u v` is 0 when v is, so it cannot absorb u.
+            (u, u.imax(v), W_LevelMax(u, u.imax(v))),
             (v, u.imax(v), u.imax(v)),
         ],
         ids=[

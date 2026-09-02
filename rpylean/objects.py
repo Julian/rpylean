@@ -1130,6 +1130,17 @@ def _mk_num_name(parent, idx):
     return e
 
 
+def _sort_levels(levels):
+    """Sort ``levels`` in place by `norm_lt` (they are few)."""
+    i = 1
+    while i < len(levels):
+        j = i
+        while j > 0 and levels[j].norm_lt(levels[j - 1]):
+            levels[j], levels[j - 1] = levels[j - 1], levels[j]
+            j -= 1
+        i += 1
+
+
 def _mk_level_succ(parent):
     assert isinstance(parent, W_Level)
     h = _mix1(parent.hash())
@@ -2278,11 +2289,64 @@ class W_Level(_Item):
 
     def eq(self, other):
         """
-        Two levels are equal via antisymmetry.
-
-        I.e. `a == b` if `a.leq(b)` and `b.leq(a)`.
+        Whether two levels denote the same universe for every
+        assignment of their parameters: their normal forms coincide,
+        or each is at most the other.
         """
-        return self.leq(other) and other.leq(self)
+        if self is other:
+            return True
+        n1 = self.normalize()
+        n2 = other.normalize()
+        if syntactic_eq(n1, n2):
+            return True
+        return n1.leq(n2) and n2.leq(n1)
+
+    def to_offset(self):
+        """``(base, k)`` with ``self = base + k`` and ``base`` not a successor."""
+        return self, 0
+
+    def normalize(self):
+        """
+        A canonical form: the arguments of a max are flattened, sorted,
+        and merged (an explicit universe subsumed by a larger offset, a
+        base kept only at its largest offset), with successors pushed
+        outward. Equal universes have syntactically equal normal forms
+        far more often than not, which is what makes `eq` decide the
+        reorderings that structural comparison cannot.
+        """
+        return self
+
+    def norm_kind(self):
+        """Ordering class among level kinds in a normal form."""
+        return 0
+
+    def norm_lt(self, other):
+        """A total order on levels, for sorting a max's arguments."""
+        if self is other:
+            return False
+        b1, k1 = self.to_offset()
+        b2, k2 = other.to_offset()
+        if b1 is not b2 and not syntactic_eq(b1, b2):
+            kind1 = b1.norm_kind()
+            kind2 = b2.norm_kind()
+            if kind1 != kind2:
+                return kind1 < kind2
+            return b1.norm_lt_same_kind(b2)
+        return k1 < k2
+
+    def norm_lt_same_kind(self, other):
+        return False
+
+    def push_max_args(self, out):
+        """Append this level's max arguments (itself, unless a max)."""
+        out.append(self)
+
+    def succ_n(self, k):
+        level = self
+        while k > 0:
+            level = level.succ()
+            k -= 1
+        return level
 
     def sort(self):
         """
@@ -2297,30 +2361,33 @@ class W_Level(_Item):
         return _mk_level_succ(self)
 
     def imax_leq(self, imax, other, balance):
-        """Check imax ≤ other when self is the imax's rhs."""
-        return imax.lhs.leq(other, balance) or self.leq(other, balance)
+        """Check imax ≤ other when self is the imax's rhs: both sides of
+        the imax must fit, since it is their max unless this rhs is
+        zero (when it is zero itself)."""
+        return imax.lhs.leq(other, balance) and self.leq(other, balance)
 
     def imax_gt(self, imax, other, balance):
-        """Check other ≤ imax when self is the imax's rhs."""
-        return imax.lhs.gt(other, balance) or self.gt(other, balance)
+        """Check other ≤ imax when self is the imax's rhs: only the rhs
+        can be relied on, since a zero rhs zeroes the whole imax."""
+        return self.gt(other, balance)
 
     def max(self, other):
         """
-        Return the (simplified) max of this level with another.
+        Return the (simplified) max of this level with another: one
+        side is dropped only when the other is at least as large for
+        every assignment of the parameters.
         """
         if self is other:
             return self
-
-        if isinstance(other, W_LevelSucc) and syntactic_eq(other.parent, self):
-            return other
         if isinstance(other, W_LevelZero):
             return self
-        if isinstance(other, W_LevelIMax):
-            if self.leq(other.lhs) or self.leq(other.rhs):
+        if isinstance(other, W_LevelMax):
+            if syntactic_eq(other.lhs, self) or syntactic_eq(other.rhs, self):
                 return other
-        elif isinstance(other, W_LevelMax):
-            if self.leq(other.lhs) or self.leq(other.rhs):
-                return other
+        if other.leq(self):
+            return self
+        if self.leq(other):
+            return other
         return _mk_level_max(self, other)
 
     def imax(self, other):
@@ -2404,6 +2471,17 @@ class W_LevelSucc(W_Level):
     def gt(self, lhs, balance):
         return lhs.leq(self.parent, -balance + 1)
 
+    def to_offset(self):
+        base, k = self.parent.to_offset()
+        return base, k + 1
+
+    def normalize(self):
+        base, k = self.to_offset()
+        return base.normalize().succ_n(k)
+
+    def norm_kind(self):
+        return 1
+
     def pretty_parts(self):
         text, balance = self.parent.pretty_parts()
         return text, balance + 1
@@ -2454,6 +2532,62 @@ class W_LevelMax(W_Level):
 
     def gt(self, other, balance):
         return other.leq(self.lhs, balance) or other.leq(self.rhs, balance)
+
+    def norm_kind(self):
+        return 2
+
+    def norm_lt_same_kind(self, other):
+        assert isinstance(other, W_LevelMax)
+        if not syntactic_eq(self.lhs, other.lhs):
+            return self.lhs.norm_lt(other.lhs)
+        return self.rhs.norm_lt(other.rhs)
+
+    def push_max_args(self, out):
+        self.lhs.push_max_args(out)
+        self.rhs.push_max_args(out)
+
+    def normalize(self):
+        todo = []
+        self.push_max_args(todo)
+        args = []
+        for each in todo:
+            each.normalize().push_max_args(args)
+        _sort_levels(args)
+        # An explicit universe k is subsumed by any argument at offset
+        # >= k; keep the largest explicit one only when nothing does.
+        i = 0
+        n = len(args)
+        if isinstance(args[i].to_offset()[0], W_LevelZero):
+            while i + 1 < n and isinstance(args[i + 1].to_offset()[0], W_LevelZero):
+                i += 1
+            k = args[i].to_offset()[1]
+            j = i + 1
+            while j < n:
+                if args[j].to_offset()[1] >= k:
+                    break
+                j += 1
+            if j < n:
+                i += 1
+        kept = [args[i]]
+        prev_base, prev_k = args[i].to_offset()
+        i += 1
+        while i < n:
+            base, k = args[i].to_offset()
+            if syntactic_eq(prev_base, base):
+                if prev_k < k:
+                    prev_k = k
+                    kept[len(kept) - 1] = args[i]
+            else:
+                prev_base = base
+                prev_k = k
+                kept.append(args[i])
+            i += 1
+        result = kept[len(kept) - 1]
+        i = len(kept) - 2
+        while i >= 0:
+            result = _mk_level_max(kept[i], result)
+            i -= 1
+        return result
 
     def pretty_parts(self):
         left, balance = self.lhs.pretty_parts()
@@ -2508,15 +2642,30 @@ class W_LevelIMax(W_Level):
 
     @leq
     def leq(self, other, balance):
+        # A max on the right may contain this imax outright; look
+        # there before decomposing the imax, which loses information.
+        if isinstance(other, W_LevelMax):
+            if self.leq(other.lhs, balance) or self.leq(other.rhs, balance):
+                return True
         return self.rhs.imax_leq(self, other, balance)
 
     def gt(self, other, balance):
         return self.rhs.imax_gt(self, other, balance)
 
+    def norm_kind(self):
+        return 3
+
+    def norm_lt_same_kind(self, other):
+        assert isinstance(other, W_LevelIMax)
+        if not syntactic_eq(self.lhs, other.lhs):
+            return self.lhs.norm_lt(other.lhs)
+        return self.rhs.norm_lt(other.rhs)
+
+    def normalize(self):
+        return self.lhs.normalize().imax(self.rhs.normalize())
+
     def pretty_parts(self):
-        lhs, _ = self.lhs.pretty_parts()
-        rhs, _ = self.rhs.pretty_parts()
-        return "(imax %s %s)" % (lhs, rhs), 0
+        return "(imax %s %s)" % (self.lhs.str(), self.rhs.str()), 0
 
     def subst_levels(self, tc, substs):
         new_lhs = self.lhs.subst_levels(tc, substs)
@@ -2579,6 +2728,13 @@ class W_LevelParam(W_Level):
     def subst_levels(self, tc, substs):
         return substs.get(self.name, self)
 
+    def norm_kind(self):
+        return 4
+
+    def norm_lt_same_kind(self, other):
+        assert isinstance(other, W_LevelParam)
+        return self.name.str() < other.name.str()
+
     def imax_leq(self, imax, other, balance):
         """Check imax ≤ other by case-splitting on this param."""
         subst_zero = {self.name: W_LEVEL_ZERO}
@@ -2596,12 +2752,13 @@ class W_LevelParam(W_Level):
         """Check other ≤ imax by case-splitting on this param."""
         subst_zero = {self.name: W_LEVEL_ZERO}
         subst_succ = {self.name: self.succ()}
+        # `gt` carries its offset on the other side from `leq`.
         return (
             other.subst_levels(None, subst_zero).leq(
-                imax.subst_levels(None, subst_zero), balance,
+                imax.subst_levels(None, subst_zero), -balance,
             )
             and other.subst_levels(None, subst_succ).leq(
-                imax.subst_levels(None, subst_succ), balance,
+                imax.subst_levels(None, subst_succ), -balance,
             )
         )
 
