@@ -1483,10 +1483,16 @@ class Name(_Item):
 
     @staticmethod
     def from_str(s):
-        """Construct a name by splitting a string on ``.`` (all str parts)."""
+        """Construct a name by splitting a string on ``.``. A digit-only
+        part becomes a *numeric* part -- the inverse of how names print,
+        so e.g. the ``.0.`` component of a private name round-trips
+        (an all-string parse can never equal such a name)."""
         name = Name.ANONYMOUS
         for p in s.split("."):
-            name = name.child(p)
+            if p and p.isdigit():
+                name = name.num_child(rbigint.fromdecimalstr(p))
+            else:
+                name = name.child(p)
         return name
 
     @staticmethod
