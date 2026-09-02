@@ -33,10 +33,14 @@ from __future__ import print_function
 from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,
+    SAFETY_PARTIAL,
+    SAFETY_SAFE,
+    SAFETY_UNSAFE,
     Name,
     NumName,
     StrName,
     W_Constructor,
+    W_Definition,
     W_Inductive,
     W_LevelZero,
     W_Recursor,
@@ -125,6 +129,17 @@ def _json_string(s):
             out.append(ch)
     out.append('"')
     return "".join(out)
+
+
+#: The export format's spelling of each `SAFETY_*` value, by value.
+_SAFETY_JSON = ["safe", "partial", "unsafe"]
+assert _SAFETY_JSON[SAFETY_SAFE] == "safe"
+assert _SAFETY_JSON[SAFETY_PARTIAL] == "partial"
+assert _SAFETY_JSON[SAFETY_UNSAFE] == "unsafe"
+
+
+def _json_bool(value):
+    return "true" if value else "false"
 
 
 class Exporter(object):
@@ -382,9 +397,10 @@ class Exporter(object):
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
         self.stream.write(
-            '{"axiom":{"isUnsafe":false,"levelParams":%s,'
+            '{"axiom":{"isUnsafe":%s,"levelParams":%s,'
             '"name":%d,"type":%d}}\n'
-            % (self._ids_list(levels), nid, tid),
+            % (_json_bool(decl.is_unsafe()), self._ids_list(levels),
+               nid, tid),
         )
 
     def emit_quot(self, decl, kind):
@@ -401,11 +417,18 @@ class Exporter(object):
         levels = self._level_param_ids(decl.levels)
         tid = self.expr_id(decl.type)
         vid = self.expr_id(value)
+        kind = decl.w_kind
+        assert isinstance(kind, W_Definition)
+        if kind.all is None:
+            all_ids = [nid]
+        else:
+            all_ids = [self.name_id(each) for each in kind.all]
         self.stream.write(
-            '{"def":{"all":[%d],"hints":%s,"levelParams":%s,'
-            '"name":%d,"safety":"safe","type":%d,"value":%d}}\n'
-            % (nid, self._hint_json(hint), self._ids_list(levels),
-               nid, tid, vid),
+            '{"def":{"all":%s,"hints":%s,"levelParams":%s,'
+            '"name":%d,"safety":"%s","type":%d,"value":%d}}\n'
+            % (self._ids_list(all_ids), self._hint_json(hint),
+               self._ids_list(levels), nid, _SAFETY_JSON[decl.safety],
+               tid, vid),
         )
 
     def emit_thm(self, decl, value):
@@ -425,9 +448,10 @@ class Exporter(object):
         tid = self.expr_id(decl.type)
         vid = self.expr_id(value)
         self.stream.write(
-            '{"opaque":{"all":[%d],"isUnsafe":false,"levelParams":%s,'
+            '{"opaque":{"all":[%d],"isUnsafe":%s,"levelParams":%s,'
             '"name":%d,"type":%d,"value":%d}}\n'
-            % (nid, self._ids_list(levels), nid, tid, vid),
+            % (nid, _json_bool(decl.is_unsafe()), self._ids_list(levels),
+               nid, tid, vid),
         )
 
     def _hint_json(self, hint):

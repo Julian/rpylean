@@ -24,7 +24,11 @@ from rpylean.objects import (
     W_NonPositiveOccurrence,
     W_NotAFunction,
     W_NotAProp,
+    W_NotYetDeclared,
     W_RecRule,
+    W_UnsafeReference,
+    SAFETY_PARTIAL,
+    SAFETY_UNSAFE,
     W_UniverseTooHigh,
     W_Sort,
     W_TypeError,
@@ -1517,3 +1521,176 @@ class TestResolver(object):
             Environment.EMPTY.check_decl(
                 Name.simple("b").axiom(type=Name.simple("A").const()),
             )
+
+
+class TestDeclarationOrder(object):
+    """
+    A declaration may use only constants declared before it.
+    """
+
+    def test_theorem_may_not_prove_itself(self):
+        selfProof = Name.simple("selfProof")
+        p = Name.simple("p").binder(type=PROP)
+        thm = selfProof.theorem(type=forall(p)(b0), value=selfProof.const())
+        env = Environment.having([thm])
+        errors = list(env.type_check([thm]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+        assert "`selfProof` is not yet declared" in str(errors[0])
+
+    def test_later_declaration_rejected(self):
+        later = Name.simple("later").axiom(type=TYPE)
+        d = Name.simple("d").definition(type=TYPE, value=later.const())
+        errors = list(Environment.having([d, later]).type_check([d]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+
+    def test_earlier_declaration_accepted(self):
+        earlier = Name.simple("earlier").axiom(type=TYPE)
+        d = Name.simple("d").definition(type=TYPE, value=earlier.const())
+        assert list(Environment.having([earlier, d]).type_check([d])) == []
+
+    def test_unsafe_definition_may_use_itself(self):
+        loop = Name.simple("loop")
+        decl = loop.definition(
+            type=T.const(), value=loop.const(), safety=SAFETY_UNSAFE,
+        )
+        env = Environment.having([T.axiom(type=TYPE), decl])
+        assert list(env.type_check([decl])) == []
+
+    def test_partial_definition_may_not_use_itself(self):
+        loop = Name.simple("loop")
+        decl = loop.definition(
+            type=T.const(), value=loop.const(), safety=SAFETY_PARTIAL,
+        )
+        env = Environment.having([T.axiom(type=TYPE), decl])
+        errors = list(env.type_check([decl]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+
+    def test_mutual_unsafe_definitions_may_use_each_other(self):
+        ping, pong = Name.simple("ping"), Name.simple("pong")
+        block = [ping, pong]
+        ping_decl = ping.definition(
+            type=T.const(), value=pong.const(), safety=SAFETY_UNSAFE,
+            all=block,
+        )
+        pong_decl = pong.definition(
+            type=T.const(), value=ping.const(), safety=SAFETY_UNSAFE,
+            all=block,
+        )
+        env = Environment.having([T.axiom(type=TYPE), ping_decl, pong_decl])
+        assert list(env.type_check([ping_decl, pong_decl])) == []
+
+    def test_mutual_partial_definitions_may_use_each_other(self):
+        ping, pong = Name.simple("ping"), Name.simple("pong")
+        block = [ping, pong]
+        ping_decl = ping.definition(
+            type=T.const(), value=pong.const(), safety=SAFETY_PARTIAL,
+            all=block,
+        )
+        pong_decl = pong.definition(
+            type=T.const(), value=ping.const(), safety=SAFETY_PARTIAL,
+            all=block,
+        )
+        env = Environment.having([T.axiom(type=TYPE), ping_decl, pong_decl])
+        assert list(env.type_check([ping_decl, pong_decl])) == []
+
+    def test_safe_mutual_block_is_still_ordered(self):
+        ping, pong = Name.simple("ping"), Name.simple("pong")
+        block = [ping, pong]
+        ping_decl = ping.definition(
+            type=T.const(), value=pong.const(), all=block,
+        )
+        pong_decl = pong.definition(
+            type=T.const(), value=ping.const(), all=block,
+        )
+        env = Environment.having([T.axiom(type=TYPE), ping_decl, pong_decl])
+        errors = list(env.type_check([ping_decl]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+
+
+class TestSafety(object):
+    """
+    A declaration may use only constants at most as unsafe as itself.
+    """
+
+    def _false(self):
+        return Name.simple("F").inductive(type=PROP)
+
+    def test_safe_theorem_may_not_use_unsafe(self):
+        F = self._false()
+        loop = Name.simple("unsafeLoop")
+        loop_decl = loop.definition(
+            type=F.const(), value=loop.const(), safety=SAFETY_UNSAFE,
+        )
+        thm = Name.simple("falseFromUnsafe").theorem(
+            type=F.const(), value=loop.const(),
+        )
+        env = Environment.having([F, loop_decl, thm])
+        errors = list(env.type_check([thm]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)
+        assert "`unsafeLoop` is unsafe" in str(errors[0])
+
+    def test_safe_definition_may_not_use_partial(self):
+        stuck = Name.simple("stuck").definition(
+            type=T.const(), value=a.const(), safety=SAFETY_PARTIAL,
+        )
+        d = Name.simple("d").definition(type=T.const(), value=stuck.const())
+        env = Environment.having([T.axiom(type=TYPE), a.axiom(type=T.const()), stuck, d])
+        errors = list(env.type_check([d]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)
+        assert "`stuck` is partial" in str(errors[0])
+
+    def test_partial_definition_may_not_use_unsafe(self):
+        u = Name.simple("u").definition(
+            type=T.const(), value=a.const(), safety=SAFETY_UNSAFE,
+        )
+        d = Name.simple("d").definition(
+            type=T.const(), value=u.const(), safety=SAFETY_PARTIAL,
+        )
+        env = Environment.having([T.axiom(type=TYPE), a.axiom(type=T.const()), u, d])
+        errors = list(env.type_check([d]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)
+
+    def test_partial_definition_may_use_partial(self):
+        stuck = Name.simple("stuck").definition(
+            type=T.const(), value=a.const(), safety=SAFETY_PARTIAL,
+        )
+        d = Name.simple("d").definition(
+            type=T.const(), value=stuck.const(), safety=SAFETY_PARTIAL,
+        )
+        env = Environment.having([T.axiom(type=TYPE), a.axiom(type=T.const()), stuck, d])
+        assert list(env.type_check([d])) == []
+
+    def test_unsafe_definition_may_use_anything(self):
+        stuck = Name.simple("stuck").definition(
+            type=T.const(), value=a.const(), safety=SAFETY_PARTIAL,
+        )
+        u = Name.simple("u").definition(
+            type=T.const(), value=a.const(), safety=SAFETY_UNSAFE,
+        )
+        d = Name.simple("d").definition(
+            type=T.const(),
+            value=Name.simple("f").const().app(stuck.const(), u.const()),
+            safety=SAFETY_UNSAFE,
+        )
+        f_type = forall(x.binder(type=T.const()), y.binder(type=T.const()))(T.const())
+        env = Environment.having([
+            T.axiom(type=TYPE), a.axiom(type=T.const()),
+            Name.simple("f").axiom(type=f_type), stuck, u, d,
+        ])
+        assert list(env.type_check([d])) == []
+
+    def test_safe_theorem_may_not_use_unsafe_axiom(self):
+        F = self._false()
+        ax = Name.simple("sorry").axiom(type=F.const(), is_unsafe=True)
+        thm = Name.simple("bad").theorem(type=F.const(), value=ax.const())
+        env = Environment.having([F, ax, thm])
+        errors = list(env.type_check([thm]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)

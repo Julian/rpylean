@@ -713,6 +713,9 @@ def check(self, args, stdin, stdout, stderr):
     start = time()
     abort_at = run.max_fail if run.max_fail > 0 else 0
     builder, checker, tracer = run.start(abort_at)
+    # Declarations arrive as the walk (and the resolver) reach them, not
+    # in declaration order; Lean already checked that order.
+    builder.ordered = False
     collector = _FFICollector(builder, checker)
     bytes_at_start = _bytes_allocated()
     try:
@@ -759,6 +762,7 @@ def repl(self, args, stdin, stdout, stderr):
         return 1
 
     builder = EnvironmentBuilder()
+    builder.ordered = False
     collector = _FFILoader(builder)
     with FFI.from_prefix(prefix) as ffi_obj:
         env_obj = ffi_obj.import_modules(modules)

@@ -31,6 +31,19 @@ from rpylean.exceptions import (
 )
 
 
+#: A declaration's `DefinitionSafety`. Ordered by how much a declaration
+#: is trusted to do: one may use exactly the constants whose safety is
+#: at most its own, so a safe declaration never rests on a partial or
+#: unsafe one and a partial declaration never rests on an unsafe one.
+SAFETY_SAFE = 0
+SAFETY_PARTIAL = 1
+SAFETY_UNSAFE = 2
+
+
+def _safety_of(is_unsafe):
+    return SAFETY_UNSAFE if is_unsafe else SAFETY_SAFE
+
+
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
@@ -376,6 +389,65 @@ class W_InvalidRecursorRule(W_CheckError):
         return _error_diagnostic(
             self.declaration, self.name, None,
             "Invalid recursor ", message, declarations,
+        )
+
+
+class W_NotYetDeclared(W_CheckError):
+    """
+    A declaration uses a constant not declared before it: a later
+    declaration, or itself.
+    """
+
+    _attrs_ = ['environment', 'const']
+
+    def __init__(self, environment, const, name=None):
+        self.environment = environment
+        self.const = const
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit(
+            "\n`%s` is not yet declared" % (self.const.name.str(),),
+        )]
+        return _error_diagnostic(
+            self.declaration, self.name, self.const,
+            "Invalid declaration ", message, declarations,
+        )
+
+
+class W_UnsafeReference(W_CheckError):
+    """
+    A declaration uses a constant less safe than itself: a safe one
+    uses something partial or unsafe, or a partial one uses something
+    unsafe.
+    """
+
+    _attrs_ = ['environment', 'const', 'target_safety']
+
+    def __init__(self, environment, const, target_safety, name=None):
+        self.environment = environment
+        self.const = const
+        self.target_safety = target_safety
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        target = self.const.name.str()
+        if self.target_safety == SAFETY_UNSAFE:
+            summary = (
+                "\n`%s` is unsafe; only an unsafe declaration may use it"
+                % (target,)
+            )
+        else:
+            summary = (
+                "\n`%s` is partial; a safe declaration may not use it"
+                % (target,)
+            )
+        message = [MESSAGE.emit(summary)]
+        return _error_diagnostic(
+            self.declaration, self.name, self.const,
+            "Invalid declaration ", message, declarations,
         )
 
 
@@ -1694,7 +1766,7 @@ class Name(_Item):
         """
         return _mk_w_const(self, [] if levels is None else levels)
 
-    def declaration(self, type, w_kind, levels=None, is_unsafe=False):
+    def declaration(self, type, w_kind, levels=None, safety=SAFETY_SAFE):
         """
         Make a declaration with this name.
         """
@@ -1703,11 +1775,11 @@ class Name(_Item):
             type=type,
             levels=[] if levels is None else levels,
             w_kind=w_kind,
-            is_unsafe=is_unsafe,
+            safety=safety,
         )
 
     def constructor(self, type, num_params=0, num_fields=0, cidx=0,
-                    levels=None):
+                    levels=None, is_unsafe=False):
         """
         Make a constructor declaration with this name.
         """
@@ -1716,7 +1788,10 @@ class Name(_Item):
             num_fields=num_fields,
             cidx=cidx,
         )
-        return self.declaration(type=type, w_kind=constructor, levels=levels)
+        return self.declaration(
+            type=type, w_kind=constructor, levels=levels,
+            safety=_safety_of(is_unsafe),
+        )
 
     def inductive(
         self,
@@ -1731,6 +1806,7 @@ class Name(_Item):
         is_recursive=False,
         levels=None,
         ctor_names=None,
+        is_unsafe=False,
     ):
         """
         Make an inductive type declaration with this name.
@@ -1751,7 +1827,10 @@ class Name(_Item):
             is_recursive=is_recursive,
             ctor_names=ctor_names,
         )
-        return self.declaration(type=type, w_kind=inductive, levels=levels)
+        return self.declaration(
+            type=type, w_kind=inductive, levels=levels,
+            safety=_safety_of(is_unsafe),
+        )
 
     def structure(self, type, constructor, levels=None):
         """
@@ -1768,13 +1847,17 @@ class Name(_Item):
             levels=levels,
         )
 
-    def definition(self, type, value, hint=1, levels=None, is_unsafe=False):
+    def definition(self, type, value, hint=1, levels=None,
+                   safety=SAFETY_SAFE, all=None):
         """
         Make a definition of the given type and value with this name.
+
+        ``all`` lists the members of the definition's mutual block when
+        it has one (`DefinitionVal.all`).
         """
-        definition = W_Definition(value=value, hint=hint)
+        definition = W_Definition(value=value, hint=hint, all=all)
         return self.declaration(type=type, w_kind=definition, levels=levels,
-                                is_unsafe=is_unsafe)
+                                safety=safety)
 
     def opaque(self, type, value, levels=None, is_unsafe=False):
         """
@@ -1782,14 +1865,14 @@ class Name(_Item):
         """
         opaque = W_Opaque(value=value)
         return self.declaration(type=type, w_kind=opaque, levels=levels,
-                                is_unsafe=is_unsafe)
+                                safety=_safety_of(is_unsafe))
 
     def axiom(self, type, levels=None, is_unsafe=False):
         """
         Make an axiom with this name.
         """
         return self.declaration(type=type, w_kind=W_Axiom(), levels=levels,
-                                is_unsafe=is_unsafe)
+                                safety=_safety_of(is_unsafe))
 
     def quotient(self, type, kind, levels=None):
         """
@@ -1818,6 +1901,7 @@ class Name(_Item):
         k=False,
         all=None,
         levels=None,
+        is_unsafe=False,
     ):
         """
         Make a recursor with this name.
@@ -1838,7 +1922,10 @@ class Name(_Item):
             num_motives=num_motives,
             num_minors=num_minors,
         )
-        return self.declaration(type=type, w_kind=recursor, levels=levels)
+        return self.declaration(
+            type=type, w_kind=recursor, levels=levels,
+            safety=_safety_of(is_unsafe),
+        )
 
     def let(self, type, value, body):
         """
@@ -3277,6 +3364,8 @@ class W_Const(W_Expr):
         if self._infer_cache_env is env:
             return self._infer_cache_result
         decl = get_decl(env.declarations, self.name)
+        if not env.infer_only:
+            env.check_reference(self, decl)
         params = decl.levels
         if not params:
             result = decl.type
@@ -5618,21 +5707,53 @@ class W_RecRule(_Item):
 
 
 class W_Declaration(_Item):
-    _attrs_ = ['name', 'type', 'w_kind', 'levels', 'is_unsafe']
-    _immutable_fields_ = ['name', 'type', 'w_kind', 'levels', 'is_unsafe']
+    _attrs_ = [
+        'name', 'type', 'w_kind', 'levels', 'safety', 'index', 'group',
+    ]
+    _immutable_fields_ = ['name', 'type', 'w_kind', 'levels', 'safety']
 
-    def __init__(self, name, type, w_kind, levels, is_unsafe=False):
+    def __init__(self, name, type, w_kind, levels, safety=SAFETY_SAFE):
         self.name = name
         self.type = type
         self.w_kind = w_kind
         for each in levels:
             assert isinstance(each, Name), "%s is not a level name" % (each,)
         self.levels = levels
-        #: Mirrors Lean's `ConstantInfo.isUnsafe` (or `DefinitionVal.safety
-        #: == .unsafe`). `lean4export` skips unsafe constants unless
-        #: `--export-unsafe` is passed; we follow the same convention
-        #: by default.
-        self.is_unsafe = is_unsafe
+        #: One of the `SAFETY_*` constants: `DefinitionVal.safety` for a
+        #: definition, `isUnsafe` (unsafe or safe) for every other kind.
+        self.safety = safety
+        #: Position in declaration order, or -1 when the order is unknown.
+        #: A declaration may use only constants declared before it, so
+        #: nothing can rest on itself or on something not yet checked.
+        self.index = -1
+        #: Members of one inductive block, or of one unsafe or partial
+        #: mutual block, share a group and may use each other regardless
+        #: of `index`. -1 when the declaration belongs to no block.
+        self.group = -1
+
+    @not_rpython
+    def __eq__(self, other):
+        # Where a declaration sits (`index`, `group`) is a property of
+        # the environment it was registered in, not of the declaration.
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return (
+            self.name == other.name
+            and self.type == other.type
+            and self.w_kind == other.w_kind
+            and self.levels == other.levels
+            and self.safety == other.safety
+        )
+
+    def is_unsafe(self):
+        return self.safety == SAFETY_UNSAFE
+
+    def group_key(self):
+        """
+        The name identifying this declaration's block, or ``None`` when
+        it may only use what precedes it.
+        """
+        return self.w_kind.group_key(self.name, self.safety)
 
     def const(self, levels=None):
         """
@@ -5690,6 +5811,14 @@ class W_Declaration(_Item):
 class W_DeclarationKind(_Item):
     _attrs_ = []
 
+    def group_key(self, name, safety):
+        """
+        The name identifying the block a declaration of this kind with
+        the given name and safety belongs to (see `W_Declaration.group`),
+        or ``None`` when it belongs to none.
+        """
+        return None
+
     # Returns the value associated with this declaration kind.
     # This is the def value for a Definition, and `None` for things like Inductive
     def get_delta_reduce_target(self):
@@ -5738,12 +5867,25 @@ HINT_ABBREV = -1
 
 
 class W_Definition(W_DeclarationKind):
-    _attrs_ = ['value', 'hint']
-    _immutable_fields_ = ['value', 'hint']
+    _attrs_ = ['value', 'hint', 'all']
+    _immutable_fields_ = ['value', 'hint', 'all']
 
-    def __init__(self, value, hint):
+    def __init__(self, value, hint, all=None):
         self.value = value
         self.hint = hint
+        #: The members of this definition's mutual block (`DefinitionVal.
+        #: all`), or ``None`` when it stands alone.
+        self.all = all
+
+    def group_key(self, name, safety):
+        # An unsafe definition enters the environment before its value is
+        # checked, so it may use itself and its mutual block; a partial
+        # one may use only a mutual block it shares.
+        if safety == SAFETY_UNSAFE:
+            return name if self.all is None else self.all[0]
+        if safety == SAFETY_PARTIAL and self.all is not None:
+            return self.all[0]
+        return None
 
     def dump_to(self, exporter, decl):
         exporter.begin_decl(decl)
@@ -5780,6 +5922,10 @@ class W_Opaque(W_Definition):
     def __init__(self, value):
         self.value = value
         self.hint = HINT_OPAQUE
+        self.all = None
+
+    def group_key(self, name, safety):
+        return None
 
     def dump_to(self, exporter, decl):
         exporter.begin_decl(decl)
@@ -5919,6 +6065,9 @@ class W_Inductive(W_DeclarationKind):
         'num_nested', 'num_params', 'num_indices',
         'is_reflexive', 'is_recursive', 'ctor_names',
     ]
+
+    def group_key(self, name, safety):
+        return self.all[0] if self.all else None
     # `constructors` is appended to by the parser when registering
     # mutual-inductive blocks; everything else is set-once at construction.
     _immutable_fields_ = [
@@ -6254,6 +6403,9 @@ class W_Recursor(W_DeclarationKind):
         'k', 'num_params', 'num_indices', 'num_motives', 'num_minors',
         '_rules_by_ctor', 'all', 'rules',
     ]
+
+    def group_key(self, name, safety):
+        return self.all[0] if self.all else None
     _immutable_fields_ = [
         'k', 'num_params', 'num_indices', 'num_motives', 'num_minors',
         'all', 'rules',

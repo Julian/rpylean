@@ -443,9 +443,12 @@ def _parse_axiom(cursor, builder):
     levels = None
     name_idx = 0
     type_eidx = 0
+    is_unsafe = False
     while True:
         key = cursor.read_key()
-        if key == "levelParams":
+        if key == "isUnsafe":
+            is_unsafe = cursor.read_bool()
+        elif key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
             name_idx = cursor.read_int()
@@ -460,6 +463,7 @@ def _parse_axiom(cursor, builder):
             decl = builder.names[name_idx].axiom(
                 levels=[builder.names[i] for i in levels],
                 type=builder.ref_expr(type_eidx),
+                is_unsafe=is_unsafe,
             )
             builder.register_declaration(decl)
             return
@@ -541,9 +545,12 @@ def _parse_opaque(cursor, builder):
     name_idx = 0
     type_eidx = 0
     value_eidx = 0
+    is_unsafe = False
     while True:
         key = cursor.read_key()
-        if key == "levelParams":
+        if key == "isUnsafe":
+            is_unsafe = cursor.read_bool()
+        elif key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
             name_idx = cursor.read_int()
@@ -561,6 +568,7 @@ def _parse_opaque(cursor, builder):
                 levels=[builder.names[i] for i in levels],
                 type=builder.ref_expr(type_eidx),
                 value=builder.ref_expr(value_eidx),
+                is_unsafe=is_unsafe,
             )
             builder.register_declaration(decl)
             return
@@ -575,14 +583,20 @@ def _parse_definition(cursor, builder):
     type_eidx = 0
     value_eidx = 0
     hint = objects.HINT_OPAQUE
+    safety = objects.SAFETY_SAFE
+    all_idxs = None
     while True:
         key = cursor.read_key()
-        if key == "hints":
+        if key == "all":
+            all_idxs = cursor.read_int_array()
+        elif key == "hints":
             hint = _parse_def_hint(cursor)
         elif key == "levelParams":
             levels = cursor.read_int_array()
         elif key == "name":
             name_idx = cursor.read_int()
+        elif key == "safety":
+            safety = _parse_safety(cursor)
         elif key == "type":
             type_eidx = cursor.read_int()
         elif key == "value":
@@ -593,15 +607,32 @@ def _parse_definition(cursor, builder):
             cursor.expect('}')
             if levels is None:
                 levels = []
+            all = None
+            if all_idxs is not None and len(all_idxs) > 1:
+                all = [builder.names[i] for i in all_idxs]
             decl = builder.names[name_idx].definition(
                 levels=[builder.names[i] for i in levels],
                 type=builder.ref_expr(type_eidx),
                 value=builder.ref_expr(value_eidx),
                 hint=hint,
+                safety=safety,
+                all=all,
             )
             builder.register_declaration(decl)
             return
         cursor.expect(',')
+
+
+def _parse_safety(cursor):
+    """Parse a definition's ``"safety"`` field."""
+    raw = cursor.read_string()
+    if raw == "safe":
+        return objects.SAFETY_SAFE
+    if raw == "unsafe":
+        return objects.SAFETY_UNSAFE
+    if raw == "partial":
+        return objects.SAFETY_PARTIAL
+    raise MalformedLine("unknown definition safety: %s" % raw)
 
 
 def _parse_def_hint(cursor):
@@ -639,7 +670,7 @@ class _IndType(object):
     """Fields of one entry in an inductive line's ``types`` array."""
 
     _attrs_ = [
-        'nidx', 'type_idx', 'is_reflexive', 'is_recursive',
+        'nidx', 'type_idx', 'is_reflexive', 'is_recursive', 'is_unsafe',
         'num_nested', 'num_params', 'num_indices',
         'name_idxs', 'ctor_nidxs', 'levels',
     ]
@@ -649,6 +680,7 @@ class _IndType(object):
         self.type_idx = 0
         self.is_reflexive = False
         self.is_recursive = False
+        self.is_unsafe = False
         self.num_nested = 0
         self.num_params = 0
         self.num_indices = 0
@@ -661,7 +693,7 @@ class _IndCtor(object):
     """Fields of one entry in an inductive line's ``ctors`` array."""
 
     _attrs_ = [
-        'nidx', 'induct_nidx', 'type_idx',
+        'nidx', 'induct_nidx', 'type_idx', 'is_unsafe',
         'num_params', 'num_fields', 'cidx', 'levels',
     ]
 
@@ -669,6 +701,7 @@ class _IndCtor(object):
         self.nidx = 0
         self.induct_nidx = 0
         self.type_idx = 0
+        self.is_unsafe = False
         self.num_params = 0
         self.num_fields = 0
         self.cidx = 0
@@ -680,7 +713,7 @@ class _IndRec(object):
     standalone ``rec`` line."""
 
     _attrs_ = [
-        'nidx', 'type_idx', 'k',
+        'nidx', 'type_idx', 'k', 'is_unsafe',
         'num_params', 'num_indices', 'num_motives', 'num_minors',
         'ind_name_idxs', 'rules', 'levels',
     ]
@@ -689,6 +722,7 @@ class _IndRec(object):
         self.nidx = 0
         self.type_idx = 0
         self.k = False
+        self.is_unsafe = False
         self.num_params = 0
         self.num_indices = 0
         self.num_motives = 0
@@ -741,21 +775,29 @@ def _parse_inductive(cursor, builder):
         builder.check_name(name)
         builder.check_name(name.child("rec"))
 
+    # Every member of the record shares one block: constructors and
+    # recursors refer to the types, recursors to the constructors, and
+    # the members of a mutual block to each other.
+    block = len(builder.declarations)
     if len(types) == 1:
-        _register_single_inductive(builder, types[0], ctors, recs)
+        _register_single_inductive(builder, types[0], ctors, recs, block)
     else:
-        _register_mutual_inductive(builder, types, ctors, recs)
+        _register_mutual_inductive(builder, types, ctors, recs, block)
 
 
-def _register_single_inductive(builder, type_data, ctor_records, rec_records):
+def _register_single_inductive(
+    builder, type_data, ctor_records, rec_records, block,
+):
     name = builder.names[type_data.nidx]
     if type_data.is_reflexive:
         for rec in rec_records:
             if rec.k:
                 raise ReflexiveKError(name, builder.names[rec.nidx])
 
-    ctor_decls = [_register_constructor(builder, c) for c in ctor_records]
-    rec_decls = [_register_recursor(builder, r) for r in rec_records]
+    ctor_decls = [
+        _register_constructor(builder, c, block) for c in ctor_records
+    ]
+    rec_decls = [_register_recursor(builder, r, block) for r in rec_records]
 
     inductive = name.inductive(
         levels=[builder.names[i] for i in type_data.levels],
@@ -768,11 +810,14 @@ def _register_single_inductive(builder, type_data, ctor_records, rec_records):
         num_indices=type_data.num_indices,
         is_reflexive=type_data.is_reflexive,
         is_recursive=type_data.is_recursive,
+        is_unsafe=type_data.is_unsafe,
     )
-    builder.register_declaration(inductive)
+    builder.register_declaration(inductive, group=block)
 
 
-def _register_mutual_inductive(builder, types, ctor_records, rec_records):
+def _register_mutual_inductive(
+    builder, types, ctor_records, rec_records, block,
+):
     # Track each block-member's W_Inductive by name so we can wire each
     # constructor back to its parent below — `_iota_reduce` / W_Proj
     # both index into `inductive_decl.w_kind.constructors` and crash if
@@ -796,12 +841,13 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
             is_reflexive=type_data.is_reflexive,
             is_recursive=type_data.is_recursive,
             ctor_names=[builder.names[i] for i in type_data.ctor_nidxs],
+            is_unsafe=type_data.is_unsafe,
         )
-        builder.register_declaration(inductive)
+        builder.register_declaration(inductive, group=block)
         induct_by_name[name] = inductive
 
     for ctor in ctor_records:
-        ctor_decl = _register_constructor(builder, ctor)
+        ctor_decl = _register_constructor(builder, ctor, block)
         induct_name = builder.names[ctor.induct_nidx]
         parent = induct_by_name.get(induct_name, None)
         if parent is not None:
@@ -809,22 +855,23 @@ def _register_mutual_inductive(builder, types, ctor_records, rec_records):
             assert isinstance(parent_kind, objects.W_Inductive)
             parent_kind.constructors.append(ctor_decl)
     for rec in rec_records:
-        _register_recursor(builder, rec)
+        _register_recursor(builder, rec, block)
 
 
-def _register_constructor(builder, ctor):
+def _register_constructor(builder, ctor, block):
     decl = builder.names[ctor.nidx].constructor(
         levels=[builder.names[i] for i in ctor.levels],
         type=builder.ref_expr(ctor.type_idx),
         num_params=ctor.num_params,
         num_fields=ctor.num_fields,
         cidx=ctor.cidx,
+        is_unsafe=ctor.is_unsafe,
     )
-    builder.register_declaration(decl)
+    builder.register_declaration(decl, group=block)
     return decl
 
 
-def _register_recursor(builder, rec):
+def _register_recursor(builder, rec, block=-1):
     decl = builder.names[rec.nidx].recursor(
         levels=[builder.names[i] for i in rec.levels],
         type=builder.ref_expr(rec.type_idx),
@@ -841,8 +888,9 @@ def _register_recursor(builder, rec):
         num_indices=rec.num_indices,
         num_motives=rec.num_motives,
         num_minors=rec.num_minors,
+        is_unsafe=rec.is_unsafe,
     )
-    builder.register_declaration(decl)
+    builder.register_declaration(decl, group=block)
     return decl
 
 
@@ -871,6 +919,8 @@ def _parse_inductive_type(cursor):
             type_data.is_recursive = cursor.read_bool()
         elif key == "isReflexive":
             type_data.is_reflexive = cursor.read_bool()
+        elif key == "isUnsafe":
+            type_data.is_unsafe = cursor.read_bool()
         elif key == "levelParams":
             type_data.levels = cursor.read_int_array()
         elif key == "name":
@@ -911,6 +961,8 @@ def _parse_constructor(cursor):
             ctor.cidx = cursor.read_int()
         elif key == "induct":
             ctor.induct_nidx = cursor.read_int()
+        elif key == "isUnsafe":
+            ctor.is_unsafe = cursor.read_bool()
         elif key == "levelParams":
             ctor.levels = cursor.read_int_array()
         elif key == "name":
@@ -949,6 +1001,8 @@ def _parse_recursor_record(cursor):
         key = cursor.read_key()
         if key == "all":
             rec.ind_name_idxs = cursor.read_int_array()
+        elif key == "isUnsafe":
+            rec.is_unsafe = cursor.read_bool()
         elif key == "k":
             rec.k = cursor.read_bool()
         elif key == "levelParams":

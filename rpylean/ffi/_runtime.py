@@ -78,6 +78,9 @@ from rpylean.objects import (
     Binder,
     HINT_ABBREV,
     HINT_OPAQUE,
+    SAFETY_PARTIAL,
+    SAFETY_SAFE,
+    SAFETY_UNSAFE,
     Name,
     W_Constructor,
     W_Declaration,
@@ -86,6 +89,7 @@ from rpylean.objects import (
     W_RecRule,
     W_Recursor,
     _mk_w_bvar,
+    _safety_of,
     _mk_w_forall,
     _mk_w_lambda,
     _mk_w_litnat,
@@ -389,6 +393,10 @@ def _read_constant_val(cval):
     return name, levels, type_expr
 
 
+#: `DefinitionSafety` by constructor tag: unsafe, safe, partial.
+_SAFETY_FROM_LEAN = [SAFETY_UNSAFE, SAFETY_SAFE, SAFETY_PARTIAL]
+
+
 def read_constant_info(ci):
     """
     Convert a `Lean.ConstantInfo` runtime object into a `W_Declaration`.
@@ -413,11 +421,14 @@ def read_constant_info(ci):
     if tag == 1:  # defnInfo
         value = read_expr(_lean.ctor_get(val, 1))
         hint = _read_hints(_lean.ctor_get(val, 2))
-        # DefinitionVal: scalar byte 0 = safety enum
-        # (0=unsafe, 1=safe, 2=partial). 4 obj fields preceding.
-        is_unsafe = _ctor_byte(val, 4, 0) == 0
-        return name.definition(type=type_expr, value=value, hint=hint,
-                               levels=levels, is_unsafe=is_unsafe)
+        # DefinitionVal: obj field 3 = `all`; scalar byte 0 = safety
+        # enum (0=unsafe, 1=safe, 2=partial). 4 obj fields preceding.
+        all_names = _read_name_list(_lean.ctor_get(val, 3))
+        safety = _SAFETY_FROM_LEAN[_ctor_byte(val, 4, 0)]
+        return name.definition(
+            type=type_expr, value=value, hint=hint, levels=levels,
+            safety=safety, all=all_names if len(all_names) > 1 else None,
+        )
     if tag == 2:  # thmInfo — always safe.
         value = read_expr(_lean.ctor_get(val, 1))
         return name.theorem(type=type_expr, value=value, levels=levels)
@@ -458,7 +469,7 @@ def read_constant_info(ci):
             ctor_names=ctor_names,
         )
         return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, is_unsafe=is_unsafe)
+                             levels=levels, safety=_safety_of(is_unsafe))
     if tag == 6:  # ctorInfo
         # ConstructorVal layout (nested ConstantVal at field 0):
         #   1: induct : Name
@@ -473,7 +484,7 @@ def read_constant_info(ci):
         kind = W_Constructor(num_params=num_params, num_fields=num_fields,
                              cidx=cidx)
         return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, is_unsafe=is_unsafe)
+                             levels=levels, safety=_safety_of(is_unsafe))
     if tag == 7:  # recInfo
         all_names = _read_name_list(_lean.ctor_get(val, 1))
         num_params = read_nat(_lean.ctor_get(val, 2)).toint()
@@ -507,6 +518,6 @@ def read_constant_info(ci):
             num_minors=num_minors,
         )
         return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, is_unsafe=is_unsafe)
+                             levels=levels, safety=_safety_of(is_unsafe))
     raise RuntimeError("read_constant_info: unexpected tag")
     raise RuntimeError("read_constant_info: variant not yet supported")

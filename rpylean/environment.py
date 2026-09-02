@@ -43,6 +43,8 @@ from rpylean.objects import (
     W_FunBase,
     W_HeartbeatError,
     W_MemoryError,
+    W_NotYetDeclared,
+    W_UnsafeReference,
     W_WallTimeError,
     W_Inductive,
     W_Lambda,
@@ -111,7 +113,7 @@ class EnvironmentBuilder(object):
 
     _attrs_ = [
         'levels', 'exprs', 'names', 'declarations', 'env',
-        '_refcount', '_scanning',
+        '_refcount', '_scanning', '_groups', 'ordered',
     ]
 
     def __init__(self, levels=None, exprs=None, names=[]):
@@ -120,6 +122,15 @@ class EnvironmentBuilder(object):
         self.names = [Name.ANONYMOUS] + names
         self.declarations = []
         self.env = Environment(declarations=name_dict())
+        # Whether registration order is declaration order. It is for an
+        # export, which lists each declaration after everything it uses;
+        # it is not for declarations pulled in on demand, which arrive in
+        # the order the checker happens to need them.
+        self.ordered = True
+        # Block name (see `W_Declaration.group_key`) -> group id, so the
+        # members of a mutual block registered as separate records still
+        # end up in one group.
+        self._groups = name_dict()
         # Expr-pool pruning (see `ref_expr`). `_refcount` is `None` on the
         # default path (no pruning — REPL, tests, stdin); a `list[int]`
         # of parse-time reference counts when a pre-scan has run. While
@@ -271,7 +282,15 @@ class EnvironmentBuilder(object):
         if name in env_decls:
             raise AlreadyDeclared(name, env_decls)
 
-    def register_declaration(self, decl):
+    def register_declaration(self, decl, group=-1):
+        """
+        Register ``decl`` as the next declaration.
+
+        ``group`` names the block ``decl`` belongs to when the record
+        being parsed is itself the block (an inductive record with its
+        constructors and recursors); otherwise the block, if any, is
+        derived from the declaration.
+        """
         env_decls = self.env.declarations
         if decl.name in env_decls:
             raise AlreadyDeclared(decl.name, env_decls)
@@ -281,8 +300,24 @@ class EnvironmentBuilder(object):
                 if level in seen:
                     raise DuplicateLevels(decl.name, decl.levels, level)
                 seen[level] = True
+        if self.ordered:
+            self._place(decl, group)
         self.declarations.append(decl)
         env_decls[decl.name] = decl
+
+    def _place(self, decl, group):
+        index = len(self.declarations)
+        decl.index = index
+        key = decl.group_key()
+        if group < 0:
+            if key is None:
+                return
+            group = self._groups.get(key, -1)
+            if group < 0:
+                group = index
+        if key is not None and key not in self._groups:
+            self._groups[key] = group
+        decl.group = group
 
     def finish(self):
         """
@@ -896,6 +931,24 @@ class TypeChecker(object):
         self._flush_floor = survived + self.flush_memory
 
     # ---- public def_eq / infer entry points ----------------------------
+
+    def check_reference(self, const, target):
+        """
+        ``const``, occurring in the declaration under check, names the
+        declaration ``target``: verify the declaration may use it.
+
+        It may not use anything declared after it, nor itself, except
+        within its own block; and it may not use anything less safe
+        than it is.
+        """
+        current = self.decl
+        if current is None:
+            return
+        if current.index >= 0 and target.index >= current.index:
+            if current.group < 0 or target.group != current.group:
+                raise W_NotYetDeclared(self, const)
+        if target.safety > current.safety:
+            raise W_UnsafeReference(self, const, target.safety)
 
     def def_eq(self, expr1, expr2):
         """
@@ -1749,6 +1802,33 @@ def _peak_memory():
     return 0
 
 
+def _place_all(declarations):
+    """
+    Give ``declarations`` their positions in declaration order and their
+    blocks, the way `EnvironmentBuilder` does one at a time. An
+    inductive's constructors and recursors join its block.
+    """
+    groups = name_dict()
+    index = 0
+    for each in declarations:
+        each.index = index
+        key = each.group_key()
+        if key is not None:
+            group = groups.get(key, -1)
+            if group < 0:
+                group = index
+                groups[key] = group
+            each.group = group
+        index += 1
+    for each in declarations:
+        kind = each.w_kind
+        if isinstance(kind, W_Inductive):
+            for member in kind.constructors:
+                member.group = each.group
+            for member in kind.recursors:
+                member.group = each.group
+
+
 class Environment(object):
     """
     A Lean environment with its declarations.
@@ -1807,6 +1887,11 @@ class Environment(object):
         bare `Environment` (REPL / tests / cold paths) never enforces it."""
         pass
 
+    def check_reference(self, const, target):
+        """No-op: there is no declaration under check whose position or
+        safety could restrict what ``const`` may name."""
+        pass
+
     @not_rpython
     def __getitem__(self, value):
         name = value if isinstance(value, Name) else Name.from_str(value)
@@ -1840,6 +1925,7 @@ class Environment(object):
                 levels[level] = True
 
             by_name[each.name] = each
+        _place_all(declarations)
         return Environment(declarations=by_name)
 
     def type_check(self, declarations, printer=None):
