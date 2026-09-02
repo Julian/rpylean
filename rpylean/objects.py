@@ -3617,39 +3617,83 @@ def _try_reduce_nat(expr, env):
 def _dispatch_nat_op(name, args, env):
     # For binary ops, args[1] is the first argument, args[0] is the second
     # (because we collected them innermost-first).
+    if not is_nat_binop(name):
+        return None
+    v1, v2 = _get_bin_nat_args(args, env)
+    if v1 is None:
+        return None
+    return nat_binop_value(name, v1, v2)
 
+
+def is_nat_binop(name):
+    """Whether ``name`` is one of the kernel's native binary Nat ops."""
+    return (
+        name_eq(name, _NAT_ADD)
+        or name_eq(name, _NAT_SUB)
+        or name_eq(name, _NAT_MUL)
+        or name_eq(name, _NAT_POW)
+        or name_eq(name, _NAT_GCD)
+        or name_eq(name, _NAT_MOD)
+        or name_eq(name, _NAT_DIV)
+        or name_eq(name, _NAT_BEQ)
+        or name_eq(name, _NAT_BLE)
+        or name_eq(name, _NAT_LAND)
+        or name_eq(name, _NAT_LOR)
+        or name_eq(name, _NAT_XOR)
+        or name_eq(name, _NAT_SHIFT_LEFT)
+        or name_eq(name, _NAT_SHIFT_RIGHT)
+    )
+
+
+def nat_binop_value(name, v1, v2):
+    """
+    The native result of the binary Nat op ``name`` on the literal
+    values ``v1`` and ``v2``: a ``W_LitNat``, a ``Bool`` constant for
+    the predicates, or ``None`` when the op declines (a power with an
+    exponent past the cap).
+    """
     # Use name_eq (which is @elidable) so that with a promoted name the JIT
-    # folds every comparison to a compile-time constant and removes the whole
-    # chain from the hot trace for non-nat constants.
+    # folds every comparison to a compile-time constant.
     if name_eq(name, _NAT_ADD):
-        return _reduce_bin_nat_op_add(args, env)
+        return _mk_w_litnat(v1.add(v2))
     if name_eq(name, _NAT_SUB):
-        return _reduce_bin_nat_op_sub(args, env)
+        if v1.lt(v2):
+            return _mk_w_litnat(rbigint.fromint(0))
+        return _mk_w_litnat(v1.sub(v2))
     if name_eq(name, _NAT_MUL):
-        return _reduce_bin_nat_op_mul(args, env)
+        return _mk_w_litnat(v1.mul(v2))
     if name_eq(name, _NAT_POW):
-        return _reduce_nat_pow(args, env)
+        if v2.gt(_REDUCE_POW_MAX_EXP):
+            return None
+        return _mk_w_litnat(v1.pow(v2))
     if name_eq(name, _NAT_GCD):
-        return _reduce_bin_nat_op_gcd(args, env)
+        return _mk_w_litnat(v1.gcd(v2))
     if name_eq(name, _NAT_MOD):
-        return _reduce_bin_nat_op_mod(args, env)
+        if v2.eq(rbigint.fromint(0)):
+            return _mk_w_litnat(v1)
+        return _mk_w_litnat(v1.mod(v2))
     if name_eq(name, _NAT_DIV):
-        return _reduce_bin_nat_op_div(args, env)
+        if v2.eq(rbigint.fromint(0)):
+            return _mk_w_litnat(rbigint.fromint(0))
+        return _mk_w_litnat(v1.div(v2))
     if name_eq(name, _NAT_BEQ):
-        return _reduce_bin_nat_pred_beq(args, env)
+        if v1.eq(v2):
+            return _BOOL_TRUE
+        return _BOOL_FALSE
     if name_eq(name, _NAT_BLE):
-        return _reduce_bin_nat_pred_ble(args, env)
+        if v1.le(v2):
+            return _BOOL_TRUE
+        return _BOOL_FALSE
     if name_eq(name, _NAT_LAND):
-        return _reduce_bin_nat_op_land(args, env)
+        return _mk_w_litnat(v1.and_(v2))
     if name_eq(name, _NAT_LOR):
-        return _reduce_bin_nat_op_lor(args, env)
+        return _mk_w_litnat(v1.or_(v2))
     if name_eq(name, _NAT_XOR):
-        return _reduce_bin_nat_op_xor(args, env)
+        return _mk_w_litnat(v1.xor(v2))
     if name_eq(name, _NAT_SHIFT_LEFT):
-        return _reduce_bin_nat_op_shiftleft(args, env)
+        return _mk_w_litnat(v1.lshift(v2.toint()))
     if name_eq(name, _NAT_SHIFT_RIGHT):
-        return _reduce_bin_nat_op_shiftright(args, env)
-
+        return _mk_w_litnat(v1.rshift(v2.toint()))
     return None
 
 
@@ -3666,119 +3710,9 @@ def _get_bin_nat_args(args, env):
         return None, None
     arg2 = args[0].whnf(env)
     v2 = _to_nat_val(arg2, env)
-    if v2 is None:
+    if v1 is None or v2 is None:
         return None, None
     return v1, v2
-
-
-def _reduce_bin_nat_op_add(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.add(v2))
-
-
-def _reduce_bin_nat_op_sub(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v1.lt(v2):
-        return _mk_w_litnat(rbigint.fromint(0))
-    return _mk_w_litnat(v1.sub(v2))
-
-
-def _reduce_bin_nat_op_mul(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.mul(v2))
-
-
-def _reduce_nat_pow(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v2.gt(_REDUCE_POW_MAX_EXP):
-        return None
-    return _mk_w_litnat(v1.pow(v2))
-
-
-def _reduce_bin_nat_op_gcd(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.gcd(v2))
-
-
-def _reduce_bin_nat_op_mod(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v2.eq(rbigint.fromint(0)):
-        return _mk_w_litnat(v1)
-    return _mk_w_litnat(v1.mod(v2))
-
-
-def _reduce_bin_nat_op_div(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v2.eq(rbigint.fromint(0)):
-        return _mk_w_litnat(rbigint.fromint(0))
-    return _mk_w_litnat(v1.div(v2))
-
-
-def _reduce_bin_nat_pred_beq(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v1.eq(v2):
-        return _BOOL_TRUE
-    return _BOOL_FALSE
-
-
-def _reduce_bin_nat_pred_ble(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    if v1.le(v2):
-        return _BOOL_TRUE
-    return _BOOL_FALSE
-
-
-def _reduce_bin_nat_op_land(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.and_(v2))
-
-
-def _reduce_bin_nat_op_lor(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.or_(v2))
-
-
-def _reduce_bin_nat_op_xor(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.xor(v2))
-
-
-def _reduce_bin_nat_op_shiftleft(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.lshift(v2.toint()))
-
-
-def _reduce_bin_nat_op_shiftright(args, env):
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return _mk_w_litnat(v1.rshift(v2.toint()))
 
 
 class W_Proj(W_Expr):

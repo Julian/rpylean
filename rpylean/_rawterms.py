@@ -20,20 +20,37 @@ from rpython.rlib.objectmodel import always_inline
 from rpython.rlib.rstack import stack_almost_full
 from rpython.rtyper.lltypesystem import lltype, rffi
 
+from rpython.rlib.rbigint import rbigint
+
 from rpylean.objects import (
-    Binder,
+    NAT_SUCC,
+    NAT_ZERO,
     W_App,
     W_BVar,
     W_Closure,
-    W_Expr,
+    W_Const,
+    W_Constructor,
+    W_Definition,
     W_ForAll,
     W_FVar,
+    W_Inductive,
     W_Lambda,
     W_Let,
+    W_LitNat,
+    W_LitStr,
     W_Proj,
+    W_Recursor,
+    _NAT_REC_NAME,
+    _NAT_SUCC_NAME,
     _mk_app_in,
     _mk_w_forall_in,
     _mk_w_lambda_in,
+    _mk_w_litnat,
+    apply_const_level_params,
+    find_decl,
+    get_decl,
+    is_nat_binop,
+    nat_binop_value,
     syntactic_eq,
 )
 
@@ -102,6 +119,13 @@ F_A = 1
 F_B = 2
 F_C = 3
 F_META = 4
+
+# Per-record memo slots (parallel to the records, 0 = not yet known).
+MEMO_SLOTS = 4
+M_WHNF_CORE = 0
+M_WHNF = 1
+M_INFER = 2
+M_INFER_CHECKED = 3
 
 _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
 _NO_INFO = -1
@@ -234,9 +258,10 @@ class RawTermStore(object):
 
     _attrs_ = [
         'tc',
-        'recs', 'rec_info', 'nrecs', 'cap',
+        'recs', 'rec_info', 'memos', 'nrecs', 'cap',
         'table', 'tmask',
-        'leaves', 'leaf_meta', 'leaf_bvar', 'nleaves', 'leaf_cap',
+        'leaves', 'leaf_meta', 'leaf_bvar', 'leaf_whnf', 'nleaves',
+        'leaf_cap',
         'infos', 'names',
         '_bvar_leaves', '_fvar_leaves', '_content_leaves',
         '_import_memo', '_export_memo',
@@ -252,6 +277,7 @@ class RawTermStore(object):
         self.cap = cap
         self.recs = _raw_alloc(cap * REC_WORDS)
         self.rec_info = _raw_alloc(cap)
+        self.memos = _raw_alloc(cap * MEMO_SLOTS)
         self.nrecs = 0
         self.table = _raw_alloc(cap * 2)
         self.tmask = cap * 2 - 1
@@ -263,6 +289,7 @@ class RawTermStore(object):
         self.leaf_cap = 1 << 10
         self.leaf_meta = _raw_alloc(self.leaf_cap)
         self.leaf_bvar = _raw_alloc(self.leaf_cap)
+        self.leaf_whnf = _raw_alloc(self.leaf_cap)
         self.nleaves = 0
         #: Binder infos (boxed `Binder`s, for the name and style) and
         #: `Name`s (for projections and lets), by `rec_info` index.
@@ -285,9 +312,11 @@ class RawTermStore(object):
         self._freed = True
         _raw_free(self.recs)
         _raw_free(self.rec_info)
+        _raw_free(self.memos)
         _raw_free(self.table)
         _raw_free(self.leaf_meta)
         _raw_free(self.leaf_bvar)
+        _raw_free(self.leaf_whnf)
         self._inst_memo.free()
         self._shift_memo.free()
 
@@ -327,6 +356,14 @@ class RawTermStore(object):
 
     def info(self, h):
         return self.rec_info[rec_index(h)]
+
+    @always_inline
+    def memo(self, h, slot):
+        return self.memos[rec_index(h) * MEMO_SLOTS + slot]
+
+    @always_inline
+    def set_memo(self, h, slot, value):
+        self.memos[rec_index(h) * MEMO_SLOTS + slot] = value
 
     def binder_of(self, h):
         """The boxed `Binder` recorded for a lambda or forall record."""
@@ -422,9 +459,11 @@ class RawTermStore(object):
     def _grow_records(self):
         old = self.recs
         old_info = self.rec_info
+        old_memos = self.memos
         cap = self.cap * 2
         recs = _raw_alloc(cap * REC_WORDS)
         info = _raw_alloc(cap)
+        memos = _raw_alloc(cap * MEMO_SLOTS)
         n = self.nrecs * REC_WORDS
         i = 0
         while i < n:
@@ -434,11 +473,18 @@ class RawTermStore(object):
         while i < self.nrecs:
             info[i] = old_info[i]
             i += 1
+        n = self.nrecs * MEMO_SLOTS
+        i = 0
+        while i < n:
+            memos[i] = old_memos[i]
+            i += 1
         self.recs = recs
         self.rec_info = info
+        self.memos = memos
         self.cap = cap
         _raw_free(old)
         _raw_free(old_info)
+        _raw_free(old_memos)
 
     def _rehash(self):
         _raw_free(self.table)
@@ -495,15 +541,19 @@ class RawTermStore(object):
             cap = self.leaf_cap * 2
             meta = _raw_alloc(cap)
             bv = _raw_alloc(cap)
+            wh = _raw_alloc(cap)
             i = 0
             while i < j:
                 meta[i] = self.leaf_meta[i]
                 bv[i] = self.leaf_bvar[i]
+                wh[i] = self.leaf_whnf[i]
                 i += 1
             _raw_free(self.leaf_meta)
             _raw_free(self.leaf_bvar)
+            _raw_free(self.leaf_whnf)
             self.leaf_meta = meta
             self.leaf_bvar = bv
+            self.leaf_whnf = wh
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_meta[j] = e._packed >> 32
@@ -553,6 +603,60 @@ class RawTermStore(object):
         h = self._new_leaf(e, -1)
         bucket.append(h)
         return h
+
+    # ---- spines ----------------------------------------------------------
+
+    def head(self, h):
+        """The head of the application spine ``h``."""
+        while self.kind(h) == KIND_APP:
+            h = self.field_a(h)
+        return h
+
+    def unapp(self, h):
+        """
+        ``(head, args)`` for the spine ``h``, args outermost-first (the
+        last argument first), as the boxed `unapp` returns them.
+        """
+        args = []
+        while self.kind(h) == KIND_APP:
+            args.append(self.field_b(h))
+            h = self.field_a(h)
+        return h, args
+
+    def apply(self, fn, args, start, stop):
+        """``fn`` applied to ``args[start:stop]``, left to right."""
+        i = start
+        while i < stop:
+            fn = self.cons(KIND_APP, fn, args[i], 0)
+            i += 1
+        return fn
+
+    def apply_rev(self, fn, args, hi):
+        """``fn`` applied to ``args[hi]``, ``args[hi-1]``, … ``args[0]``:
+        re-applies an outermost-first arg list up to index ``hi``."""
+        i = hi
+        while i >= 0:
+            fn = self.cons(KIND_APP, fn, args[i], 0)
+            i -= 1
+        return fn
+
+    def const_leaf(self, h):
+        """The boxed `W_Const` a leaf handle names, or ``None``."""
+        if not is_leaf(h):
+            return None
+        e = self.leaves[leaf_index(h)]
+        if isinstance(e, W_Const):
+            return e
+        return None
+
+    def litnat_leaf(self, h):
+        """The boxed `W_LitNat` a leaf handle names, or ``None``."""
+        if not is_leaf(h):
+            return None
+        e = self.leaves[leaf_index(h)]
+        if isinstance(e, W_LitNat):
+            return e
+        return None
 
     # ---- substitution ----------------------------------------------------
 
@@ -793,16 +897,367 @@ class RawMachine(object):
     """
     A declaration checker over handles. Anything it cannot decide
     raises `RawBail`, and the caller runs the boxed kernel instead.
+
+    Reduction mirrors the boxed kernel step for step: `whnf_core` is
+    beta / zeta / projection / iota / quot only, `whnf` adds native Nat
+    arithmetic and one delta layer per iteration, and iota evaluates
+    the major premise with `whnf`.
     """
 
-    _attrs_ = ['tc', 'store']
+    _attrs_ = ['tc', 'store', '_delta_memo', '_rule_memo']
 
     def __init__(self, tc):
         self.tc = tc
         self.store = RawTermStore(tc)
+        #: const leaf index -> handle of its unfolded value (0 = none)
+        self._delta_memo = {}
+        #: (rec const leaf index, ctor leaf index) -> rule rhs handle
+        self._rule_memo = {}
 
     def free(self):
         self.store.free()
+
+    def _decl(self, const):
+        return find_decl(self.tc.declarations, const.name)
+
+    # ---- whnf ------------------------------------------------------------
+
+    def whnf_core(self, h):
+        """
+        Weak head normal form without unfolding definitions: beta, zeta,
+        projection of a constructor, iota and quot only.
+        """
+        store = self.store
+        if is_leaf(h):
+            return h
+        cached = store.memo(h, M_WHNF_CORE)
+        if cached != 0:
+            return cached
+        # A term already known to be in full WHNF is whnf_core-normal.
+        cached = store.memo(h, M_WHNF)
+        if cached == h:
+            return h
+        start = h
+        tc = self.tc
+        while True:
+            tc.tick_wall_time()
+            next = self._whnf_core_step(h)
+            if next == 0:
+                break
+            h = next
+        store.set_memo(start, M_WHNF_CORE, h)
+        return h
+
+    def _whnf_core_step(self, h):
+        """One whnf_core step of ``h``, or 0 when there is none."""
+        store = self.store
+        kind = store.kind(h)
+        if kind == KIND_APP:
+            fn = store.field_a(h)
+            arg = store.field_b(h)
+            fn_whnf = self.whnf_core(fn)
+            if fn_whnf != fn:
+                return store.cons(KIND_APP, fn_whnf, arg, 0)
+            if store.kind(fn) == KIND_LAMBDA:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                return store.instantiate(store.field_b(fn), arg, 0)
+            reduced = self.try_iota(h)
+            if reduced != 0:
+                return reduced
+            return self.try_quot_lift(h)
+        if kind == KIND_LET:
+            pair = store.field_b(h)
+            return store.instantiate(store.field_b(pair), store.field_a(pair), 0)
+        if kind == KIND_PROJ:
+            return self.try_proj(h)
+        return 0
+
+    def whnf(self, h):
+        """Weak head normal form, unfolding definitions as needed."""
+        store = self.store
+        if is_leaf(h):
+            cached = store.leaf_whnf[leaf_index(h)]
+        else:
+            cached = store.memo(h, M_WHNF)
+        if cached != 0:
+            return cached
+        start = h
+        tc = self.tc
+        while True:
+            h = self.whnf_core(h)
+            if store.kind(h) == KIND_APP:
+                reduced = self.try_reduce_nat(h)
+                if reduced != 0:
+                    h = reduced
+                    continue
+            unfolded = self.try_unfold_head(h)
+            if unfolded == 0:
+                break
+            h = unfolded
+        if is_leaf(start):
+            store.leaf_whnf[leaf_index(start)] = h
+        else:
+            store.set_memo(start, M_WHNF, h)
+        return h
+
+    def try_unfold_head(self, h):
+        """``h`` with its head constant unfolded one definition layer and
+        the spine re-applied, or 0 when the head isn't unfoldable."""
+        store = self.store
+        head, args = store.unapp(h)
+        const = store.const_leaf(head)
+        if const is None:
+            return 0
+        val = self._delta_value(head, const)
+        if val == 0:
+            return 0
+        return store.apply_rev(val, args, len(args) - 1)
+
+    def _delta_value(self, head, const):
+        j = leaf_index(head)
+        val = self._delta_memo.get(j, -1)
+        if val >= 0:
+            return val
+        decl = self._decl(const)
+        val = 0
+        if decl is not None and isinstance(decl.w_kind, W_Definition):
+            target = decl.w_kind.get_delta_reduce_target()
+            if target is not None:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.delta(const.name)
+                val = self.store.import_term(
+                    apply_const_level_params(const, target, self.tc),
+                )
+        self._delta_memo[j] = val
+        return val
+
+    def try_reduce_nat(self, h):
+        """Native evaluation of a binary Nat op on literal arguments, or
+        0 when ``h`` isn't one."""
+        store = self.store
+        fn = store.field_a(h)
+        if store.kind(fn) != KIND_APP:
+            return 0
+        head = store.field_a(fn)
+        if store.kind(head) == KIND_APP:
+            return 0
+        const = store.const_leaf(head)
+        if const is None or not is_nat_binop(const.name):
+            return 0
+        v1 = self._nat_value(self.whnf(store.field_b(fn)))
+        if v1 is None:
+            return 0
+        v2 = self._nat_value(self.whnf(store.field_b(h)))
+        if v2 is None:
+            return 0
+        result = nat_binop_value(const.name, v1, v2)
+        if result is None:
+            return 0
+        if self.tc.tracer.recording:
+            self.tc.tracer.nat_reduce(const.name)
+        return store.leaf_for(result)
+
+    def _nat_value(self, h):
+        """The Nat value of a WHNF ``h`` (a literal, `Nat.zero`, or
+        `Nat.succ` of such), or ``None``."""
+        store = self.store
+        succs = 0
+        while True:
+            lit = store.litnat_leaf(h)
+            if lit is not None:
+                return lit.val.add(rbigint.fromint(succs))
+            const = store.const_leaf(h)
+            if const is not None:
+                if const.name.syntactic_eq(NAT_ZERO.name):
+                    return rbigint.fromint(succs)
+                return None
+            if store.kind(h) == KIND_APP:
+                head = store.const_leaf(store.field_a(h))
+                if head is not None and head.name.syntactic_eq(_NAT_SUCC_NAME):
+                    succs += 1
+                    h = self.whnf(store.field_b(h))
+                    continue
+            return None
+
+    def try_proj(self, h):
+        """Projection of a constructor application, or 0."""
+        store = self.store
+        struct = self.whnf(store.field_a(h))
+        lit = None
+        if is_leaf(struct):
+            e = store.leaf(struct)
+            if isinstance(e, W_LitStr):
+                lit = e
+        if lit is not None:
+            struct = self.whnf(store.import_term(lit.build_str_expr(self.tc)))
+        head, args = store.unapp(struct)
+        const = store.const_leaf(head)
+        if const is None:
+            return 0
+        decl = self._decl(const)
+        if decl is None:
+            return 0
+        kind = decl.w_kind
+        if not isinstance(kind, W_Constructor):
+            return 0
+        idx = kind.num_params + store.field_b(h)
+        n = len(args)
+        if idx < n:
+            # args are outermost-first: field i of a left-to-right list
+            # sits at n - 1 - i.
+            return args[n - 1 - idx]
+        return 0
+
+    def try_quot_lift(self, h):
+        """``Quot.lift f h (Quot.mk r a) ⇒ f a``, or 0."""
+        store = self.store
+        head, args = store.unapp(h)
+        const = store.const_leaf(head)
+        if const is None or len(args) != 6:
+            return 0
+        if not const.name.syntactic_eq(W_App._QUOT_LIFT):
+            return 0
+        mk = self.whnf(args[0])
+        mk_head, mk_args = store.unapp(mk)
+        mk_const = store.const_leaf(mk_head)
+        if mk_const is None or len(mk_args) != 3:
+            return 0
+        if not mk_const.name.syntactic_eq(W_App._QUOT_MK):
+            return 0
+        return store.cons(KIND_APP, args[2], mk_args[0], 0)
+
+    def try_iota(self, h):
+        """One recursor iota step of the spine ``h``, or 0."""
+        store = self.store
+        tc = self.tc
+        target, args = store.unapp(h)
+        const = store.const_leaf(target)
+        if const is None:
+            return 0
+        decl = self._decl(const)
+        if decl is None:
+            return 0
+        rec = decl.w_kind
+        if not isinstance(rec, W_Recursor):
+            return 0
+        skip = rec.num_params + rec.num_indices + rec.num_minors + rec.num_motives
+        major_idx = len(args) - 1 - skip
+        if major_idx < 0:
+            return 0
+
+        # `Nat.rec motive zero succ (literal N)` in one step.
+        if major_idx == 0 and const.name.syntactic_eq(_NAT_REC_NAME):
+            lit = store.litnat_leaf(args[0])
+            if lit is not None:
+                if tc.tracer.recording:
+                    tc.tracer.iota(const.name)
+                succ_case = args[1]
+                zero_case = args[2]
+                motive = args[3]
+                if lit.val.eq(rbigint.fromint(0)):
+                    return zero_case
+                pred = store.leaf_for(_mk_w_litnat(lit.val.sub(rbigint.fromint(1))))
+                rec_at_pred = store.cons(KIND_APP, store.cons(KIND_APP, store.cons(
+                    KIND_APP, store.cons(KIND_APP, target, motive, 0),
+                    zero_case, 0), succ_case, 0), pred, 0)
+                return store.cons(
+                    KIND_APP, store.cons(KIND_APP, succ_case, pred, 0),
+                    rec_at_pred, 0,
+                )
+
+        major = self.whnf(args[major_idx])
+
+        if rec.k == 1:
+            raise RawBail("iota: k-like")
+
+        lit = store.litnat_leaf(major)
+        if lit is not None:
+            major = store.import_term(lit.one_step_constructor(tc))
+        else:
+            expanded = self._to_cnstr_when_structure(decl, rec, major)
+            if expanded != 0:
+                major = expanded
+
+        ctor_head, ctor_args = store.unapp(major)
+        ctor = store.const_leaf(ctor_head)
+        if ctor is None:
+            return 0
+        rule = rec.rule_for_ctor(ctor.name)
+        if rule is None:
+            return 0
+        ctor_decl = find_decl(tc.declarations, rule.ctor_name)
+        if ctor_decl is None or not ctor_decl.w_kind.is_constructor():
+            return 0
+        ctor_kind = ctor_decl.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+
+        rhs = self._rule_rhs(target, const, ctor_head, rule)
+        n_args = len(args)
+        # args are outermost-first; the first `total` declared arguments
+        # (params, motives, minors) are the last `total` entries.
+        total = rec.num_params + rec.num_motives + rec.num_minors
+        assert total >= 0
+        result = rhs
+        i = n_args - 1
+        stop = n_args - total
+        while i >= stop:
+            result = store.cons(KIND_APP, result, args[i], 0)
+            i -= 1
+        # The constructor's fields, left to right.
+        n_ctor = len(ctor_args)
+        i = n_ctor - 1 - ctor_kind.num_params
+        stop = n_ctor - 1 - (ctor_kind.num_params + rule.num_fields)
+        while i > stop:
+            if i < 0:
+                break
+            result = store.cons(KIND_APP, result, ctor_args[i], 0)
+            i -= 1
+        # Then whatever followed the major premise.
+        result = store.apply_rev(result, args, major_idx - 1)
+        if tc.tracer.recording:
+            tc.tracer.iota(const.name)
+        return result
+
+    def _rule_rhs(self, target, const, ctor_head, rule):
+        key = (leaf_index(target) << 30) | leaf_index(ctor_head)
+        rhs = self._rule_memo.get(key, 0)
+        if rhs != 0:
+            return rhs
+        rhs = self.store.import_term(
+            apply_const_level_params(const, rule.rhs, self.tc),
+        )
+        self._rule_memo[key] = rhs
+        return rhs
+
+    def _to_cnstr_when_structure(self, rec_decl, rec, major):
+        """
+        A stuck major of non-recursive-structure type, eta-expanded to
+        its constructor applied to its projections so the rule can
+        fire; 0 when that doesn't apply.
+        """
+        store = self.store
+        tc = self.tc
+        induct_name = rec.major_induct_name(rec_decl.type)
+        if induct_name is None:
+            return 0
+        ind_decl = find_decl(tc.declarations, induct_name)
+        if ind_decl is None:
+            return 0
+        ind = ind_decl.w_kind
+        if not isinstance(ind, W_Inductive):
+            return 0
+        if not ind.is_non_recursive_structure():
+            return 0
+        head = store.head(major)
+        head_const = store.const_leaf(head)
+        if head_const is not None:
+            head_decl = find_decl(tc.declarations, head_const.name)
+            if head_decl is not None and head_decl.w_kind.is_constructor():
+                return 0
+        raise RawBail("iota: struct-eta major")
+
+    # ---- checking --------------------------------------------------------
 
     def check_value(self, type, value, prop):
         """
@@ -812,6 +1267,7 @@ class RawMachine(object):
         when rejected.
         """
         store = self.store
-        store.import_term(type)
+        ty = store.import_term(type)
         store.import_term(value)
+        self.whnf(ty)
         raise RawBail("check: unported")
