@@ -201,3 +201,84 @@ class TestRecords(object):
         store.import_term(f.const().app(x.const()))
         store.free()
         store.free()
+
+
+def check_instantiate(store, e, sub, depth=0):
+    expected = e.instantiate(None, sub, depth)
+    got = store.export_term(
+        store.instantiate(store.import_term(e), store.import_term(sub), depth),
+    )
+    assert syntactic_eq(got, expected), (got, expected)
+
+
+def check_shift(store, e, count, depth=0):
+    expected = e.incr_free_bvars(None, count, depth)
+    got = store.export_term(store.shift(store.import_term(e), count, depth))
+    assert syntactic_eq(got, expected), (got, expected)
+
+
+class TestSubstitution(object):
+    def test_bvar_cases(self, store):
+        sub = f.const().app(x.const())
+        check_instantiate(store, b0, sub)
+        check_instantiate(store, b1, sub)            # moves down
+        check_instantiate(store, b2, sub, depth=1)   # moves down
+        check_instantiate(store, b0, sub, depth=1)   # untouched
+        check_instantiate(store, b1, sub, depth=1)   # hit at depth 1
+
+    def test_closed_terms_are_identical(self, store):
+        e = f.const().app(x.const(), fun(y.binder(type=NAT))(b0))
+        h = store.import_term(e)
+        assert store.instantiate(h, store.import_term(x.const()), 0) == h
+        assert store.shift(h, 3, 0) == h
+
+    def test_under_binders_shifts_the_substitute(self, store):
+        # The substitute mentions a variable of the enclosing scope; it
+        # must move up past each binder it is placed under.
+        sub = f.const().app(b0)
+        e = fun(x.binder(type=NAT))(g.const().app(b1, b0))
+        check_instantiate(store, e, sub)
+        e = fun(x.binder(type=NAT))(fun(y.binder(type=b1))(g.const().app(b2, b1, b0)))
+        check_instantiate(store, e, sub)
+        e = forall(x.binder(type=b0))(b1)
+        check_instantiate(store, e, sub)
+
+    def test_let_and_proj(self, store):
+        sub = g.const().app(b0)
+        e = x.let(type=b0, value=S.proj(0, b0), body=f.const().app(b0, b1))
+        check_instantiate(store, e, sub)
+        check_instantiate(store, e, sub, depth=1)
+        check_shift(store, e, 2)
+        check_shift(store, e, 2, depth=1)
+
+    def test_shift_cases(self, store):
+        e = fun(x.binder(type=b0))(g.const().app(b0, b1, b2))
+        check_shift(store, e, 1)
+        check_shift(store, e, 5, depth=1)
+        check_shift(store, e, 5, depth=3)
+        check_shift(store, b0, 4)
+        check_shift(store, b0, 4, depth=1)
+
+    def test_memo_returns_same_handle(self, store):
+        sub = store.import_term(f.const().app(x.const()))
+        e = store.import_term(fun(x.binder(type=NAT))(g.const().app(b1, b0)))
+        r1 = store.instantiate(e, sub, 0)
+        r2 = store.instantiate(e, sub, 0)
+        assert r1 == r2
+        assert store.export_term(r1) is store.export_term(r2)
+
+    def test_deep_spine(self, store):
+        e = b0
+        for i in range(200):
+            e = e.app(b1)
+        check_instantiate(store, e, x.const())
+        check_shift(store, e, 2)
+
+    def test_shared_dag_is_walked_once(self, store):
+        shared = g.const().app(b0)
+        e = f.const().app(shared, shared, shared)
+        before = store.nrecs
+        h = store.import_term(e)
+        store.instantiate(h, store.import_term(x.const()), 0)
+        # g x, f (g x), f (g x) (g x), f (g x) (g x) (g x): four new records.
+        assert store.nrecs - before == 4 + 4

@@ -127,6 +127,19 @@ def _spread(k):
     return (k * 1000003) ^ (k >> 17)
 
 
+@always_inline
+def _pack_key(h, other, depth):
+    """
+    ``(h, other, depth)`` as one map key, or 0 when a component is too
+    large to pack (the caller then skips the memo for this call).
+    Handles get 25 bits each, the depth 13; ``h`` is never 0, so the
+    key is never 0.
+    """
+    if h >= (1 << 25) or other >= (1 << 25) or depth >= (1 << 13):
+        return 0
+    return (h << 38) | (other << 13) | depth
+
+
 class RawIntMap(object):
     """
     An open-addressed int -> int map in raw memory. Keys must be
@@ -227,6 +240,7 @@ class RawTermStore(object):
         'infos', 'names',
         '_bvar_leaves', '_fvar_leaves', '_content_leaves',
         '_import_memo', '_export_memo',
+        '_inst_memo', '_shift_memo',
         '_freed',
     ]
 
@@ -259,6 +273,8 @@ class RawTermStore(object):
         self._content_leaves = {}
         self._import_memo = {}
         self._export_memo = {}
+        self._inst_memo = RawIntMap(1 << 12)
+        self._shift_memo = RawIntMap(1 << 10)
         self._freed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -272,6 +288,8 @@ class RawTermStore(object):
         _raw_free(self.table)
         _raw_free(self.leaf_meta)
         _raw_free(self.leaf_bvar)
+        self._inst_memo.free()
+        self._shift_memo.free()
 
     # ---- record access ---------------------------------------------------
 
@@ -535,6 +553,117 @@ class RawTermStore(object):
         h = self._new_leaf(e, -1)
         bucket.append(h)
         return h
+
+    # ---- substitution ----------------------------------------------------
+
+    def instantiate(self, h, sub, depth=0):
+        """
+        ``h`` with ``sub`` substituted for the bound variable ``depth``
+        and every looser bound variable moved down by one (the binder
+        that bound it is gone).
+        """
+        if self.loose_bvar_range(h) <= depth:
+            return h
+        if is_leaf(h):
+            # Only a bound variable has a loose range, so this is one,
+            # at or above `depth`.
+            id = self.leaf_bvar[leaf_index(h)]
+            if id == depth:
+                return self.shift(sub, depth, 0)
+            return self.bvar(id - 1)
+        key = _pack_key(h, sub, depth)
+        if key != 0:
+            r = self._inst_memo.get(key, 0)
+            if r != 0:
+                return r
+        if stack_almost_full():
+            raise RawBail("instantiate: stack")
+        recs = self.recs
+        base = rec_index(h) * REC_WORDS
+        kind = recs[base + F_KIND]
+        a = recs[base + F_A]
+        b = recs[base + F_B]
+        info = self.rec_info[rec_index(h)]
+        if kind == KIND_APP:
+            na = self.instantiate(a, sub, depth)
+            nb = self.instantiate(b, sub, depth)
+            if na == a and nb == b:
+                r = h
+            else:
+                r = self.cons(KIND_APP, na, nb, 0)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            na = self.instantiate(a, sub, depth)
+            nb = self.instantiate(b, sub, depth + 1)
+            if na == a and nb == b:
+                r = h
+            else:
+                r = self.cons(kind, na, nb, 0, info)
+        elif kind == KIND_PROJ:
+            na = self.instantiate(a, sub, depth)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, 0, info)
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self.instantiate(a, sub, depth)
+            nv = self.instantiate(value, sub, depth)
+            nbody = self.instantiate(body, sub, depth + 1)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody, 0)
+                r = self.cons(KIND_LET, na, pair, 0, info)
+        if key != 0:
+            self._inst_memo.set(key, r)
+        return r
+
+    def shift(self, h, count, depth=0):
+        """
+        ``h`` with every bound variable at or above ``depth`` moved up
+        by ``count`` (it is being placed under ``count`` more binders).
+        """
+        if count == 0 or self.loose_bvar_range(h) <= depth:
+            return h
+        if is_leaf(h):
+            return self.bvar(self.leaf_bvar[leaf_index(h)] + count)
+        key = _pack_key(h, count, depth)
+        if key != 0:
+            r = self._shift_memo.get(key, 0)
+            if r != 0:
+                return r
+        if stack_almost_full():
+            raise RawBail("shift: stack")
+        recs = self.recs
+        base = rec_index(h) * REC_WORDS
+        kind = recs[base + F_KIND]
+        a = recs[base + F_A]
+        b = recs[base + F_B]
+        info = self.rec_info[rec_index(h)]
+        if kind == KIND_APP:
+            r = self.cons(
+                KIND_APP, self.shift(a, count, depth),
+                self.shift(b, count, depth), 0,
+            )
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            r = self.cons(
+                kind, self.shift(a, count, depth),
+                self.shift(b, count, depth + 1), 0, info,
+            )
+        elif kind == KIND_PROJ:
+            r = self.cons(KIND_PROJ, self.shift(a, count, depth), b, 0, info)
+        else:
+            assert kind == KIND_LET
+            pair = self.cons(
+                KIND_PAIR, self.shift(self.field_a(b), count, depth),
+                self.shift(self.field_b(b), count, depth + 1), 0,
+            )
+            r = self.cons(KIND_LET, self.shift(a, count, depth), pair, 0, info)
+        if key != 0:
+            self._shift_memo.set(key, r)
+        return r
 
     # ---- boundary --------------------------------------------------------
 
