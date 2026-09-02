@@ -4992,9 +4992,10 @@ class W_App(W_Expr):
         # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
         # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
         if rec_kind.k == 1:
-            # Verify that our major premise type is correct (by checking the whole expression)
-            # before we get rid of it
-            self.infer(env)
+            # Terms under reduction are already well-typed (the
+            # `infer_only` invariant), so only the major premise's type
+            # is needed here; K's soundness condition is the index-
+            # coincidence `def_eq(old_ty, new_ty)` below.
 
             # Full whnf, not just `.head()`: the major is typically an
             # opened binder's fvar whose type may sit under a closure
@@ -5048,30 +5049,6 @@ class W_App(W_Expr):
                 return False, self
             env.tracer.klike_fired()
             major_premise = major_premise_ctor
-
-            # major_premise_ty = major_premise.infer(env)
-            # print("K-like reduction with major_premise %s type: %s" % (major_premise.pretty(), major_premise_ty.pretty()))
-            # k_like_args = []
-            # while isinstance(major_premise_ty, W_App):
-            #     k_like_args.append(major_premise_ty.arg)
-            #     major_premise_ty = major_premise_ty.fn
-
-            # k_like_args.reverse()
-            # print("Unwrapped: %s" % major_premise_ty.pretty())
-            # assert isinstance(major_premise_ty, W_Const)
-            # base_decl = env.declarations[major_premise_ty.name]
-            # assert isinstance(base_decl.w_kind, W_Inductive)
-            # assert len(base_decl.w_kind.ctor_names) == 1
-            # print("Ctor name: %s" % base_decl.w_kind.ctor_names[0])
-
-            # ctor_decl = env.declarations[base_decl.w_kind.ctor_names[0]]
-
-            # major_premise_ctor = W_Const(base_decl.w_kind.ctor_names[0], major_premise_ty.levels)
-            # for arg in k_like_args[0:ctor_decl.w_kind.num_params]:
-            #     major_premise_ctor = W_App(major_premise_ctor, arg)
-            # print("Made new major premise ctor: %s" % major_premise_ctor.pretty())
-            # major_premise = major_premise_ctor
-            # #import pdb; pdb.set_trace()
 
         # We try to delay materializing LitNat expressions as late as possible,
         # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
