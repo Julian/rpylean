@@ -36,14 +36,19 @@ def get_decl(declarations, name):
     Look up a declaration by name.
 
     This is a hot path during type checking — called for every constant.
-    We promote both arguments here and dispatch to the `@elidable` inner
-    so every call site benefits from JIT-time folding, not only the ones
-    that happen to promote on their own.
+    The name-side inline cache (`Name._decl_dict` / `_decl_cached`)
+    answers repeat lookups with two field reads instead of the r_dict
+    probe (whose custom hash/eq run through indirect calls).
     """
+    if name._decl_dict is declarations:
+        return name._decl_cached
     try:
-        return _get_decl(promote(declarations), promote(name))
+        decl = _get_decl(declarations, name)
     except KeyError:
-        return _demand_decl(declarations, name)
+        decl = _demand_decl(declarations, name)
+    name._decl_dict = declarations
+    name._decl_cached = decl
+    return decl
 
 
 @elidable
@@ -1450,7 +1455,10 @@ class Name(_Item):
     construct it directly).
     """
 
-    _attrs_ = ['_level_cache', 'parent', '_hash', 'is_internal', 'is_private']
+    _attrs_ = [
+        '_level_cache', 'parent', '_hash', 'is_internal', 'is_private',
+        '_decl_dict', '_decl_cached',
+    ]
     _immutable_fields_ = ['parent', '_hash', 'is_internal', 'is_private']
 
     def __init__(self):
@@ -1458,6 +1466,15 @@ class Name(_Item):
         # Subclasses set their own `parent` / `_hash` / `is_internal` /
         # `is_private` fields after calling this.
         self._level_cache = None
+        # Inline cache for `get_decl`: the declarations dict this name
+        # was last resolved in, and the declaration it resolved to.
+        # Names are interned, so this turns the hot Name-keyed r_dict
+        # probe (indirect hash/eq calls) into two field reads. Sound for
+        # the same reason `_get_decl` may be `@elidable`: a registered
+        # binding is never replaced (`AlreadyDeclared`), and the dict
+        # identity check keeps distinct environments apart.
+        self._decl_dict = None
+        self._decl_cached = None
 
     @staticmethod
     def simple(part):
