@@ -54,9 +54,9 @@ export-simple path:
     rm "$olean_output_dir/JustfileTemporary.olean"; \
     rmdir "$olean_output_dir"
 
-# Translate (compile) rpylean into an rpylean-c binary (with JIT).
+# Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:
-    "{{ pypy }}" "{{ rpython }}" --opt=jit --output="{{ translated }}" {{ ARGS }} "{{ target }}"
+    "{{ pypy }}" "{{ rpython }}" --opt=3 --output="{{ translated }}" {{ ARGS }} "{{ target }}"
 
 # Run rpylean's (untranslated) tests.
 test *ARGS=tests:
@@ -70,16 +70,6 @@ test-translated *ARGS=translated_tests:
 bench file:
     hyperfine \
         --command-name untranslated \
-        --command-name 'translated (no JIT)' \
-        --command-name 'translated (JIT)' \
+        --command-name translated \
         "PYTHONPATH='{{ pypy_checkout }}/' '{{ pypy }}' -m rpylean check '{{ file }}'" \
-        "'{{ translated }}' --jit off check '{{ file }}'" \
         "'{{ translated }}' check '{{ file }}'"
-
-# Run the translated binary with PYPYLOG=jit-summary and emit the
-# RPython JIT summary to stderr at process exit. Pair this with `just
-# bench` for wall-time numbers — this run is unmeasured and exists
-# only to capture trace counts, abort reasons, and tracing/backend
-# time for one invocation.
-bench-jit-summary file:
-    PYPYLOG=jit-summary:- "{{ translated }}" check "{{ file }}"

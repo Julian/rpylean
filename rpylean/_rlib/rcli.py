@@ -2,7 +2,6 @@
 A mini-framework for CLIs in RPython.
 """
 
-from rpython.rlib import jit
 from rpython.rlib.rfile import create_stdio
 
 
@@ -25,72 +24,11 @@ USAGE
 OPTIONS
 
   --help: Show this help message
-  --jit OPTS: Configure the JIT, which is off unless this option is passed (`default` to enable, `help`, or `name=value,...`)
   --version: Show version information
 
 COMMANDS
 
 """
-
-
-def _build_jit_help():
-    lines = [
-        "Configure the JIT via `--jit name=value,name=value`,",
-        "or `--jit off` to disable, or `--jit default` to reset.",
-        "",
-        "PARAMETERS",
-        "",
-    ]
-    for k in sorted(jit.PARAMETER_DOCS):
-        lines.append("  %s: %s" % (k, jit.PARAMETER_DOCS[k]))
-    return "\n".join(lines)
-
-
-_JIT_HELP = _build_jit_help()
-
-
-def _apply_jit(optstring):
-    if optstring == "help":
-        raise UsageError(_JIT_HELP, exit_code=0)
-    try:
-        jit.set_user_param(None, optstring)
-    except ValueError:
-        raise UsageError("Invalid --jit options: %s" % (optstring,))
-
-
-def _extract_jit(argv):
-    """Strip and apply any `--jit OPTS` / `--jit=OPTS` from argv.
-
-    JIT params have to be set before any JIT-driven code runs, so we
-    pull these out at the top level rather than threading them through
-    per-subcommand options.
-
-    Without an explicit `--jit`, the JIT is *disabled*: the workload
-    is megamorphic tree-walking whose traces don't beat the static
-    code, while the merge-point bookkeeping alone costs ~15% wall
-    time, so paying it has to be opted into (`--jit default`).
-    """
-    result = [argv[0]]
-    seen = False
-    i = 1
-    while i < len(argv):
-        a = argv[i]
-        if a == "--jit":
-            if i + 1 >= len(argv):
-                raise UsageError("Option --jit requires an argument")
-            _apply_jit(argv[i + 1])
-            seen = True
-            i += 2
-        elif a.startswith("--jit="):
-            _apply_jit(a[len("--jit="):])
-            seen = True
-            i += 1
-        else:
-            result.append(a)
-            i += 1
-    if not seen:
-        _apply_jit("off")
-    return result
 
 
 COMMAND_USAGE = """\
@@ -290,8 +228,6 @@ class CLI(object):
         return sub
 
     def parse(self, argv):
-        argv = _extract_jit(argv)
-
         if len(argv) == 1 or argv[1] == "--help":
             raise self.with_tagline(argv[0])
 
