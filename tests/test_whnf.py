@@ -25,6 +25,7 @@ class _CollectingTracer(Tracer):
 
     def __init__(self):
         Tracer.__init__(self, None)
+        self.recording = True
         self.steps = []
 
     def whnf_step(self, expr, declarations):

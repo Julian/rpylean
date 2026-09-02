@@ -1269,9 +1269,11 @@ def _mk_app_in(tc, fn, arg):
     hi = _mix2(fn._uid, arg._uid)
     existing = arena.get(hi, None)
     if existing is not None and existing.fn is fn and existing.arg is arg:
-        tc.tracer.arena_app_hit()
+        if tc.tracer.recording:
+            tc.tracer.arena_app_hit()
         return existing
-    tc.tracer.arena_app_miss()
+    if tc.tracer.recording:
+        tc.tracer.arena_app_miss()
     e = W_App(fn, arg)
     arena[hi] = e
     return e
@@ -2723,7 +2725,8 @@ class W_Expr(_Item):
         expr = self
         made_progress = False
         while True:
-            env.tracer.whnf_step(expr, env.declarations)
+            if env.tracer.recording:
+                env.tracer.whnf_step(expr, env.declarations)
             env.tick_wall_time()
             next = expr._whnf_core(env)
             if next is None:
@@ -2762,7 +2765,8 @@ class W_Expr(_Item):
                 if (c is not None and c.whnf_env is env
                         and c.whnf_result is expr):
                     return expr
-            env.tracer.whnf_step(expr, env.declarations)
+            if env.tracer.recording:
+                env.tracer.whnf_step(expr, env.declarations)
             env.tick_wall_time()
             next = expr._whnf_core(env)
             if next is None:

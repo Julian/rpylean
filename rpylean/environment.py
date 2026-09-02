@@ -328,11 +328,17 @@ class Tracer(object):
     on `env.tracer` rather than gating on the tracer's identity.
     """
 
-    _attrs_ = ['_writer', '_depth']
+    _attrs_ = ['_writer', '_depth', 'recording']
 
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
+        # Whether this tracer records anything. The hottest call sites
+        # (arena probes, whnf steps, the def_eq prologue) fire billions
+        # of times per heavy declaration; a virtual call into an empty
+        # method is not free at that volume, so they gate on this flag
+        # instead of relying on the empty bodies being inlined away.
+        self.recording = False
 
     def enter(self, expr1, expr2, declarations):
         """Called when entering a def_eq comparison."""
@@ -471,6 +477,7 @@ class StreamTracer(Tracer):
     def __init__(self, writer):
         self._writer = writer
         self._depth = 0
+        self.recording = True
         self._pending_newline = False
         self.def_eq_count = 0
         self.whnf_step_count = 0
@@ -922,29 +929,40 @@ class TypeChecker(object):
                 )
         self.tick_wall_time()
 
-        tracer = env.tracer
-        tracer.enter(expr1, expr2, env.declarations)
+        # The tracer prologue/hit callbacks are virtual calls into
+        # (usually) empty methods; at billions of def_eq calls per
+        # heavy declaration they are gated on the tracer's `recording`
+        # flag rather than relied on to be free.
+        tracing = env.tracer.recording
+        if tracing:
+            env.tracer.enter(expr1, expr2, env.declarations)
 
         # Pointer-equality fast path before WHNF: shared subexpressions
         # are very common in proof terms (the DAG that lean4export
         # produces is heavily shared), so WHNFing the same instance
         # twice just to discover it's equal to itself wastes work.
         if expr1 is expr2:
-            tracer.identity_hit()
-            return tracer.result(True)
+            if tracing:
+                env.tracer.identity_hit()
+                return env.tracer.result(True)
+            return True
 
         # Already proven def-eq earlier in this decl: the union-find
         # makes every repeat comparison O(α). Mirrors lean4's
         # `quick_is_def_eq` consulting `m_eqv_manager`
         # (type_checker.cpp:741).
         if self._eqv_find(expr1) is self._eqv_find(expr2):
-            tracer.eqv_hit()
-            return tracer.result(True)
+            if tracing:
+                env.tracer.eqv_hit()
+                return env.tracer.result(True)
+            return True
 
         result = self._def_eq_uncached(expr1, expr2)
         if result:
             self._eqv_union(expr1, expr2)
-        return tracer.result(result)
+        if tracing:
+            return env.tracer.result(result)
+        return result
 
     def _def_eq_uncached(self, expr1, expr2):
         """
