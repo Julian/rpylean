@@ -25,6 +25,7 @@ from rpylean.objects import (
     W_LevelMax,
     W_LevelParam,
     W_LevelSucc,
+    W_LevelZero,
     W_LitNat,
     W_LitStr,
     W_Opaque,
@@ -491,9 +492,13 @@ class TestLevel(object):
         u2 = Name.simple("u").level()
         assert u.max(v).gt(u2, 0)
 
+    def test_max_gt_param_positive_balance(self):
+        """u + 1 ≤ max(u, v) is unknown"""
+        assert not u.max(v).gt(u, 1)
+
     def test_max_gt_param_negative_balance(self):
-        """u ≤ max(u, v) - 1 is unknown"""
-        assert not u.max(v).gt(u, -1)
+        """u - 1 ≤ max(u, v)"""
+        assert u.max(v).gt(u, -1)
 
     def test_param_gt_zero(self):
         """0 ≤ u"""
@@ -508,9 +513,13 @@ class TestLevel(object):
         """v ≤ u is unknown"""
         assert not u.gt(v, 0)
 
+    def test_param_gt_zero_positive(self):
+        """1 ≤ u is unknown"""
+        assert not u.gt(W_LEVEL_ZERO, 1)
+
     def test_param_gt_zero_negative(self):
-        """0 ≤ u - 1 is unknown"""
-        assert not u.gt(W_LEVEL_ZERO, -1)
+        """-1 ≤ u"""
+        assert u.gt(W_LEVEL_ZERO, -1)
 
     def test_succ(self):
         assert u.succ() == W_LevelSucc(W_LevelParam(Name.of(["u"])))
@@ -643,3 +652,65 @@ class TestClosure(object):
         body = W_App(W_BVar(0), W_BVar(1))
         closure = W_Closure([W_BVar(0), W_BVar(0)], body)
         assert closure.force(None) == W_App(W_BVar(0), W_BVar(0))
+
+
+class TestLevelOrderSoundness(object):
+    """
+    The level order against a brute-force oracle: for random levels
+    over a few parameters, `leq` and `eq` must never claim more than
+    holds for every assignment of the parameters (in a small range;
+    a claim that holds there but not beyond would need an explicit
+    universe above the range, which the generator keeps small).
+    """
+
+    PARAMS = ["u", "v", "w"]
+
+    @staticmethod
+    def _eval(level, assignment):
+        if isinstance(level, W_LevelZero):
+            return 0
+        if isinstance(level, W_LevelSucc):
+            return TestLevelOrderSoundness._eval(level.parent, assignment) + 1
+        if isinstance(level, W_LevelMax):
+            return max(
+                TestLevelOrderSoundness._eval(level.lhs, assignment),
+                TestLevelOrderSoundness._eval(level.rhs, assignment),
+            )
+        if isinstance(level, W_LevelIMax):
+            rhs = TestLevelOrderSoundness._eval(level.rhs, assignment)
+            if rhs == 0:
+                return 0
+            return max(TestLevelOrderSoundness._eval(level.lhs, assignment), rhs)
+        return assignment[level.name.str()]
+
+    def _holds_leq(self, l1, l2):
+        import itertools
+        for values in itertools.product(range(4), repeat=len(self.PARAMS)):
+            assignment = dict(zip(self.PARAMS, values))
+            if self._eval(l1, assignment) > self._eval(l2, assignment):
+                return False
+        return True
+
+    def _random_level(self, rng, depth):
+        from rpylean.objects import level_max, level_imax
+        kind = rng.randint(0, 4 if depth > 0 else 1)
+        if kind == 0:
+            return W_LEVEL_ZERO
+        if kind == 1:
+            return Name.simple(rng.choice(self.PARAMS)).level()
+        if kind == 2:
+            return self._random_level(rng, depth - 1).succ()
+        if kind == 3:
+            return level_max(self._random_level(rng, depth - 1), self._random_level(rng, depth - 1))
+        return level_imax(self._random_level(rng, depth - 1), self._random_level(rng, depth - 1))
+
+    def test_never_unsound(self):
+        import random
+        rng = random.Random(20260902)
+        for _ in range(400):
+            l1 = self._random_level(rng, 3)
+            l2 = self._random_level(rng, 3)
+            if l1.leq(l2):
+                assert self._holds_leq(l1, l2), (l1, l2)
+            if l1.eq(l2):
+                assert self._holds_leq(l1, l2) and self._holds_leq(l2, l1), (l1, l2)

@@ -1157,6 +1157,20 @@ def _mk_level_succ(parent):
     return e
 
 
+def level_max(lhs, rhs):
+    """
+    ``max lhs rhs`` exactly as written, for a level read from an
+    export: a parsed level keeps its shape so it can be written back
+    and compared the way the kernel that produced it would.
+    """
+    return _mk_level_max(lhs, rhs)
+
+
+def level_imax(lhs, rhs):
+    """``imax lhs rhs`` exactly as written (see `level_max`)."""
+    return _mk_level_imax(lhs, rhs)
+
+
 def _mk_level_max(lhs, rhs):
     assert isinstance(lhs, W_Level)
     assert isinstance(rhs, W_Level)
@@ -2309,12 +2323,16 @@ class W_Level(_Item):
         """
         A canonical form: the arguments of a max are flattened, sorted,
         and merged (an explicit universe subsumed by a larger offset, a
-        base kept only at its largest offset), with successors pushed
-        outward. Equal universes have syntactically equal normal forms
-        far more often than not, which is what makes `eq` decide the
-        reorderings that structural comparison cannot.
+        base kept only at its largest offset), and a successor of a max
+        is pushed into each argument. Equal universes have syntactically
+        equal normal forms far more often than not, which is what makes
+        `eq` decide the reorderings that structural comparison cannot.
         """
-        return self
+        return self.normalize_at(0)
+
+    def normalize_at(self, k):
+        """The normal form of ``self + k`` (``self`` not a successor)."""
+        return self.succ_n(k)
 
     def norm_kind(self):
         """Ordering class among level kinds in a normal form."""
@@ -2359,6 +2377,11 @@ class W_Level(_Item):
         Return the level which is successor to this one.
         """
         return _mk_level_succ(self)
+
+    def gt(self, other, balance):
+        """Whether ``other + balance ≤ self``; every `leq` is
+        ``self ≤ other + balance``, so the two convert with a sign flip."""
+        raise NotImplementedError
 
     def imax_leq(self, imax, other, balance):
         """Check imax ≤ other when self is the imax's rhs: both sides of
@@ -2427,6 +2450,11 @@ class W_LevelZero(W_Level):
             return balance >= 0
         return other.gt(self, -balance)
 
+    def gt(self, other, balance):
+        if isinstance(other, W_LevelZero):
+            return balance <= 0
+        return False
+
     def pretty_parts(self):
         return "", 0
 
@@ -2477,7 +2505,7 @@ class W_LevelSucc(W_Level):
 
     def normalize(self):
         base, k = self.to_offset()
-        return base.normalize().succ_n(k)
+        return base.normalize_at(k)
 
     def norm_kind(self):
         return 1
@@ -2531,7 +2559,9 @@ class W_LevelMax(W_Level):
         return self.lhs.leq(other, balance) and self.rhs.leq(other, balance)
 
     def gt(self, other, balance):
-        return other.leq(self.lhs, balance) or other.leq(self.rhs, balance)
+        return (
+            other.leq(self.lhs, -balance) or other.leq(self.rhs, -balance)
+        )
 
     def norm_kind(self):
         return 2
@@ -2546,7 +2576,7 @@ class W_LevelMax(W_Level):
         self.lhs.push_max_args(out)
         self.rhs.push_max_args(out)
 
-    def normalize(self):
+    def normalize_at(self, k):
         todo = []
         self.push_max_args(todo)
         args = []
@@ -2560,32 +2590,32 @@ class W_LevelMax(W_Level):
         if isinstance(args[i].to_offset()[0], W_LevelZero):
             while i + 1 < n and isinstance(args[i + 1].to_offset()[0], W_LevelZero):
                 i += 1
-            k = args[i].to_offset()[1]
+            explicit = args[i].to_offset()[1]
             j = i + 1
             while j < n:
-                if args[j].to_offset()[1] >= k:
+                if args[j].to_offset()[1] >= explicit:
                     break
                 j += 1
             if j < n:
                 i += 1
         kept = [args[i]]
-        prev_base, prev_k = args[i].to_offset()
+        prev_base, prev_off = args[i].to_offset()
         i += 1
         while i < n:
-            base, k = args[i].to_offset()
+            base, off = args[i].to_offset()
             if syntactic_eq(prev_base, base):
-                if prev_k < k:
-                    prev_k = k
+                if prev_off < off:
+                    prev_off = off
                     kept[len(kept) - 1] = args[i]
             else:
                 prev_base = base
-                prev_k = k
+                prev_off = off
                 kept.append(args[i])
             i += 1
-        result = kept[len(kept) - 1]
+        result = kept[len(kept) - 1].succ_n(k)
         i = len(kept) - 2
         while i >= 0:
-            result = _mk_level_max(kept[i], result)
+            result = _mk_level_max(kept[i].succ_n(k), result)
             i -= 1
         return result
 
@@ -2661,8 +2691,8 @@ class W_LevelIMax(W_Level):
             return self.lhs.norm_lt(other.lhs)
         return self.rhs.norm_lt(other.rhs)
 
-    def normalize(self):
-        return self.lhs.normalize().imax(self.rhs.normalize())
+    def normalize_at(self, k):
+        return self.lhs.normalize().imax(self.rhs.normalize()).succ_n(k)
 
     def pretty_parts(self):
         return "(imax %s %s)" % (self.lhs.str(), self.rhs.str()), 0
@@ -2710,9 +2740,9 @@ class W_LevelParam(W_Level):
 
     def gt(self, other, balance):
         if isinstance(other, W_LevelZero):
-            return balance >= 0
+            return balance <= 0
         if isinstance(other, W_LevelParam):
-            return balance >= 0 and syntactic_eq(self.name, other.name)
+            return balance <= 0 and syntactic_eq(self.name, other.name)
         return False
 
     def pretty_parts(self):

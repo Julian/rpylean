@@ -193,7 +193,7 @@ def _parse_universe(cursor, builder):
         cursor.expect(']')
         cursor.expect('}')
         builder.register_level(
-            uidx, builder.levels[lhs].max(builder.levels[rhs]),
+            uidx, objects.level_max(builder.levels[lhs], builder.levels[rhs]),
         )
     elif disc == "imax":
         cursor.expect('[')
@@ -203,7 +203,7 @@ def _parse_universe(cursor, builder):
         cursor.expect(']')
         cursor.expect('}')
         builder.register_level(
-            uidx, builder.levels[lhs].imax(builder.levels[rhs]),
+            uidx, objects.level_imax(builder.levels[lhs], builder.levels[rhs]),
         )
     elif disc == "param":
         nidx = cursor.read_int()
