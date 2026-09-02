@@ -26,6 +26,7 @@ from rpylean.exceptions import (
     W_InvalidDeclaration,
     WallTimeExceeded,
 )
+from rpylean._rawterms import RawBail, RawMachine
 from rpylean.objects import (
     HINT_ABBREV,
     W_CheckError,
@@ -40,6 +41,7 @@ from rpylean.objects import (
     W_Constructor,
     W_Definition,
     W_ForAll,
+    W_Theorem,
     W_FunBase,
     W_HeartbeatError,
     W_MemoryError,
@@ -374,6 +376,10 @@ class Tracer(object):
         # method is not free at that volume, so they gate on this flag
         # instead of relying on the empty bodies being inlined away.
         self.recording = False
+
+    def raw_bail(self, reason):
+        """Called when the `RawMachine` hands a declaration back to the
+        boxed kernel; ``reason`` names what it could not decide."""
 
     def enter(self, expr1, expr2, declarations):
         """Called when entering a def_eq comparison."""
@@ -763,7 +769,7 @@ class TypeChecker(object):
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
         '_eqv_parent', '_defeq_failed',
-        'infer_only',
+        'infer_only', 'raw',
     ]
     # `declarations` etc. are mirrored from the env at construction so
     # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
@@ -808,6 +814,8 @@ class TypeChecker(object):
         # and, on the unreduced beta-redex domains reduction produces,
         # a source of spurious mismatches.
         self.infer_only = False
+        #: The `RawMachine` checking this declaration, or ``None``.
+        self.raw = None
         self.declarations = env.declarations
         self.tracer = env.tracer
         self.max_heartbeat = env.max_heartbeat
@@ -1802,6 +1810,36 @@ def _peak_memory():
     return 0
 
 
+def _type_check_decl(decl, tc):
+    """
+    Type check ``decl`` with ``tc``: through the `RawMachine` when one
+    is attached and the declaration is one it checks (a definition,
+    theorem or opaque), falling back to the boxed kernel whenever the
+    machine bails.
+    """
+    raw = tc.raw
+    if raw is not None:
+        kind = decl.w_kind
+        value = None
+        prop = False
+        if isinstance(kind, W_Definition):
+            value = kind.value
+        elif isinstance(kind, W_Theorem):
+            value = kind.value
+            prop = True
+        if value is not None:
+            try:
+                error = raw.check_value(decl.type, value, prop)
+            except RawBail as bail:
+                tc.tracer.raw_bail(bail.reason)
+            else:
+                if error is not None:
+                    error.name = decl.name
+                    error.declaration = decl
+                return error
+    return decl.type_check(tc)
+
+
 def _place_all(declarations):
     """
     Give ``declarations`` their positions in declaration order and their
@@ -1840,7 +1878,7 @@ class Environment(object):
         'max_wall_time', 'max_memory', 'flush_memory',
         '_intern_w_app', '_intern_w_proj',
         '_intern_w_lambda', '_intern_w_forall',
-        'infer_only',
+        'infer_only', 'raw_enabled',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -1881,6 +1919,9 @@ class Environment(object):
         # `TypeChecker` so the duck-typed `env.infer_only` read in
         # `_iter_infer` works without an isinstance check.
         self.infer_only = False
+        #: Whether definition-like declarations are checked by the
+        #: `RawMachine` first, with the boxed kernel as the fallback.
+        self.raw_enabled = False
 
     def tick_wall_time(self):
         """No-op: wall-time tracking is a per-decl `TypeChecker` concern;
@@ -1958,13 +1999,15 @@ class Environment(object):
             printer.before(self, decl)
 
         tc = TypeChecker(self, decl)
+        if self.raw_enabled:
+            tc.raw = RawMachine(tc)
         error = None
         gc_start = _gc_time_seconds()
         bytes_start = _bytes_allocated()
         peak_start = _peak_memory()
         start = clock()
         try:
-            error = decl.type_check(tc)
+            error = _type_check_decl(decl, tc)
         except HeartbeatExceeded as err:
             error = W_HeartbeatError(
                 decl.name,
@@ -2000,6 +2043,8 @@ class Environment(object):
         elapsed = clock() - start
         gc_elapsed = _gc_time_seconds() - gc_start
         bytes_allocated = _bytes_allocated() - bytes_start
+        if tc.raw is not None:
+            tc.raw.free()
         # Reset the per-decl inline caches before measuring live memory
         # so the reading reflects what this decl *permanently* added —
         # stale caches on persistent nodes would otherwise pin this

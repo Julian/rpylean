@@ -164,6 +164,13 @@ CHECK_FLAGS = [
         "",
         "yes",
     ),
+    (
+        "raw",
+        "check definitions and theorems with the raw-memory machine "
+        "first, falling back to the boxed kernel when it cannot decide",
+        "",
+        "yes",
+    ),
 ]
 
 
@@ -381,7 +388,7 @@ class _CheckRun(object):
     _attrs_ = [
         'stdoutw', 'stderrw',
         'max_fail', 'max_heartbeat', 'max_wall_time', 'max_memory',
-        'flush_memory', 'printer', 'slow_secs', 'slow_hb',
+        'flush_memory', 'printer', 'slow_secs', 'slow_hb', 'raw',
         'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
     ]
 
@@ -422,6 +429,7 @@ class _CheckRun(object):
 
         self.trace = args.options["trace"]
         self.stats = args.options["stats"]
+        self.raw = args.options["raw"]
 
     def start(self, abort_at):
         """
@@ -441,6 +449,8 @@ class _CheckRun(object):
             env.max_memory = self.max_memory
         if self.flush_memory > 0:
             env.flush_memory = self.flush_memory
+        if self.raw:
+            env.raw_enabled = True
         if (
             self.slow_secs >= 0.0
             or self.slow_hb >= 0
