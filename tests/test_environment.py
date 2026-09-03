@@ -884,10 +884,10 @@ class TestDiagnosticTokens(object):
             """\
             def bad : Prop :=
               ∀ (x : Prop) (y : x), y → y
-                                ^
-                                has type
-                                  x
-                                but is expected to be a Sort (Type or Prop)""",
+                                    ^
+                                    has type
+                                      x
+                                    but is expected to be a Sort (Type or Prop)""",
         )
 
     def test_not_a_prop_diagnostic(self):
@@ -961,8 +961,8 @@ class TestInvalidDeclaration(object):
               Foo has only 2 fields""",
         )
 
-    def test_nested_lambda_projection_marks_value(self):
-        """Projection inside nested lambdas marks the whole value."""
+    def test_nested_lambda_projection_is_marked(self):
+        """A projection inside nested lambdas is marked exactly."""
         z = Name.simple("z")
         And = Name.simple("And")
         intro = And.child("intro")
@@ -997,8 +997,8 @@ class TestInvalidDeclaration(object):
             """\
             def bad : Prop :=
               fun a x z ↦ z.2
-              ^^^^^^^^^^^^^^^
-              invalid projection And.2: And has only 2 fields""",
+                          ^^^
+                          And has only 2 fields""",
         )
 
     def test_unknown_structure_diagnostic(self):

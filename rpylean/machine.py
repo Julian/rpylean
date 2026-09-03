@@ -1,16 +1,17 @@
 """
-Terms as flat records in raw memory, addressed by integer handles.
+The kernel: terms as flat records in unmanaged memory, addressed by
+integer handles, and the checker that reduces, infers and compares them.
 
-The boxed `W_Expr` tree is the parsed representation: it is what the
-garbage collector traces, so every reduction product that lives in it
-is re-traced on every major collection for as long as it is retained.
-Here a term is instead a *record*: a fixed run of machine words in a
-raw (untraced) array, named by an integer *handle*. Records are
-hash-consed, so structurally equal terms have equal handles and
-syntactic equality is an integer comparison. Leaves that carry no
-sub-terms (constants, sorts, variables, literals) stay boxed and are
-referenced from a side table; they are canonicalised by content on the
-way in, which is what makes handle equality meaningful.
+The `W_Expr` tree is the parsed representation: it is what the garbage
+collector traces, so every reduction product that lives in it is
+re-traced on every major collection for as long as it is retained. Here
+a term is instead a *record*: a fixed run of machine words in an
+untraced array, named by an integer *handle*. Records are hash-consed,
+so structurally equal terms have equal handles and syntactic equality
+is an integer comparison. Leaves that carry no sub-terms (constants,
+sorts, variables, literals) stay `W_Expr` objects referenced from a
+side table; they are canonicalised by content on the way in, which is
+what makes handle equality meaningful.
 
 A store is per declaration: the working set of one check, freed
 wholesale when the check ends.
@@ -32,9 +33,9 @@ from rpylean.objects import (
     STRING,
     W_App,
     W_BVar,
-    W_Closure,
     W_Const,
     W_Constructor,
+    W_DeepRecursion,
     W_Definition,
     W_ForAll,
     W_FVar,
@@ -54,9 +55,6 @@ from rpylean.objects import (
     _BOOL_TRUE,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
-    _mk_app_in,
-    _mk_w_forall_in,
-    _mk_w_lambda_in,
     _mk_w_litnat,
     apply_const_level_params,
     find_decl,
@@ -68,22 +66,12 @@ from rpylean.objects import (
 )
 
 
-class RawBail(Exception):
-    """
-    The machine cannot (or will not) decide this; the caller falls
-    back to the boxed kernel.
-    """
-
-    def __init__(self, reason):
-        self.reason = reason
-
-
 # ---- Handles --------------------------------------------------------------
 #
 # A handle is a tagged machine int. Bit 0 set: a leaf, index `h >> 1`
-# into the boxed leaf table. Bit 0 clear and non-zero: a record, index
+# into the leaf table. Bit 0 clear and non-zero: a record, index
 # `(h >> 1) - 1`. Zero never names anything, so it doubles as the empty
-# marker of every raw table.
+# marker of every table.
 
 INVALID = 0
 
@@ -116,12 +104,12 @@ def leaf_handle(j):
 # ---- Records --------------------------------------------------------------
 #
 # Five words per record: kind, three kind-specific fields, and `meta`,
-# which packs `loose_bvar_range << 1 | has_fvar` exactly as the boxed
-# node's `_packed` upper half does.
+# which packs `loose_bvar_range << 1 | has_fvar` exactly as a
+# `W_Expr`'s `_packed` upper half does.
 
 KIND_APP = 1      # a = fn, b = arg
-KIND_LAMBDA = 2   # a = binder type, b = body; info = the boxed Binder
-KIND_FORALL = 3   # a = binder type, b = body; info = the boxed Binder
+KIND_LAMBDA = 2   # a = binder type, b = body; info = the Binder
+KIND_FORALL = 3   # a = binder type, b = body; info = the Binder
 KIND_PROJ = 4     # a = struct, b = field index, c = struct Name id; info = the Name
 KIND_LET = 5      # a = type, b = PAIR(value, body); info = the let Name
 KIND_PAIR = 6     # a = value, b = body (auxiliary to KIND_LET)
@@ -145,18 +133,18 @@ _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
 _NO_INFO = -1
 
 
-def _raw_alloc(n):
+def _alloc_words(n):
     return lltype.malloc(_SIGNED_ARRAY, n, flavor='raw', zero=True)
 
 
-def _raw_free(arr):
+def _free_words(arr):
     lltype.free(arr, flavor='raw')
 
 
-def _raw_grow(arr, used, cap):
+def _grow_words(arr, used, cap):
     """A fresh array of ``cap`` words holding ``arr``'s first ``used``
     words; ``arr`` is freed."""
-    new = _raw_alloc(cap)
+    new = _alloc_words(cap)
     if we_are_translated():
         rffi.c_memcpy(
             rffi.cast(rffi.VOIDP, new), rffi.cast(rffi.CONST_VOIDP, arr),
@@ -167,7 +155,7 @@ def _raw_grow(arr, used, cap):
         while i < used:
             new[i] = arr[i]
             i += 1
-    _raw_free(arr)
+    _free_words(arr)
     return new
 
 
@@ -232,9 +220,9 @@ def _canonical_sort(sort):
     return n.sort()
 
 
-class RawIntMap(object):
+class IntMap(object):
     """
-    An open-addressed int -> int map in raw memory. Keys must be
+    An open-addressed int -> int map in unmanaged memory. Keys must be
     non-zero (zero marks an empty slot).
     """
 
@@ -244,8 +232,8 @@ class RawIntMap(object):
         cap = 1
         while cap < capacity:
             cap <<= 1
-        self.keys = _raw_alloc(cap)
-        self.vals = _raw_alloc(cap)
+        self.keys = _alloc_words(cap)
+        self.vals = _alloc_words(cap)
         self.mask = cap - 1
         self.size = 0
 
@@ -286,8 +274,8 @@ class RawIntMap(object):
         old_vals = self.vals
         old_cap = self.mask + 1
         cap = old_cap * 2
-        keys = _raw_alloc(cap)
-        vals = _raw_alloc(cap)
+        keys = _alloc_words(cap)
+        vals = _alloc_words(cap)
         mask = cap - 1
         i = 0
         while i < old_cap:
@@ -302,26 +290,22 @@ class RawIntMap(object):
         self.keys = keys
         self.vals = vals
         self.mask = mask
-        _raw_free(old_keys)
-        _raw_free(old_vals)
+        _free_words(old_keys)
+        _free_words(old_vals)
 
     def free(self):
         if self.mask >= 0:
-            _raw_free(self.keys)
-            _raw_free(self.vals)
+            _free_words(self.keys)
+            _free_words(self.vals)
             self.mask = -1
             self.size = 0
 
 
-class RawTermStore(object):
+class TermStore(object):
     """
     The record arena for one declaration's check: records, the consing
-    table over them, the boxed leaf table, and the memoised boundary
-    in both directions.
-
-    ``tc`` is the `TypeChecker` whose arenas boxed products built at the
-    boundary go to (``None`` in tests routes them to the persistent
-    intern tables).
+    table over them, the leaf table, and the memoised boundary to and
+    from `W_Expr` in both directions.
     """
 
     _attrs_ = [
@@ -332,7 +316,7 @@ class RawTermStore(object):
         'leaf_checked', 'nleaves', 'leaf_cap',
         'infos', 'names', '_name_ids',
         '_bvar_leaves', '_fvar_leaves', '_content_leaves',
-        '_import_memo', '_export_memo',
+        '_import_memo', 'rec_node', 'nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_bindm_memo',
         '_freed',
@@ -344,28 +328,28 @@ class RawTermStore(object):
         while cap < capacity:
             cap <<= 1
         self.cap = cap
-        self.recs = _raw_alloc(cap * REC_WORDS)
-        self.rec_info = _raw_alloc(cap)
-        self.memos = _raw_alloc(cap * MEMO_SLOTS)
+        self.recs = _alloc_words(cap * REC_WORDS)
+        self.rec_info = _alloc_words(cap)
+        self.memos = _alloc_words(cap * MEMO_SLOTS)
         self.nrecs = 0
-        self.table = _raw_alloc(cap * 2)
+        self.table = _alloc_words(cap * 2)
         self.tmask = cap * 2 - 1
-        #: Boxed leaves by index; `leaf_meta` / `leaf_bvar` mirror the
-        #: two facts the machine reads on hot paths so it need not touch
-        #: the boxed object: the packed meta word, and the de Bruijn
-        #: index for a bound variable (-1 otherwise).
+        #: Leaves by index; `leaf_meta` / `leaf_bvar` mirror the two
+        #: facts the machine reads on hot paths so it need not touch the
+        #: object: the packed meta word, and the de Bruijn index for a
+        #: bound variable (-1 otherwise).
         self.leaves = []
         self.leaf_cap = 1 << 10
-        self.leaf_meta = _raw_alloc(self.leaf_cap)
-        self.leaf_bvar = _raw_alloc(self.leaf_cap)
-        self.leaf_whnf = _raw_alloc(self.leaf_cap)
+        self.leaf_meta = _alloc_words(self.leaf_cap)
+        self.leaf_bvar = _alloc_words(self.leaf_cap)
+        self.leaf_whnf = _alloc_words(self.leaf_cap)
         #: A leaf's inferred type (0 = not yet), and whether that type
         #: was produced in check mode (a constant's reference check has
         #: run).
-        self.leaf_infer = _raw_alloc(self.leaf_cap)
-        self.leaf_checked = _raw_alloc(self.leaf_cap)
+        self.leaf_infer = _alloc_words(self.leaf_cap)
+        self.leaf_checked = _alloc_words(self.leaf_cap)
         self.nleaves = 0
-        #: Binder infos (boxed `Binder`s, for the name and style) and
+        #: Binder infos (`Binder`s, for the name and style) and
         #: `Name`s (for projections and lets), by `rec_info` index.
         self.infos = []
         self.names = []
@@ -374,12 +358,15 @@ class RawTermStore(object):
         self._fvar_leaves = {}
         self._content_leaves = {}
         self._import_memo = {}
-        self._export_memo = {}
-        self._inst_memo = RawIntMap(1 << 12)
-        self._shift_memo = RawIntMap(1 << 10)
-        self._bind_memo = RawIntMap(1 << 10)
-        self._multi_memo = RawIntMap(1 << 10)
-        self._bindm_memo = RawIntMap(1 << 10)
+        #: record index -> 1 + its index in `nodes`, or 0: the `W_Expr`
+        #: a record was imported from or exported to
+        self.rec_node = _alloc_words(capacity)
+        self.nodes = []
+        self._inst_memo = IntMap(1 << 12)
+        self._shift_memo = IntMap(1 << 10)
+        self._bind_memo = IntMap(1 << 10)
+        self._multi_memo = IntMap(1 << 10)
+        self._bindm_memo = IntMap(1 << 10)
         self._freed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -388,15 +375,16 @@ class RawTermStore(object):
         if self._freed:
             return
         self._freed = True
-        _raw_free(self.recs)
-        _raw_free(self.rec_info)
-        _raw_free(self.memos)
-        _raw_free(self.table)
-        _raw_free(self.leaf_meta)
-        _raw_free(self.leaf_bvar)
-        _raw_free(self.leaf_whnf)
-        _raw_free(self.leaf_infer)
-        _raw_free(self.leaf_checked)
+        _free_words(self.recs)
+        _free_words(self.rec_info)
+        _free_words(self.rec_node)
+        _free_words(self.memos)
+        _free_words(self.table)
+        _free_words(self.leaf_meta)
+        _free_words(self.leaf_bvar)
+        _free_words(self.leaf_whnf)
+        _free_words(self.leaf_infer)
+        _free_words(self.leaf_checked)
         self._inst_memo.free()
         self._shift_memo.free()
         self._bind_memo.free()
@@ -449,7 +437,7 @@ class RawTermStore(object):
         self.memos[rec_index(h) * MEMO_SLOTS + slot] = value
 
     def binder_of(self, h):
-        """The boxed `Binder` recorded for a lambda or forall record."""
+        """The `Binder` recorded for a lambda or forall record."""
         return self.infos[self.info(h)]
 
     def name_of(self, h):
@@ -457,7 +445,7 @@ class RawTermStore(object):
         return self.names[self.info(h)]
 
     def leaf(self, h):
-        """The boxed leaf a leaf handle names."""
+        """The `W_Expr` a leaf handle names."""
         return self.leaves[leaf_index(h)]
 
     def bvar_id(self, h):
@@ -542,15 +530,16 @@ class RawTermStore(object):
     def _grow_records(self):
         n = self.nrecs
         cap = self.cap * 2
-        self.recs = _raw_grow(self.recs, n * REC_WORDS, cap * REC_WORDS)
-        self.rec_info = _raw_grow(self.rec_info, n, cap)
-        self.memos = _raw_grow(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
+        self.recs = _grow_words(self.recs, n * REC_WORDS, cap * REC_WORDS)
+        self.rec_info = _grow_words(self.rec_info, n, cap)
+        self.rec_node = _grow_words(self.rec_node, n, cap)
+        self.memos = _grow_words(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
         self.cap = cap
 
     def _rehash(self):
-        _raw_free(self.table)
+        _free_words(self.table)
         cap = (self.tmask + 1) * 2
-        table = _raw_alloc(cap)
+        table = _alloc_words(cap)
         tmask = cap - 1
         recs = self.recs
         idx = 0
@@ -605,11 +594,11 @@ class RawTermStore(object):
         j = self.nleaves
         if j == self.leaf_cap:
             cap = self.leaf_cap * 2
-            self.leaf_meta = _raw_grow(self.leaf_meta, j, cap)
-            self.leaf_bvar = _raw_grow(self.leaf_bvar, j, cap)
-            self.leaf_whnf = _raw_grow(self.leaf_whnf, j, cap)
-            self.leaf_infer = _raw_grow(self.leaf_infer, j, cap)
-            self.leaf_checked = _raw_grow(self.leaf_checked, j, cap)
+            self.leaf_meta = _grow_words(self.leaf_meta, j, cap)
+            self.leaf_bvar = _grow_words(self.leaf_bvar, j, cap)
+            self.leaf_whnf = _grow_words(self.leaf_whnf, j, cap)
+            self.leaf_infer = _grow_words(self.leaf_infer, j, cap)
+            self.leaf_checked = _grow_words(self.leaf_checked, j, cap)
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_meta[j] = e._packed >> 32
@@ -625,9 +614,13 @@ class RawTermStore(object):
         self._bvar_leaves[id] = h
         return h
 
+    def has_fvar_leaf(self, fvar):
+        """Whether the free variable ``fvar`` already has a leaf."""
+        return self._fvar_leaves.get(fvar._uid, 0) != 0
+
     def leaf_for(self, e):
         """
-        The canonical leaf handle for the boxed leaf ``e``: bound
+        The canonical leaf handle for the leaf ``e``: bound
         variables by index, free variables by identity, everything else
         by content.
         """
@@ -677,7 +670,7 @@ class RawTermStore(object):
     def unapp(self, h):
         """
         ``(head, args)`` for the spine ``h``, args outermost-first (the
-        last argument first), as the boxed `unapp` returns them.
+        last argument first), as `W_Expr.unapp` returns them.
         """
         args = []
         while self.kind(h) == KIND_APP:
@@ -703,7 +696,7 @@ class RawTermStore(object):
         return fn
 
     def const_leaf(self, h):
-        """The boxed `W_Const` a leaf handle names, or ``None``."""
+        """The `W_Const` a leaf handle names, or ``None``."""
         if not is_leaf(h):
             return None
         e = self.leaves[leaf_index(h)]
@@ -712,7 +705,7 @@ class RawTermStore(object):
         return None
 
     def litnat_leaf(self, h):
-        """The boxed `W_LitNat` a leaf handle names, or ``None``."""
+        """The `W_LitNat` a leaf handle names, or ``None``."""
         if not is_leaf(h):
             return None
         e = self.leaves[leaf_index(h)]
@@ -743,7 +736,7 @@ class RawTermStore(object):
             if r != 0:
                 return r
         if stack_almost_full():
-            raise RawBail("instantiate: stack")
+            raise W_DeepRecursion("instantiate")
         recs = self.recs
         base = rec_index(h) * REC_WORDS
         kind = recs[base + F_KIND]
@@ -817,7 +810,7 @@ class RawTermStore(object):
             if r != 0:
                 return r
         if stack_almost_full():
-            raise RawBail("instantiate_multi: stack")
+            raise W_DeepRecursion("instantiate_multi")
         recs = self.recs
         base = rec_index(h) * REC_WORDS
         kind = recs[base + F_KIND]
@@ -869,7 +862,7 @@ class RawTermStore(object):
             if r != 0:
                 return r
         if stack_almost_full():
-            raise RawBail("shift: stack")
+            raise W_DeepRecursion("shift")
         recs = self.recs
         base = rec_index(h) * REC_WORDS
         kind = recs[base + F_KIND]
@@ -919,7 +912,7 @@ class RawTermStore(object):
             if r != 0:
                 return r
         if stack_almost_full():
-            raise RawBail("bind_fvar: stack")
+            raise W_DeepRecursion("bind_fvar")
         recs = self.recs
         base = rec_index(h) * REC_WORDS
         kind = recs[base + F_KIND]
@@ -997,7 +990,7 @@ class RawTermStore(object):
             if r != 0:
                 return r
         if stack_almost_full():
-            raise RawBail("bind_fvars: stack")
+            raise W_DeepRecursion("bind_fvars")
         recs = self.recs
         base = rec_index(h) * REC_WORDS
         kind = recs[base + F_KIND]
@@ -1035,7 +1028,7 @@ class RawTermStore(object):
         return r
 
     def sort_leaf(self, h):
-        """The boxed `W_Sort` a leaf handle names, or ``None``."""
+        """The `W_Sort` a leaf handle names, or ``None``."""
         if not is_leaf(h):
             return None
         e = self.leaves[leaf_index(h)]
@@ -1045,14 +1038,26 @@ class RawTermStore(object):
 
     # ---- boundary --------------------------------------------------------
 
+    def node_of(self, h):
+        """The `W_Expr` the record ``h`` was imported from or exported
+        to, or ``None``."""
+        i = self.rec_node[rec_index(h)]
+        if i == 0:
+            return None
+        return self.nodes[i - 1]
+
+    def set_node(self, h, e):
+        self.nodes.append(e)
+        self.rec_node[rec_index(h)] = len(self.nodes)
+
     def import_term(self, e):
-        """The handle for the boxed term ``e``, memoised per boxed node."""
+        """The handle for the term ``e``, memoised per `W_Expr`."""
         memo = self._import_memo
         h = memo.get(e._uid, 0)
         if h != 0:
             return h
         if stack_almost_full():
-            raise RawBail("import: stack")
+            raise W_DeepRecursion("import_term")
         cls = e.__class__
         if cls is W_App:
             # Walk the spine down to the first already-imported node
@@ -1076,6 +1081,7 @@ class RawTermStore(object):
                 app = spine[i]
                 head = self.app(head, self.import_term(app.arg))
                 memo[app._uid] = head
+                self.set_node(head, app)
                 i -= 1
             return head
         if cls is W_Lambda or cls is W_ForAll:
@@ -1100,25 +1106,23 @@ class RawTermStore(object):
                 self.import_term(e.value),
                 self.import_term(e.body),
             )
-        elif cls is W_Closure:
-            assert isinstance(e, W_Closure)
-            h = self.import_term(e.force(self.tc))
         else:
             h = self.leaf_for(e)
+            memo[e._uid] = h
+            return h
         memo[e._uid] = h
+        self.set_node(h, e)
         return h
 
     def export_term(self, h):
-        """The boxed term for ``h``, memoised per record."""
+        """The `W_Expr` for ``h``, memoised per record."""
         if is_leaf(h):
             return self.leaves[leaf_index(h)]
-        memo = self._export_memo
-        cached = memo.get(h, None)
+        cached = self.node_of(h)
         if cached is not None:
             return cached
         if stack_almost_full():
-            raise RawBail("export: stack")
-        tc = self.tc
+            raise W_DeepRecursion("export_term")
         kind = self.kind(h)
         if kind == KIND_APP:
             args = []
@@ -1128,7 +1132,7 @@ class RawTermStore(object):
                 if self.kind(cur) != KIND_APP:
                     head = self.export_term(cur)
                     break
-                cached = memo.get(cur, None)
+                cached = self.node_of(cur)
                 if cached is not None:
                     head = cached
                     break
@@ -1138,8 +1142,8 @@ class RawTermStore(object):
             i = len(args) - 1
             while i >= 0:
                 app = args[i]
-                head = _mk_app_in(tc, head, self.export_term(self.field_b(app)))
-                memo[app] = head
+                head = W_App(head, self.export_term(self.field_b(app)))
+                self.set_node(app, head)
                 i -= 1
             return head
         if kind == KIND_LAMBDA or kind == KIND_FORALL:
@@ -1148,31 +1152,32 @@ class RawTermStore(object):
             )
             body = self.export_term(self.field_b(h))
             if kind == KIND_LAMBDA:
-                e = _mk_w_lambda_in(tc, binder, body)
+                e = W_Lambda(binder, body)
             else:
-                e = _mk_w_forall_in(tc, binder, body)
+                e = W_ForAll(binder, body)
         elif kind == KIND_PROJ:
-            e = self.name_of(h).proj_in(
-                tc, self.field_b(h), self.export_term(self.field_a(h)),
+            e = W_Proj(
+                self.name_of(h), self.field_b(h),
+                self.export_term(self.field_a(h)),
             )
         else:
             assert kind == KIND_LET
             pair = self.field_b(h)
-            e = self.name_of(h).let(
-                type=self.export_term(self.field_a(h)),
-                value=self.export_term(self.field_a(pair)),
-                body=self.export_term(self.field_b(pair)),
+            e = W_Let(
+                self.name_of(h),
+                self.export_term(self.field_a(h)),
+                self.export_term(self.field_a(pair)),
+                self.export_term(self.field_b(pair)),
             )
-        memo[h] = e
+        self.set_node(h, e)
         return e
 
 
-class RawMachine(object):
+class Machine(object):
     """
-    A declaration checker over handles. Anything it cannot decide
-    raises `RawBail`, and the caller runs the boxed kernel instead.
+    A declaration checker over handles.
 
-    Every step mirrors the boxed kernel: `whnf_core` is beta / zeta /
+    Every step mirrors Lean's kernel: `whnf_core` is beta / zeta /
     projection / iota / quot only, `whnf` adds native Nat arithmetic
     and one delta layer per iteration, `def_eq` runs the same sequence
     of checks in the same order, and `infer` opens each binder with one
@@ -1180,7 +1185,7 @@ class RawMachine(object):
     """
 
     _attrs_ = [
-        'tc', 'store', '_delta_memo', '_rule_memo', '_fvars',
+        'tc', 'store', '_delta_memo', '_rule_memo', '_fvars', '_opened',
         '_eqv', '_neq', '_failed',
         'h_prop', 'h_true', 'h_nat', 'h_string',
     ]
@@ -1189,20 +1194,22 @@ class RawMachine(object):
 
     def __init__(self, tc):
         self.tc = tc
-        store = RawTermStore(tc)
+        store = TermStore(tc)
         self.store = store
         #: const leaf index -> handle of its unfolded value (0 = none)
         self._delta_memo = {}
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = {}
-        #: binder record -> its canonical free-variable leaf
+        #: (binder record, domain) -> the free-variable leaf opening it
         self._fvars = {}
+        #: uids of binders' own free variables already opening a binder
+        self._opened = {}
         #: proven-def-eq forest over handles (handle -> parent)
-        self._eqv = RawIntMap(1 << 10)
+        self._eqv = IntMap(1 << 10)
         #: pairs proven NOT def-eq
-        self._neq = RawIntMap(1 << 10)
+        self._neq = IntMap(1 << 10)
         #: pairs whose same-head argument comparison failed (symmetric)
-        self._failed = RawIntMap(1 << 8)
+        self._failed = IntMap(1 << 8)
         self.h_prop = store.leaf_for(PROP)
         self.h_true = store.leaf_for(_BOOL_TRUE)
         self.h_nat = store.leaf_for(NAT)
@@ -1212,7 +1219,7 @@ class RawMachine(object):
         store = self.store
         tracer = self.tc.tracer
         if tracer.recording:
-            tracer.raw_census(
+            tracer.census(
                 store.nrecs, store.nleaves, store._inst_memo.size,
                 store._shift_memo.size, store._bind_memo.size,
                 self._eqv.size, self._neq.size, self._failed.size,
@@ -1230,17 +1237,24 @@ class RawMachine(object):
 
     # ---- whnf ------------------------------------------------------------
 
-    def whnf_core(self, h, cheap_proj=False):
+    def whnf_core(self, h, cheap_proj=False, traced=True):
         """
         Weak head normal form without unfolding definitions: beta, zeta,
         projection of a constructor, iota and quot only. With
         ``cheap_proj`` the struct of a projection is itself only taken
         to whnf_core, never evaluated; the first pass of def_eq uses
         that so two projections are compared before either struct is
-        unfolded through its definitions.
+        unfolded through its definitions. A tracer that writes sees
+        each form the term takes unless ``traced`` is off, as it is for
+        the reduction of an application's head on the way to its own.
         """
         store = self.store
+        tc = self.tc
+        tracer = tc.tracer
+        writes = traced and tracer.recording and tracer.writes
         if is_leaf(h):
+            if writes:
+                tracer.whnf_step(self.export(h), tc.declarations)
             return h
         slot = M_WHNF_CORE_CHEAP if cheap_proj else M_WHNF_CORE
         cached = store.memo(h, slot)
@@ -1256,11 +1270,12 @@ class RawMachine(object):
             if cached == h:
                 return h
         if stack_almost_full():
-            raise RawBail("whnf_core: stack")
+            raise W_DeepRecursion("whnf_core")
         start = h
-        tc = self.tc
         while True:
             tc.tick_wall_time()
+            if writes:
+                tracer.whnf_step(self.export(h), tc.declarations)
             next = self._whnf_core_step(h, cheap_proj)
             if next == 0:
                 break
@@ -1275,7 +1290,7 @@ class RawMachine(object):
         if kind == KIND_APP:
             fn = store.field_a(h)
             arg = store.field_b(h)
-            fn_whnf = self.whnf_core(fn, cheap_proj)
+            fn_whnf = self.whnf_core(fn, cheap_proj, False)
             if fn_whnf != fn:
                 return store.cons(KIND_APP, fn_whnf, arg, 0)
             if store.kind(fn) == KIND_LAMBDA:
@@ -1452,7 +1467,7 @@ class RawMachine(object):
             if isinstance(e, W_LitStr):
                 lit = e
         if lit is not None:
-            struct = self.whnf(store.import_term(lit.build_str_expr(self.tc)))
+            struct = self.whnf(store.import_term(lit.build_str_expr()))
         head, args = store.unapp(struct)
         const = store.const_leaf(head)
         if const is None:
@@ -1537,7 +1552,7 @@ class RawMachine(object):
 
         lit = store.litnat_leaf(major)
         if lit is not None:
-            major = store.import_term(lit.one_step_constructor(tc))
+            major = store.import_term(lit.one_step_constructor())
         else:
             expanded = self._to_cnstr_when_structure(decl, rec, major)
             if expanded != 0:
@@ -1707,7 +1722,16 @@ class RawMachine(object):
         if fv != 0:
             return fv
         store = self.store
-        fv = store.leaf_for(W_FVar(store.binder_of(h)))
+        binder = store.binder_of(h)
+        own = binder.fvar()
+        if own._uid in self._opened or store.has_fvar_leaf(own):
+            fv = store.leaf_for(W_FVar(binder))
+        else:
+            # The binder's own variable serves its first opening, so an
+            # error in it is marked where whoever opens the binder
+            # outside the machine (the printer, say) puts the variable.
+            self._opened[own._uid] = None
+            fv = store.leaf_for(own)
         j = leaf_index(fv)
         store.leaf_infer[j] = domain
         store.leaf_checked[j] = 1
@@ -1739,7 +1763,7 @@ class RawMachine(object):
             if t != 0:
                 return t
         if stack_almost_full():
-            raise RawBail("infer: stack")
+            raise W_DeepRecursion("infer")
         kind = store.kind(h)
         if kind == KIND_APP:
             t = self._infer_app(h, check)
@@ -1752,7 +1776,7 @@ class RawMachine(object):
         elif kind == KIND_PROJ:
             t = self._infer_proj(h, check)
         else:
-            raise RawBail("infer: pair")
+            raise RuntimeError("infer: internal pair record")
         if check:
             store.set_memo(h, M_INFER_CHECKED, t)
         store.set_memo(h, M_INFER, t)
@@ -1794,7 +1818,7 @@ class RawMachine(object):
             t = store.import_term(e.binder.type)
             store.leaf_checked[j] = 1
         else:
-            raise RawBail("infer: loose bvar")
+            raise RuntimeError("infer: loose bound variable")
         store.leaf_infer[j] = t
         return t
 
@@ -1825,10 +1849,10 @@ class RawMachine(object):
             domain = store.field_a(fn_type_whnf)
             tracing = tc.tracer.recording
             if tracing:
-                tc.tracer.raw_mark()
+                tc.tracer.begin_argcheck()
             ok = self.def_eq(domain, arg_type)
             if tracing:
-                tc.tracer.raw_argcheck(self._head_label(head), n - 1 - i)
+                tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
             if not ok:
                 raise W_TypeError(
                     tc, self.export(arg), self.export(domain),
@@ -2144,7 +2168,7 @@ class RawMachine(object):
                     return self._traced_result(True)
                 return True
         if stack_almost_full():
-            raise RawBail("def_eq: stack")
+            raise W_DeepRecursion("def_eq")
         result = self._def_eq_uncached(h1, h2)
         if result:
             self._union(h1, h2)
@@ -2413,7 +2437,7 @@ class RawMachine(object):
         c2 = self.store.const_leaf(head2)
         if c1 is None or c2 is None:
             return False
-        return c1.name.syntactic_eq(c2.name) and c1.def_eq(c2, self.tc)
+        return c1.name.syntactic_eq(c2.name) and c1.def_eq(c2)
 
     def _failed_before(self, h1, h2):
         key = self._pair_key(h1, h2)
@@ -2447,7 +2471,7 @@ class RawMachine(object):
                 elif cls1 is W_Const:
                     assert isinstance(e1, W_Const)
                     assert isinstance(e2, W_Const)
-                    if e1.name.syntactic_eq(e2.name) and e1.def_eq(e2, self.tc):
+                    if e1.name.syntactic_eq(e2.name) and e1.def_eq(e2):
                         return True
                 # Free variables are canonical by identity: unequal.
         elif kind1 == kind2:
@@ -2481,24 +2505,24 @@ class RawMachine(object):
         lit1 = store.litnat_leaf(h1)
         if lit1 is not None:
             return self.def_eq(
-                store.import_term(lit1.one_step_constructor(self.tc)), h2,
+                store.import_term(lit1.one_step_constructor()), h2,
             )
         lit2 = store.litnat_leaf(h2)
         if lit2 is not None:
             return self.def_eq(
-                h1, store.import_term(lit2.one_step_constructor(self.tc)),
+                h1, store.import_term(lit2.one_step_constructor()),
             )
         if is_leaf(h1):
             s1 = store.leaf(h1)
             if isinstance(s1, W_LitStr):
                 return self.def_eq(
-                    store.import_term(s1.build_str_expr(self.tc)), h2,
+                    store.import_term(s1.build_str_expr()), h2,
                 )
         if is_leaf(h2):
             s2 = store.leaf(h2)
             if isinstance(s2, W_LitStr):
                 return self.def_eq(
-                    h1, store.import_term(s2.build_str_expr(self.tc)),
+                    h1, store.import_term(s2.build_str_expr()),
                 )
         return False
 
@@ -2638,10 +2662,10 @@ class RawMachine(object):
             return W_NotAProp(tc, type, inferred_sort=sort, name=None)
         val_ty = self.infer(val, True)
         if tc.tracer.recording:
-            tc.tracer.raw_phase("infer value")
+            tc.tracer.phase("infer value")
         ok = self.def_eq(ty, val_ty)
         if tc.tracer.recording:
-            tc.tracer.raw_phase("def_eq type")
+            tc.tracer.phase("def_eq type")
         if not ok:
             return W_TypeError(tc, value, type, inferred_type=self.export(val_ty))
         return None

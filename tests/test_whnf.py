@@ -26,6 +26,7 @@ class _CollectingTracer(Tracer):
     def __init__(self):
         Tracer.__init__(self, None)
         self.recording = True
+        self.writes = True
         self.steps = []
 
     def whnf_step(self, expr, declarations):
@@ -209,42 +210,6 @@ class TestApp(object):
 
         expected = g_decl.const().app(a_decl.const())  # g a
         assert syntactic_eq(reduced, expected)
-
-
-class TestClosure(object):
-    def test_resolves_inner_bvar(self):
-        """Closure([fvar], BVar(0)) reduces to fvar."""
-        fvar = x.binder(type=NAT).fvar()
-        closure = b0.closure([fvar])
-        assert syntactic_eq(closure.whnf(Environment.EMPTY), fvar)
-
-    def test_shifts_outer_bvar_down(self):
-        """Closure([fvar], BVar(2)) reduces to BVar(1) (env consumed bvar(0))."""
-        fvar = x.binder(type=NAT).fvar()
-        closure = b2.closure([fvar])
-        assert syntactic_eq(closure.whnf(Environment.EMPTY), b1)
-
-    def test_atomic_body_passes_through(self):
-        """Closure([fvar], Const) is just Const."""
-        a_decl = a.axiom(type=NAT)
-        env = Environment.having([a_decl])
-        const = a_decl.const()
-        # Const has no loose bvars, so .closure() should already collapse.
-        # Construct W_Closure directly to exercise WHNF too.
-        from rpylean.objects import W_Closure
-        fvar = x.binder(type=NAT).fvar()
-        closure = W_Closure([fvar], const)
-        assert syntactic_eq(closure.whnf(env), const)
-
-    def test_pushes_through_app_to_resolve_bvar(self):
-        """Closure([arg], App(f, BVar(0))) reduces to App(f, arg)."""
-        f_decl = f.axiom(type=forall(x.binder(type=NAT))(NAT))
-        arg_decl = a.axiom(type=NAT)
-        env = Environment.having([f_decl, arg_decl])
-        body = f_decl.const().app(b0)
-        closure = body.closure([arg_decl.const()])
-        expected = f_decl.const().app(arg_decl.const())
-        assert syntactic_eq(closure.whnf(env), expected)
 
 
 class TestLet(object):
@@ -763,11 +728,8 @@ class TestNativeNatReduction(object):
 
     def test_nat_succ_not_natively_reduced(self):
         """Nat.succ is not natively reduced; it stays as a constructor app."""
-        from rpylean.objects import _try_reduce_nat
-
         app = Name.simple("Nat").child("succ").const().app(W_LitNat.int(5))
-        result = _try_reduce_nat(app, Environment.EMPTY)
-        assert result is None
+        assert app.whnf(NAT_OPS_ENV) is app
 
     def test_nat_add(self):
         app = (
@@ -943,11 +905,11 @@ class TestNativeNatReduction(object):
         assert syntactic_eq(result, _BOOL_FALSE)
 
     def test_non_literal_arg_falls_through(self):
-        """Native reduction returns None when args are not nat literals."""
-        from rpylean.objects import _try_reduce_nat
-
+        """Native reduction does not fire when an arg isn't a nat value."""
         a_decl = a.axiom(type=NAT)
-        env = Environment.having([a_decl])
+        env = Environment.having([
+            a_decl, Name.simple("Nat").child("add").axiom(type=NAT),
+        ])
         app = (
             Name.simple("Nat")
             .child("add")
@@ -955,67 +917,30 @@ class TestNativeNatReduction(object):
             .app(a_decl.const())
             .app(W_LitNat.int(3))
         )
-        # _try_reduce_nat returns None when an arg isn't a nat literal
-        result = _try_reduce_nat(app, env)
-        assert result is None
+        assert app.whnf(env) is app
 
-    def test_to_nat_val_succ_of_zero(self):
-        """_to_nat_val extracts 1 from Nat.succ(Nat.zero)."""
-        from rpylean.objects import _to_nat_val
-
-        Nat_decl = Name.simple("Nat").inductive(type=TYPE)
-        Nat_zero_decl = (
-            Name.simple("Nat")
-            .child("zero")
-            .constructor(
-                type=NAT,
-                num_params=0,
-                num_fields=0,
-            )
-        )
-        env = Environment.having([Nat_decl, Nat_zero_decl])
-        app = (
-            Name.simple("Nat")
-            .child("succ")
-            .const()
+    def test_succ_of_zero_is_a_nat_value(self):
+        """Nat.succ Nat.zero is the value 1 to native reduction."""
+        one = (
+            Name.simple("Nat").child("succ").const()
             .app(Name.simple("Nat").child("zero").const())
         )
-        result = _to_nat_val(app, env)
-        assert result is not None
-        assert result.str() == "1"
+        app = Name.simple("Nat").child("add").const().app(one, W_LitNat.int(3))
+        result = app.whnf(NAT_OPS_ENV)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == "4"
 
-    def test_to_nat_val_deep_succ_chain(self):
-        """_to_nat_val handles deep Nat.succ chains without stack overflow."""
-        from rpylean.objects import _to_nat_val
-
-        Nat_decl = Name.simple("Nat").inductive(type=TYPE)
-        Nat_zero_decl = (
-            Name.simple("Nat")
-            .child("zero")
-            .constructor(
-                type=NAT,
-                num_params=0,
-                num_fields=0,
-            )
-        )
-        Nat_succ_decl = (
-            Name.simple("Nat")
-            .child("succ")
-            .constructor(
-                type=forall(x.binder(type=NAT))(NAT),
-                num_params=0,
-                num_fields=1,
-            )
-        )
-        env = Environment.having([Nat_decl, Nat_zero_decl, Nat_succ_decl])
+    def test_deep_succ_chain_is_a_nat_value(self):
+        """A deep Nat.succ chain is read without growing the stack."""
         succ = Name.simple("Nat").child("succ").const()
         expr = Name.simple("Nat").child("zero").const()
         depth = 2000
         for _ in range(depth):
             expr = succ.app(expr)
-        result = _to_nat_val(expr, env)
-        assert result is not None
-        assert result.str() == str(depth)
+        app = Name.simple("Nat").child("add").const().app(expr, W_LitNat.int(1))
+        result = app.whnf(NAT_OPS_ENV)
+        assert isinstance(result, W_LitNat)
+        assert result.val.str() == str(depth + 1)
 
     def test_projection_of_constructor_reduces(self):
         """
@@ -1341,7 +1266,7 @@ class TestTracer(object):
         const.whnf(env)
 
         assert len(tracer.steps) == 1
-        assert tracer.steps[0] is const
+        assert syntactic_eq(tracer.steps[0], const)
 
     def test_beta_reduction_records_each_step(self):
         """(fun x ↦ x) a reduces in one step: traces input then result."""
@@ -1355,7 +1280,7 @@ class TestTracer(object):
         app.whnf(env)
 
         assert len(tracer.steps) == 2
-        assert tracer.steps[0] is app
+        assert syntactic_eq(tracer.steps[0], app)
         assert syntactic_eq(tracer.steps[1], a_decl.const())
 
     def test_delta_then_beta_records_full_chain(self):
@@ -1373,7 +1298,7 @@ class TestTracer(object):
         app.whnf(env)
 
         assert len(tracer.steps) == 3
-        assert tracer.steps[0] is app
+        assert syntactic_eq(tracer.steps[0], app)
         assert syntactic_eq(
             tracer.steps[1],
             fun(x.binder(type=NAT))(b0).app(a_decl.const()),
@@ -1434,7 +1359,7 @@ class TestTracer(object):
         # 3: nested whnf — `origin` deltas to `Foo.mk Nat myVal`
         # 4: outer proj iota extracts field, lands on `myVal`
         assert len(tracer.steps) == 4
-        assert tracer.steps[0] is proj
+        assert syntactic_eq(tracer.steps[0], proj)
         assert syntactic_eq(tracer.steps[1], origin_decl.const())
         assert syntactic_eq(
             tracer.steps[2],

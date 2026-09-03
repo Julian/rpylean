@@ -79,16 +79,6 @@ def apply_width(width_arg, stdout):
             return
     _format.set_render_width(_format.DEFAULT_WIDTH)
 
-#: How much a single declaration may grow the live heap before its
-#: caches are flushed mid-check, unless --flush-memory-per-decl says
-#: otherwise. A handful of pathological declarations (the BVDecide
-#: blastUdiv lemmas) otherwise pin many gigabytes of dead reduction
-#: state mid-decl and drive the incremental GC into walking the whole
-#: pile on every collection — without a bound the check wedges at ~90%
-#: GC time. Ordinary declarations never grow anywhere near this much,
-#: so the sampling check is their only cost.
-DEFAULT_FLUSH_MEMORY = "4G"
-
 #: The options shared by `check` and `ffi check`, parsed by `_CheckRun`.
 CHECK_OPTIONS = [
     (
@@ -117,14 +107,6 @@ CHECK_OPTIONS = [
         "give up on the declaration being checked when the process' "
         "live heap exceeds this size (suffixes: K/M/G, default bytes; "
         "sampled with the wall-time check)",
-    ),
-    (
-        "flush-memory-per-decl",
-        "drop the per-decl caches mid-decl whenever the live heap "
-        "grows past the declaration's starting point by this much, "
-        "trading recomputation for a bounded footprint (suffixes: "
-        "K/M/G, default bytes; sampled with the wall-time check; "
-        "default 4G, pass 0 to never flush)",
     ),
     (
         "print",
@@ -161,13 +143,6 @@ CHECK_FLAGS = [
         "stats",
         "collect reduction counts (def_eq, whnf, iota, beta, delta, "
         "native nat) and print a summary after the check",
-        "",
-        "yes",
-    ),
-    (
-        "boxed",
-        "check every declaration with the boxed kernel only, instead of "
-        "the raw-memory machine with the boxed kernel as its fallback",
         "",
         "yes",
     ),
@@ -258,18 +233,18 @@ class _StreamingChecker(DeclarationHook):
         # `decl.name.str()` we print *is* what we were stuck on (the
         # decl that just blocked the loop on the prior iteration).
         if _progress.poll():
-            apps, projs, consts, pending = intern_stats()
+            apps, projs, consts = intern_stats()
             _MB = 1024 * 1024
             self.stderrw.write_plain(
                 "[progress] seen=%d checked=%d failures=%d "
                 "live=%dMB arena=%dMB rawmalloc=%dMB "
-                "interned(apps=%d projs=%d consts=%d) pending=%d "
+                "interned(apps=%d projs=%d consts=%d) "
                 "cur=%s\n" % (
                     self.n_seen, self.n_checked, self.failures,
                     _live_memory() // _MB,
                     _arena_memory() // _MB,
                     _rawmalloced_memory() // _MB,
-                    apps, projs, consts, pending,
+                    apps, projs, consts,
                     decl.name.str(),
                 ),
             )
@@ -388,7 +363,7 @@ class _CheckRun(object):
     _attrs_ = [
         'stdoutw', 'stderrw',
         'max_fail', 'max_heartbeat', 'max_wall_time', 'max_memory',
-        'flush_memory', 'printer', 'slow_secs', 'slow_hb', 'boxed',
+        'printer', 'slow_secs', 'slow_hb',
         'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
     ]
 
@@ -402,10 +377,6 @@ class _CheckRun(object):
             args.options["max-wall-time-per-decl"],
         )
         self.max_memory = _parse_bytes(args.options["max-memory-per-decl"])
-        flush_memory = args.options["flush-memory-per-decl"]
-        if flush_memory is None:
-            flush_memory = DEFAULT_FLUSH_MEMORY
-        self.flush_memory = _parse_bytes(flush_memory)
         self.printer = Printer.from_str(args.options["print"], stdoutw)
         self.slow_secs, self.slow_hb = _parse_threshold(
             args.options["slower-than"],
@@ -429,7 +400,6 @@ class _CheckRun(object):
 
         self.trace = args.options["trace"]
         self.stats = args.options["stats"]
-        self.boxed = args.options["boxed"]
 
     def start(self, abort_at):
         """
@@ -447,10 +417,6 @@ class _CheckRun(object):
             env.max_wall_time = self.max_wall_time
         if self.max_memory > 0:
             env.max_memory = self.max_memory
-        if self.flush_memory > 0:
-            env.flush_memory = self.flush_memory
-        if self.boxed:
-            env.raw_enabled = False
         if (
             self.slow_secs >= 0.0
             or self.slow_hb >= 0

@@ -12,7 +12,6 @@ from rpylean.objects import (
     W_App,
     W_Axiom,
     W_BVar,
-    W_Closure,
     W_Const,
     W_Constructor,
     W_Declaration,
@@ -558,16 +557,16 @@ class TestLitNat(object):
 class TestLitStr(object):
     def test_subst_levels(self):
         lit = W_LitStr("hi")
-        assert lit.subst_levels(None, {Name.simple("u"): W_LEVEL_ZERO}) is lit
+        assert lit.subst_levels({Name.simple("u"): W_LEVEL_ZERO}) is lit
 
     def test_bind_fvar(self):
         lit = W_LitStr("hi")
         fvar = x.binder(type=NAT).fvar()
-        assert lit.bind_fvar(None, fvar, 0) is lit
+        assert lit.bind_fvar(fvar, 0) is lit
 
     def test_incr_free_bvars(self):
         lit = W_LitStr("hi")
-        assert lit.incr_free_bvars(None, 1, 0) is lit
+        assert lit.incr_free_bvars(1, 0) is lit
 
 
 class TestForAll(object):
@@ -598,60 +597,6 @@ class TestFun(object):
             binder=x_nat,
             body=W_Lambda(binder=y_type, body=P),
         )
-
-
-class TestClosure(object):
-    def test_loose_bvar_range_closed_body(self):
-        """Closure([fvar], BVar(0)) has no loose bvars (env entry is closed)."""
-        fvar = x.binder(type=NAT).fvar()
-        assert W_BVar(0).closure([fvar]).loose_bvar_range() == 0
-
-    def test_loose_bvar_range_body_leaks(self):
-        """Closure([fvar], BVar(2)) leaks bvar(2-1) = bvar(1) outside."""
-        fvar = x.binder(type=NAT).fvar()
-        assert W_BVar(2).closure([fvar]).loose_bvar_range() == 2
-
-    def test_loose_bvar_range_env_entry_open(self):
-        """An env entry's loose bvars contribute to the closure's range."""
-        assert W_BVar(0).closure([W_BVar(3)]).loose_bvar_range() == 4
-
-    def test_closure_of_closed_body_is_identity(self):
-        """A body with no loose bvars doesn't need wrapping."""
-        const = Name.simple("c").const()
-        fvar = x.binder(type=NAT).fvar()
-        assert const.closure([fvar]) is const
-
-    def test_closure_with_empty_env_is_identity(self):
-        bvar = W_BVar(0)
-        assert bvar.closure([]) is bvar
-
-    def test_force_substitutes_innermost_bvar(self):
-        """Closure([a], BVar(0)).force() = a."""
-        a_decl = Name.simple("a").axiom(type=NAT)
-        a = a_decl.const()
-        closure = W_Closure([a], W_BVar(0))
-        assert closure.force(None) == a
-
-    def test_force_with_multi_env(self):
-        """Closure([a, b], App(BVar(0), BVar(1))).force() = App(a, b)."""
-        a_decl = Name.simple("a").axiom(type=NAT)
-        b_decl = Name.simple("b").axiom(type=NAT)
-        a = a_decl.const()
-        b = b_decl.const()
-        body = W_App(W_BVar(0), W_BVar(1))
-        closure = W_Closure([a, b], body)
-        assert closure.force(None) == W_App(a, b)
-
-    def test_force_preserves_env_entry_bvars(self):
-        """env entries' free bvars survive force without being over-substituted."""
-        # env=[BVar(0), BVar(0)], body=App(BVar(0), BVar(1))
-        # Semantics: body's bvar(0) -> env[0] = BVar(0) (refers to OUTER bvar(0));
-        #           body's bvar(1) -> env[1] = BVar(0) (also refers to OUTER bvar(0)).
-        # Both env entries refer to the same outer bvar, so result should be
-        # App(BVar(0), BVar(0)).
-        body = W_App(W_BVar(0), W_BVar(1))
-        closure = W_Closure([W_BVar(0), W_BVar(0)], body)
-        assert closure.force(None) == W_App(W_BVar(0), W_BVar(0))
 
 
 class TestLevelOrderSoundness(object):

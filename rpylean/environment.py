@@ -6,7 +6,7 @@ from traceback import print_exc
 import pdb
 
 from rpython.rlib import rgc
-from rpython.rlib.jit import dont_look_inside, promote
+from rpython.rlib.jit import dont_look_inside
 from rpython.rlib.objectmodel import (
     not_rpython,
     specialize,
@@ -26,45 +26,24 @@ from rpylean.exceptions import (
     W_InvalidDeclaration,
     WallTimeExceeded,
 )
-from rpylean._rawterms import RawBail, RawMachine
+from rpylean.machine import Machine
 from rpylean.objects import (
-    HINT_ABBREV,
     W_CheckError,
-    W_LEVEL_ZERO,
-    PROP,
     Name,
     StrName,
-    W_App,
-    W_BVar,
-    W_Closure,
-    W_Const,
-    W_Constructor,
-    W_Definition,
-    W_ForAll,
-    W_Theorem,
-    W_FunBase,
     W_HeartbeatError,
     W_MemoryError,
     W_NotYetDeclared,
     W_UnsafeReference,
     W_WallTimeError,
     W_Inductive,
-    W_Lambda,
-    W_LitNat,
-    W_LitStr,
-    W_Proj,
-    W_Sort,
-    _BOOL_TRUE,
-    _is_nat_zero_const,
-    _mk_w_bvar,
-    _nat_succ_pred,
-    _try_reduce_nat,
+    W_LEVEL_ZERO,
+    PROP,
     fun,
+    _mk_w_bvar,
     find_decl,
     get_decl,
     name_dict,
-    reset_decl_caches,
-    syntactic_eq,
 )
 
 
@@ -382,29 +361,22 @@ class Tracer(object):
         # instead of relying on the empty bodies being inlined away.
         self.recording = False
 
-    def raw_bail(self, reason):
-        """Called when the `RawMachine` hands a declaration back to the
-        boxed kernel; ``reason`` names what it could not decide."""
 
-    def raw_mismatch(self, name):
-        """Called when the `RawMachine` rejected the declaration ``name``
-        but the boxed kernel accepted it."""
-
-    def raw_census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
-        """Called as a `RawMachine` is freed, with the sizes its tables
+    def census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
+        """Called as a `Machine` is freed, with the sizes its tables
         reached for that declaration."""
 
-    def raw_phase(self, phase):
-        """Called by the `RawMachine` as a phase of a declaration's check
+    def phase(self, phase):
+        """Called by the `Machine` as a phase of a declaration's check
         ends; a counting tracer attributes the def_eq calls since the
         previous phase to it."""
 
-    def raw_mark(self):
+    def begin_argcheck(self):
         """Called before an argument check, to bracket its def_eq calls."""
 
-    def raw_argcheck(self, head, index):
+    def end_argcheck(self, head, index):
         """Called after the check of argument ``index`` of an application
-        of ``head``, closing the bracket `raw_mark` opened."""
+        of ``head``, closing the bracket `begin_argcheck` opened."""
 
     def counted_enter(self):
         """`enter` without the terms, for a tracer that only counts."""
@@ -427,11 +399,6 @@ class Tracer(object):
         initial expression and the final form returned as the WHNF.
         """
 
-    def whnf_cache_hit(self):
-        """Called when a `W_App.whnf` call returns its inline cache hit."""
-
-    def whnf_cache_miss(self):
-        """Called when a `W_App.whnf` call has to compute a fresh result."""
 
     def iota(self, recursor_name):
         """Called when a recursor's iota rule fires on a constructor.
@@ -454,8 +421,6 @@ class Tracer(object):
     def eqv_hit(self):
         """Called when def_eq resolves via the equivalence union-find."""
 
-    def syntactic_hit(self):
-        """Called when def_eq resolves via the syntactic fast path."""
 
     def pi_hit(self):
         """Called when def_eq resolves via proof irrelevance."""
@@ -463,37 +428,6 @@ class Tracer(object):
     def identity_hit(self):
         """Called when def_eq resolves via `expr1 is expr2` at entry."""
 
-    def arena_app_hit(self):
-        """Called when `_mk_app_in` finds the pair in the per-decl arena."""
-
-    def arena_app_miss(self):
-        """Called when `_mk_app_in` allocates a fresh `W_App`."""
-
-    def arena_proj_hit(self):
-        """Called when `_mk_w_proj_in` finds the node in the per-decl arena."""
-
-    def arena_proj_miss(self):
-        """Called when `_mk_w_proj_in` allocates a fresh `W_Proj`."""
-
-    def arena_lambda_hit(self):
-        """Called when `_mk_w_lambda_in` finds the node in the per-decl
-        arena."""
-
-    def arena_lambda_miss(self):
-        """Called when `_mk_w_lambda_in` allocates a fresh `W_Lambda`."""
-
-    def arena_forall_hit(self):
-        """Called when `_mk_w_forall_in` finds the node in the per-decl
-        arena."""
-
-    def arena_forall_miss(self):
-        """Called when `_mk_w_forall_in` allocates a fresh `W_ForAll`."""
-
-    def failed_probe(self):
-        """Called when lazy delta consults the failed-pair cache."""
-
-    def failed_hit(self):
-        """Called when the failed-pair cache short-circuits a compare."""
 
     def klike_fired(self):
         """Called when K-like reduction replaces a stuck major."""
@@ -532,22 +466,14 @@ class StreamTracer(Tracer):
     _attrs_ = [
         '_pending_newline',
         'def_eq_count', 'whnf_step_count', 'beta_count',
-        'whnf_cache_hit_count', 'whnf_cache_miss_count',
         'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
-        'eqv_hit_count', 'syntactic_hit_count', 'pi_hit_count',
-        'false_count',
+        'eqv_hit_count', 'pi_hit_count', 'false_count',
         'identity_hit_count',
-        'arena_app_hit_count', 'arena_app_miss_count',
-        'arena_proj_hit_count', 'arena_proj_miss_count',
-        'arena_lambda_hit_count', 'arena_lambda_miss_count',
-        'arena_forall_hit_count', 'arena_forall_miss_count',
-        'failed_probe_count', 'failed_hit_count',
         'klike_fired_count', 'klike_bail_head_count',
         'klike_bail_mutual_count', 'klike_bail_ctors_count',
         'klike_bail_defeq_count',
-        'raw_bail_by_reason', 'raw_mismatch_count', 'raw_max',
-        'raw_phases', '_phase_mark',
-        'raw_argchecks', '_arg_mark',
+        'table_max', 'phases', '_phase_mark',
+        'argchecks', '_arg_mark',
     ]
 
     def __init__(self, writer):
@@ -556,38 +482,23 @@ class StreamTracer(Tracer):
         self.recording = True
         self.writes = writer is not None
         self._pending_newline = False
-        self.raw_bail_by_reason = {}
-        self.raw_mismatch_count = 0
         # Largest per-declaration table sizes seen: records, leaves,
         # instantiate / shift / bind memos, eqv, neq, failed.
-        self.raw_max = [0] * 8
-        self.raw_phases = {}
+        self.table_max = [0] * 8
+        self.phases = {}
         self._phase_mark = 0
-        self.raw_argchecks = {}
+        self.argchecks = {}
         self._arg_mark = 0
         self.def_eq_count = 0
         self.whnf_step_count = 0
         self.beta_count = 0
-        self.whnf_cache_hit_count = 0
-        self.whnf_cache_miss_count = 0
         self.iota_by_name = name_dict()
         self.delta_by_name = name_dict()
         self.nat_reduce_by_name = name_dict()
         self.eqv_hit_count = 0
-        self.syntactic_hit_count = 0
         self.pi_hit_count = 0
         self.false_count = 0
         self.identity_hit_count = 0
-        self.arena_app_hit_count = 0
-        self.arena_app_miss_count = 0
-        self.arena_proj_hit_count = 0
-        self.arena_proj_miss_count = 0
-        self.arena_lambda_hit_count = 0
-        self.arena_lambda_miss_count = 0
-        self.arena_forall_hit_count = 0
-        self.arena_forall_miss_count = 0
-        self.failed_probe_count = 0
-        self.failed_hit_count = 0
         self.klike_fired_count = 0
         self.klike_bail_head_count = 0
         self.klike_bail_mutual_count = 0
@@ -649,11 +560,6 @@ class StreamTracer(Tracer):
         self._writer.write(expr.tokens(declarations))
         self._writer.write_plain("\n")
 
-    def whnf_cache_hit(self):
-        self.whnf_cache_hit_count += 1
-
-    def whnf_cache_miss(self):
-        self.whnf_cache_miss_count += 1
 
     def iota(self, recursor_name):
         self.iota_by_name[recursor_name] = (
@@ -676,8 +582,6 @@ class StreamTracer(Tracer):
     def eqv_hit(self):
         self.eqv_hit_count += 1
 
-    def syntactic_hit(self):
-        self.syntactic_hit_count += 1
 
     def pi_hit(self):
         self.pi_hit_count += 1
@@ -685,35 +589,6 @@ class StreamTracer(Tracer):
     def identity_hit(self):
         self.identity_hit_count += 1
 
-    def arena_app_hit(self):
-        self.arena_app_hit_count += 1
-
-    def arena_app_miss(self):
-        self.arena_app_miss_count += 1
-
-    def arena_proj_hit(self):
-        self.arena_proj_hit_count += 1
-
-    def arena_proj_miss(self):
-        self.arena_proj_miss_count += 1
-
-    def arena_lambda_hit(self):
-        self.arena_lambda_hit_count += 1
-
-    def arena_lambda_miss(self):
-        self.arena_lambda_miss_count += 1
-
-    def arena_forall_hit(self):
-        self.arena_forall_hit_count += 1
-
-    def arena_forall_miss(self):
-        self.arena_forall_miss_count += 1
-
-    def failed_probe(self):
-        self.failed_probe_count += 1
-
-    def failed_hit(self):
-        self.failed_hit_count += 1
 
     def klike_fired(self):
         self.klike_fired_count += 1
@@ -730,37 +605,27 @@ class StreamTracer(Tracer):
     def klike_bail_defeq(self):
         self.klike_bail_defeq_count += 1
 
-    def raw_bail(self, reason):
-        self.raw_bail_by_reason[reason] = (
-            self.raw_bail_by_reason.get(reason, 0) + 1
-        )
 
-    def raw_census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
+    def census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
         sizes = [nrecs, nleaves, inst, shift, bind, eqv, neq, failed]
         for i in range(8):
-            if sizes[i] > self.raw_max[i]:
-                self.raw_max[i] = sizes[i]
+            if sizes[i] > self.table_max[i]:
+                self.table_max[i] = sizes[i]
 
-    def raw_mark(self):
+    def begin_argcheck(self):
         self._arg_mark = self.def_eq_count
 
-    def raw_argcheck(self, head, index):
+    def end_argcheck(self, head, index):
         key = "%s #%d" % (head, index)
-        self.raw_argchecks[key] = (
-            self.raw_argchecks.get(key, 0) + self.def_eq_count - self._arg_mark
+        self.argchecks[key] = (
+            self.argchecks.get(key, 0) + self.def_eq_count - self._arg_mark
         )
 
-    def raw_phase(self, phase):
+    def phase(self, phase):
         calls = self.def_eq_count - self._phase_mark
         self._phase_mark = self.def_eq_count
-        self.raw_phases[phase] = self.raw_phases.get(phase, 0) + calls
+        self.phases[phase] = self.phases.get(phase, 0) + calls
 
-    def raw_mismatch(self, name):
-        self.raw_mismatch_count += 1
-        if self._writer is not None:
-            self._writer.write_plain(
-                "raw machine rejected %s; boxed kernel accepted\n" % name.str(),
-            )
 
     def print_summary(self, writer):
         """Write a human-readable summary of collected counts to ``writer``.
@@ -771,51 +636,20 @@ class StreamTracer(Tracer):
         writer.write_plain("def_eq calls:   %d\n" % self.def_eq_count)
         writer.write_plain("def_eq false:   %d\n" % self.false_count)
         writer.write_plain("def_eq eqv hits: %d\n" % self.eqv_hit_count)
-        writer.write_plain("def_eq syntactic hits: %d\n"
-                           % self.syntactic_hit_count)
         writer.write_plain("def_eq proof-irrelevance hits: %d\n"
                            % self.pi_hit_count)
         writer.write_plain("def_eq identity hits: %d\n"
                            % self.identity_hit_count)
-        writer.write_plain("arena app hit/miss: %d/%d\n" % (
-            self.arena_app_hit_count,
-            self.arena_app_miss_count,
-        ))
-        writer.write_plain("arena proj hit/miss: %d/%d\n" % (
-            self.arena_proj_hit_count,
-            self.arena_proj_miss_count,
-        ))
-        writer.write_plain("arena lambda hit/miss: %d/%d\n" % (
-            self.arena_lambda_hit_count,
-            self.arena_lambda_miss_count,
-        ))
-        writer.write_plain("arena forall hit/miss: %d/%d\n" % (
-            self.arena_forall_hit_count,
-            self.arena_forall_miss_count,
-        ))
-        writer.write_plain("defeq-failed probe/hit: %d/%d\n" % (
-            self.failed_probe_count,
-            self.failed_hit_count,
-        ))
+        m = self.table_max
         writer.write_plain(
-            "raw machine mismatches: %d\n" % self.raw_mismatch_count,
-        )
-        total = 0
-        for reason, count in self.raw_bail_by_reason.iteritems():
-            total += count
-        writer.write_plain("raw machine bails: %d total\n" % total)
-        m = self.raw_max
-        writer.write_plain(
-            "raw machine max per decl: records %d, leaves %d, inst memo %d, "
+            "max per decl: records %d, leaves %d, inst memo %d, "
             "shift memo %d, bind memo %d, eqv %d, neq %d, failed %d\n"
             % (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]),
         )
-        for reason, count in self.raw_bail_by_reason.iteritems():
-            writer.write_plain("  %d\t%s\n" % (count, reason))
-        for phase, count in self.raw_phases.iteritems():
-            writer.write_plain("raw machine def_eq calls in %s: %d\n" % (phase, count))
-        writer.write_plain("raw machine def_eq calls by argument check:\n")
-        for key, count in self.raw_argchecks.iteritems():
+        for phase, count in self.phases.iteritems():
+            writer.write_plain("def_eq calls in %s: %d\n" % (phase, count))
+        writer.write_plain("def_eq calls by argument check:\n")
+        for key, count in self.argchecks.iteritems():
             if count > 0:
                 writer.write_plain("  %d\t%s\n" % (count, key))
         writer.write_plain(
@@ -828,10 +662,6 @@ class StreamTracer(Tracer):
             ),
         )
         writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
-        writer.write_plain("whnf calls (cache hit): %d\n"
-                           % self.whnf_cache_hit_count)
-        writer.write_plain("whnf calls (cache miss): %d\n"
-                           % self.whnf_cache_miss_count)
         writer.write_plain("beta reductions: %d\n" % self.beta_count)
         _write_by_name(writer, "iota fires", self.iota_by_name)
         _write_by_name(writer, "delta unfolds", self.delta_by_name)
@@ -855,135 +685,59 @@ def _write_by_name(writer, label, counts):
 
 class TypeChecker(object):
     """
-    Per-declaration type-checking context.
-
-    Created by `Environment.type_check_one` at the start of each decl
-    check and discarded when the check returns. Owns the per-decl
-    mutable state — the heartbeat counter, and `def_eq` / `infer` /
-    associated reduction helpers which all read it. Persistent
-    run-config (declarations, tracer, max_heartbeat, count_heartbeats)
-    is reached via `self.env`.
+    The checker for one declaration: the machine reducing, inferring
+    and comparing that declaration's terms, plus the per-declaration
+    limits (heartbeats, wall time, memory) and the reference rules its
+    position and safety impose.
     """
 
     _attrs_ = [
-        'env', 'decl', 'heartbeat',
+        'env', 'decl', 'heartbeat', 'machine',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
-        'flush_memory', '_flush_floor',
         '_whnf_tick',
-        '_intern_w_app', '_intern_w_proj',
-        '_intern_w_lambda', '_intern_w_forall',
-        '_eqv_parent', '_defeq_failed',
-        'infer_only', 'raw',
     ]
-    # `declarations` etc. are mirrored from the env at construction so
-    # per-class methods (`W_*.infer` / `.whnf` / etc.) that read
-    # `env.declarations` / `env.tracer` / `env.def_eq` / `env.infer`
-    # continue to work when handed a `TypeChecker` — those fields are
-    # quasi-immutable on `Environment`, so the snapshot is stable for
-    # the lifetime of the TC.
     _immutable_fields_ = [
-        'env', 'decl',
-        'declarations',
-        'tracer?', 'max_heartbeat?', 'count_heartbeats?',
-        'max_wall_time?', 'max_memory?', 'flush_memory?',
+        'env', 'decl', 'machine', 'declarations', 'tracer',
+        'max_heartbeat', 'count_heartbeats', 'max_wall_time', 'max_memory',
         'start_time', 'start_peak',
     ]
 
-    # Safety cap on the unfold-and-retry loop in `_try_lazy_delta`.
-    # Each iteration peels exactly one definition layer off one (or
-    # both) sides, so legitimate comparisons that bottom out in
-    # evaluation can take as many iterations as the evaluation has
-    # delta steps — the cap exists only to bound truly pathological
-    # inputs; `tick_wall_time` (called from every `whnf_core` step
-    # inside the loop) is the real per-decl guard.
-    _LAZY_DELTA_MAX_ITER = 100000000
-
-    # Mask for the wall-time sampling in `def_eq`. We only read `clock()`
-    # every 1024th heartbeat to keep the per-call cost negligible —
-    # `clock()` is ~20-50ns but a 5% throttle on def_eq matters.
+    # Mask for the wall-time sampling: `clock()` is read every 1024th
+    # tick so the per-tick cost stays a counter bump and a mask test.
     _WALL_TIME_SAMPLE_MASK = 1023
 
     def __init__(self, env, decl):
         self.env = env
         self.decl = decl
         self.heartbeat = 0
-        # `infer_only` mirrors lean4's `infer_type_core(e, infer_only)`
-        # flag (type_checker.cpp). False (the fresh default) is the
-        # `check` mode used for a declaration's own type and value: it
-        # validates each application's argument type against the
-        # function's domain. True is the `infer_type` mode used for
-        # every inference spawned *while reasoning* — inside `def_eq`
-        # and the reductions it drives — where the term is already
-        # known well-typed and the argument check is both redundant
-        # and, on the unreduced beta-redex domains reduction produces,
-        # a source of spurious mismatches.
-        self.infer_only = False
-        #: The `RawMachine` checking this declaration, or ``None``.
-        self.raw = None
         self.declarations = env.declarations
         self.tracer = env.tracer
         self.max_heartbeat = env.max_heartbeat
         self.count_heartbeats = env.count_heartbeats
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
-        self.flush_memory = env.flush_memory
-        # The flush budget is *growth* above this decl's starting live
-        # heap, not an absolute size: the parsed environment alone can
-        # exceed any reasonable absolute threshold (Mathlib's is
-        # ~8.6GB), and an absolute floor re-armed per decl fires a
-        # full collection on virtually every declaration.
-        if env.flush_memory > 0:
-            self._flush_floor = _live_memory() + env.flush_memory
-        else:
-            self._flush_floor = 0
         self.start_time = clock()
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
-        # Per-decl arenas for reduction-produced W_App / W_Proj /
-        # W_Lambda / W_ForAll — mirrors nanoda_lib's fresh per-decl
-        # `LeanDag` dag created in `with_tc_and_declar` (util.rs:239+).
-        # Stays bounded by the *distinct* sub-expressions reduction
-        # visits within this decl; dropped when the TC goes out of
-        # scope so reduction output never pollutes the persistent
-        # parse-time intern.
-        self._intern_w_app = {}
-        self._intern_w_proj = {}
-        self._intern_w_lambda = {}
-        self._intern_w_forall = {}
-        # Union-find over expressions proven def-eq within this decl —
-        # mirrors lean4's `m_eqv_manager` (type_checker.h:34) and
-        # nanoda_lib's `eq_cache` (util.rs:823). Keyed by identity,
-        # which the W_App / W_Proj interning above makes structural
-        # for reduction-produced spines.
-        self._eqv_parent = {}
-        # Pairs whose lazy-delta same-head args comparison failed —
-        # mirrors lean4's `m_failure` (type_checker.h:35, checked by
-        # `failed_before` at type_checker.cpp:922 before re-exploring
-        # the args). Maps expr -> {expr: None}, stored symmetrically.
-        self._defeq_failed = {}
+        self.machine = Machine(self)
+
+    def free(self):
+        """Release the machine's memory once the check is over."""
+        self.machine.free()
 
     def tick_wall_time(self):
         """
-        Increment the wall-time tick counter; every 1024th call, check
-        whether `max_wall_time` or `max_memory` has been exceeded (or
-        the flush budget's floor has been crossed) and raise or flush
-        accordingly. Called from the hot WHNF loop
-        (`whnf_with_progress`) and from `def_eq`.
-
-        The common path is a counter bump and a mask test; everything
-        else — including the are-any-limits-armed reads (flushing is
-        on by default, so some limit almost always is) — waits for the
-        1024th call.
+        Count a reduction step; every 1024th one, check whether
+        `max_wall_time` or `max_memory` has been exceeded.
         """
         self._whnf_tick += 1
         if (self._whnf_tick & self._WALL_TIME_SAMPLE_MASK) != 0:
             return
         max_wall_time = self.max_wall_time
         max_memory = self.max_memory
-        flush_memory = self.flush_memory
-        if max_wall_time <= 0.0 and max_memory <= 0 and flush_memory <= 0:
+        if max_wall_time <= 0.0 and max_memory <= 0:
             return
         if max_wall_time > 0.0:
             elapsed = clock() - self.start_time
@@ -1008,43 +762,6 @@ class TypeChecker(object):
                 raise MemoryExceeded(
                     self.decl, growth, max_memory,
                 )
-        if flush_memory > 0 and _live_memory() > self._flush_floor:
-            self.flush_decl_caches()
-
-    @dont_look_inside
-    def flush_decl_caches(self):
-        """
-        Drop every per-decl cache mid-decl and collect, then continue.
-
-        Long evaluations over wide state (the BVDecide `blastUdiv`
-        lemmas rebuild an O(width) circuit term per iteration) pin
-        O(steps × width) nodes through the arenas, the inline caches
-        and the eqv union-find, even though the truly reachable
-        working set is a fraction of that. The official kernel
-        survives these decls in constant memory because dead
-        intermediates are freed as reduction proceeds; flushing is
-        our equivalent — it trades re-deriving some equalities and
-        re-reducing some towers for a bounded live set.
-
-        Re-arms at the surviving live heap plus another full budget,
-        so a working set the flush cannot shrink doesn't trigger a
-        flush per sample tick — at least `flush_memory` bytes of new
-        growth separate consecutive flushes (the
-        `--max-memory-per-decl` cap, when set, remains the abort
-        backstop).
-        """
-        reset_decl_caches()
-        self._intern_w_app = {}
-        self._intern_w_proj = {}
-        self._intern_w_lambda = {}
-        self._intern_w_forall = {}
-        self._eqv_parent = {}
-        self._defeq_failed = {}
-        rgc.collect()
-        survived = _live_memory()
-        self._flush_floor = survived + self.flush_memory
-
-    # ---- public def_eq / infer entry points ----------------------------
 
     def check_reference(self, const, target):
         """
@@ -1064,748 +781,38 @@ class TypeChecker(object):
         if target.safety > current.safety:
             raise W_UnsafeReference(self, const, target.safety)
 
-    def def_eq(self, expr1, expr2):
-        """
-        Check if two expressions are definitionally equal.
+    def whnf(self, expr):
+        """The weak head normal form of ``expr``."""
+        machine = self.machine
+        h = machine.store.import_term(expr)
+        result = machine.whnf(h)
+        if result == h:
+            return expr
+        return machine.export(result)
 
-        Any type inference performed while deciding def-eq runs in
-        `infer_only` mode — the terms being compared are already
-        known well-typed, so re-checking application arguments inside
-        them is redundant, and reduction routinely exposes unreduced
-        beta-redexes in domains that the argument check would spuriously
-        reject. Mirrors lean4, where `is_def_eq`'s internal
-        `infer_type` calls pass `infer_only = true` (type_checker.cpp).
-        """
-        saved = self.infer_only
-        self.infer_only = True
-        try:
-            return self._def_eq(expr1, expr2)
-        finally:
-            self.infer_only = saved
-
-    def _def_eq(self, expr1, expr2):
-        env = self.env
-        max_heartbeat = env.max_heartbeat
-        if max_heartbeat > 0 or env.count_heartbeats:
-            self.heartbeat += 1
-            if max_heartbeat > 0 and self.heartbeat > max_heartbeat:
-                raise HeartbeatExceeded(
-                    self.decl,
-                    self.heartbeat,
-                    max_heartbeat,
-                )
-        self.tick_wall_time()
-
-        # The tracer prologue/hit callbacks are virtual calls into
-        # (usually) empty methods; at billions of def_eq calls per
-        # heavy declaration they are gated on the tracer's `recording`
-        # flag rather than relied on to be free.
-        tracing = env.tracer.recording
-        if tracing:
-            env.tracer.enter(expr1, expr2, env.declarations)
-
-        # Pointer-equality fast path before WHNF: shared subexpressions
-        # are very common in proof terms (the DAG that lean4export
-        # produces is heavily shared), so WHNFing the same instance
-        # twice just to discover it's equal to itself wastes work.
-        if expr1 is expr2:
-            if tracing:
-                env.tracer.identity_hit()
-                return env.tracer.result(True)
-            return True
-
-        # Already proven def-eq earlier in this decl: the union-find
-        # makes every repeat comparison O(α). Mirrors lean4's
-        # `quick_is_def_eq` consulting `m_eqv_manager`
-        # (type_checker.cpp:741).
-        if self._eqv_find(expr1) is self._eqv_find(expr2):
-            if tracing:
-                env.tracer.eqv_hit()
-                return env.tracer.result(True)
-            return True
-
-        # Cheap spine congruence: two applications whose corresponding
-        # parts are each pointer-identical or already proven def-eq are
-        # def-eq, decided in one lockstep walk rather than one recursive
-        # def_eq call (and prologue) per argument. Uses only established
-        # facts (identity + the eqv forest), so False means undecided.
-        if isinstance(expr1, W_App) and isinstance(expr2, W_App):
-            if self._spine_cheap_eq(expr1, expr2):
-                self._eqv_union(expr1, expr2)
-                if tracing:
-                    env.tracer.eqv_hit()
-                    return env.tracer.result(True)
-                return True
-
-        result = self._def_eq_uncached(expr1, expr2)
-        if result:
-            self._eqv_union(expr1, expr2)
-        if tracing:
-            return env.tracer.result(result)
-        return result
-
-    def _def_eq_uncached(self, expr1, expr2):
-        """
-        The def_eq check sequence proper, behind `def_eq`'s
-        bookkeeping (heartbeat / tracer) and equivalence cache.
-        """
-        # Structural-equality fast path before WHNF: catches DAG
-        # fragments that are equal but live in distinct instances —
-        # e.g. things produced by reduction rather than parsed. The
-        # walk piggy-backs on identity at each level (see
-        # `syntactic_eq`) so it remains cheap for shared subtrees.
-        if syntactic_eq(expr1, expr2):
-            self.tracer.syntactic_hit()
-            return True
-
-        # Bring both sides to WHNF *without* delta (beta / iota /
-        # proj / quot only) — lean4's `is_def_eq_core` does exactly
-        # this before any unfolding (type_checker.cpp:1079). All
-        # delta from here on is lazy: one definition layer at a time
-        # inside `_try_lazy_delta`, never a full normalization.
-        expr1 = expr1.whnf_core(self)
-        expr2 = expr2.whnf_core(self)
-        if expr1 is expr2:
-            return True
-
-        # Proof irrelevance: two proofs of the same Prop are equal.
-        # Checked *before* lazy delta, mirroring lean4's ordering
-        # (`is_def_eq_proof_irrel` at type_checker.cpp:1087, ahead of
-        # `lazy_delta_reduction` at 1091): proof *terms* must never
-        # be reduced when comparing their *types* suffices. Proofs
-        # produced by `omega` / `decide` certificates otherwise force
-        # WHNF to evaluate the whole decision procedure — e.g.
-        # `Nat.rec` over `0x10ffff`-sized literals in the
-        # `String.Decode` UTF-8 lemmas.
-        # The sort needs a WHNF before the Prop test — lean4's
-        # `is_prop` is `whnf(infer_type(e)) == Prop` — but only on the
-        # slow path: inference usually hands back the literal `Prop`.
-        expr1_ty = expr1.infer(self)
-        expr1_sort = expr1_ty.infer(self)
-        if not syntactic_eq(expr1_sort, PROP):
-            expr1_sort = expr1_sort.whnf(self)
-        if syntactic_eq(expr1_sort, PROP):
-            expr2_ty = expr2.infer(self)
-            expr2_sort = expr2_ty.infer(self)
-            if not syntactic_eq(expr2_sort, PROP):
-                expr2_sort = expr2_sort.whnf(self)
-            if syntactic_eq(expr2_sort, PROP):
-                if self.def_eq(expr1_ty, expr2_ty):
-                    self.tracer.pi_hit()
-                    return True
-
-        # Nat-offset: short-circuit `Nat.zero =?= Nat.zero` and
-        # `Nat.succ a =?= Nat.succ b` (and the `W_LitNat` analogues)
-        # without WHNF. Mirrors lean4's `is_def_eq_offset`
-        # (type_checker.cpp:961), called from `lazy_delta_reduction`
-        # at line 975. Recurses on the predecessors; `_OFFSET_FALSE`
-        # bypasses the fallthrough so a structurally-unequal Nat-succ
-        # spine doesn't get re-explored via WHNF + `_def_eq_core`.
-        offset = self._def_eq_offset(expr1, expr2)
-        if offset == _OFFSET_TRUE:
-            return True
-        if offset == _OFFSET_FALSE:
-            return False
-
-        # `decide`-tactic shortcut: when one side is the constant
-        # `Bool.true`, WHNF only the other and check it reduces there
-        # too. Mirrors lean4's `is_def_eq_core` (type_checker.cpp:1062)
-        # and nanoda_lib (tc.rs:935). Proofs from `decide` come out as
-        # `of_eq_true (Eq.refl true) : decide p = true`, so the spot
-        # we hit this is the `decide p =?= true` def_eq — short-circuits
-        # away the full structural dispatch on the proof side. This is
-        # the one place a full evaluating WHNF is intentional: the
-        # other side must actually compute down to `Bool.true`.
-        if expr2 is _BOOL_TRUE:
-            if expr1.whnf(self) is _BOOL_TRUE:
-                return True
-        elif expr1 is _BOOL_TRUE:
-            if expr2.whnf(self) is _BOOL_TRUE:
-                return True
-
-        # Lazy delta reduction: unfold one definition layer at a time,
-        # re-comparing heads after each, mirroring lean4's
-        # `lazy_delta_reduction` (type_checker.cpp:973). When both
-        # sides are spines headed by the same delta-reducible constant,
-        # compare args *before* unfolding either head — crucial for
-        # proof terms in the `String.Decode` / BitVec / UIntN family,
-        # whose bodies are long `congr (congrArg f h) (ite_congr ...)`
-        # chains: the spines line up structurally so we should never
-        # delta-reduce through `instHMod → UInt32.mod → BitVec.umod →
-        # Fin.mod` just to compare two identical arg subtrees.
-        #
-        # Whatever the outcome, both sides come back whnf_core'd with
-        # delta-exhausted heads — i.e. in WHNF — so `_def_eq_core`
-        # dispatches on them directly; there is no full-WHNF pass here
-        # to evaluate what lazy delta declined to.
-        status, expr1, expr2 = self._try_lazy_delta(expr1, expr2)
-        if status == _LD_TRUE:
-            return True
-
-        # Pointer equality before `_def_eq_core`'s structural
-        # dispatch — heads collapsed by lazy delta often share.
-        if expr1 is expr2:
-            return True
-
-        return self._def_eq_core(expr1, expr2)
-
-    def _spine_cheap_eq(self, expr1, expr2):
-        """Lockstep walk of two application spines using only identity
-        and the proven-def-eq forest per part. ``True`` is a proof;
-        ``False`` only means this cheap pass couldn't decide."""
-        while True:
-            arg1 = expr1.arg
-            arg2 = expr2.arg
-            if arg1 is not arg2:
-                if self._eqv_find(arg1) is not self._eqv_find(arg2):
-                    return False
-            fn1 = expr1.fn
-            fn2 = expr2.fn
-            if fn1 is fn2:
-                return True
-            fn1_app = isinstance(fn1, W_App)
-            fn2_app = isinstance(fn2, W_App)
-            if fn1_app and fn2_app:
-                assert isinstance(fn1, W_App)
-                assert isinstance(fn2, W_App)
-                expr1 = fn1
-                expr2 = fn2
-                continue
-            if fn1_app or fn2_app:
-                return False
-            return self._eqv_find(fn1) is self._eqv_find(fn2)
-
-    def _eqv_find(self, expr):
-        """
-        Union-find root of ``expr`` in the proven-def-eq forest, with
-        path compression. An expression with no entry is its own root.
-        """
-        parent = self._eqv_parent
-        root = expr
-        while True:
-            next = parent.get(root, None)
-            if next is None:
-                break
-            root = next
-        cur = expr
-        while cur is not root:
-            next = parent[cur]
-            parent[cur] = root
-            cur = next
-        return root
-
-    def _eqv_union(self, expr1, expr2):
-        """
-        Record that ``expr1`` and ``expr2`` are def-eq.
-        """
-        root1 = self._eqv_find(expr1)
-        root2 = self._eqv_find(expr2)
-        if root1 is not root2:
-            self._eqv_parent[root1] = root2
-
-    def _failed_before(self, expr1, expr2):
-        """
-        Whether this pair already failed a lazy-delta args comparison.
-        """
-        self.tracer.failed_probe()
-        bucket = self._defeq_failed.get(expr1, None)
-        if bucket is not None and expr2 in bucket:
-            self.tracer.failed_hit()
-            return True
-        return False
-
-    def _cache_failure(self, expr1, expr2):
-        """
-        Record a failed lazy-delta args comparison, symmetrically.
-        """
-        failed = self._defeq_failed
-        bucket = failed.get(expr1, None)
-        if bucket is None:
-            bucket = {}
-            failed[expr1] = bucket
-        bucket[expr2] = None
-        bucket = failed.get(expr2, None)
-        if bucket is None:
-            bucket = {}
-            failed[expr2] = bucket
-        bucket[expr1] = None
+    def whnf_core(self, expr):
+        """``expr`` reduced without unfolding definitions."""
+        machine = self.machine
+        h = machine.store.import_term(expr)
+        result = machine.whnf_core(h)
+        if result == h:
+            return expr
+        return machine.export(result)
 
     def infer(self, expr):
-        """
-        Infer the type of ``expr``.
+        """The type of ``expr``, checking it along the way."""
+        machine = self.machine
+        return machine.export(
+            machine.infer(machine.store.import_term(expr), True),
+        )
 
-        The hot classes (`W_App`, `W_Lambda`, `W_ForAll`, `W_Const`)
-        hit a per-instance inline cache slot — DAG-shared
-        subexpressions otherwise turn into O(2ⁿ) re-inference, so this
-        matters even when the JIT is involved. Cold classes (`W_Let`,
-        `W_Proj`, `W_Sort`, literals, vars) re-compute on each call;
-        they're rare enough on hot paths that a dict-based fallback
-        wasn't paying for the JIT-hostile lookups it added to the
-        def_eq trace.
-        """
-        cls = expr.__class__
-        if cls is W_App:
-            assert isinstance(expr, W_App)
-            c = expr._caches
-            if c is not None and c.infer_env is self:
-                return c.infer_result
-            result = expr.infer(self)
-            c = expr._ensure_caches()
-            c.infer_env = self
-            c.infer_result = result
-            return result
-        if cls is W_Lambda or cls is W_ForAll:
-            assert isinstance(expr, W_FunBase)
-            c = expr._caches
-            if c is not None and c.infer_env is self:
-                return c.infer_result
-            result = expr.infer(self)
-            c = expr._ensure_caches()
-            c.infer_env = self
-            c.infer_result = result
-            return result
-        if cls is W_Const:
-            assert isinstance(expr, W_Const)
-            if expr._infer_cache_env is self:
-                return expr._infer_cache_result
-            result = expr.infer(self)
-            expr._infer_cache_env = self
-            expr._infer_cache_result = result
-            return result
-        return expr.infer(self)
-
-    # ---- inner helpers --------------------------------------------------
-
-    def _def_eq_core(self, expr1, expr2):
-        """
-        Core definitional equality logic, called after WHNF reduction.
-        """
-        # Closures are an internal representation of deferred
-        # substitution; peel any that survive WHNF here so the rest of
-        # the dispatch — and the JIT driver's greens — see canonical
-        # forms rather than closure wrappers.
-        if isinstance(expr1, W_Closure):
-            expr1 = expr1.force(self)
-        if isinstance(expr2, W_Closure):
-            expr2 = expr2.force(self)
-
-        cls1 = promote(expr1.__class__)
-        cls2 = promote(expr2.__class__)
-
-        # Fast-path: syntactically identical expressions are def-eq
-        # without needing to infer types or do proof-irrelevance work.
-        # Critical for avoiding redundant type inference on every
-        # recursive def_eq call over a large expression tree.
-        if cls1 is cls2 and syntactic_eq(expr1, expr2):
-            return True
-
-        # Two literals that aren't syntactically equal are unequal —
-        # lean4's quick_is_def_eq decides Lit pairs definitively
-        # (type_checker.cpp:758). Falling through would materialise
-        # them as constructor chains just to fail.
-        if cls1 is cls2 and (cls1 is W_LitStr or cls1 is W_LitNat):
-            return False
-
-        if cls1 is cls2:
-            if cls1 is W_Const:
-                assert isinstance(expr1, W_Const)
-                assert isinstance(expr2, W_Const)
-                names_eq = expr1.name.syntactic_eq(expr2.name)
-            else:
-                names_eq = True
-            if names_eq and expr1.def_eq(expr2, self):
-                return True
-            # A failed structural comparison is not definitive: fall
-            # through — lean4's is_def_eq_core likewise tries eta,
-            # structure eta and unit-likeness after a same-head app
-            # comparison fails (e.g. a stuck `Option.rec` application
-            # against a `Std.Iter.mk` constructor application is
-            # proven equal by structure eta, never structurally).
-
-        # Only perform this check after we've already tried reduction,
-        # since this check can get fail in cases like
-        # '((fvar 1) x)' ((fun y => ((fvar 1) x)) z)
-        expr2_eta = self.try_eta_expand(expr1, expr2)
-        if expr2_eta is not None:
-            return self.def_eq(expr1, expr2_eta)
-        expr1_eta = self.try_eta_expand(expr2, expr1)
-        if expr1_eta is not None:
-            return self.def_eq(expr1_eta, expr2)
-
-        # Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
-        if self.try_struct_eta(expr1, expr2):
-            return True
-        if self.try_struct_eta(expr2, expr1):
-            return True
-
-        if self.def_eq_unit(expr1, expr2):
-            return True
-
-        # As the *very* last step, expose a single Nat constructor from
-        # any remaining `W_LitNat`. We only peel one `Nat.succ` per
-        # def-eq call: if the other side is `Nat.succ Y`, the recursive
-        # def-eq descends into `(W_LitNat (val-1), Y)` and we loop only
-        # as deep as the other side's actual `Nat.succ` nesting. If the
-        # other side is anything else, def-eq bails immediately. This
-        # keeps `UInt32.size`-sized literals (2^32) from materialising
-        # ~4 billion `Nat.succ` nodes the way `build_nat_expr` did.
-        if cls1 is W_LitNat:
-            return self.def_eq(expr1.one_step_constructor(self), expr2)
-        elif isinstance(expr2, W_LitNat):
-            return self.def_eq(expr1, expr2.one_step_constructor(self))
-
-        if cls1 is W_LitStr:
-            return self.def_eq(expr1.build_str_expr(self), expr2)
-        elif isinstance(expr2, W_LitStr):
-            return self.def_eq(expr1, expr2.build_str_expr(self))
-
-        return False
-
-    def _def_eq_offset(self, expr1, expr2):
-        """
-        Mirrors lean4's ``is_def_eq_offset`` (type_checker.cpp:961).
-
-        Returns:
-          ``_OFFSET_TRUE``   both sides are ``Nat.zero``, or both are
-                             ``Nat.succ x`` / ``Nat.succ y`` with
-                             ``x``, ``y`` def-equal predecessors.
-          ``_OFFSET_FALSE``  both sides are ``Nat.succ _`` but the
-                             predecessors are not def-equal.
-          ``_OFFSET_UNDEF``  Nat-shape doesn't apply; caller falls
-                             through to its normal path.
-
-        Two ``W_LitNat`` literals get compared by value rather than by
-        peeling — peeling a 2³² literal one ``Nat.succ`` at a time
-        would blow the stack, and lean4 sidesteps the same case via
-        the ``Lit`` fast path in ``quick_is_def_eq``
-        (type_checker.cpp:758).
-        """
-        while True:
-            if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
-                if expr1.val.eq(expr2.val):
-                    return _OFFSET_TRUE
-                return _OFFSET_FALSE
-            if _is_nat_zero_const(expr1) and _is_nat_zero_const(expr2):
-                return _OFFSET_TRUE
-            pred1 = _nat_succ_pred(expr1)
-            if pred1 is None:
-                return _OFFSET_UNDEF
-            pred2 = _nat_succ_pred(expr2)
-            if pred2 is None:
-                return _OFFSET_UNDEF
-            # Both sides peeled a `Nat.succ`: loop on the predecessors
-            # rather than recursing through the full def_eq — a
-            # `succ`-spine is as deep as its literal (`Char.«succ?_eq»`
-            # exposes 0x110000-level chains) and a def_eq frame per
-            # level overflows the stack. When the shapes stop being
-            # numeric the answer is undecided here: the caller's lazy
-            # delta loop peels further layers iteratively as reduction
-            # exposes them.
-            self.tick_wall_time()
-            expr1 = pred1
-            expr2 = pred2
-
-    def _try_lazy_delta(self, expr1, expr2):
-        """
-        Iterative lazy delta reduction, mirroring lean4's
-        ``lazy_delta_reduction`` (type_checker.cpp:973): walk the
-        heads of ``expr1`` and ``expr2`` in sync, unfolding exactly
-        one definition layer at a time (``try_unfold_head`` +
-        ``whnf_core``, never an evaluating full WHNF) and
-        short-circuiting whenever the sides converge or a same-head
-        args check succeeds.
-
-        Returns ``(status, expr1, expr2)``: ``_LD_TRUE`` when the
-        sides were proven def-equal, else ``_LD_UNDEF`` with both
-        sides advanced — whnf_core'd, heads delta-exhausted, i.e. in
-        WHNF — for the caller's structural dispatch. **Never** decides
-        "unequal".
-
-        Which side to unfold is decided by ``W_Definition.hint``:
-        an abbrev (``HINT_ABBREV``) unfolds before a regular def, and
-        among regulars the higher-height side unfolds first. Higher
-        height means a definition layered on top of lower-height ones,
-        so peeling it off pushes both sides toward a common lower-level
-        form.
-        """
-        for _ in range(self._LAZY_DELTA_MAX_ITER):
-            if expr1 is expr2:
-                return _LD_TRUE, expr1, expr2
-
-            # Iterative Nat-offset peeling — lean4 re-checks
-            # is_def_eq_offset at the top of every lazy delta
-            # iteration (type_checker.cpp:975). Reduction exposes
-            # `Nat.succ` layers one delta step at a time; peeling
-            # matching numeric layers here in place means a
-            # 0x110000-deep chain (`Char.«succ?_eq»`) costs loop
-            # iterations, where a def_eq recursion per layer
-            # overflows the stack.
-            peeled = False
-            while True:
-                if isinstance(expr1, W_LitNat) and isinstance(expr2, W_LitNat):
-                    if expr1.val.eq(expr2.val):
-                        return _LD_TRUE, expr1, expr2
-                    # Unequal literals: _def_eq_core's definitive
-                    # literal check answers False.
-                    break
-                pred1 = _nat_succ_pred(expr1)
-                if pred1 is None:
-                    break
-                pred2 = _nat_succ_pred(expr2)
-                if pred2 is None:
-                    break
-                self.tick_wall_time()
-                expr1 = pred1
-                expr2 = pred2
-                peeled = True
-            if peeled:
-                # Predecessors come from inside constructor apps and
-                # may not be in whnf_core form, which the rest of the
-                # iteration assumes.
-                expr1 = expr1.whnf_core(self)
-                expr2 = expr2.whnf_core(self)
-                if expr1 is expr2:
-                    return _LD_TRUE, expr1, expr2
-
-            # Native nat probe, only when both sides are closed —
-            # lean4's `!has_fvar(t_n) && !has_fvar(s_n)` guard
-            # (type_checker.cpp:978). The probe WHNFs the op's
-            # arguments — full evaluation — and evaluating
-            # fvar-containing arithmetic can grind through unary
-            # recursion towers under huge literals (the SInt range
-            # instances compare `toNat hi + 2^15`-shaped subterms
-            # whose Nat.add would otherwise build a 2^15-level
-            # brecOn below-tower just to probe for a literal).
-            if not expr1.has_fvar() and not expr2.has_fvar():
-                reduced1 = _try_reduce_nat(expr1, self)
-                if reduced1 is not None:
-                    expr1 = reduced1
-                    continue
-                reduced2 = _try_reduce_nat(expr2, self)
-                if reduced2 is not None:
-                    expr2 = reduced2
-                    continue
-
-            kind1 = self._delta_kind(expr1.head())
-            kind2 = self._delta_kind(expr2.head())
-
-            # Neither side is delta-reducible: lazy delta has nothing
-            # more to offer; let the caller's _def_eq_core dispatch
-            # handle the (now head-canonical) forms.
-            if kind1 is None and kind2 is None:
-                return _LD_UNDEF, expr1, expr2
-
-            # Exactly one side reducible: unfold that one and retry.
-            # First, if the non-delta side is a projection-headed app,
-            # try whnf_core'ing it instead — the proj may resolve
-            # cheaply via struct-eta or constructor iota, avoiding an
-            # expensive well-founded-recursion delta-unfold on the
-            # other side. Mirrors lean4's `try_unfold_proj_app`
-            # (type_checker.cpp:868, called from
-            # `lazy_delta_reduction_step` at lines 898/905).
-            if kind1 is None:
-                if isinstance(expr1.head(), W_Proj):
-                    new_e1 = expr1.whnf_core(self)
-                    if new_e1 is not expr1:
-                        expr1 = new_e1
-                        continue
-                new_e2 = expr2.try_unfold_head(self)
-                if new_e2 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr2 = new_e2.whnf_core(self)
-                continue
-            if kind2 is None:
-                if isinstance(expr2.head(), W_Proj):
-                    new_e2 = expr2.whnf_core(self)
-                    if new_e2 is not expr2:
-                        expr2 = new_e2
-                        continue
-                new_e1 = expr1.try_unfold_head(self)
-                if new_e1 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr1 = new_e1.whnf_core(self)
-                continue
-
-            # Both delta-reducible. Pick which side to unfold.
-            hint1 = kind1.hint
-            hint2 = kind2.hint
-
-            if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
-                new_e1 = expr1.try_unfold_head(self)
-                if new_e1 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr1 = new_e1.whnf_core(self)
-                continue
-            if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
-                new_e2 = expr2.try_unfold_head(self)
-                if new_e2 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr2 = new_e2.whnf_core(self)
-                continue
-
-            # Same-head args fast path. Two app spines headed by the
-            # same `W_Const` (with matching levels) are def-equal iff
-            # their args are pairwise def-equal — no need to unfold
-            # the head at all. Guarded by the failure cache so a pair
-            # whose args comparison already failed isn't re-explored
-            # on every later encounter — mirrors lean4's
-            # `failed_before` check (type_checker.cpp:922): nested
-            # congruence chains (e.g. omega certificates) otherwise
-            # re-pay the failed comparison at every nesting level.
-            #
-            # Only for *regular* definitions, mirroring lean4's
-            # `d_t->get_hints().is_regular()` gate (type_checker.cpp:
-            # 918). For abbrevs — `casesOn` and friends — the args
-            # include dead match arms: unfolding both sides lets the
-            # recursor's iota evaluate the major and select the live
-            # arm, while an args check would compare the dead arms,
-            # which can be arbitrarily expensive to refute (e.g.
-            # `Int.subNatNat` arms whose comparison descends a unary
-            # `Nat.sub` tower under a 0x110000-scale literal).
-            if hint1 >= 0:
-                head1, args1 = expr1.unapp()
-                head2, args2 = expr2.unapp()
-                if syntactic_eq(head1, head2) and len(args1) == len(args2):
-                    if not self._failed_before(expr1, expr2):
-                        all_eq = True
-                        for j in range(len(args1)):
-                            if not self.def_eq(args1[j], args2[j]):
-                                all_eq = False
-                                break
-                        if all_eq:
-                            return _LD_TRUE, expr1, expr2
-                        self._cache_failure(expr1, expr2)
-
-            # Heights differ: unfold the higher one.
-            if hint1 > hint2:
-                new_e1 = expr1.try_unfold_head(self)
-                if new_e1 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr1 = new_e1.whnf_core(self)
-                continue
-            if hint1 < hint2:
-                new_e2 = expr2.try_unfold_head(self)
-                if new_e2 is None:
-                    return _LD_UNDEF, expr1, expr2
-                expr2 = new_e2.whnf_core(self)
-                continue
-
-            # Same height, and same-head args either failed or
-            # arities/heads didn't match. Unfold both; if neither made
-            # progress, bail.
-            new_e1 = expr1.try_unfold_head(self)
-            new_e2 = expr2.try_unfold_head(self)
-            if new_e1 is None and new_e2 is None:
-                return _LD_UNDEF, expr1, expr2
-            if new_e1 is not None:
-                expr1 = new_e1.whnf_core(self)
-            if new_e2 is not None:
-                expr2 = new_e2.whnf_core(self)
-
-        return _LD_UNDEF, expr1, expr2
-
-    def _delta_kind(self, head):
-        """Return ``head``'s ``W_Definition`` kind if ``head`` is a
-        delta-reducible constant — i.e. a definition that's neither
-        an opaque nor a constructor/inductive/recursor (those don't
-        subclass ``W_Definition``). Returns ``None`` otherwise.
-        """
-        if not isinstance(head, W_Const):
-            return None
-        decl = find_decl(self.env.declarations, head.name)
-        if decl is None:
-            return None
-        kind = decl.w_kind
-        if not isinstance(kind, W_Definition):
-            return None
-        if kind.get_delta_reduce_target() is None:
-            return None
-        return kind
-
-    def def_eq_unit(self, expr1, expr2):
-        """
-        Unit-like definitional equality: any two values of a
-        non-recursive structure with zero indices and a zero-field
-        constructor are def-eq — there are no fields to disagree on,
-        so equality follows from the types matching.
-        """
-        expr1_ty = expr1.infer(self).whnf(self)
-        head = expr1_ty.head()
-        if not isinstance(head, W_Const):
-            return False
-        decl = get_decl(self.env.declarations, head.name)
-        ind = decl.w_kind
-        if not isinstance(ind, W_Inductive):
-            return False
-        if not ind.is_non_recursive_structure():
-            return False
-        if ind.num_indices != 0:
-            return False
-        first_ctor_kind = ind.constructor_decls(self.declarations)[0].w_kind
-        assert isinstance(first_ctor_kind, W_Constructor)
-        if first_ctor_kind.num_fields != 0:
-            return False
-        expr2_ty = expr2.infer(self)
-        return self.def_eq(expr1_ty, expr2_ty)
-
-    def try_eta_expand(self, expr1, expr2):
-        # Only when the other side is *not* already a lambda — lean4's
-        # try_eta_expansion_core guard. Without it, two structurally
-        # unequal lambdas would eta-wrap each other forever.
-        if isinstance(expr1, W_Lambda) and not isinstance(expr2, W_Lambda):
-            expr2_ty = expr2.infer(self).whnf(self)
-            if isinstance(expr2_ty, W_Closure):
-                expr2_ty = expr2_ty.force(self)
-            if isinstance(expr2_ty, W_ForAll):
-                # Turn 'f' into 'fun x => f x'
-                return fun(expr2_ty.binder)(
-                    expr2.incr_free_bvars(self, 1, 0).app_in(self, _mk_w_bvar(0)),
-                )
-        return None
-
-    def try_struct_eta(self, ctor_side, other_side):
-        """
-        Structure eta: S.mk (S.p₁ x) ... (S.pₙ x) ≟ x
-        """
-        head, args = ctor_side.unapp()
-
-        if not isinstance(head, W_Const):
-            return False
-
-        ctor_decl = get_decl(self.env.declarations, head.name)
-        ctor_kind = ctor_decl.w_kind
-        if not isinstance(ctor_kind, W_Constructor):
-            return False
-
-        num_params = ctor_kind.num_params
-        num_fields = ctor_kind.num_fields
-
-        if len(args) != num_params + num_fields:
-            return False
-
-        ctor_ty = ctor_side.infer(self).whnf(self)
-        result_head = ctor_ty.head()
-        if not isinstance(result_head, W_Const):
-            return False
-        struct_name = result_head.name
-        inductive_decl = get_decl(self.env.declarations, struct_name)
-        if not isinstance(inductive_decl.w_kind, W_Inductive):
-            return False
-        ind = inductive_decl.w_kind
-        if not ind.is_non_recursive_structure():
-            return False
-
-        if not self.def_eq(ctor_ty, other_side.infer(self)):
-            return False
-
-        args.reverse()
-        i = 0
-        while i < num_fields:
-            proj = struct_name.proj_in(self, i, other_side)
-            if not self.def_eq(proj, args[num_params + i]):
-                return False
-            i += 1
-        return True
+    def def_eq(self, expr1, expr2):
+        """Whether ``expr1`` and ``expr2`` are definitionally equal."""
+        machine = self.machine
+        store = machine.store
+        return machine.def_eq(
+            store.import_term(expr1), store.import_term(expr2),
+        )
 
 
 class CheckResult(object):
@@ -1916,46 +923,6 @@ def _peak_memory():
     return 0
 
 
-def _type_check_decl(decl, tc):
-    """
-    Type check ``decl`` with ``tc``: through the `RawMachine` when one
-    is attached and the declaration is one it checks (a definition,
-    theorem or opaque), falling back to the boxed kernel whenever the
-    machine bails.
-    """
-    raw = tc.raw
-    if raw is not None:
-        kind = decl.w_kind
-        value = None
-        prop = False
-        if isinstance(kind, W_Definition):
-            value = kind.value
-        elif isinstance(kind, W_Theorem):
-            value = kind.value
-            prop = True
-        if value is not None:
-            rejected = False
-            try:
-                error = raw.check_value(decl.type, value, prop)
-                rejected = error is not None
-            except RawBail as bail:
-                tc.tracer.raw_bail(bail.reason)
-            except W_Error:
-                rejected = True
-            else:
-                if not rejected:
-                    return None
-            if rejected:
-                # A rejection is confirmed by the boxed kernel before it
-                # is reported, so the machine can never reject more than
-                # the kernel does; a disagreement is recorded instead.
-                boxed = decl.type_check(tc)
-                if boxed is None:
-                    tc.tracer.raw_mismatch(decl.name)
-                return boxed
-    return decl.type_check(tc)
-
-
 def _place_all(declarations):
     """
     Give ``declarations`` their positions in declaration order and their
@@ -1991,19 +958,13 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time', 'max_memory', 'flush_memory',
-        '_intern_w_app', '_intern_w_proj',
-        '_intern_w_lambda', '_intern_w_forall',
-        'infer_only', 'raw_enabled',
+        'max_wall_time', 'max_memory',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
-    # mutated as decls are parsed, but the reference isn't).
-    # `tracer` / `max_heartbeat` / `count_heartbeats` / `max_wall_time`
-    # change only at run-setup time (CLI options) or at REPL command
-    # boundaries — never inside the check loop — so quasi-immutable
-    # (`?`) lets the JIT compile assuming they're constant and
-    # invalidate only on the rare reassignment.
+    # mutated as decls are parsed, but the reference isn't). The
+    # limits change only at run-setup time (CLI options) or at REPL
+    # command boundaries — never inside the check loop.
     _immutable_fields_ = [
         'declarations',
         'tracer?',
@@ -2011,7 +972,6 @@ class Environment(object):
         'count_heartbeats?',
         'max_wall_time?',
         'max_memory?',
-        'flush_memory?',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -2021,33 +981,6 @@ class Environment(object):
         self.count_heartbeats = False
         self.max_wall_time = 0.0
         self.max_memory = 0
-        self.flush_memory = 0
-        # `None` is the sentinel routing `_mk_app_in` / `_mk_w_proj_in`
-        # back to the persistent intern. Same attribute name as on
-        # `TypeChecker` so the duck-typed dispatch works without
-        # isinstance checks.
-        self._intern_w_app = None
-        self._intern_w_proj = None
-        self._intern_w_lambda = None
-        self._intern_w_forall = None
-        # A bare `Environment` (REPL / tests / cold inference) always
-        # checks application arguments — same attribute name as on
-        # `TypeChecker` so the duck-typed `env.infer_only` read in
-        # `_iter_infer` works without an isinstance check.
-        self.infer_only = False
-        #: Whether definition-like declarations are checked by the
-        #: `RawMachine` first, with the boxed kernel as the fallback.
-        self.raw_enabled = True
-
-    def tick_wall_time(self):
-        """No-op: wall-time tracking is a per-decl `TypeChecker` concern;
-        bare `Environment` (REPL / tests / cold paths) never enforces it."""
-        pass
-
-    def check_reference(self, const, target):
-        """No-op: there is no declaration under check whose position or
-        safety could restrict what ``const`` may name."""
-        pass
 
     @not_rpython
     def __getitem__(self, value):
@@ -2102,10 +1035,11 @@ class Environment(object):
         scripts that want a one-shot check; production paths should
         use `type_check_one`.
         """
+        tc = TypeChecker(self, decl)
         try:
-            return decl.type_check(TypeChecker(self, decl))
+            return decl.type_check(tc)
         finally:
-            reset_decl_caches()
+            tc.free()
 
     def type_check_one(self, decl, printer=None):
         """
@@ -2115,15 +1049,13 @@ class Environment(object):
             printer.before(self, decl)
 
         tc = TypeChecker(self, decl)
-        if self.raw_enabled:
-            tc.raw = RawMachine(tc)
         error = None
         gc_start = _gc_time_seconds()
         bytes_start = _bytes_allocated()
         peak_start = _peak_memory()
         start = clock()
         try:
-            error = _type_check_decl(decl, tc)
+            error = decl.type_check(tc)
         except HeartbeatExceeded as err:
             error = W_HeartbeatError(
                 decl.name,
@@ -2159,24 +1091,11 @@ class Environment(object):
         elapsed = clock() - start
         gc_elapsed = _gc_time_seconds() - gc_start
         bytes_allocated = _bytes_allocated() - bytes_start
-        if tc.raw is not None:
-            tc.raw.free()
-        # Reset the per-decl inline caches before measuring live memory
-        # so the reading reflects what this decl *permanently* added —
-        # stale caches on persistent nodes would otherwise pin this
-        # decl's reduction towers for the rest of the run.
-        reset_decl_caches()
+        tc.free()
         if isinstance(error, W_MemoryError):
-            # The decl blew the memory cap: drop the per-decl arenas
-            # eagerly and force a major collection so the next decl
-            # starts from a shrunken heap instead of riding the
+            # The decl blew the memory cap: collect now so the next
+            # decl starts from a shrunken heap instead of riding the
             # high-water mark into swap.
-            tc._intern_w_app = {}
-            tc._intern_w_proj = {}
-            tc._intern_w_lambda = {}
-            tc._intern_w_forall = {}
-            tc._eqv_parent = {}
-            tc._defeq_failed = {}
             rgc.collect()
         live_memory = _live_memory()
         peak_growth = _peak_memory() - peak_start
@@ -2218,20 +1137,49 @@ class Environment(object):
         """
         Definitional equality, with a transient `TypeChecker`.
 
-        Each call gets its own `TypeChecker(self, None)`; heartbeat
-        counting won't accumulate across calls. Tests and REPL paths
-        that just need a single comparison use this. Production paths
-        (type_check_one) construct one TC and call `tc.def_eq` directly
-        so heartbeat and any per-decl caches are properly scoped.
+        Each call gets its own checker, outside any declaration, so
+        nothing accumulates across calls: for tests and REPL paths that
+        need a single comparison. A declaration's check constructs one
+        checker and uses it throughout, so its heartbeats and memos are
+        scoped to the declaration.
         """
-        return TypeChecker(self, None).def_eq(expr1, expr2)
+        tc = TypeChecker(self, None)
+        try:
+            return tc.def_eq(expr1, expr2)
+        finally:
+            tc.free()
 
     def infer(self, expr):
         """
         Type inference, with a transient `TypeChecker`. See `def_eq`.
         """
-        return TypeChecker(self, None).infer(expr)
+        tc = TypeChecker(self, None)
+        try:
+            return tc.infer(expr)
+        finally:
+            tc.free()
 
+    def whnf(self, expr):
+        """
+        Weak head normal form, with a transient `TypeChecker`. See
+        `def_eq`.
+        """
+        tc = TypeChecker(self, None)
+        try:
+            return tc.whnf(expr)
+        finally:
+            tc.free()
+
+    def whnf_core(self, expr):
+        """
+        Reduction without unfolding definitions, with a transient
+        `TypeChecker`. See `def_eq`.
+        """
+        tc = TypeChecker(self, None)
+        try:
+            return tc.whnf_core(expr)
+        finally:
+            tc.free()
 
 
 #: The empty environment.

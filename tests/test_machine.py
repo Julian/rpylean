@@ -1,18 +1,18 @@
 """
-Tests for the raw term store: records in raw memory, canonical leaves,
-and the boxed boundary.
+Tests for the term store: records, canonical leaves, and the boundary
+to and from `W_Expr`.
 """
 
 import pytest
 
-from rpylean._rawterms import (
+from rpylean.machine import (
     KIND_APP,
     KIND_FORALL,
     KIND_LAMBDA,
     KIND_LET,
     KIND_PROJ,
-    RawIntMap,
-    RawTermStore,
+    IntMap,
+    TermStore,
     is_leaf,
 )
 from rpylean.objects import (
@@ -37,7 +37,7 @@ u = Name.simple("u").level()
 
 @pytest.fixture
 def store(request):
-    s = RawTermStore(None, capacity=16)
+    s = TermStore(None, capacity=16)
     request.addfinalizer(s.free)
     return s
 
@@ -49,9 +49,9 @@ def roundtrip(store, e):
     return h
 
 
-class TestRawIntMap(object):
+class TestIntMap(object):
     def test_get_set_grow(self):
-        m = RawIntMap(capacity=4)
+        m = IntMap(capacity=4)
         try:
             assert m.get(7, -1) == -1
             for k in range(1, 5000):
@@ -66,7 +66,7 @@ class TestRawIntMap(object):
             m.free()
 
     def test_free_is_idempotent(self):
-        m = RawIntMap()
+        m = IntMap()
         m.free()
         m.free()
 
@@ -141,7 +141,7 @@ class TestRecords(object):
         assert store.kind(hl) == KIND_LET
         assert store.loose_bvar_range(hl) == 0
 
-    def test_loose_range_matches_boxed(self, store):
+    def test_loose_range_matches_expr(self, store):
         cases = [
             b0,
             f.const().app(b2, b0),
@@ -173,7 +173,7 @@ class TestRecords(object):
         assert store.export_term(h) is store.export_term(h)
 
     def test_growth(self):
-        store = RawTermStore(None, capacity=4)
+        store = TermStore(None, capacity=4)
         try:
             # A 20000-argument spine: deep in the direction both the
             # import and the export walk iteratively.
@@ -197,14 +197,14 @@ class TestRecords(object):
             store.free()
 
     def test_free_is_idempotent(self):
-        store = RawTermStore(None)
+        store = TermStore(None)
         store.import_term(f.const().app(x.const()))
         store.free()
         store.free()
 
 
 def check_instantiate(store, e, sub, depth=0):
-    expected = e.instantiate(None, sub, depth)
+    expected = e.instantiate(sub, depth)
     got = store.export_term(
         store.instantiate(store.import_term(e), store.import_term(sub), depth),
     )
@@ -212,7 +212,7 @@ def check_instantiate(store, e, sub, depth=0):
 
 
 def check_shift(store, e, count, depth=0):
-    expected = e.incr_free_bvars(None, count, depth)
+    expected = e.incr_free_bvars(count, depth)
     got = store.export_term(store.shift(store.import_term(e), count, depth))
     assert syntactic_eq(got, expected), (got, expected)
 

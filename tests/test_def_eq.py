@@ -240,8 +240,8 @@ class TestConst(object):
         assert not env.def_eq(const1, const2)
 
     def test_mismatched_level_arity(self):
-        assert not x.const().def_eq(x.const(levels=[u]), env.def_eq)
-        assert not x.const(levels=[u]).def_eq(x.const(), env.def_eq)
+        assert not x.const().def_eq(x.const(levels=[u]))
+        assert not x.const(levels=[u]).def_eq(x.const())
 
     def test_def_eq_via_delta(self):
         """

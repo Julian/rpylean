@@ -207,12 +207,13 @@ class _Marker(object):
     """
     Tracks the sub-expression whose rendered span should be reported.
 
-    ``mark`` is the expression (by identity) to locate when building a
-    ``Format``; ``found`` records whether the (first) occurrence has been
-    wrapped already.  Hash-consing means the same interned sub-expression
-    can appear at many syntactic positions, so we wrap only the first one
-    seen in source order -- the caret then lands where a reader would look
-    for it.  A ``mark`` of ``None`` matches nothing.
+    ``mark`` is the expression (by identity, or for a free variable by
+    binding position) to locate when building a ``Format``; ``found``
+    records whether the (first) occurrence has been wrapped already.
+    Hash-consing means the same interned sub-expression can appear at
+    many syntactic positions, so we wrap only the first one seen in
+    source order -- the caret then lands where a reader would look for
+    it.  A ``mark`` of ``None`` matches nothing.
     """
 
     _attrs_ = ['mark', 'found']
@@ -220,6 +221,14 @@ class _Marker(object):
     def __init__(self, mark):
         self.mark = mark
         self.found = False
+
+    def matches(self, expr):
+        mark = self.mark
+        if mark is expr:
+            return True
+        if isinstance(mark, W_FVar) and isinstance(expr, W_FVar):
+            return mark.id == expr.id
+        return False
 
 
 #: Shared marker for the common no-mark case (its ``found`` is never set,
@@ -263,7 +272,7 @@ def _sub(marker, expr, constants):
         budget.remaining -= 1
         if budget.remaining == 0:
             return _format.text(MESSAGE, " …⟨diagnostic truncated⟩")
-    if marker.mark is not None and not marker.found and marker.mark is expr:
+    if marker.mark is not None and not marker.found and marker.matches(expr):
         marker.found = True
         return _format.tag(_format.MARK_TAG, expr.to_format(constants, marker))
     return expr.to_format(constants, marker)
@@ -575,6 +584,28 @@ class W_HeartbeatError(W_CheckError):
         return Diagnostic(tokens, NO_SPAN, message)
 
 
+class W_DeepRecursion(W_CheckError):
+    """
+    Checking the declaration nested deeper than the stack allows.
+    """
+
+    _attrs_ = ['operation']
+
+    def __init__(self, operation, name=None):
+        #: What was recursing: the machine operation that ran out of stack.
+        self.operation = operation
+        self.name = name
+
+    def as_diagnostic(self):
+        tokens = []
+        if self.name is not None:
+            tokens = [PLAIN.emit("in "), DECL_NAME.emit(self.name.str())]
+        message = [MESSAGE.emit(
+            ":\ndeep recursion detected (in %s)" % self.operation,
+        )]
+        return Diagnostic(tokens, NO_SPAN, message)
+
+
 class W_WallTimeError(W_CheckError):
     """
     The per-declaration wall-time limit was exceeded.
@@ -795,9 +826,6 @@ def name_eq(name, other):
     #        that directly, RPython seems unable to be convinced that name and
     #        other are always Names no matter how much I assert.
     #
-    # Marked @elidable so the JIT can fold calls to this function at
-    # trace-compile time when both arguments are promoted.  This collapses
-    # all 14 sequential nat-op comparisons in _try_reduce_nat into constants.
     return name.syntactic_eq(other)
 
 
@@ -969,25 +997,16 @@ _INTERN_LEVEL_MAX = {}     # int -> list[W_LevelMax]
 _INTERN_LEVEL_IMAX = {}    # int -> list[W_LevelIMax]
 _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 # NOT hash-consed (see comments by their `_mk_*` factories):
-#   * W_Lambda / W_ForAll — their binders can't be interned (below), so
-#     they only participate in the per-decl arenas (`_mk_w_lambda_in` /
-#     `_mk_w_forall_in`).
+#   * W_Lambda / W_ForAll — their binders can't be interned (below).
 #   * Binder — `_fvar` is *per-binding-position* mutable state that
 #     interning would silently share across distinct positions.
 
 
 # A process-global monotonic id stamped on every `W_Expr` at
-# construction. The per-decl reduction arenas (`_mk_app_in`,
-# `_mk_w_lambda_in`, `_mk_w_proj_in`, …) are identity-keyed — a hit
-# requires `existing.fn is fn`, etc. — so their hash key only needs a
-# cheap, stable, per-node integer to spread distinct nodes across
-# buckets. `_uid` is that integer, replacing `compute_identity_hash`:
-# the GC's identity hash forced a shadow object + an address->hash
-# lookup for every `fn`/`arg`/`body` fed to an arena — billions per run,
-# ~14% of a cedar profile. Reading an immutable `_uid` field is free by
-# comparison, and identity semantics are preserved exactly (two
-# structurally-equal-but-distinct nodes still get distinct uids, unlike
-# a content hash, so nothing spuriously collapses).
+# construction: a cheap, stable per-node integer for identity-keyed
+# tables (the machine's import memo), where the GC's identity hash would
+# force a shadow object and an address lookup per node. Two
+# structurally-equal-but-distinct nodes get distinct uids.
 _EXPR_UID = count()
 
 
@@ -998,103 +1017,14 @@ def _next_uid():
     return uid
 
 
-class _ExprCaches(object):
-    """
-    The mutable inline-cache slots of a `W_App` / `W_FunBase`, hung off
-    the node's single `_caches` slot and allocated on the first cache
-    write. The overwhelming majority of parsed nodes are never reduced
-    — inlining these slots on every node costs multiple words apiece
-    across tens of millions of nodes, which is most of the parsed heap.
-
-    `inst_*` is the 1-entry instantiate cache (env-independent);
-    `infer_*` / `whnf_*` / `closure_*` are env-tagged (hash-consing
-    shares nodes across `Environment`s). `closure_*` is only used by
-    `W_FunBase`; `whnf_*` only by `W_App` — sharing one class keeps
-    both nodes at a single extra slot without a second allocation path.
-    """
-
-    _attrs_ = [
-        'inst_expr', 'inst_depth', 'inst_result',
-        'inst_menv', 'inst_mdepth', 'inst_mresult',
-        'infer_env', 'infer_result',
-        'whnf_env', 'whnf_result',
-        'closure_env', 'closure_result',
-    ]
-
-    def __init__(self):
-        self.inst_expr = None
-        self.inst_depth = -1
-        self.inst_result = None
-        self.inst_menv = None
-        self.inst_mdepth = -1
-        self.inst_mresult = None
-        self.infer_env = None
-        self.infer_result = None
-        self.whnf_env = None
-        self.whnf_result = None
-        self.closure_env = None
-        self.closure_result = None
-
-
-class _CacheWriteRegistry(object):
-    """
-    Every node whose per-instance inline caches were populated since
-    the last `reset_decl_caches()` call. The inline caches are keyed
-    on per-declaration identities (the `TypeChecker`, a closure env, a
-    substitute), so after a decl's check returns they can never hit
-    again — but their `*_result` references would pin entire reduction
-    towers on nodes that outlive the decl (parsed / interned ones).
-    Write sites register the node here on the first write into an
-    empty slot; the checker resets every registered node between
-    decls.
-
-    The registered nodes live in a rebindable `items` slot (rather
-    than a bare module-level list) because RPython's list shrinking
-    only decrements the length: the backing array keeps stale
-    references in the vacated slots, which would itself pin every
-    node ever registered. Dropping the whole list frees the backing
-    array too.
-    """
-
-    def __init__(self):
-        self.items = []
-
-
-_DECL_CACHE_WRITES = _CacheWriteRegistry()
-
-
-def _note_cache_write(expr):
-    _DECL_CACHE_WRITES.items.append(expr)
-
-
-def reset_decl_caches():
-    """
-    Reset the inline caches of every node registered since the last
-    call. Called by the checker after each declaration so dead caches
-    don't pin that decl's reduction output for the rest of the run.
-    """
-    items = _DECL_CACHE_WRITES.items
-    for i in range(len(items)):
-        items[i]._reset_caches()
-    _DECL_CACHE_WRITES.items = []
-
-
 def intern_stats():
     """
-    Entry counts of the persistent intern tables, plus the pending
-    cache-write registry length, for leak hunting: the tables only
-    ever grow, so a count climbing in step with declarations checked
-    (rather than with parsing) means reduction products are being
-    interned persistently somewhere; the registry should be near zero
-    at any declaration boundary — a climbing value means
-    `reset_decl_caches` isn't draining it.
+    Entry counts of the persistent intern tables, for leak hunting: the
+    tables only ever grow, so a count climbing in step with declarations
+    checked (rather than with parsing) means reduction products are
+    being interned persistently somewhere.
     """
-    return (
-        len(_INTERN_W_APP),
-        len(_INTERN_W_PROJ),
-        len(_INTERN_W_CONST),
-        len(_DECL_CACHE_WRITES.items),
-    )
+    return len(_INTERN_W_APP), len(_INTERN_W_PROJ), len(_INTERN_W_CONST)
 
 
 def _mk_str_name(parent, suffix):
@@ -1294,21 +1224,15 @@ def _mk_binder_strict_implicit(name, type):
 # so identity-keyed bucket lookup finds duplicates reliably during
 # reduction (the case `assemble*`-family `init.ndjson` decls hit).
 #
-# W_Lambda / W_ForAll have no *persistent* intern table: their binders
-# carry a mutable `_fvar` slot used by `binder.fvar()` to hand out a
-# stable FVar for that *binding occurrence*, so binders themselves
-# can't be interned (see the comment by `_mk_binder_default`). They DO
-# participate in the per-decl arenas (`_mk_w_lambda_in` /
-# `_mk_w_forall_in`), keyed on the identity of the binder's components
-# and of the body — see `_binder_key_hash` for the key shape and why
-# it leaves the `_fvar` sharing story unchanged.
+# W_Lambda / W_ForAll have no intern table: their binders carry a
+# mutable `_fvar` slot used by `binder.fvar()` to hand out a stable
+# FVar for that *binding occurrence*, so binders themselves can't be
+# interned (see the comment by `_mk_binder_default`).
 
 @elidable
 def _mk_app(fn, arg):
     """
     Allocate a `W_App(fn, arg)` against the persistent intern table.
-    Used at every reduction-time `_mk_app_in` site, so it is on the
-    hottest path.
     """
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
@@ -1321,158 +1245,12 @@ def _mk_app(fn, arg):
     return e
 
 
-@elidable
-def _mk_app_in(tc, fn, arg):
-    """
-    Allocate a `W_App(fn, arg)` for a reduction-time call site,
-    against the per-decl arena on `tc`.
-
-    The arena gives us hash-consing across iterations within one
-    declaration (so `Nat.brecOn`-style sub-W_Apps reconstructed each
-    step are shared and re-hit the WHNF cache) without polluting the
-    persistent table — the arena dict is dropped when the TC goes
-    out of scope, so reduction-produced W_Apps don't accumulate over
-    the run. Mirrors nanoda_lib's two-tier dag scheme
-    (`util.rs:218-227`, `alloc_expr` at `util.rs:394`).
-
-    There is deliberately no fallback probe of the persistent
-    parse-time table: it serves a 5.7% hit rate against two extra
-    dict probes (content-hash) per arena miss — a reduction-built
-    node that coincides with a parsed one is simply allocated anew
-    and shared via the arena from then on.
-
-    `tc` may also be a bare `Environment` (tests / REPL / cold paths
-    outside a check); its `_intern_w_app` slot is `None` and we route
-    directly to `_mk_app`. A bare `None` (no env at all) takes the
-    same fallback.
-    """
-    if tc is None:
-        return _mk_app(fn, arg)
-    arena = tc._intern_w_app
-    if arena is None:
-        return _mk_app(fn, arg)
-    assert isinstance(fn, W_Expr)
-    assert isinstance(arg, W_Expr)
-    # The arena's equality is identity (`existing.fn is fn`), so its
-    # key only needs a cheap per-node integer that spreads distinct
-    # nodes across buckets — the `_uid`. It must NOT be a content hash:
-    # W_Lambda / W_ForAll aren't persistently interned, so a proof term
-    # carries structurally-equal-but-distinct lambda subtrees, and a
-    # content key would collapse them onto one bucket and thrash
-    # (98% of wall time on Vector.pmap_pmap once upon a time). `_uid`
-    # keeps them distinct like an identity hash would, but without the
-    # GC shadow + address->hash lookup that `compute_identity_hash`
-    # billions of times made the hottest thing on a cedar profile.
-    hi = _mix2(fn._uid, arg._uid)
-    existing = arena.get(hi, None)
-    if existing is not None and existing.fn is fn and existing.arg is arg:
-        if tc.tracer.recording:
-            tc.tracer.arena_app_hit()
-        return existing
-    if tc.tracer.recording:
-        tc.tracer.arena_app_miss()
-    e = W_App(fn, arg)
-    arena[hi] = e
-    return e
-
-
 def _mk_w_lambda(binder, body):
     return W_Lambda(binder, body)
 
 
 def _mk_w_forall(binder, body):
     return W_ForAll(binder, body)
-
-
-def _binder_key_hash(binder, body):
-    """
-    Arena key for a lambda/forall node: identity of the binder's
-    *components* (name, type, style) plus identity of the body — NOT
-    identity of the binder object itself. `binder.instantiate` /
-    `with_type` allocate a fresh `Binder` whenever the binder type is
-    touched by substitution, so a binder-identity key would miss every
-    rebuild of such a spine, and each miss mints a fresh `_fvar` for
-    what is semantically the same binding occurrence.
-
-    Keying on the components is safe for the `_fvar` slot: each
-    distinct key keeps the binder of its first-seen node, so two
-    *different* interned lambdas never share a binder object that
-    wasn't already shared — the merge only drops never-used duplicate
-    binders.
-    """
-    # `binder.name` is an interned `Name` (structural equality is
-    # identity), so its content `hash()` is an identity-faithful key
-    # component; `binder.type` and `body` are `W_Expr`s keyed by `_uid`.
-    h = _mix2(binder.name.hash(), binder.type._uid)
-    return _mix3(h, compute_hash(binder.left), body._uid)
-
-
-def _binder_key_eq(existing, binder, body):
-    eb = existing.binder
-    return (
-        existing.body is body
-        and eb.name is binder.name
-        and eb.type is binder.type
-        and eb.left == binder.left
-    )
-
-
-@elidable
-def _mk_w_lambda_in(tc, binder, body):
-    """
-    Allocate a `W_Lambda(binder, body)` for a reduction-time call
-    site, against the per-decl arena on `tc`.
-
-    Keyed per `_binder_key_hash` — see also the hash-consing comment
-    block above `_mk_app`. Sharing the rebuilt lambda node is what
-    lets the identity-keyed inline caches (`_whnf_cache_*`,
-    `_infer_cache_*`, `_inst_cache_*`) on the apps *above* it hit:
-    without it every instantiation that rebuilds a lambda spine cuts
-    the sharing chain and the whole tower re-reduces from scratch.
-
-    There is no persistent fallback — lambdas have no persistent
-    intern table.
-    """
-    if tc is None:
-        return W_Lambda(binder, body)
-    arena = tc._intern_w_lambda
-    if arena is None:
-        return W_Lambda(binder, body)
-    assert isinstance(binder, Binder)
-    assert isinstance(body, W_Expr)
-    hi = _binder_key_hash(binder, body)
-    existing = arena.get(hi, None)
-    if existing is not None and _binder_key_eq(existing, binder, body):
-        tc.tracer.arena_lambda_hit()
-        return existing
-    tc.tracer.arena_lambda_miss()
-    e = W_Lambda(binder, body)
-    arena[hi] = e
-    return e
-
-
-@elidable
-def _mk_w_forall_in(tc, binder, body):
-    """
-    Reduction-path companion to `_mk_w_forall`. Same per-decl arena
-    scheme as `_mk_w_lambda_in`.
-    """
-    if tc is None:
-        return W_ForAll(binder, body)
-    arena = tc._intern_w_forall
-    if arena is None:
-        return W_ForAll(binder, body)
-    assert isinstance(binder, Binder)
-    assert isinstance(body, W_Expr)
-    hi = _binder_key_hash(binder, body)
-    existing = arena.get(hi, None)
-    if existing is not None and _binder_key_eq(existing, binder, body):
-        tc.tracer.arena_forall_hit()
-        return existing
-    tc.tracer.arena_forall_miss()
-    e = W_ForAll(binder, body)
-    arena[hi] = e
-    return e
 
 
 @elidable
@@ -1488,37 +1266,6 @@ def _mk_w_proj(struct_name, field_index, struct_expr):
         return existing
     e = W_Proj(struct_name, field_index, struct_expr)
     _INTERN_W_PROJ[h] = e
-    return e
-
-
-@elidable
-def _mk_w_proj_in(tc, struct_name, field_index, struct_expr):
-    """
-    Reduction-path companion to `_mk_w_proj`. Same per-decl arena
-    scheme as `_mk_app_in` (and likewise no persistent fallback
-    probe).
-    """
-    if tc is None:
-        return _mk_w_proj(struct_name, field_index, struct_expr)
-    arena = tc._intern_w_proj
-    if arena is None:
-        return _mk_w_proj(struct_name, field_index, struct_expr)
-    assert isinstance(struct_name, Name)
-    assert isinstance(struct_expr, W_Expr)
-    # Identity-keyed like `_mk_app_in`'s arena — see the comment there.
-    # `struct_name` is an interned `Name` (content hash is identity);
-    # `struct_expr` is keyed by `_uid`.
-    hi = _mix3(struct_name.hash(), field_index, struct_expr._uid)
-    existing = arena.get(hi, None)
-    if (existing is not None
-            and existing.struct_name is struct_name
-            and existing.field_index == field_index
-            and existing.struct_expr is struct_expr):
-        tc.tracer.arena_proj_hit()
-        return existing
-    tc.tracer.arena_proj_miss()
-    e = W_Proj(struct_name, field_index, struct_expr)
-    arena[hi] = e
     return e
 
 
@@ -1754,11 +1501,6 @@ class Name(_Item):
         """
         return self.const().app(*args)
 
-    def app_in(self, tc, *args):
-        """
-        Apply this name to the given argument(s), allocating in tc's arena.
-        """
-        return self.const().app_in(tc, *args)
 
     def binder(self, type):
         """
@@ -1964,13 +1706,6 @@ class Name(_Item):
         """
         return _mk_w_proj(self, field_index, struct_expr)
 
-    def proj_in(self, tc, field_index, struct_expr):
-        """
-        Reduction-path `.proj(...)` — allocates a fresh `W_Proj` when
-        called with a `tc` instead of hash-consing through the
-        persistent intern table.
-        """
-        return _mk_w_proj_in(tc, self, field_index, struct_expr)
 
     def as_level_param(self):
         """
@@ -2111,7 +1846,7 @@ class Binder(_Item):
     strictly for pretty printing.
     """
 
-    _attrs_ = ['name', 'type', 'left', 'right', '_fvar', '_hash']
+    _attrs_ = ['name', 'type', 'left', 'right', '_position', '_fvar', '_hash']
     _immutable_fields_ = ['name', 'type', 'left', 'right', '_hash']
 
     @staticmethod
@@ -2147,6 +1882,10 @@ class Binder(_Item):
         self.type = type
         self.left = left
         self.right = right
+        #: The binding position this binder stands at, which a binder
+        #: rebuilt from it (with a substituted type, say) shares, and
+        #: which its free variable carries as its id.
+        self._position = next(W_FVar._counter)
         self._fvar = None
         h = name.hash() ^ type.hash()
         h = (h * 1000003) ^ compute_hash(left)
@@ -2208,28 +1947,28 @@ class Binder(_Item):
         """
         fvar = self._fvar
         if fvar is None:
-            fvar = W_FVar(self)
+            fvar = W_FVar(self, self._position)
             self._fvar = fvar
         return fvar
 
-    def bind_fvar(self, tc, fvar, depth):
-        new_type = self.type.bind_fvar(tc, fvar, depth)
+    def bind_fvar(self, fvar, depth):
+        new_type = self.type.bind_fvar(fvar, depth)
         if new_type is self.type:
             return self
         return self.with_type(type=new_type)
 
-    def incr_free_bvars(self, tc, expr, depth):
+    def incr_free_bvars(self, expr, depth):
         if self.type.loose_bvar_range() <= depth:
             return self
-        return self.with_type(type=self.type.incr_free_bvars(tc, expr, depth))
+        return self.with_type(type=self.type.incr_free_bvars(expr, depth))
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         if self.type.loose_bvar_range() <= depth:
             return self
-        return self.with_type(type=self.type.instantiate(tc, expr, depth))
+        return self.with_type(type=self.type.instantiate(expr, depth))
 
-    def subst_levels(self, tc, subts):
-        new_type = self.type.subst_levels(tc, subts)
+    def subst_levels(self, subts):
+        new_type = self.type.subst_levels(subts)
         if new_type is self.type:
             return self
         return self.with_type(type=new_type)
@@ -2251,12 +1990,15 @@ class Binder(_Item):
         Create a new binder of the same name and kind but with a new type.
         """
         if self.left == "(":
-            return _mk_binder_default(self.name, type)
-        if self.left == "{":
-            return _mk_binder_implicit(self.name, type)
-        if self.left == "[":
-            return _mk_binder_instance(self.name, type)
-        return _mk_binder_strict_implicit(self.name, type)
+            binder = _mk_binder_default(self.name, type)
+        elif self.left == "{":
+            binder = _mk_binder_implicit(self.name, type)
+        elif self.left == "[":
+            binder = _mk_binder_instance(self.name, type)
+        else:
+            binder = _mk_binder_strict_implicit(self.name, type)
+        binder._position = self._position
+        return binder
 
 
 def leq(fn):
@@ -2466,7 +2208,7 @@ class W_LevelZero(W_Level):
     def pretty_parts(self):
         return "", 0
 
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         return self
 
     def syntactic_eq(self, other):
@@ -2522,8 +2264,8 @@ class W_LevelSucc(W_Level):
         text, balance = self.parent.pretty_parts()
         return text, balance + 1
 
-    def subst_levels(self, tc, substs):
-        new_parent = self.parent.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_parent = self.parent.subst_levels(substs)
         if new_parent is self.parent:
             return self
         return new_parent.succ()
@@ -2646,9 +2388,9 @@ class W_LevelMax(W_Level):
 
         return "(max %s %s)" % (lhs, rhs), 0
 
-    def subst_levels(self, tc, substs):
-        new_lhs = self.lhs.subst_levels(tc, substs)
-        new_rhs = self.rhs.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_lhs = self.lhs.subst_levels(substs)
+        new_rhs = self.rhs.subst_levels(substs)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.max(new_rhs)
@@ -2705,9 +2447,9 @@ class W_LevelIMax(W_Level):
     def pretty_parts(self):
         return "(imax %s %s)" % (self.lhs.str(), self.rhs.str()), 0
 
-    def subst_levels(self, tc, substs):
-        new_lhs = self.lhs.subst_levels(tc, substs)
-        new_rhs = self.rhs.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_lhs = self.lhs.subst_levels(substs)
+        new_rhs = self.rhs.subst_levels(substs)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.imax(new_rhs)
@@ -2763,7 +2505,7 @@ class W_LevelParam(W_Level):
     def is_named(self, name):
         return self.name.syntactic_eq(name)
 
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         return substs.get(self.name, self)
 
     def norm_kind(self):
@@ -2778,11 +2520,11 @@ class W_LevelParam(W_Level):
         subst_zero = {self.name: W_LEVEL_ZERO}
         subst_succ = {self.name: self.succ()}
         return (
-            imax.subst_levels(None, subst_zero).leq(
-                other.subst_levels(None, subst_zero), balance,
+            imax.subst_levels(subst_zero).leq(
+                other.subst_levels(subst_zero), balance,
             )
-            and imax.subst_levels(None, subst_succ).leq(
-                other.subst_levels(None, subst_succ), balance,
+            and imax.subst_levels(subst_succ).leq(
+                other.subst_levels(subst_succ), balance,
             )
         )
 
@@ -2792,11 +2534,11 @@ class W_LevelParam(W_Level):
         subst_succ = {self.name: self.succ()}
         # `gt` carries its offset on the other side from `leq`.
         return (
-            other.subst_levels(None, subst_zero).leq(
-                imax.subst_levels(None, subst_zero), -balance,
+            other.subst_levels(subst_zero).leq(
+                imax.subst_levels(subst_zero), -balance,
             )
-            and other.subst_levels(None, subst_succ).leq(
-                imax.subst_levels(None, subst_succ), -balance,
+            and other.subst_levels(subst_succ).leq(
+                imax.subst_levels(subst_succ), -balance,
             )
         )
 
@@ -2847,20 +2589,6 @@ class W_Expr(_Item):
         """Whether any free variable (`W_FVar`) occurs in this term."""
         return ((self._packed >> 32) & 1) != 0
 
-    def _reset_caches(self):
-        """
-        Drop every per-instance inline cache on this node.
-
-        The inline caches (`_whnf_cache_*` / `_infer_cache_*` /
-        `_delta_cache_*` / `_closure_cache_*` / `_inst_cache_*`) are
-        keyed on per-declaration identities — the `TypeChecker`, a
-        reduction-produced closure env, or a reduction-produced
-        substitute — so once the decl's check returns they can never
-        hit again, but the dangling `*_result` references pin whole
-        reduction towers on nodes that outlive the decl (parsed /
-        interned ones). The `TypeChecker` records every node whose
-        caches it populated and resets them here when it's torn down.
-        """
 
     def collect_consts_into(self, out, seen):
         """
@@ -2908,7 +2636,15 @@ class W_Expr(_Item):
             expr = expr.fn
         return expr, args
 
-    def open_all_binders(self, tc):
+    def whnf(self, checker):
+        """The weak head normal form of this expression."""
+        return checker.whnf(self)
+
+    def infer(self, checker):
+        """The type of this expression, checking it along the way."""
+        return checker.infer(self)
+
+    def open_all_binders(self):
         """
         Open all leading forall binders, instantiating each with a fresh fvar.
 
@@ -2919,7 +2655,7 @@ class W_Expr(_Item):
         while isinstance(expr, W_ForAll):
             fvar = expr.binder.fvar()
             fvars.append(fvar)
-            expr = expr.body.instantiate(tc, fvar, 0)
+            expr = expr.body.instantiate(fvar, 0)
         return fvars, expr
 
     def contains_const(self, name):
@@ -2945,157 +2681,12 @@ class W_Expr(_Item):
     def app(self, arg, *more):
         """
         Apply this (which better be a function) to the given argument(s).
-
-        Allocates against the persistent parser-time intern table; use
-        `.app_in(tc, arg)` from reduction paths so the allocation lands
-        in the per-decl arena and is reclaimed when the TC ends.
         """
         expr = _mk_app(self, arg)
         if not more:
             return expr
         return expr.app(*more)
 
-    @unroll_safe
-    def app_in(self, tc, arg, *more):
-        """
-        `.app(...)` for a reduction-time call site. With a `tc`,
-        allocates a fresh `W_App` (no hash-consing) so the result
-        isn't pinned in any intern dict for the lifetime of the
-        check. Without a `tc` (parser / test paths), routes to the
-        persistent intern table.
-        """
-        expr = _mk_app_in(tc, self, arg)
-        if not more:
-            return expr
-        return expr.app_in(tc, *more)
-
-    @unroll_safe
-    def closure(self, env):
-        """
-        Wrap this expression in a closure that defers ``env``'s substitution.
-        """
-        if not env:
-            return self
-        if self.loose_bvar_range() == 0:
-            return self
-        return W_Closure(env, self)
-
-    def _whnf_under_closure(self, tc, closure_env):
-        """
-        One WHNF step for ``W_Closure(closure_env, self)``.
-
-        Default: the closure has no further effect on this expression
-        (e.g. atoms have no bvars to resolve), so emit ``self`` and let
-        the outer WHNF loop continue from there.
-        """
-        return self
-
-    def whnf_with_progress(self, env):
-        """
-        Reduce this expression to weak head normal form.
-        This is the same as W_Expr.whnf, but returns (expr, made_progress)
-        where progress is True if we reduced the expression at all, and False otherwise
-
-        Uses an iterative loop with the JIT driver to avoid deep
-        recursion and allow the tracing JIT to compile efficient loops.
-
-        `_whnf_core` steps never delta-reduce; when they bottom out,
-        the head constant is unfolded one definition layer here and
-        the loop continues — lean4's `whnf` loop over `whnf_core` +
-        `unfold_definition` (type_checker.cpp:644).
-        """
-        expr = self
-        made_progress = False
-        while True:
-            if env.tracer.recording:
-                env.tracer.whnf_step(expr, env.declarations)
-            env.tick_wall_time()
-            next = expr._whnf_core(env)
-            if next is None:
-                # Native nat reduction sits between whnf_core and
-                # delta — lean4's whnf loop ordering (whnf_core →
-                # reduce_nat → unfold_definition, type_checker.cpp:
-                # 644). It must NOT live inside `_whnf_core`: probing
-                # a binary nat op WHNFs its arguments, which is full
-                # evaluation, and whnf_core callers (def_eq's lazy
-                # delta) must never evaluate.
-                if isinstance(expr, W_App):
-                    next = _try_reduce_nat(expr, env)
-                if next is None:
-                    next = expr.try_unfold_head(env)
-                    if next is None:
-                        return (expr, made_progress)
-            expr = next
-            made_progress = True
-
-    def whnf_core(self, env):
-        """
-        Reduce to weak head normal form *without* delta-unfolding the
-        head: beta / iota / proj / quot / zeta only. Mirrors lean4's
-        `whnf_core` (type_checker.cpp:401). Lazy delta uses this
-        between single unfold steps so heads can be compared at every
-        definition layer.
-        """
-        expr = self
-        while True:
-            # A full-WHNF inline cache entry mapping the expr to
-            # *itself* means it's in WHNF proper, which is also
-            # whnf_core-normal — the common case on def_eq's entry
-            # path, where most operands are already normal.
-            if isinstance(expr, W_App):
-                c = expr._caches
-                if (c is not None and c.whnf_env is env
-                        and c.whnf_result is expr):
-                    return expr
-            if env.tracer.recording:
-                env.tracer.whnf_step(expr, env.declarations)
-            env.tick_wall_time()
-            next = expr._whnf_core(env)
-            if next is None:
-                return expr
-            expr = next
-
-    def try_unfold_head(self, env):
-        """
-        Delta-unfold this expression's head constant by exactly one
-        definition layer, re-applying any spine args. Returns ``None``
-        when the head isn't an unfoldable constant — lean4's
-        `unfold_definition` / `unfold_definition_core`
-        (type_checker.cpp:488).
-        """
-        head, args = self.unapp()
-        if not isinstance(head, W_Const):
-            return None
-        if find_decl(env.declarations, head.name) is None:
-            return None
-        val = head.try_delta_reduce(env)
-        if val is None:
-            return None
-        result = val
-        i = len(args) - 1
-        while i >= 0:
-            result = result.app_in(env, args[i])
-            i -= 1
-        return result
-
-    def whnf(self, env):
-        """
-        Reduce this expression to weak head normal form.
-
-        Uses an iterative loop with the JIT driver to avoid deep
-        recursion and allow the tracing JIT to compile efficient loops.
-        """
-        (expr, _progress) = self.whnf_with_progress(env)
-        return expr
-
-    def _whnf_core(self, env):
-        """
-        Perform one WHNF reduction step.
-
-        Returns the reduced expression to keep reducing, or None if
-        this expression is already in WHNF.
-        """
-        return None
 
     def expect_sort(self, env):
         raise W_NotASort(env, self, inferred_type=self, name=None)
@@ -3150,12 +2741,12 @@ class W_BVar(W_Expr):
         assert isinstance(other, W_BVar)
         return self.id == other.id
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         if self.id == depth:
-            incr = expr.incr_free_bvars(tc, depth, 0)
+            incr = expr.incr_free_bvars(depth, 0)
             return incr
         elif self.id > depth:
             # This variable is not bound here (e.g. 'fun x => BVar(1)')
@@ -3164,26 +2755,13 @@ class W_BVar(W_Expr):
             return _mk_w_bvar(self.id - 1)
         return self
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         if self.id >= depth:
             return _mk_w_bvar(self.id + count)
         return self
 
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         return self
-
-    @unroll_safe
-    def closure(self, env):
-        if not env:
-            return self
-        if self.id < len(env):
-            return env[self.id]
-        return _mk_w_bvar(self.id - len(env))
-
-    def _whnf_under_closure(self, tc, closure_env):
-        if self.id < len(closure_env):
-            return closure_env[self.id]
-        return _mk_w_bvar(self.id - len(closure_env))
 
 
 class W_FVar(W_Expr):
@@ -3194,8 +2772,10 @@ class W_FVar(W_Expr):
 
     _counter = count()
 
-    def __init__(self, binder):
-        self.id = next(self._counter)
+    def __init__(self, binder, id=-1):
+        if id < 0:
+            id = next(self._counter)
+        self.id = id
         assert isinstance(binder, Binder)
         self.binder = binder
         bf = 1
@@ -3206,9 +2786,6 @@ class W_FVar(W_Expr):
     def __repr__(self):
         return "<FVar id={} binder={!r}>".format(self.id, self.binder)
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_FVar)
-        return self.id == other.id
 
     def str(self):
         return self.binder.name.user_name().str()
@@ -3216,23 +2793,18 @@ class W_FVar(W_Expr):
     def to_format(self, constants, marker):
         return _format.text(BINDER_NAME, self.str())
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         return self
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         return self
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_FVar)
         return self.id == other.id and syntactic_eq(self.binder, other.binder)
 
-    def infer(self, env):
-        """
-        A free variable's type comes from the binder's type which it replaced.
-        """
-        return self.binder.type
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         if self.id == fvar.id:
             return _mk_w_bvar(depth)
         return self
@@ -3259,9 +2831,6 @@ class W_LitStr(W_Expr):
         )
         return eid
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_LitStr)
-        return self.val == other.val
 
     def str(self):
         result = ['"']
@@ -3285,31 +2854,26 @@ class W_LitStr(W_Expr):
         """A ``Format`` tagging this string literal."""
         return _format.text(LITERAL, self.str())
 
-    def build_str_expr(self, env):
+    def build_str_expr(self):
         Char = Name.simple("Char").const()
-        cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app_in(env, Char)
-        expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app_in(env, Char)
+        cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app(Char)
+        expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app(Char)
         for i in range(len(self.val) - 1, -1, -1):
-            char_expr = Name.from_str("Char.ofNat").app_in(env, W_LitNat.char(self.val[i]))
-            expr = cons.app_in(env, char_expr).app_in(env, expr)
-        return Name.from_str("String.ofList").app_in(env, expr)
+            char_expr = Name.from_str("Char.ofNat").app(W_LitNat.char(self.val[i]))
+            expr = cons.app(char_expr).app(expr)
+        return Name.from_str("String.ofList").app(expr)
 
-    def infer(self, env):
-        """
-        String literals infer as the constant named String.
-        """
-        return STRING
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         return self
 
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         return self
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         return self
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         return self
 
     def syntactic_eq(self, other):
@@ -3331,9 +2895,6 @@ class W_Sort(W_Expr):
         # No class name here, as we wouldn't want to see <Sort Type>
         return "<%s>" % (self.str(),)
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_Sort)
-        return self.level.eq(other.level)
 
     def emit_to(self, exporter):
         lid = exporter.level_id(self.level)
@@ -3365,23 +2926,21 @@ class W_Sort(W_Expr):
             return "%s %s" % (prefix, text)
         return "%s (%s + %s)" % (prefix, text, balance)
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         return self
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         return self
 
-    def infer(self, env):
-        return self.level.succ().sort()
 
     def expect_sort(self, env):
         return self.level
 
-    def subst_levels(self, tc, substs):
-        new_level = self.level.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_level = self.level.subst_levels(substs)
         if new_level is self.level:
             return self
         return new_level.sort()
@@ -3398,10 +2957,7 @@ TYPE = W_LEVEL_ZERO.succ().sort()
 # Takes the level params from 'const', and substitutes them into 'target'
 @unroll_safe
 def apply_const_level_params(const, target, env):
-    # Promote for the same reason as W_Const._whnf_core / try_delta_reduce.
-    name = promote(const.name)
-    declarations = promote(env.declarations)
-    decl = get_decl(declarations, name)
+    decl = get_decl(env.declarations, const.name)
     if len(decl.levels) != len(const.levels):
         raise RuntimeError(
             "W_Const.infer: expected %s levels, got %s"
@@ -3411,7 +2967,7 @@ def apply_const_level_params(const, target, env):
     substs = {}
     for i in range(len(params)):
         substs[params[i]] = const.levels[i]
-    return target.subst_levels(env, substs)
+    return target.subst_levels(substs)
 
 
 class W_Const(W_Expr):
@@ -3476,14 +3032,21 @@ class W_Const(W_Expr):
     def is_named(self, name):
         return self.name.syntactic_eq(name)
 
-    def def_eq(self, other, tc):
+    def def_eq(self, other):
+        """
+        Whether this is the same constant as ``other`` at definitionally
+        equal universe levels.
+        """
         assert isinstance(other, W_Const)
+        if not self.name.syntactic_eq(other.name):
+            return False
         if len(self.levels) != len(other.levels):
             return False
         for i, level in enumerate(self.levels):
             if not level.eq(other.levels[i]):
                 return False
         return True
+
 
     def to_format(self, constants, marker):
         """
@@ -3509,84 +3072,27 @@ class W_Const(W_Expr):
                 return False
         return True
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         return self
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         return self
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         return self
 
-    def _whnf_core(self, env):
-        # No delta here: `_whnf_core` is beta / iota / proj / quot /
-        # zeta only, mirroring lean4's `whnf_core`
-        # (type_checker.cpp:401). Delta-unfolding the head is the
-        # *outer* `whnf` loop's job (one layer per iteration, via
-        # `try_unfold_head`), so that `whnf_core`-level callers —
-        # lazy delta in particular — can compare heads after each
-        # definition layer instead of bulldozing to a normal form.
-        return None
-
-    def try_delta_reduce(self, env, only_abbrev=False):
-        # Promote for the same reason as _whnf_core: lets the JIT fold
-        # get_decl (and the second call inside apply_const_level_params)
-        # to compile-time constants when this constant is hot.
-        name = promote(self.name)
-        declarations = promote(env.declarations)
-        decl = get_decl(declarations, name)
-        # TODO - use hint to decide whether to delta reduce or not
-        val = decl.w_kind.get_delta_reduce_target()
-        if not isinstance(decl.w_kind, W_Definition):
-            return None
-
-        if val is None:
-            return None
-
-        env.tracer.delta(name)
-        if self._delta_cache_env is env:
-            return self._delta_cache_result
-        result = apply_const_level_params(self, val, env)
-        if self._delta_cache_env is None:
-            _note_cache_write(self)
-        self._delta_cache_env = env
-        self._delta_cache_result = result
-        return result
-
-    def infer(self, env):
-        if self._infer_cache_env is env:
-            return self._infer_cache_result
-        decl = get_decl(env.declarations, self.name)
-        if not env.infer_only:
-            env.check_reference(self, decl)
-        params = decl.levels
-        if not params:
-            result = decl.type
-        else:
-            result = apply_const_level_params(self, decl.type, env)
-        if self._infer_cache_env is None:
-            _note_cache_write(self)
-        self._infer_cache_env = env
-        self._infer_cache_result = result
-        return result
-
-    def _reset_caches(self):
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._delta_cache_env = None
-        self._delta_cache_result = None
 
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
 
     @unroll_safe
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         levels = self.levels
         if not levels:
             return self
         new_levels = None
         for i in range(len(levels)):
-            new_level = levels[i].subst_levels(tc, substs)
+            new_level = levels[i].subst_levels(substs)
             if new_level is not levels[i]:
                 if new_levels is None:
                     new_levels = list(levels)
@@ -3628,66 +3134,6 @@ _BOOL_FALSE = Name.simple("Bool").child("false").const()
 _REDUCE_POW_MAX_EXP = rbigint.fromint(1 << 24)
 
 
-def _to_nat_val(expr, env):
-    """
-    If expr (already WHNF'd) is a nat literal, Nat.zero, or a chain of
-    Nat.succ applications on a nat value, return its rbigint value.
-    Otherwise return None.
-
-    Iterative to avoid stack overflow on large Nat.succ chains.
-    """
-    succs = 0
-    while True:
-        if isinstance(expr, W_LitNat):
-            return expr.val.add(rbigint.fromint(succs))
-        if isinstance(expr, W_Const):
-            if expr.name.syntactic_eq(NAT_ZERO.name):
-                return rbigint.fromint(succs)
-        if isinstance(expr, W_App):
-            head = expr.fn
-            if isinstance(head, W_Const) and head.name.syntactic_eq(
-                _NAT_SUCC_NAME,
-            ):
-                succs += 1
-                expr = expr.arg.whnf(env)
-                continue
-        return None
-
-
-def _is_nat_zero_const(expr):
-    """
-    Whether ``expr`` is the syntactic form of ``Nat.zero``: either the
-    ``Nat.zero`` constant or a ``W_LitNat`` with value zero.
-
-    Caller is responsible for any needed WHNF; this never reduces.
-    """
-    if isinstance(expr, W_LitNat):
-        return expr.val.eq(rbigint.fromint(0))
-    if isinstance(expr, W_Const):
-        return expr.name.syntactic_eq(NAT_ZERO.name)
-    return False
-
-
-def _nat_succ_pred(expr):
-    """
-    If ``expr`` is the syntactic form of ``Nat.succ pred``, return
-    ``pred``; otherwise return None.
-
-    Caller is responsible for any needed WHNF.
-    """
-    if isinstance(expr, W_LitNat):
-        if not expr.val.eq(rbigint.fromint(0)):
-            return _mk_w_litnat(expr.val.sub(rbigint.fromint(1)))
-        return None
-    if isinstance(expr, W_App):
-        head = expr.fn
-        if isinstance(head, W_Const) and head.name.syntactic_eq(
-            _NAT_SUCC_NAME,
-        ):
-            return expr.arg
-    return None
-
-
 class W_LitNat(W_Expr):
     _attrs_ = ['val']
     _immutable_fields_ = ['val']
@@ -3713,9 +3159,6 @@ class W_LitNat(W_Expr):
     def long(i):
         return _mk_w_litnat(rbigint.fromlong(i))
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_LitNat)
-        return self.val.eq(other.val)
 
     def emit_to(self, exporter):
         eid = exporter.next_expr_id()
@@ -3732,17 +3175,17 @@ class W_LitNat(W_Expr):
         """A ``Format`` tagging this nat literal."""
         return _format.text(LITERAL, self.str())
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         return self
 
-    def subst_levels(self, tc, substs):
+    def subst_levels(self, substs):
         return self
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
 
-    def one_step_constructor(self, tc):
+    def one_step_constructor(self):
         """
         Expose one Nat constructor: ``Nat.zero`` if the value is zero,
         otherwise ``Nat.succ (W_LitNat (val - 1))``.
@@ -3752,70 +3195,13 @@ class W_LitNat(W_Expr):
         """
         if self.val.eq(rbigint.fromint(0)):
             return NAT_ZERO
-        return NAT_SUCC.app_in(tc, _mk_w_litnat(self.val.sub(rbigint.fromint(1))))
+        return NAT_SUCC.app(_mk_w_litnat(self.val.sub(rbigint.fromint(1))))
 
-    def bind_fvar(self, tc, fvar, depth):
+    def bind_fvar(self, fvar, depth):
         return self
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         return self
-
-    def infer(self, env):
-        """
-        Nat literals infer as the constant named Nat.
-        """
-        return NAT
-
-
-def _try_reduce_nat(expr, env):
-    """
-    Try to natively reduce a nat kernel operation.
-
-    Matches the Lean kernel's ``reduce_nat`` function: given an application
-    expression, extract the head constant and arguments *without* first
-    WHNF-reducing them, then WHNF the arguments to see if they are nat
-    literals.  If so, compute the result natively using rbigint.
-
-    Returns a W_LitNat (or Bool constant) on success, None on failure.
-    """
-    # Collect the application spine (unreduced) to find the head constant
-    # and count args.  args are collected in reverse (innermost first).
-    target, args = expr.unapp()
-
-    if not isinstance(target, W_Const):
-        return None
-
-    # Promote the head name and arg count so the JIT can specialise one
-    # trace per head constant and fold all 14 syntactic_eq checks below
-    # to compile-time booleans.  For non-nat constants (the common case)
-    # every comparison folds to False and the whole function compiles away.
-    name = promote(target.name)
-    nargs = promote(len(args))
-
-    if nargs == 1:
-        # Nat.succ is handled via _to_nat_val instead of here,
-        # to avoid converting constructor applications to W_LitNat
-        # which would then need re-expanding in iota reduction.
-        return None
-
-    if nargs != 2:
-        return None
-
-    result = _dispatch_nat_op(name, args, env)
-    if result is not None:
-        env.tracer.nat_reduce(name)
-    return result
-
-
-def _dispatch_nat_op(name, args, env):
-    # For binary ops, args[1] is the first argument, args[0] is the second
-    # (because we collected them innermost-first).
-    if not is_nat_binop(name):
-        return None
-    v1, v2 = _get_bin_nat_args(args, env)
-    if v1 is None:
-        return None
-    return nat_binop_value(name, v1, v2)
 
 
 def is_nat_binop(name):
@@ -3890,24 +3276,6 @@ def nat_binop_value(name, v1, v2):
     return None
 
 
-def _get_bin_nat_args(args, env):
-    """
-    WHNF both arguments and extract their nat values.
-
-    Returns (v1, v2) as rbigint pair, or (None, None) if either
-    argument is not a nat literal.
-    """
-    arg1 = args[1].whnf(env)
-    v1 = _to_nat_val(arg1, env)
-    if v1 is None:
-        return None, None
-    arg2 = args[0].whnf(env)
-    v2 = _to_nat_val(arg2, env)
-    if v1 is None or v2 is None:
-        return None, None
-    return v1, v2
-
-
 class W_Proj(W_Expr):
     _attrs_ = [
         'struct_name', 'field_index', 'struct_expr',
@@ -3935,9 +3303,6 @@ class W_Proj(W_Expr):
         self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32)
 
-    def _reset_caches(self):
-        self._struct_whnf_env = None
-        self._struct_whnf = None
 
     def contains_const(self, name):
         return self.struct_expr.contains_const(name)
@@ -3958,13 +3323,6 @@ class W_Proj(W_Expr):
     def _any_subexpr_invalid_index(self, inductive):
         return inductive._has_invalid_index_occurrence(self.struct_expr)
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_Proj)
-        return (
-            self.struct_name.syntactic_eq(other.struct_name)
-            and self.field_index == other.field_index
-            and tc.def_eq(self.struct_expr, other.struct_expr)
-        )
 
     def _field_name(self, constants):
         """The name of the projected field, or its numeric index as a string."""
@@ -4004,67 +3362,32 @@ class W_Proj(W_Expr):
             result = _format.tag(_format.MARK_TAG, result)
         return result
 
-    def _whnf_core(self, env):
-        if self._struct_whnf_env is env:
-            reduced_struct = self._struct_whnf
-        else:
-            reduced_struct = self.struct_expr.whnf(env)
-            # String literals carry their constructor form implicitly.
-            # To project a field out of one, materialize the constructor
-            # app and whnf again so the field-extract below sees the
-            # spine.
-            if isinstance(reduced_struct, W_LitStr):
-                reduced_struct = reduced_struct.build_str_expr(env).whnf(env)
-            if self._struct_whnf_env is None:
-                _note_cache_write(self)
-            self._struct_whnf_env = env
-            self._struct_whnf = reduced_struct
 
-        # Try to perform projection reduction (structural iota reduction).
-        # If the struct expression reduces to a constructor application,
-        # extract the field at the appropriate index.
-        head, ctor_args = reduced_struct.unapp()
-
-        if isinstance(head, W_Const):
-            decl = get_decl(env.declarations, head.name)
-            kind = decl.w_kind
-            if isinstance(kind, W_Constructor):
-                ctor_args.reverse()
-                # Constructor args = params ++ fields
-                # The field we want is at index num_params + field_index
-                idx = kind.num_params + self.field_index
-                if idx < len(ctor_args):
-                    return ctor_args[idx]
-
-        return None
-
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range() <= depth:
             return self
-        return self.with_expr(tc, self.struct_expr.incr_free_bvars(tc, count, depth))
+        return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
 
-    def bind_fvar(self, tc, fvar, depth):
-        new_expr = self.struct_expr.bind_fvar(tc, fvar, depth)
+    def bind_fvar(self, fvar, depth):
+        new_expr = self.struct_expr.bind_fvar(fvar, depth)
         if new_expr is self.struct_expr:
             return self
-        return self.with_expr(tc, new_expr)
+        return self.with_expr(new_expr)
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
-        return self.with_expr(tc, self.struct_expr.instantiate(tc, expr, depth))
+        return self.with_expr(self.struct_expr.instantiate(expr, depth))
 
-    def subst_levels(self, tc, substs):
-        new_expr = self.struct_expr.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_expr = self.struct_expr.subst_levels(substs)
         if new_expr is self.struct_expr:
             return self
-        return self.with_expr(tc, new_expr)
+        return self.with_expr(new_expr)
 
-    def with_expr(self, tc, expr):
-        return self.struct_name.proj_in(tc, self.field_index, expr)
+    def with_expr(self, expr):
+        return self.struct_name.proj(self.field_index, expr)
 
-    def _whnf_under_closure(self, tc, closure_env):
-        return self.with_expr(tc, self.struct_expr.closure(closure_env))
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_Proj)
@@ -4073,125 +3396,6 @@ class W_Proj(W_Expr):
             and self.field_index == other.field_index
             and syntactic_eq(self.struct_expr, other.struct_expr)
         )
-
-    def infer(self, env):
-        struct_expr_type = self.struct_expr.infer(env).whnf(env)
-
-        # Unfold applications of a base inductive type (e.g. `MyList TypeA TypeB`)
-        apps = []
-        while isinstance(struct_expr_type, W_App):
-            apps.append(struct_expr_type)
-            struct_expr_type = struct_expr_type.fn
-
-        try:
-            struct_type = get_decl(env.declarations, self.struct_name)
-        except UnknownDeclaration:
-            raise InvalidProjection.unknown_structure(
-                self.struct_name, self.field_index, self.struct_expr,
-            )
-
-        # The base type must be a constant naming the projected structure
-        # (e.g. `MyList` for `MyList.0`). A projection whose structure name
-        # doesn't match the value being projected is ill-typed: the field
-        # type would be read out of a constructor the value never used.
-        if not isinstance(struct_expr_type, W_Const):
-            raise InvalidProjection.not_a_structure_type(
-                self.struct_name, self.field_index, self.struct_expr,
-            )
-        if not struct_expr_type.is_named(self.struct_name):
-            raise InvalidProjection.mismatched_structure(
-                self.struct_name, self.field_index,
-                struct_expr_type.name, self.struct_expr,
-            )
-
-        assert isinstance(struct_type, W_Declaration)
-        struct_kind = struct_type.w_kind
-        if not isinstance(struct_kind, W_Inductive):
-            raise InvalidProjection.not_an_inductive(
-                self.struct_name, self.field_index, self.struct_expr,
-            )
-        assert isinstance(struct_kind, W_Inductive)
-        if len(struct_kind.ctor_names) != 1:
-            raise InvalidProjection.not_a_structure(
-                self.struct_name, self.field_index,
-                len(struct_kind.ctor_names), self.struct_expr,
-            )
-
-        ind_type_whnf = apply_const_level_params(
-            struct_expr_type, struct_type.type, env
-        ).whnf(env)
-        is_prop_type = isinstance(ind_type_whnf, W_Sort) and ind_type_whnf.level.eq(
-            W_LEVEL_ZERO
-        )
-
-        ctor_decl = struct_kind.constructor_decls(env.declarations)[0]
-        assert isinstance(ctor_decl, W_Declaration)
-        assert isinstance(ctor_decl.w_kind, W_Constructor)
-
-        ctor_type = apply_const_level_params(
-            struct_expr_type,
-            ctor_decl.type,
-            env,
-        )
-
-        # apps is collected outermost-first; reversed gives innermost-first order,
-        # matching the constructor type's parameter order.
-        for app in reversed(apps):
-            ctor_type = ctor_type.whnf(env)
-            if not isinstance(ctor_type, W_ForAll):
-                raise InvalidProjection.out_of_bounds(
-                    self.struct_name, self.field_index, 0, self.struct_expr,
-                )
-            new_type = ctor_type.body.instantiate(env, app.arg)
-            ctor_type = new_type
-
-        # Fields can depend on earlier fields, so the constructor takes in 'proj'
-        # expressions for all of the previous fields ('self.field_idx' is 0-based).
-        # For Prop-valued structures, any field that is depended upon by later fields
-        # must itself live in Prop (matching the Lean kernel's infer_proj rule).
-        i = -1
-        for i in range(self.field_index):
-            ctor_type = ctor_type.whnf(env)
-            if not isinstance(ctor_type, W_ForAll):
-                raise InvalidProjection.out_of_bounds(
-                    self.struct_name, self.field_index, i + 1,
-                    self.struct_expr,
-                )
-            if ctor_type.body.loose_bvar_range() > 0:
-                # Later fields depend on this one; for Prop structs the field must be Prop.
-                if is_prop_type:
-                    field_sort = ctor_type.binder.type.infer(env).whnf(env)
-                    if not (
-                        isinstance(field_sort, W_Sort)
-                        and field_sort.level.eq(W_LEVEL_ZERO)
-                    ):
-                        raise InvalidProjection.non_prop_field(
-                            self.struct_name, self.field_index,
-                            self.struct_expr,
-                        )
-                proj = self.struct_name.proj_in(env, i, self.struct_expr)
-                ctor_type = ctor_type.body.instantiate(env, proj)
-            else:
-                # Non-dependent field: body doesn't refer to it, skip instantiation.
-                ctor_type = ctor_type.body
-
-        ctor_type = ctor_type.whnf(env)
-        if not isinstance(ctor_type, W_ForAll):
-            raise InvalidProjection.out_of_bounds(
-                self.struct_name, self.field_index, i + 1, self.struct_expr,
-            )
-
-        # For Prop-valued structures the target field itself must live in Prop.
-        if is_prop_type:
-            field_sort = ctor_type.binder.type.infer(env).whnf(env)
-            if not (
-                isinstance(field_sort, W_Sort) and field_sort.level.eq(W_LEVEL_ZERO)
-            ):
-                raise InvalidProjection.non_prop_field(
-                    self.struct_name, self.field_index, self.struct_expr,
-                )
-
-        return ctor_type.binder.type
 
 
 def _is_prop_type(expr, constants):
@@ -4206,7 +3410,7 @@ def _is_prop_type(expr, constants):
         elif isinstance(current, W_ForAll):
             # imax(sort_of(A), sort_of(B)) = 0 whenever sort_of(B) = 0,
             # so \u2200 (x : A), B is Prop iff B is Prop.
-            stack.append(current.body.instantiate(None, current.binder.fvar()))
+            stack.append(current.body.instantiate(current.binder.fvar()))
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
@@ -4223,11 +3427,11 @@ def _is_prop_type(expr, constants):
                             substs = {}
                             for i in range(len(decl.levels)):
                                 substs[decl.levels[i]] = head.levels[i]
-                            val = val.subst_levels(None, substs)
+                            val = val.subst_levels(substs)
                         # Beta-reduce by applying each arg to the lambda body.
                         for arg in args:
                             if isinstance(val, W_Lambda):
-                                val = val.body.instantiate(None, arg)
+                                val = val.body.instantiate(arg)
                             else:
                                 break
                         stack.append(val)
@@ -4237,7 +3441,7 @@ def _is_prop_type(expr, constants):
                         decl_type = decl.type
                         for arg in args:
                             if isinstance(decl_type, W_ForAll):
-                                decl_type = decl_type.body.instantiate(None, arg)
+                                decl_type = decl_type.body.instantiate(arg)
                             else:
                                 break
                         stack.append(decl_type)
@@ -4246,7 +3450,7 @@ def _is_prop_type(expr, constants):
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
-    _attrs_ = ['binder', 'body', 'finished_reduce', '_caches']
+    _attrs_ = ['binder', 'body']
     _immutable_fields_ = ['binder', 'body']
 
     # Subclasses set this to a distinct tag so structurally-equal
@@ -4258,7 +3462,6 @@ class W_FunBase(W_Expr):
         assert isinstance(binder, Binder)
         self.binder = binder
         self.body = body
-        self.finished_reduce = False
         body_range = body.loose_bvar_range() - 1
         if body_range < 0:
             body_range = 0
@@ -4269,45 +3472,12 @@ class W_FunBase(W_Expr):
             loose = body_range
         fvar = binder.type.has_fvar() or body.has_fvar()
         bf = (loose << 1) | (1 if fvar else 0)
-        # Instantiate / infer / closure caches, allocated on first
-        # write — see `_ExprCaches`. The closure cache is critical for
-        # DAG-shared lambdas: when ``λ`` appears N times under the
-        # same env (e.g. wrap2 lam lam) all N calls return the same
-        # ``W_Closure``, preserving the inferred-type cache across
-        # references and avoiding exponential blowup.
-        self._caches = None
         # Content hash: mix binder's name + type + binder-info + body.
         h = (binder.name.hash() * 1000003) ^ binder.type.hash()
         h = (h * 1000003) ^ body.hash()
         self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32)
 
-    def _ensure_caches(self):
-        c = self._caches
-        if c is None:
-            c = _ExprCaches()
-            self._caches = c
-        return c
-
-    @unroll_safe
-    def closure(self, env):
-        if not env:
-            return self
-        if self.loose_bvar_range() == 0:
-            return self
-        c = self._caches
-        if c is not None and c.closure_env is env:
-            return c.closure_result
-        result = W_Closure(env, self)
-        c = self._ensure_caches()
-        if c.closure_env is None:
-            _note_cache_write(self)
-        c.closure_env = env
-        c.closure_result = result
-        return result
-
-    def _reset_caches(self):
-        self._caches = None
 
     def contains_const(self, name):
         return (self.binder.type.contains_const(name)
@@ -4350,29 +3520,9 @@ class W_FunBase(W_Expr):
         """The binder type must not mention any inductive in the block."""
         if inductive._contains_any_inductive(self.binder.type):
             return False
-        return self.body.instantiate(env, self.binder.fvar()).whnf(env).is_strictly_positive(
+        return self.body.instantiate(self.binder.fvar()).whnf(env).is_strictly_positive(
             inductive, env,
         )
-
-    def def_eq(self, other, tc):
-        """
-        Compare binders and bodies without regard for bound variable names.
-
-        (This is alpha equivalence.)
-        """
-        assert isinstance(other, W_FunBase)
-        if not tc.def_eq(self.binder.type, other.binder.type):
-            return False
-
-        fvar = self.binder.fvar()
-        body = self.body.instantiate(tc, fvar)
-        other_body = other.body.instantiate(tc, fvar)
-
-        return tc.def_eq(body, other_body)
-
-    def _whnf_under_closure(self, tc, closure_env):
-        # Closure-of-lambda (or -ForAll) is itself a value in WHNF.
-        return None
 
 
 class W_ForAll(W_FunBase):
@@ -4382,24 +3532,18 @@ class W_ForAll(W_FunBase):
     _ie_first_tag = False  # `'f' < 'i'`
     _hash_tag = 0xF0A1
 
-    def infer(self, env):
-        return _iter_infer(env, self)
-
-    def _infer_recursive(self, env):
-        binder_sort = self.binder.type.infer(env).whnf(env).expect_sort(env)
-        body_sort = (
-            self.body.instantiate(env, self.binder.fvar())
-            .infer(env)
-            .whnf(env)
-            .expect_sort(env)
-        )
-        return binder_sort.imax(body_sort).sort()
 
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
 
-    def instantiate(self, tc, expr, depth=0):
-        return _iter_instantiate(tc, self, expr, depth)
+    def instantiate(self, expr, depth=0):
+        if self.loose_bvar_range() <= depth:
+            return self
+        new_binder = self.binder.instantiate(expr, depth)
+        new_body = self.body.instantiate(expr, depth + 1)
+        if new_binder is self.binder and new_body is self.body:
+            return self
+        return _mk_w_forall(new_binder, new_body)
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
@@ -4407,28 +3551,26 @@ class W_ForAll(W_FunBase):
             self.body, other.body
         )
 
-    def bind_fvar(self, tc, fvar, depth):
-        new_binder = self.binder.bind_fvar(tc, fvar, depth)
-        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
+    def bind_fvar(self, fvar, depth):
+        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return _mk_w_forall_in(tc, new_binder, new_body)
+        return _mk_w_forall(new_binder, new_body)
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range() <= depth:
             return self
-        return _mk_w_forall_in(
-            tc,
-            self.binder.incr_free_bvars(tc, count, depth),
-            self.body.incr_free_bvars(tc, count, depth + 1),
+        return _mk_w_forall(self.binder.incr_free_bvars(count, depth),
+            self.body.incr_free_bvars(count, depth + 1),
         )
 
-    def subst_levels(self, tc, levels):
-        new_binder = self.binder.subst_levels(tc, levels)
-        new_body = self.body.subst_levels(tc, levels)
+    def subst_levels(self, levels):
+        new_binder = self.binder.subst_levels(levels)
+        new_body = self.body.subst_levels(levels)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return _mk_w_forall_in(tc, new_binder, new_body)
+        return _mk_w_forall(new_binder, new_body)
 
     def to_format(self, constants, marker):
         """
@@ -4565,7 +3707,7 @@ def _forall_quantifier_step(fa, constants):
             lhs_type = decl.type
     elif isinstance(lhs_type, W_FVar):
         lhs_type = lhs_type.binder.type
-    rhs = fa.body.instantiate(None, fa.binder.fvar())
+    rhs = fa.body.instantiate(fa.binder.fvar())
     is_forall = (
         (not _is_prop_type(lhs_type, constants)
          and _is_prop_type(rhs, constants))
@@ -4681,7 +3823,7 @@ class W_Lambda(W_FunBase):
 
         body = current
         for binder in reversed(binders):
-            body = body.instantiate(None, binder.fvar())
+            body = body.instantiate(binder.fvar())
 
         return binder_doc, body
 
@@ -4725,34 +3867,36 @@ class W_Lambda(W_FunBase):
             self.body, other.body
         )
 
-    def bind_fvar(self, tc, fvar, depth):
-        new_binder = self.binder.bind_fvar(tc, fvar, depth)
-        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
+    def bind_fvar(self, fvar, depth):
+        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return _mk_w_lambda_in(tc, new_binder, new_body)
+        return _mk_w_lambda(new_binder, new_body)
 
-    def instantiate(self, tc, expr, depth=0):
-        return _iter_instantiate(tc, self, expr, depth)
-
-    def incr_free_bvars(self, tc, count, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
-        return _mk_w_lambda_in(
-            tc,
-            self.binder.incr_free_bvars(tc, count, depth),
-            self.body.incr_free_bvars(tc, count, depth + 1),
-        )
-
-    def infer(self, env):
-        return _iter_infer(env, self)
-
-    def subst_levels(self, tc, substs):
-        new_binder = self.binder.subst_levels(tc, substs)
-        new_body = self.body.subst_levels(tc, substs)
+        new_binder = self.binder.instantiate(expr, depth)
+        new_body = self.body.instantiate(expr, depth + 1)
         if new_binder is self.binder and new_body is self.body:
             return self
-        return _mk_w_lambda_in(tc, new_binder, new_body)
+        return _mk_w_lambda(new_binder, new_body)
+
+    def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range() <= depth:
+            return self
+        return _mk_w_lambda(self.binder.incr_free_bvars(count, depth),
+            self.body.incr_free_bvars(count, depth + 1),
+        )
+
+
+    def subst_levels(self, substs):
+        new_binder = self.binder.subst_levels(substs)
+        new_body = self.body.subst_levels(substs)
+        if new_binder is self.binder and new_body is self.body:
+            return self
+        return _mk_w_lambda(new_binder, new_body)
 
 
 class W_Let(W_Expr):
@@ -4810,7 +3954,7 @@ class W_Let(W_Expr):
 
     def to_format(self, constants, marker):
         fvar = self.name.binder(type=self.type).fvar()
-        body = self.body.instantiate(None, fvar)
+        body = self.body.instantiate(fvar)
         # The binder type is omitted, matching Lean's `pp.letVarTypes=false`
         # default (`let x := v`). The value breaks onto its own indented line
         # when it does not fit; the newline before the body is always
@@ -4827,43 +3971,29 @@ class W_Let(W_Expr):
             _sub(marker, body, constants),
         ])
 
-    def infer(self, env):
-        self.type.infer(env).whnf(env).expect_sort(env)
-        # The let's value must match the declared type. Surface a real
-        # W_TypeError instead of asserting so malformed exports (like
-        # the arena's `constlevels` regression) get cleanly rejected
-        # rather than crashing the process.
-        inferred_value_type = self.value.infer(env)
-        if not env.def_eq(inferred_value_type, self.type):
-            raise W_TypeError(
-                env, self.value, self.type,
-                inferred_type=inferred_value_type,
-            )
-        body_type = self.body.instantiate(env, self.value)
-        return body_type.infer(env)
 
-    def instantiate(self, tc, expr, depth=0):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
         return self.name.let(
-            type=self.type.instantiate(tc, expr, depth),
-            value=self.value.instantiate(tc, expr, depth),
-            body=self.body.instantiate(tc, expr, depth + 1),
+            type=self.type.instantiate(expr, depth),
+            value=self.value.instantiate(expr, depth),
+            body=self.body.instantiate(expr, depth + 1),
         )
 
-    def incr_free_bvars(self, tc, count, depth):
+    def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range() <= depth:
             return self
         return self.name.let(
-            type=self.type.incr_free_bvars(tc, count, depth),
-            value=self.value.incr_free_bvars(tc, count, depth),
-            body=self.body.incr_free_bvars(tc, count, depth + 1),
+            type=self.type.incr_free_bvars(count, depth),
+            value=self.value.incr_free_bvars(count, depth),
+            body=self.body.incr_free_bvars(count, depth + 1),
         )
 
-    def bind_fvar(self, tc, fvar, depth):
-        new_type = self.type.bind_fvar(tc, fvar, depth)
-        new_value = self.value.bind_fvar(tc, fvar, depth)
-        new_body = self.body.bind_fvar(tc, fvar, depth + 1)
+    def bind_fvar(self, fvar, depth):
+        new_type = self.type.bind_fvar(fvar, depth)
+        new_value = self.value.bind_fvar(fvar, depth)
+        new_body = self.body.bind_fvar(fvar, depth + 1)
         if (new_type is self.type
                 and new_value is self.value
                 and new_body is self.body):
@@ -4881,13 +4011,11 @@ class W_Let(W_Expr):
             and syntactic_eq(self.body, other.body)
         )
 
-    def _whnf_core(self, env):
-        return self.body.instantiate(env, self.value)
 
-    def subst_levels(self, tc, substs):
-        new_type = self.type.subst_levels(tc, substs)
-        new_value = self.value.subst_levels(tc, substs)
-        new_body = self.body.subst_levels(tc, substs)
+    def subst_levels(self, substs):
+        new_type = self.type.subst_levels(substs)
+        new_value = self.value.subst_levels(substs)
+        new_body = self.body.subst_levels(substs)
         if (new_type is self.type
                 and new_value is self.value
                 and new_body is self.body):
@@ -4896,13 +4024,9 @@ class W_Let(W_Expr):
             type=new_type, value=new_value, body=new_body,
         )
 
-    def _whnf_under_closure(self, tc, closure_env):
-        # let x := val in body  ⇒  body[x ↦ val], all under closure_env.
-        return self.body.closure([self.value]).closure(closure_env)
-
 
 class W_App(W_Expr):
-    _attrs_ = ['fn', 'arg', '_caches']
+    _attrs_ = ['fn', 'arg']
     _immutable_fields_ = ['fn', 'arg']
 
     def __init__(self, fn, arg):
@@ -4916,19 +4040,10 @@ class W_App(W_Expr):
             loose = arg_range
         fvar = fn.has_fvar() or arg.has_fvar()
         bf = (loose << 1) | (1 if fvar else 0)
-        # Instantiate / infer / whnf caches, allocated on first write —
-        # see `_ExprCaches`.
-        self._caches = None
         h = (fn.hash() * 1000003) ^ arg.hash()
         self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32)
 
-    def _ensure_caches(self):
-        c = self._caches
-        if c is None:
-            c = _ExprCaches()
-            self._caches = c
-        return c
 
     def contains_const(self, name):
         return self.fn.contains_const(name) or self.arg.contains_const(name)
@@ -4955,50 +4070,6 @@ class W_App(W_Expr):
         args.reverse()
         return "<W_App fn={!r} args={!r}>".format(current, args)
 
-    def def_eq(self, other, tc):
-        assert isinstance(other, W_App)
-        self_fn = self.fn
-        if isinstance(self_fn, W_Closure):
-            self_fn_body = self_fn.body
-            if isinstance(self_fn_body, W_Lambda):
-                new_env = [self.arg] + list(self_fn.env)
-                if tc.def_eq(self_fn_body.body.closure(new_env), other):
-                    return True
-        elif isinstance(self_fn, W_FunBase):
-            if tc.def_eq(self_fn.body.instantiate(tc, self.arg), other):
-                return True
-        other_fn = other.fn
-        if isinstance(other_fn, W_Closure):
-            other_fn_body = other_fn.body
-            if isinstance(other_fn_body, W_Lambda):
-                new_env = [other.arg] + list(other_fn.env)
-                if tc.def_eq(self, other_fn_body.body.closure(new_env)):
-                    return True
-        elif isinstance(other_fn, W_FunBase):
-            if tc.def_eq(self, other_fn.body.instantiate(tc, other.arg)):
-                return True
-        # Iterative spine walk to avoid stack overflow on deep W_App trees.
-        # Collect args from both sides while both fns are W_App, then
-        # compare heads and args pairwise via def_eq.
-        self_args = newlist_hint(4)
-        other_args = newlist_hint(4)
-        lhs = self
-        rhs = other
-        while isinstance(lhs, W_App) and isinstance(rhs, W_App):
-            self_args.append(lhs.arg)
-            other_args.append(rhs.arg)
-            lhs = lhs.fn
-            rhs = rhs.fn
-        if not tc.def_eq(lhs, rhs):
-            return False
-        if len(self_args) != len(other_args):
-            return False
-        i = len(self_args) - 1
-        while i >= 0:
-            if not tc.def_eq(self_args[i], other_args[i]):
-                return False
-            i -= 1
-        return True
 
     def to_format(self, constants, marker):
         current, args = self.unapp()
@@ -5015,11 +4086,11 @@ class W_App(W_Expr):
                     substs = {}
                     for k in range(len(decl.levels)):
                         substs[decl.levels[k]] = current.levels[k]
-                    decl_type = decl_type.subst_levels(None, substs)
+                    decl_type = decl_type.subst_levels(substs)
                 for j in range(n - 1, -1, -1):
                     if isinstance(decl_type, W_ForAll):
                         mask.append(decl_type.binder.is_default())
-                        decl_type = decl_type.body.instantiate(None, args[j])
+                        decl_type = decl_type.body.instantiate(args[j])
                     else:
                         mask.append(True)
                 has_implicit = False
@@ -5078,25 +4149,6 @@ class W_App(W_Expr):
         # as many arguments as fit go on each line, the rest wrap, indented.
         return _format.fill(_format.nest(2, _format.concat(parts)))
 
-    def infer(self, env):
-        return _iter_infer(env, self)
-
-    def whnf(self, env):
-        c = self._caches
-        if c is not None and c.whnf_env is env:
-            env.tracer.whnf_cache_hit()
-            return c.whnf_result
-        env.tracer.whnf_cache_miss()
-        (expr, _progress) = self.whnf_with_progress(env)
-        c = self._ensure_caches()
-        if c.whnf_env is None:
-            _note_cache_write(self)
-        c.whnf_env = env
-        c.whnf_result = expr
-        return expr
-
-    def _reset_caches(self):
-        self._caches = None
 
     def expect_sort(self, env):
         return self.whnf(env).expect_sort(env)
@@ -5115,712 +4167,35 @@ class W_App(W_Expr):
     _QUOT_LIFT = Name.from_str("Quot.lift")
     _QUOT_MK = Name.from_str("Quot.mk")
 
-    def try_quot_lift_reduce(self, env):
-        """
-        Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
-        """
-        # Quot.lift needs 6 args, last must be Quot.mk with 3 args.
-        head, args = self.unapp()
-        if not isinstance(head, W_Const):
-            return None
-        if not head.name.syntactic_eq(self._QUOT_LIFT):
-            return None
-        if len(args) != 6:
-            return None
 
-        # args are reversed: args[0] is the last arg (the Quot.mk application)
-        quot_mk_app = args[0].whnf(env)
-        mk_head, mk_args = quot_mk_app.unapp()
-        if not isinstance(mk_head, W_Const):
-            return None
-        if not mk_head.name.syntactic_eq(self._QUOT_MK):
-            return None
-        if len(mk_args) != 3:
-            return None
-
-        # args[5-0]: {α} {r} {β} f h q — f is args[2] (reversed)
-        f = args[2]
-        # mk_args[2-0]: {α} r a — a is mk_args[0] (reversed)
-        a = mk_args[0]
-        return f.app_in(env, a)
-
-    def _whnf_core_no_iota(self, env):
-        """W_App._whnf_core minus the iota/struct-eta/quot-lift steps.
-
-        Used inside the iterative iota driver to drive WHNF of a major
-        premise without triggering recursive `try_iota_reduce` calls.
-        """
-        fn_next = self.fn._whnf_core(env)
-        if fn_next is not None:
-            return fn_next.app_in(env, self.arg)
-        fn = self.fn
-        if isinstance(fn, W_Closure):
-            inner = fn.body
-            if isinstance(inner, W_Lambda):
-                new_env = [self.arg] + list(fn.env)
-                env.tracer.beta()
-                return inner.body.closure(new_env)
-            fn = fn.force(env)
-        if isinstance(fn, W_FunBase):
-            env.tracer.beta()
-            return fn.body.instantiate(env, self.arg)
-        return None
-
-    def try_iota_reduce(self, env):
-        target, args = self.unapp()
-
-        if not isinstance(target, W_Const):
-            return False, self
-
-        decl = get_decl(env.declarations, target.name)
-        rec_kind = decl.w_kind
-        if not isinstance(rec_kind, W_Recursor):
-            return False, self
-
-        skip_count = (
-            rec_kind.num_params
-            + rec_kind.num_indices
-            + rec_kind.num_minors
-            + rec_kind.num_motives
-        )
-        major_idx = len(args) - 1 - skip_count
-
-        # Not enough arguments in our current app - we cannot reduce, since we need to know the major premise
-        # to pick the recursor rule to apply
-        if major_idx < 0:
-            return False, self
-
-        # Fast path: `Nat.rec motive zero succ (W_LitNat N)`. The
-        # standard iota path applies `rec_rule.rhs` to four args
-        # (motive, zero, succ, pred) and lets the outer whnf loop
-        # beta away the four-lambda rule body — four betas per step.
-        # We construct the same one-step iota result directly here,
-        # skipping those four betas. The chain stays lazy: consumers
-        # only descend as far as they need, and each successive step
-        # also hits this path. On `Nat.brecOn`-shaped recursions in
-        # init.ndjson the rule-unwrap betas account for ~22% of all
-        # betas in the workload.
-        nat_rec_step = self._maybe_iota_nat_rec_step(
-            env, target, args, major_idx,
-        )
-        if nat_rec_step is not None:
-            env.tracer.iota(target.name)
-            return True, nat_rec_step
-
-        major_premise = _whnf_iota_chain(env, args[major_idx])
-
-        # TODO - when checking the declaration, verify that all of the requirements for k-like reduction
-        # are met: https://ammkrn.github.io/type_checking_in_lean4/type_checking/reduction.html?highlight=k-li#k-like-reduction
-        if rec_kind.k == 1:
-            # Terms under reduction are already well-typed (the
-            # `infer_only` invariant), so only the major premise's type
-            # is needed here; K's soundness condition is the index-
-            # coincidence `def_eq(old_ty, new_ty)` below.
-
-            # Full whnf, not just `.head()`: the major is typically an
-            # opened binder's fvar whose type may sit under a closure
-            # or behind a definition unfolding to the inductive —
-            # lean4's to_cnstr_when_K does `whnf(infer_type(e))`.
-            old_ty = major_premise.infer(env).whnf(env)
-            old_ty_base = old_ty.head()
-            # The major premise's inferred-type head can be non-W_Const
-            # when iota is invoked inside an unfinished def-eq probe
-            # against a still-stuck term — observed for `Eq.rec` while
-            # checking some Init theorems whose proofs run congruence
-            # through chains of `Eq.mpr`. Bail rather than asserting:
-            # the caller will treat this app as irreducible, the
-            # def-eq attempt fails up the stack, and a real type error
-            # surfaces in a context where we can report it.
-            if not isinstance(old_ty_base, W_Const):
-                env.tracer.klike_bail_head()
-                return False, self
-
-            # Mutual-inductive blocks legitimately have `len(all) > 1`;
-            # k-like reduction can only operate on a single-inductive
-            # context. Same bail-out reasoning.
-            if len(rec_kind.all) != 1:
-                env.tracer.klike_bail_mutual()
-                return False, self
-            inductive_decl = get_decl(env.declarations, rec_kind.all[0])
-            ind_kind = inductive_decl.w_kind
-            assert isinstance(ind_kind, W_Inductive)
-
-            # K-like reduction only makes sense for a single-ctor
-            # inductive.
-            if len(ind_kind.ctor_names) != 1:
-                env.tracer.klike_bail_ctors()
-                return False, self
-            ctor_decl = ind_kind.constructor_decls(env.declarations)[0]
-            ctor_kind = ctor_decl.w_kind
-            assert isinstance(ctor_kind, W_Constructor)
-
-            new_args = list(args)
-            new_args.reverse()
-            num_ctor_params = ctor_kind.num_params
-
-            major_premise_ctor = ctor_decl.name.const(old_ty_base.levels)
-            assert num_ctor_params >= 0
-            for arg in new_args[0:num_ctor_params]:
-                major_premise_ctor = major_premise_ctor.app_in(env, arg)
-
-            new_ty = major_premise_ctor.infer(env)
-            if not env.def_eq(old_ty, new_ty):
-                env.tracer.klike_bail_defeq()
-                return False, self
-            env.tracer.klike_fired()
-            major_premise = major_premise_ctor
-
-        # We try to delay materializing LitNat expressions as late as possible,
-        # so that we can rely on syntactic equality (e.g. 'W_LitNat(25) == W_LitNat(25)')
-        # However, we need an actual constructor and application for iota reduction.
-        # Expose one constructor (Nat.zero or Nat.succ of W_LitNat predecessor)
-        # so iota can fire one step; the predecessor stays a W_LitNat and is only
-        # re-expanded lazily on the next WHNF iteration. This avoids materialising
-        # an N-deep Nat.succ chain up front for large literals.
-        if isinstance(major_premise, W_LitNat):
-            major_premise = major_premise.one_step_constructor(env)
-        else:
-            # A stuck major of non-recursive-structure type reduces by
-            # eta-expanding it to `C.mk params… major.0 … major.n`
-            # first, so the ctor's rule can fire — lean4's
-            # `to_cnstr_when_structure` (inductive.h), applied to the
-            # recursor's *major* inductive (`get_major_induct`), which
-            # for the split recursors of a nested block differs from
-            # `all[0]` (e.g. `CedarType.rec_1`'s major is a
-            # `Cedar.Data.Map`, whose single `Map.mk` rule fires).
-            expanded = self._to_cnstr_when_structure(
-                env, decl.type, rec_kind, major_premise,
-            )
-            if expanded is not None:
-                major_premise = expanded
-
-        # If the inductive type has parameters, we need to extract them from the major premise
-        # (e.g. the 'p' in 'Decidable.isFalse p')
-        # and add then as arguments to the recursor rule application (before the motive)
-        major_premise_ctor, all_ctor_args = major_premise.unapp()
-
-        if not isinstance(major_premise_ctor, W_Const):
-            return False, self
-
-        all_ctor_args.reverse()
-        rec_rule = rec_kind.rule_for_ctor(major_premise_ctor.name)
-        if rec_rule is not None:
-            # Construct an application of the recursor rule, using all
-            # of the parameters except the major premise (which is
-            # implied by the rule we matched for the ctor — e.g.
-            # `Bool.false`).
-            new_app = rec_rule.rhs
-            # The rec rule's value uses the inductive's level
-            # parameters, so substitute the recursor call's levels in.
-            new_app = apply_const_level_params(target, new_app, env)
-
-            new_args = list(args)
-            new_args.reverse()
-
-            total_args = (
-                rec_kind.num_params
-                + rec_kind.num_motives
-                + rec_kind.num_minors
-            )
-            assert total_args >= 0
-            for arg in new_args[:total_args]:
-                new_app = new_app.app_in(env, arg)
-
-            # For nested-inductive recursors the ctor whose iota we're
-            # firing can belong to a *different* inductive than the
-            # recursor's (e.g. `Lean.Syntax.rec_*` has a rule for
-            # `Array.mk`, whose parent has its own param count). Slice
-            # the ctor's args using the *ctor's* num_params, not the
-            # recursor's. For non-nested cases the two coincide.
-            ctor_decl = find_decl(env.declarations, rec_rule.ctor_name)
-            if ctor_decl is None or not ctor_decl.w_kind.is_constructor():
-                return False, self
-            ctor_kind = ctor_decl.w_kind
-            assert isinstance(ctor_kind, W_Constructor)
-            ctor_start = ctor_kind.num_params
-            ctor_end = ctor_kind.num_params + rec_rule.num_fields
-            assert ctor_start >= 0
-            assert ctor_end >= 0
-
-            for ctor_field in all_ctor_args[ctor_start:ctor_end]:
-                new_app = new_app.app_in(env, ctor_field)
-
-            i = major_idx - 1
-            while i >= 0:
-                new_app = new_app.app_in(env, args[i])
-                i -= 1
-
-            env.tracer.iota(target.name)
-            return True, new_app
-
-        return False, self
-
-    def _to_cnstr_when_structure(self, env, rec_type, rec_kind, major):
-        """
-        Lean's ``to_cnstr_when_structure`` (inductive.h): if ``major``
-        is not a constructor application and its type is a non-Prop
-        non-recursive structure ``C params…``, return
-        ``C.mk params… major.0 … major.n`` (`expand_eta_struct`);
-        otherwise ``None``.
-
-        The structure consulted is the recursor's major-premise
-        inductive (``recursor_val::get_major_induct``), read off the
-        recursor's own type.
-        """
-        induct_name = rec_kind.major_induct_name(rec_type)
-        if induct_name is None:
-            return None
-        ind_decl = find_decl(env.declarations, induct_name)
-        if ind_decl is None:
-            return None
-        ind_kind = ind_decl.w_kind
-        if not isinstance(ind_kind, W_Inductive):
-            return None
-        if not ind_kind.is_non_recursive_structure():
-            return None
-        major_head, _ = major.unapp()
-        if isinstance(major_head, W_Const):
-            head_decl = find_decl(env.declarations, major_head.name)
-            if head_decl is not None and head_decl.w_kind.is_constructor():
-                return None
-        e_type = major.infer(env).whnf(env)
-        type_head, rev_type_args = e_type.unapp()
-        if not isinstance(type_head, W_Const):
-            return None
-        if not type_head.name.syntactic_eq(induct_name):
-            return None
-        ctor_decl = ind_kind.constructor_decls(env.declarations)[0]
-        ctor_kind = ctor_decl.w_kind
-        assert isinstance(ctor_kind, W_Constructor)
-        rev_type_args.reverse()
-        num_params = ctor_kind.num_params
-        assert num_params >= 0
-        if len(rev_type_args) < num_params:
-            return None
-        result = ctor_decl.name.const(type_head.levels)
-        for i in range(num_params):
-            result = result.app_in(env, rev_type_args[i])
-        for i in range(ctor_kind.num_fields):
-            result = result.app_in(
-                env, induct_name.proj_in(env, i, major),
-            )
-        return result
-
-    def _maybe_iota_nat_rec_step(self, tc, target, args, major_idx):
-        """One-step iota for `Nat.rec motive zero succ (W_LitNat N)`.
-
-        Returns the same expression the standard iota path would produce
-        after fully beta-reducing `rec_rule.rhs` against the four args
-        — namely:
-
-            N == 0   →   zero_case
-            N >  0   →   succ_case (W_LitNat N-1) (Nat.rec motive zero succ (W_LitNat N-1))
-
-        — but built directly as a small `W_App` tree rather than via an
-        app spine the outer whnf loop has to peel one beta at a time.
-        Returns None when this isn't applicable (not `Nat.rec`, major
-        isn't a literal, or trailing args sit after the major).
-        """
-        if not target.name.syntactic_eq(_NAT_REC_NAME):
-            return None
-        if major_idx != 0:
-            # Trailing args after the major aren't handled here — fall
-            # through so the standard iota path peels them as usual.
-            return None
-        major = args[0]
-        if not isinstance(major, W_LitNat):
-            return None
-        # args is outermost-first from `unapp`, so for the fully-applied
-        # `Nat.rec motive zero succ N` we have args = [N, succ, zero, motive].
-        succ_case = args[1]
-        zero_case = args[2]
-        motive = args[3]
-        if major.val.eq(rbigint.fromint(0)):
-            return zero_case
-        pred = _mk_w_litnat(major.val.sub(rbigint.fromint(1)))
-        rec_at_pred = target.app_in(tc, motive).app_in(tc, zero_case).app_in(tc, succ_case).app_in(tc, pred)
-        return succ_case.app_in(tc, pred).app_in(tc, rec_at_pred)
-
-    # https://leanprover-community.github.io/lean4-metaprogramming-book/main/04_metam.html#weak-head-normalisation
-    def _whnf_core(self, env):
-        # No native nat probe here: probing a binary nat op WHNFs its
-        # arguments — full evaluation — and whnf_core must never
-        # evaluate. The probe lives in the evaluating loops
-        # (`whnf_with_progress`, `_whnf_iota_chain`) and, fvar-gated,
-        # in `_try_lazy_delta`, mirroring lean4 (reduce_nat is called
-        # from `whnf` at type_checker.cpp:670 and from
-        # `lazy_delta_reduction` at :979, never from `whnf_core`).
-
-        # Reduce the head by a single step rather than calling
-        # whnf_with_progress (which spawns its own JIT-driver loop).
-        # Returning a new App here lets the *outer* whnf_with_progress
-        # loop iterate over the entire reduction chain — every step
-        # goes through the same W_App merge-point, giving the RPython
-        # JIT enough iterations to compile a useful trace.
-        fn_next = self.fn._whnf_core(env)
-        if fn_next is not None:
-            return fn_next.app_in(env, self.arg)
-
-        # self.fn is now in WHNF.
-        fn = self.fn
-
-        # Beta reduction. If `fn` is a closure around a lambda
-        # (`_whnf_under_closure` treats those as already-WHNF), do
-        # the beta step *inside* the closure: extend the closure
-        # environment with the arg instead of materializing the whole
-        # substitution via `force`.
-        if isinstance(fn, W_Closure):
-            inner = fn.body
-            if isinstance(inner, W_Lambda):
-                new_env = [self.arg] + list(fn.env)
-                env.tracer.beta()
-                return inner.body.closure(new_env)
-            fn = fn.force(env)
-        if isinstance(fn, W_FunBase):
-            env.tracer.beta()
-            # No curried-call closure batching here: `W_Closure` is
-            # identity-hashed, so wrapping the hot brecOn matcher
-            # minors (3-binder lambdas) in fresh closures defeats the
-            # W_App interning that keeps reconstructed recursor
-            # sub-terms shared — every below-tower layer became a
-            # fresh subtree and the per-decl arena never deduped it.
-            return fn.body.instantiate(env, self.arg)
-
-        # Handle recursor in head position. A stuck major of
-        # structure type is eta-expanded inside (`_to_cnstr_when_
-        # structure`), which unsticks reductions like
-        # `Prod.casesOn STUCK (fun l r => mk l r)` — the `Prod.mk`
-        # rule fires against `Prod.mk STUCK.fst STUCK.snd`.
-        iota_progress, reduced = self.try_iota_reduce(env)
-        if iota_progress:
-            return reduced
-
-        # Quot.lift reduction: Quot.lift {α} {r} {β} f h (Quot.mk {α} r a) ≡ f a
-        reduced = self.try_quot_lift_reduce(env)
-        if reduced is not None:
-            return reduced
-
-        return None
-
-    def bind_fvar(self, tc, fvar, depth):
-        new_fn = self.fn.bind_fvar(tc, fvar, depth)
-        new_arg = self.arg.bind_fvar(tc, fvar, depth)
+    def bind_fvar(self, fvar, depth):
+        new_fn = self.fn.bind_fvar(fvar, depth)
+        new_arg = self.arg.bind_fvar(fvar, depth)
         if new_fn is self.fn and new_arg is self.arg:
             return self
-        return new_fn.app_in(tc, new_arg)
+        return new_fn.app(new_arg)
 
-    def instantiate(self, tc, expr, depth=0):
-        return _iter_instantiate(tc, self, expr, depth)
-
-    def incr_free_bvars(self, tc, count, depth):
+    def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
-        return self.fn.incr_free_bvars(tc, count, depth).app_in(
-            tc, self.arg.incr_free_bvars(tc, count, depth),
-        )
-
-    def subst_levels(self, tc, substs):
-        new_fn = self.fn.subst_levels(tc, substs)
-        new_arg = self.arg.subst_levels(tc, substs)
+        new_fn = self.fn.instantiate(expr, depth)
+        new_arg = self.arg.instantiate(expr, depth)
         if new_fn is self.fn and new_arg is self.arg:
             return self
-        return new_fn.app_in(tc, new_arg)
+        return new_fn.app(new_arg)
 
-    def _whnf_under_closure(self, tc, closure_env):
-        return self.fn.closure(closure_env).app_in(tc, self.arg.closure(closure_env))
+    def incr_free_bvars(self, count, depth):
+        if self.loose_bvar_range() <= depth:
+            return self
+        return self.fn.incr_free_bvars(count, depth).app(self.arg.incr_free_bvars(count, depth),
+        )
 
-
-def _whnf_iota_chain(env, expr):
-    """
-    WHNF ``expr``, walking through chains of nested recursor-iota
-    applications iteratively via an explicit work stack.
-
-    Each frame is a ``W_App`` we're trying to iota-reduce. Descending
-    happens by pushing the frame and continuing with its major
-    premise. When the deepest expression is reduced as far as
-    non-iota steps allow, we walk the stack back up applying iota at
-    each level — pre-populating the ``_whnf_cache_result`` of each
-    frame's major so a re-entry through `try_iota_reduce` (which
-    routes its `args[major_idx].whnf(env)` back into us) short-
-    circuits on the cache check below.
-    """
-    if isinstance(expr, W_App):
-        c = expr._caches
-        if c is not None and c.whnf_env is env:
-            return c.whnf_result
-    elif isinstance(expr, W_Closure):
-        if expr._whnf_cache_env is env:
-            return expr._whnf_cache_result
-
-    chain = []
-    cur = expr
-
-    while True:
-        # Reduce `cur` as far as possible without firing iota itself
-        # (so we don't recurse through `try_iota_reduce`). Major
-        # premises are evaluated with full-whnf semantics: native nat
-        # reduction and delta (`try_unfold_head`, one layer at a time)
-        # both apply here, like lean4's `reduce_recursor` calling the
-        # evaluating `whnf` on the major.
-        while True:
-            if isinstance(cur, W_App):
-                next_ = cur._whnf_core_no_iota(env)
-                if next_ is None:
-                    next_ = _try_reduce_nat(cur, env)
-                if next_ is None:
-                    # Quot.lift is not a recursor, so a stuck
-                    # `Quot.lift f h (Quot.mk r a)` never becomes a
-                    # chain frame — without firing it here the whole
-                    # major chain above it dead-ends (Finset/Multiset
-                    # computations inside recursor majors reduce
-                    # through `Quot` constantly, e.g. every
-                    # `Polynomial.natDegree (0 : Polynomial R) ≡ 0`
-                    # obligation in Mathlib). Struct-eta stays out:
-                    # struct recursors do become frames, and the
-                    # walk-up handles them once their major is
-                    # exhausted.
-                    next_ = cur.try_quot_lift_reduce(env)
-            else:
-                next_ = cur._whnf_core(env)
-            if next_ is None:
-                next_ = cur.try_unfold_head(env)
-                if next_ is None:
-                    break
-            cur = next_
-
-        # If `cur` is a recursor application, descend into its major.
-        descended = False
-        if isinstance(cur, W_App):
-            target, args = cur.unapp()
-            if isinstance(target, W_Const):
-                decl = find_decl(env.declarations, target.name)
-                if decl is not None:
-                    rec = decl.w_kind
-                    if isinstance(rec, W_Recursor):
-                        skip = (
-                            rec.num_params
-                            + rec.num_indices
-                            + rec.num_minors
-                            + rec.num_motives
-                        )
-                        major_idx = len(args) - 1 - skip
-                        if major_idx >= 0:
-                            chain.append((cur, args, major_idx))
-                            cur = args[major_idx]
-                            descended = True
-        if descended:
-            continue
-
-        # No further descent. Walk back up applying iota.
-        if not chain:
-            return cur
-
-        parent, p_args, p_mi = chain.pop()
-        major_arg = p_args[p_mi]
-        # Cache the descent's result as the major's WHNF so the
-        # `args[major_idx].whnf(env)` call inside `try_iota_reduce`
-        # returns immediately instead of recursing.
-        if isinstance(major_arg, W_App):
-            c = major_arg._ensure_caches()
-            if c.whnf_env is None:
-                _note_cache_write(major_arg)
-            c.whnf_env = env
-            c.whnf_result = cur
-        elif isinstance(major_arg, W_Closure):
-            if major_arg._whnf_cache_env is None:
-                _note_cache_write(major_arg)
-            major_arg._whnf_cache_env = env
-            major_arg._whnf_cache_result = cur
-
-        progress, reduced = parent.try_iota_reduce(env)
-        if not progress:
-            # Iota didn't fire at this level (struct-eta on a stuck
-            # major happens inside it). Quot-lift can still unstick it
-            # — same fallback order as `_whnf_core`.
-            reduced = parent.try_quot_lift_reduce(env)
-            if reduced is None:
-                # Leave `parent` un-reduced and propagate it up; any
-                # frame above us has `parent` as part of its
-                # major-chain, so they can't iota either.
-                cur = parent
-                while chain:
-                    higher, _, _ = chain.pop()
-                    cur = higher
-                return cur
-        cur = reduced
-
-
-class W_Closure(W_Expr):
-    """
-    A deferred substitution: ``body`` evaluated under ``env``.
-
-    Represents the result of substituting ``[bvar(0) ↦ env[0],
-    bvar(1) ↦ env[1], ...]`` into ``body``, with bvars at indices
-    ``>= len(env)`` shifted down by ``len(env)``. Each entry of
-    ``env`` lives in the closure's outer scope (i.e. the scope
-    containing the closure itself).
-    """
-
-    _attrs_ = [
-        'env', 'body',
-        '_whnf_cache_env', '_whnf_cache_result',
-        '_infer_cache_env', '_infer_cache_result',
-        '_force_result',
-    ]
-    _immutable_fields_ = ['env', 'body']
-
-    def __init__(self, env, body):
-        self.env = env
-        self.body = body
-        n = len(env)
-        body_outside = body.loose_bvar_range() - n
-        if body_outside < 0:
-            body_outside = 0
-        max_loose = body_outside
-        for v in env:
-            if v.loose_bvar_range() > max_loose:
-                max_loose = v.loose_bvar_range()
-        fvar = body.has_fvar()
-        if not fvar:
-            for v in env:
-                if v.has_fvar():
-                    fvar = True
-                    break
-        bf = (max_loose << 1) | (1 if fvar else 0)
-        # Inline whnf/infer caches, env-tagged for hash-consing safety.
-        self._whnf_cache_env = None
-        self._whnf_cache_result = None
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._force_result = None
-        # Closures shouldn't reach the exporter (they're produced during
-        # reduction, not by the walker), but give them an identity-based
-        # hash so the RPython annotator sees `_hash` set on every W_Expr.
-        self._uid = _next_uid()
-        # Closures aren't interned or exported; `_uid` is a fine, cheap
-        # content-hash stand-in (distinct per node, deterministic).
-        self._packed = (self._uid & 0xFFFFFFFF) | (bf << 32)
-
-    def whnf(self, env):
-        if self._whnf_cache_env is env:
-            env.tracer.whnf_cache_hit()
-            return self._whnf_cache_result
-        env.tracer.whnf_cache_miss()
-        (expr, _progress) = self.whnf_with_progress(env)
-        if self._whnf_cache_env is None:
-            _note_cache_write(self)
-        self._whnf_cache_env = env
-        self._whnf_cache_result = expr
-        return expr
-
-    def _reset_caches(self):
-        self._whnf_cache_env = None
-        self._whnf_cache_result = None
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._force_result = None
-
-    def _whnf_core(self, env):
-        return self.body._whnf_under_closure(env, self.env)
-
-    def _whnf_under_closure(self, tc, closure_env):
-        # Nested closure: peel inner first, then re-wrap.
-        inner_step = self.body._whnf_under_closure(tc, self.env)
-        if inner_step is None:
-            return None
-        return inner_step.closure(closure_env)
-
-    def force(self, tc):
-        """
-        Materialize the closure-free form by performing the deferred
-        substitution eagerly.
-
-        ``tc`` routes the substitution-produced `W_App`s into the
-        per-decl arena (when called from reduction paths). Cold-path
-        callers without a TC pass `None`; those allocations route to
-        the persistent intern. Without this threading, reduction-time
-        force()s would dump every materialised `W_App` into the
-        persistent table, recreating the leak the per-decl arena was
-        meant to bound.
-        """
-        # Multi-arg substitute: one walk of `self.body` substituting
-        # every `env[i]` for bvar `i` at once. Replaces the N sequential
-        # `instantiate` calls of the previous loop — for closures
-        # accumulated across a curried-Lambda peel, this is the savings
-        # nanoda_lib gets from `inst(body, &substs)` (tc.rs:786) versus
-        # what would otherwise be N body walks. The previous outermost-
-        # first ordering was only needed for the sequential case; with
-        # parallel substitution the rel-mapping in `_instantiate_multi`
-        # handles every bvar in its own pass.
-        #
-        # Memoized: `def_eq`, `syntactic_eq` and `infer` all force the
-        # same closure, and def-eq-heavy proofs (representation /
-        # monoidal-category lemmas in Mathlib) force each one many
-        # times — the materialization (`_instantiate_multi`) was ~45%
-        # of such a decl's profile. The materialized term depends only
-        # on `body` and `env` (both immutable), not on `tc` (which only
-        # picks the allocation arena), so a single cached result is
-        # sound. Per-decl scoped: closures are reduction products, so
-        # `_reset_caches` clears this between decls.
-        cached = self._force_result
-        if cached is not None:
-            return cached
-        result = _instantiate_multi(tc, self.body, self.env, 0)
-        if self._force_result is None:
-            _note_cache_write(self)
-        self._force_result = result
-        return result
-
-    def syntactic_eq(self, other):
-        return syntactic_eq(self.force(None), other)
-
-    def infer(self, env):
-        # Memoized in the (previously dead) `_infer_cache_*` slots: a
-        # closure's inferred type is asked for repeatedly (proof
-        # irrelevance infers both operands' types on every def_eq of
-        # them), and `force(env).infer(env)` otherwise re-infers the
-        # whole materialized term each time. Env-tagged for hash-consing
-        # safety; per-decl scoped via `_reset_caches`.
-        if self._infer_cache_env is env:
-            return self._infer_cache_result
-        result = self.force(env).infer(env)
-        if self._infer_cache_env is None:
-            _note_cache_write(self)
-        self._infer_cache_env = env
-        self._infer_cache_result = result
-        return result
-
-    def instantiate(self, tc, expr, depth=0):
-        return self.force(tc).instantiate(tc, expr, depth)
-
-    def bind_fvar(self, tc, fvar, depth):
-        return self.force(tc).bind_fvar(tc, fvar, depth)
-
-    def incr_free_bvars(self, tc, count, depth):
-        return self.force(tc).incr_free_bvars(tc, count, depth)
-
-    def subst_levels(self, tc, substs):
-        return self.force(tc).subst_levels(tc, substs)
-
-    def def_eq(self, other, tc):
-        # Re-dispatch through tc.def_eq so the forced LHS gets WHNF'd
-        # against ``other`` (which may itself still be a closure).
-        return tc.def_eq(self.force(tc), other)
-
-    def to_format(self, constants, marker):
-        return self.force(None).to_format(constants, marker)
-
-    def expect_sort(self, env):
-        return self.force(env).expect_sort(env)
-
-    def contains_const(self, name):
-        return self.force(None).contains_const(name)
-
-    def _any_subexpr_invalid_index(self, inductive):
-        return self.force(None)._any_subexpr_invalid_index(inductive)
-
-    def is_strictly_positive(self, inductive, env):
-        return self.force(env).is_strictly_positive(inductive, env)
+    def subst_levels(self, substs):
+        new_fn = self.fn.subst_levels(substs)
+        new_arg = self.arg.subst_levels(substs)
+        if new_fn is self.fn and new_arg is self.arg:
+            return self
+        return new_fn.app(new_arg)
 
 
 class W_RecRule(_Item):
@@ -6020,12 +4395,7 @@ class W_Definition(W_DeclarationKind):
         exporter.emit_def(decl, self.value, self.hint)
 
     def type_check(self, type, tc):
-        type_type = type.infer(tc)
-        if not isinstance(type_type.whnf(tc), W_Sort):
-            return W_NotASort(tc, type, inferred_type=type_type, name=None)
-        val_type = self.value.infer(tc)
-        if not tc.def_eq(type, val_type):
-            return W_TypeError(tc, self.value, type, inferred_type=val_type)
+        return tc.machine.check_value(type, self.value, False)
 
     def decl_format(self, name, levels, type, constants, marker):
         return _decl_with_value_format(
@@ -6092,17 +4462,9 @@ class W_Theorem(W_DeclarationKind):
         exporter.emit_thm(decl, value)
 
     def type_check(self, type, tc):
-        type_type = type.infer(tc)
-        type_type_whnf = type_type.whnf(tc)
-        if not isinstance(type_type_whnf, W_Sort):
-            return W_NotASort(tc, type, inferred_type=type_type, name=None)
-        if not type_type_whnf.level.eq(W_LEVEL_ZERO):
-            return W_NotAProp(tc, type, inferred_sort=type_type_whnf, name=None)
         value = self.value
         assert value is not None
-        val_type = value.infer(tc)
-        if not tc.def_eq(type, val_type):
-            return W_TypeError(tc, value, type, inferred_type=val_type)
+        return tc.machine.check_value(type, value, True)
 
     def decl_format(self, name, levels, type, constants, marker):
         value = self.value
@@ -6332,7 +4694,7 @@ class W_Inductive(W_DeclarationKind):
             # the loop index (an index-i substitution targets bvar(i)
             # at the body's top level, which never exists, silently
             # leaving every binder after the first loose).
-            target = target.body.instantiate(tc, target.binder.fvar(), 0)
+            target = target.body.instantiate(target.binder.fvar(), 0)
         target_sort = target.whnf(tc)
         if not isinstance(target_sort, W_Sort):
             return W_NotASort(
@@ -6356,7 +4718,7 @@ class W_Inductive(W_DeclarationKind):
         assert num_params >= 0
         ind_name = self.name
         error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
-        all_fvars, ctor_type = ctor.type.open_all_binders(env)
+        all_fvars, ctor_type = ctor.type.open_all_binders()
         if len(all_fvars) < num_params:
             return error
         param_fvars = all_fvars[:num_params]
@@ -6922,497 +5284,9 @@ def syntactic_eq(expr1, expr2):
     """
     if expr1 is expr2:
         return True
-    if isinstance(expr1, W_Closure):
-        expr1 = expr1.force(None)
-    if isinstance(expr2, W_Closure):
-        expr2 = expr2.force(None)
     if expr1.__class__ is not expr2.__class__:
         return False
     return expr1.syntactic_eq(expr2)
-
-
-def _iter_instantiate(tc, root, expr, depth):
-    """
-    Substitute ``expr`` for the bvar at ``depth`` in ``root``.
-
-    Recursive — splits per-kind into `_inst_app` / `_inst_lambda` /
-    `_inst_forall` so each call site has a single static type and the
-    JIT can trace each path independently (the older explicit-work-stack
-    version had a 5-way polymorphic dispatch that defeated tracing —
-    79+ bridges, ~25% regression with a JIT driver attached). The
-    per-instance 1-entry inline cache (`_inst_cache_*` on `W_App` /
-    `W_FunBase`) breaks the 2^N work that DAG-shared subexpressions
-    would otherwise cause.
-
-    The original work-stack version existed to keep `app-lam`
-    alternations from blowing the C stack on extreme depths; we now
-    rely on RPython's `stack_check___` guard (already ~3% of profile
-    time, so the cost is paid regardless) to abort cleanly if a
-    pathological term outruns the host stack.
-
-    `tc` may be a `TypeChecker` (per-decl arena routing for any new
-    `W_App`s built by `_inst_app`) or `None` (parser/test path; allocates
-    against the persistent table).
-    """
-    return _instantiate(tc, root, expr, depth)
-
-
-def _instantiate(tc, cur, sub, depth):
-    if cur.loose_bvar_range() <= depth:
-        return cur
-    cls = cur.__class__
-    if cls is W_App:
-        assert isinstance(cur, W_App)
-        return _inst_app(tc, cur, sub, depth)
-    if cls is W_Lambda:
-        assert isinstance(cur, W_Lambda)
-        return _inst_lambda(tc, cur, sub, depth)
-    if cls is W_ForAll:
-        assert isinstance(cur, W_ForAll)
-        return _inst_forall(tc, cur, sub, depth)
-    return cur.instantiate(tc, sub, depth)
-
-
-@unroll_safe
-def _inst_app(tc, app, sub, depth):
-    c = app._caches
-    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
-        return c.inst_result
-    fn = app.fn
-    arg = app.arg
-    new_fn = fn
-    new_arg = arg
-    if fn.loose_bvar_range() > depth:
-        new_fn = _instantiate(tc, fn, sub, depth)
-    if arg.loose_bvar_range() > depth:
-        new_arg = _instantiate(tc, arg, sub, depth)
-    # If neither side moved, reuse the existing app — avoids a fresh
-    # `_mk_app_in` lookup per `_inst_app` call. For brecOn-style hot
-    # loops the substitute frequently doesn't reach this sub-app even
-    # though its `loose_bvar_range` admitted descent.
-    if new_fn is fn and new_arg is arg:
-        result = app
-    else:
-        result = new_fn.app_in(tc, new_arg)
-    c = app._ensure_caches()
-    if c.inst_expr is None:
-        _note_cache_write(app)
-    c.inst_expr = sub
-    c.inst_depth = depth
-    c.inst_result = result
-    return result
-
-
-@unroll_safe
-def _inst_lambda(tc, fun, sub, depth):
-    c = fun._caches
-    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
-        return c.inst_result
-    new_binder = fun.binder.instantiate(tc, sub, depth)
-    new_body = _instantiate(tc, fun.body, sub, depth + 1)
-    if new_binder is fun.binder and new_body is fun.body:
-        result = fun
-    else:
-        result = _mk_w_lambda_in(tc, new_binder, new_body)
-    c = fun._ensure_caches()
-    if c.inst_expr is None:
-        _note_cache_write(fun)
-    c.inst_expr = sub
-    c.inst_depth = depth
-    c.inst_result = result
-    return result
-
-
-@unroll_safe
-def _inst_forall(tc, fun, sub, depth):
-    c = fun._caches
-    if c is not None and c.inst_expr is sub and c.inst_depth == depth:
-        return c.inst_result
-    new_binder = fun.binder.instantiate(tc, sub, depth)
-    new_body = _instantiate(tc, fun.body, sub, depth + 1)
-    if new_binder is fun.binder and new_body is fun.body:
-        result = fun
-    else:
-        result = _mk_w_forall_in(tc, new_binder, new_body)
-    c = fun._ensure_caches()
-    if c.inst_expr is None:
-        _note_cache_write(fun)
-    c.inst_expr = sub
-    c.inst_depth = depth
-    c.inst_result = result
-    return result
-
-
-def _instantiate_multi(tc, cur, substs, depth):
-    """
-    Substitute multiple expressions simultaneously for bvars in `cur`.
-
-    `substs[i]` is the substitute for bvar `i` (at depth 0); when called
-    with `depth > 0`, the mapping is bvar `depth + i` → `substs[i]`. A
-    bvar at or above `depth + len(substs)` is decremented by `len(substs)`
-    to account for the removed binders.
-
-    This is the multi-arg analog of `_instantiate`: substituting N values
-    in one walk rather than calling `_instantiate` N times costs O(|body|)
-    instead of O(N·|body|). Mirrors nanoda_lib's `inst_aux` (expr.rs:170)
-    used in its `whnf_no_unfolding` multi-Lambda peel (tc.rs:780-789) and
-    its `Let`/`Var` handlers.
-    """
-    if cur.loose_bvar_range() <= depth:
-        return cur
-    cls = cur.__class__
-    if cls is W_BVar:
-        assert isinstance(cur, W_BVar)
-        if cur.id < depth:
-            return cur
-        rel = cur.id - depth
-        n = len(substs)
-        if rel < n:
-            return substs[rel].incr_free_bvars(tc, depth, 0)
-        return _mk_w_bvar(cur.id - n)
-    if cls is W_App:
-        assert isinstance(cur, W_App)
-        # 1-entry cache keyed on the substitute list (identity) + depth.
-        # A closure's `force` walks its body with a fixed `substs` (the
-        # closure env), so DAG-shared sub-spines that survive the
-        # `loose_bvar_range` early-out would otherwise be re-materialized
-        # once per occurrence — the mirror of `_inst_app`'s cache for the
-        # single-substitute path.
-        c = cur._caches
-        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
-            return c.inst_mresult
-        new_fn = _instantiate_multi(tc, cur.fn, substs, depth)
-        new_arg = _instantiate_multi(tc, cur.arg, substs, depth)
-        if new_fn is cur.fn and new_arg is cur.arg:
-            result = cur
-        else:
-            result = new_fn.app_in(tc, new_arg)
-        # Only populate the cache on nodes that already carry a `_caches`
-        # side object (i.e. were reduced). Allocating one here just for
-        # this cache would cost a side object per materialized node —
-        # pure overhead on substitution that has little DAG sharing (a
-        # ~50% cedar regression when it did). Such a node is already
-        # registered for reset via its other caches.
-        if c is not None:
-            c.inst_menv = substs
-            c.inst_mdepth = depth
-            c.inst_mresult = result
-        return result
-    if cls is W_Lambda:
-        assert isinstance(cur, W_Lambda)
-        c = cur._caches
-        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
-            return c.inst_mresult
-        new_binder = cur.binder
-        if cur.binder.type.loose_bvar_range() > depth:
-            new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
-            if new_type is not cur.binder.type:
-                new_binder = cur.binder.with_type(type=new_type)
-        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
-        if new_binder is cur.binder and new_body is cur.body:
-            result = cur
-        else:
-            result = _mk_w_lambda_in(tc, new_binder, new_body)
-        if c is not None:
-            c.inst_menv = substs
-            c.inst_mdepth = depth
-            c.inst_mresult = result
-        return result
-    if cls is W_ForAll:
-        assert isinstance(cur, W_ForAll)
-        c = cur._caches
-        if c is not None and c.inst_menv is substs and c.inst_mdepth == depth:
-            return c.inst_mresult
-        new_binder = cur.binder
-        if cur.binder.type.loose_bvar_range() > depth:
-            new_type = _instantiate_multi(tc, cur.binder.type, substs, depth)
-            if new_type is not cur.binder.type:
-                new_binder = cur.binder.with_type(type=new_type)
-        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
-        if new_binder is cur.binder and new_body is cur.body:
-            result = cur
-        else:
-            result = _mk_w_forall_in(tc, new_binder, new_body)
-        if c is not None:
-            c.inst_menv = substs
-            c.inst_mdepth = depth
-            c.inst_mresult = result
-        return result
-    if cls is W_Proj:
-        assert isinstance(cur, W_Proj)
-        new_struct = _instantiate_multi(tc, cur.struct_expr, substs, depth)
-        if new_struct is cur.struct_expr:
-            return cur
-        return cur.struct_name.proj_in(tc, cur.field_index, new_struct)
-    if cls is W_Let:
-        assert isinstance(cur, W_Let)
-        new_type = _instantiate_multi(tc, cur.type, substs, depth)
-        new_value = _instantiate_multi(tc, cur.value, substs, depth)
-        new_body = _instantiate_multi(tc, cur.body, substs, depth + 1)
-        if (new_type is cur.type
-                and new_value is cur.value
-                and new_body is cur.body):
-            return cur
-        return _mk_w_let(cur.name, new_type, new_value, new_body)
-    # W_Closure / other: fall back to a sequence of single-arg
-    # `instantiate` calls. Closures aren't expected to be substituted
-    # into during a force — they'd have been peeled earlier — but the
-    # fallback keeps semantics correct if one slips through.
-    result = cur
-    k = len(substs) - 1
-    while k >= 0:
-        result = result.instantiate(tc, substs[k], depth + k)
-        k -= 1
-    return result
-
-
-# Iterative infer driver. The work stack carries items of the following
-# kinds; pushes use LIFO ordering so the bottom of the stack runs last.
-class _InferWork(object):
-    _attrs_ = []
-
-
-class _InferVisit(_InferWork):
-    _attrs_ = ['expr']
-
-    def __init__(self, expr):
-        self.expr = expr
-
-
-class _InferAppStep(_InferWork):
-    """One arg in an application spine.
-
-    ``head`` is the spine origin (the leftmost expression) and ``args`` is
-    the immutable, outermost-first list of arguments; ``j`` is the index
-    of *this* step's argument. We carry the triple instead of a
-    pre-built ``spine_so_far`` so ``_iter_infer`` doesn't allocate ``N``
-    intermediate ``W_App``s per application — those would only be read
-    for the rare error-diagnostic case, and we can rebuild the spine
-    on demand there.
-    """
-
-    _attrs_ = ['head', 'args', 'j']
-
-    def __init__(self, head, args, j):
-        self.head = head
-        self.args = args
-        self.j = j
-
-    def arg(self):
-        return self.args[self.j]
-
-    def spine_so_far(self, tc):
-        spine = self.head
-        i = len(self.args) - 1
-        while i > self.j:
-            spine = spine.app_in(tc, self.args[i])
-            i -= 1
-        return spine
-
-
-class _InferBindLambda(_InferWork):
-    _attrs_ = ['binder', 'fvar']
-
-    def __init__(self, binder, fvar):
-        self.binder = binder
-        self.fvar = fvar
-
-
-class _InferBindForAll(_InferWork):
-    _attrs_ = ['binder_sort']
-
-    def __init__(self, binder_sort):
-        self.binder_sort = binder_sort
-
-
-class _InferStore(_InferWork):
-    _attrs_ = ['expr']
-
-    def __init__(self, expr):
-        self.expr = expr
-
-
-def _iter_infer(env, root):
-    """
-    Iteratively infer the type of ``root`` for the recursive expression
-    constructors (``W_App``, ``W_Lambda``, ``W_ForAll``).
-
-    Avoids the mutual recursion between ``W_App.infer`` and
-    ``W_Lambda.infer`` that grows the host stack linearly with the
-    nesting depth (e.g. ~4000 levels in ``app-lam.ndjson``). Other
-    expression types fall back to their recursive ``infer``.
-
-    A recursive split into ``_infer_app`` / ``_infer_lambda`` /
-    ``_infer_forall`` / ``_infer_closure`` (the same shape we use for
-    ``_instantiate``) was tried; it overflows the host stack on
-    ``app-lam.ndjson`` because every lambda level recurses *twice*
-    (through ``_infer_lambda`` then ``_infer_closure``-on-body), so
-    a 4000-level term needs ~8000 C frames.
-
-    Reuses ``env._infer_cache`` so DAG-shared subexpressions are
-    inferred only once.
-    """
-    work = [_InferVisit(root)]
-    values = []
-    while len(work) > 0:
-        item = work.pop()
-        if isinstance(item, _InferVisit):
-            cur = item.expr
-            cls = cur.__class__
-            # Cache lookup. Recursive types (App/Lambda/ForAll/Closure)
-            # keep a per-instance inline result; non-recursive expression
-            # types are passed through env.infer (which has its own cache
-            # fallback) and pushed straight onto the value stack.
-            if cls is W_App:
-                assert isinstance(cur, W_App)
-                c = cur._caches
-                if c is not None and c.infer_env is env:
-                    values.append(c.infer_result)
-                    continue
-            elif cls is W_Lambda or cls is W_ForAll:
-                assert isinstance(cur, W_FunBase)
-                c = cur._caches
-                if c is not None and c.infer_env is env:
-                    values.append(c.infer_result)
-                    continue
-            elif cls is W_Closure:
-                assert isinstance(cur, W_Closure)
-                if cur._infer_cache_env is env:
-                    values.append(cur._infer_cache_result)
-                    continue
-            else:
-                values.append(env.infer(cur))
-                continue
-            if cls is W_Lambda:
-                assert isinstance(cur, W_FunBase)
-                cur.binder.type.infer(env).whnf(env).expect_sort(env)
-                fvar = cur.binder.fvar()
-                body_with_fvar = cur.body.closure([fvar])
-                work.append(_InferStore(cur))
-                work.append(_InferBindLambda(cur.binder, fvar))
-                work.append(_InferVisit(body_with_fvar))
-            elif cls is W_ForAll:
-                assert isinstance(cur, W_FunBase)
-                binder_sort = cur.binder.type.infer(env).whnf(env).expect_sort(env)
-                fvar = cur.binder.fvar()
-                body_with_fvar = cur.body.closure([fvar])
-                work.append(_InferStore(cur))
-                work.append(_InferBindForAll(binder_sort))
-                work.append(_InferVisit(body_with_fvar))
-            elif cls is W_App:
-                assert isinstance(cur, W_App)
-                target, args = cur.unapp()
-                # Process: VISIT(target), then for each arg outermost-first,
-                # VISIT(arg) then APP_STEP. args is innermost-first; pushing
-                # in increasing index puts the outermost on top after LIFO.
-                work.append(_InferStore(cur))
-                k = 0
-                n = len(args)
-                while k < n:
-                    work.append(_InferAppStep(target, args, k))
-                    work.append(_InferVisit(args[k]))
-                    k += 1
-                work.append(_InferVisit(target))
-            elif cls is W_Closure:
-                assert isinstance(cur, W_Closure)
-                inner = cur.body
-                closure_env = cur.env
-                inner_cls = inner.__class__
-                if inner_cls is W_App:
-                    assert isinstance(inner, W_App)
-                    # Push the closure through to the App's pieces.
-                    new_app = inner.fn.closure(closure_env).app_in(
-                        env, inner.arg.closure(closure_env),
-                    )
-                    work.append(_InferStore(cur))
-                    work.append(_InferVisit(new_app))
-                elif inner_cls is W_Lambda or inner_cls is W_ForAll:
-                    assert isinstance(inner, W_FunBase)
-                    # Open the binder while keeping body shared. The
-                    # new env extends the closure's env with a fresh
-                    # fvar at position 0 (innermost).
-                    new_binder_type = inner.binder.type.closure(closure_env)
-                    new_binder_type.infer(env).whnf(env).expect_sort(env)
-                    if new_binder_type is inner.binder.type:
-                        new_binder = inner.binder
-                    else:
-                        new_binder = inner.binder.with_type(type=new_binder_type)
-                    fvar = new_binder.fvar()
-                    new_env = [fvar]
-                    for v in closure_env:
-                        new_env.append(v)
-                    body_with_fvar = inner.body.closure(new_env)
-                    work.append(_InferStore(cur))
-                    if inner_cls is W_Lambda:
-                        work.append(_InferBindLambda(new_binder, fvar))
-                    else:
-                        binder_sort = new_binder_type.infer(env).whnf(env).expect_sort(env)
-                        work.append(_InferBindForAll(binder_sort))
-                    work.append(_InferVisit(body_with_fvar))
-                else:
-                    # Atoms / BVar / Let / Proj / nested Closure: fall back
-                    # to forcing.
-                    values.append(env.infer(cur))
-            else:
-                values.append(cur.infer(env))
-        elif isinstance(item, _InferAppStep):
-            arg_type = values.pop()
-            fn_type_base = values.pop()
-            fn_type = fn_type_base.whnf(env)
-            if isinstance(fn_type, W_Closure):
-                fn_type = fn_type.force(env)
-            arg = item.arg()
-            if not isinstance(fn_type, W_ForAll):
-                raise W_NotAFunction(
-                    env, item.spine_so_far(env), inferred_type=fn_type_base,
-                )
-            # In `infer_only` mode the argument's type is trusted (the
-            # term is already known well-typed); only the declaration's
-            # own type and value, checked in the default mode, validate
-            # each argument against its function's domain. Mirrors
-            # lean4's `infer_app`, which runs `is_def_eq(a_type, d_type)`
-            # only when `infer_only` is false (type_checker.cpp).
-            if not env.infer_only:
-                if not env.def_eq(fn_type.binder.type, arg_type):
-                    raise W_TypeError(
-                        env, arg, fn_type.binder.type,
-                        inferred_type=arg_type,
-                    )
-            values.append(fn_type.body.instantiate(env, arg))
-        elif isinstance(item, _InferBindLambda):
-            body_type = values.pop()
-            body_type = body_type.bind_fvar(env, item.fvar, 0)
-            values.append(forall(item.binder)(body_type))
-        elif isinstance(item, _InferBindForAll):
-            body_sort = values.pop().whnf(env).expect_sort(env)
-            values.append(item.binder_sort.imax(body_sort).sort())
-        else:
-            assert isinstance(item, _InferStore)
-            target = item.expr
-            result = values[len(values) - 1]
-            if isinstance(target, W_App):
-                c = target._ensure_caches()
-                if c.infer_env is None:
-                    _note_cache_write(target)
-                c.infer_env = env
-                c.infer_result = result
-            elif isinstance(target, W_FunBase):
-                c = target._ensure_caches()
-                if c.infer_env is None:
-                    _note_cache_write(target)
-                c.infer_env = env
-                c.infer_result = result
-            elif isinstance(target, W_Closure):
-                if target._infer_cache_env is None:
-                    _note_cache_write(target)
-                target._infer_cache_env = env
-                target._infer_cache_result = result
-            elif isinstance(target, W_Const):
-                if target._infer_cache_env is None:
-                    _note_cache_write(target)
-                target._infer_cache_env = env
-                target._infer_cache_result = result
-    return values[0]
 
 
 class Telescope(object):
