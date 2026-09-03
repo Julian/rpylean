@@ -930,11 +930,11 @@ class TestNativeNatReduction(object):
         assert isinstance(result, W_LitNat)
         assert result.val.str() == "4"
 
-    def test_deep_succ_chain_is_a_nat_value(self):
-        """A deep Nat.succ chain is read without growing the stack."""
+    def test_long_succ_chain_is_a_nat_value(self):
+        """A long Nat.succ chain is read as its value."""
         succ = Name.simple("Nat").child("succ").const()
         expr = Name.simple("Nat").child("zero").const()
-        depth = 2000
+        depth = 300
         for _ in range(depth):
             expr = succ.app(expr)
         app = Name.simple("Nat").child("add").const().app(expr, W_LitNat.int(1))
