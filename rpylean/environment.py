@@ -394,6 +394,18 @@ class Tracer(object):
         """Called as a `RawMachine` is freed, with the sizes its tables
         reached for that declaration."""
 
+    def raw_phase(self, phase):
+        """Called by the `RawMachine` as a phase of a declaration's check
+        ends; a counting tracer attributes the def_eq calls since the
+        previous phase to it."""
+
+    def raw_mark(self):
+        """Called before an argument check, to bracket its def_eq calls."""
+
+    def raw_argcheck(self, head, index):
+        """Called after the check of argument ``index`` of an application
+        of ``head``, closing the bracket `raw_mark` opened."""
+
     def counted_enter(self):
         """`enter` without the terms, for a tracer that only counts."""
 
@@ -534,6 +546,8 @@ class StreamTracer(Tracer):
         'klike_bail_mutual_count', 'klike_bail_ctors_count',
         'klike_bail_defeq_count',
         'raw_bail_by_reason', 'raw_mismatch_count', 'raw_max',
+        'raw_phases', '_phase_mark',
+        'raw_argchecks', '_arg_mark',
     ]
 
     def __init__(self, writer):
@@ -547,6 +561,10 @@ class StreamTracer(Tracer):
         # Largest per-declaration table sizes seen: records, leaves,
         # instantiate / shift / bind memos, eqv, neq, failed.
         self.raw_max = [0] * 8
+        self.raw_phases = {}
+        self._phase_mark = 0
+        self.raw_argchecks = {}
+        self._arg_mark = 0
         self.def_eq_count = 0
         self.whnf_step_count = 0
         self.beta_count = 0
@@ -723,6 +741,20 @@ class StreamTracer(Tracer):
             if sizes[i] > self.raw_max[i]:
                 self.raw_max[i] = sizes[i]
 
+    def raw_mark(self):
+        self._arg_mark = self.def_eq_count
+
+    def raw_argcheck(self, head, index):
+        key = "%s #%d" % (head, index)
+        self.raw_argchecks[key] = (
+            self.raw_argchecks.get(key, 0) + self.def_eq_count - self._arg_mark
+        )
+
+    def raw_phase(self, phase):
+        calls = self.def_eq_count - self._phase_mark
+        self._phase_mark = self.def_eq_count
+        self.raw_phases[phase] = self.raw_phases.get(phase, 0) + calls
+
     def raw_mismatch(self, name):
         self.raw_mismatch_count += 1
         if self._writer is not None:
@@ -780,6 +812,12 @@ class StreamTracer(Tracer):
         )
         for reason, count in self.raw_bail_by_reason.iteritems():
             writer.write_plain("  %d\t%s\n" % (count, reason))
+        for phase, count in self.raw_phases.iteritems():
+            writer.write_plain("raw machine def_eq calls in %s: %d\n" % (phase, count))
+        writer.write_plain("raw machine def_eq calls by argument check:\n")
+        for key, count in self.raw_argchecks.iteritems():
+            if count > 0:
+                writer.write_plain("  %d\t%s\n" % (count, key))
         writer.write_plain(
             "k-like fired/bail head/mutual/ctors/defeq: %d/%d/%d/%d/%d\n" % (
                 self.klike_fired_count,

@@ -134,11 +134,12 @@ F_C = 3
 F_META = 4
 
 # Per-record memo slots (parallel to the records, 0 = not yet known).
-MEMO_SLOTS = 4
+MEMO_SLOTS = 5
 M_WHNF_CORE = 0
 M_WHNF = 1
 M_INFER = 2
 M_INFER_CHECKED = 3
+M_WHNF_CORE_CHEAP = 4
 
 _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
 _NO_INFO = -1
@@ -201,6 +202,34 @@ def _pack_key(h, other, depth):
     if h >= (1 << 25) or other >= (1 << 25) or depth >= (1 << 13):
         return 0
     return (h << 38) | (other << 13) | depth
+
+
+def _canonical_const(const):
+    """
+    ``const`` with its universe levels in normal form, so constants at
+    equal universes written differently share one leaf.
+    """
+    levels = const.levels
+    if not levels:
+        return const
+    changed = False
+    normalized = []
+    for level in levels:
+        n = level.normalize()
+        if n is not level:
+            changed = True
+        normalized.append(n)
+    if not changed:
+        return const
+    return const.name.const(normalized)
+
+
+def _canonical_sort(sort):
+    """``sort`` with its level in normal form (see `_canonical_const`)."""
+    n = sort.level.normalize()
+    if n is sort.level:
+        return sort
+    return n.sort()
 
 
 class RawIntMap(object):
@@ -618,6 +647,12 @@ class RawTermStore(object):
             h = self._new_leaf(e, -1)
             self._fvar_leaves[e._uid] = h
             return h
+        if cls is W_Const:
+            assert isinstance(e, W_Const)
+            e = _canonical_const(e)
+        elif cls is W_Sort:
+            assert isinstance(e, W_Sort)
+            e = _canonical_sort(e)
         key = e.hash()
         bucket = self._content_leaves.get(key, None)
         if bucket is None:
@@ -1195,42 +1230,52 @@ class RawMachine(object):
 
     # ---- whnf ------------------------------------------------------------
 
-    def whnf_core(self, h):
+    def whnf_core(self, h, cheap_proj=False):
         """
         Weak head normal form without unfolding definitions: beta, zeta,
-        projection of a constructor, iota and quot only.
+        projection of a constructor, iota and quot only. With
+        ``cheap_proj`` the struct of a projection is itself only taken
+        to whnf_core, never evaluated; the first pass of def_eq uses
+        that so two projections are compared before either struct is
+        unfolded through its definitions.
         """
         store = self.store
         if is_leaf(h):
             return h
-        cached = store.memo(h, M_WHNF_CORE)
+        slot = M_WHNF_CORE_CHEAP if cheap_proj else M_WHNF_CORE
+        cached = store.memo(h, slot)
         if cached != 0:
             return cached
-        # A term already known to be in full WHNF is whnf_core-normal.
+        # A term already known to be in full WHNF is whnf_core-normal
+        # either way, and a full whnf_core result is a cheap one too.
         cached = store.memo(h, M_WHNF)
         if cached == h:
             return h
+        if cheap_proj:
+            cached = store.memo(h, M_WHNF_CORE)
+            if cached == h:
+                return h
         if stack_almost_full():
             raise RawBail("whnf_core: stack")
         start = h
         tc = self.tc
         while True:
             tc.tick_wall_time()
-            next = self._whnf_core_step(h)
+            next = self._whnf_core_step(h, cheap_proj)
             if next == 0:
                 break
             h = next
-        store.set_memo(start, M_WHNF_CORE, h)
+        store.set_memo(start, slot, h)
         return h
 
-    def _whnf_core_step(self, h):
+    def _whnf_core_step(self, h, cheap_proj):
         """One whnf_core step of ``h``, or 0 when there is none."""
         store = self.store
         kind = store.kind(h)
         if kind == KIND_APP:
             fn = store.field_a(h)
             arg = store.field_b(h)
-            fn_whnf = self.whnf_core(fn)
+            fn_whnf = self.whnf_core(fn, cheap_proj)
             if fn_whnf != fn:
                 return store.cons(KIND_APP, fn_whnf, arg, 0)
             if store.kind(fn) == KIND_LAMBDA:
@@ -1245,7 +1290,7 @@ class RawMachine(object):
             pair = store.field_b(h)
             return store.instantiate(store.field_b(pair), store.field_a(pair), 0)
         if kind == KIND_PROJ:
-            return self.try_proj(h)
+            return self.try_proj(h, cheap_proj)
         return 0
 
     def whnf(self, h):
@@ -1394,10 +1439,13 @@ class RawMachine(object):
                 return store.field_b(h)
         return 0
 
-    def try_proj(self, h):
+    def try_proj(self, h, cheap_proj=False):
         """Projection of a constructor application, or 0."""
         store = self.store
-        struct = self.whnf(store.field_a(h))
+        if cheap_proj:
+            struct = self.whnf_core(store.field_a(h), True)
+        else:
+            struct = self.whnf(store.field_a(h))
         lit = None
         if is_leaf(struct):
             e = store.leaf(struct)
@@ -1775,7 +1823,13 @@ class RawMachine(object):
                 self._not_a_function(head, args, i, fn_type)
             arg_type = self.infer(arg, True)
             domain = store.field_a(fn_type_whnf)
-            if not self.def_eq(domain, arg_type):
+            tracing = tc.tracer.recording
+            if tracing:
+                tc.tracer.raw_mark()
+            ok = self.def_eq(domain, arg_type)
+            if tracing:
+                tc.tracer.raw_argcheck(self._head_label(head), n - 1 - i)
+            if not ok:
                 raise W_TypeError(
                     tc, self.export(arg), self.export(domain),
                     inferred_type=self.export(arg_type),
@@ -2130,11 +2184,35 @@ class RawMachine(object):
                 return False
             return self._find(f1) == self._find(f2)
 
+    def _head_label(self, h):
+        """A short label for a comparison histogram: the head constant's
+        name, or the kind of the head."""
+        store = self.store
+        head = store.head(h)
+        const = store.const_leaf(head)
+        if const is not None:
+            return const.name.str()
+        kind = store.kind(head)
+        if kind == 0:
+            e = store.leaf(head)
+            if isinstance(e, W_FVar):
+                return "<fvar>"
+            if isinstance(e, W_Sort):
+                return "<sort>"
+            return "<lit>"
+        if kind == KIND_LAMBDA:
+            return "<lambda>"
+        if kind == KIND_FORALL:
+            return "<pi>"
+        if kind == KIND_PROJ:
+            return "<proj " + store.name_of(head).str() + ">"
+        return "<let>"
+
     def _def_eq_uncached(self, h1, h2):
         store = self.store
         tracer = self.tc.tracer
-        h1 = self.whnf_core(h1)
-        h2 = self.whnf_core(h2)
+        h1 = self.whnf_core(h1, True)
+        h2 = self.whnf_core(h2, True)
         if h1 == h2:
             return True
 
@@ -2172,6 +2250,12 @@ class RawMachine(object):
             return True
         if h1 == h2:
             return True
+        # Now with projections evaluated in full: if that changes either
+        # side, start the comparison over on the new forms.
+        n1 = self.whnf_core(h1)
+        n2 = self.whnf_core(h2)
+        if n1 != h1 or n2 != h2:
+            return self.def_eq(n1, n2)
         return self._def_eq_core(h1, h2)
 
     def _def_eq_offset(self, h1, h2):
@@ -2281,7 +2365,7 @@ class RawMachine(object):
                 h2 = self.whnf_core(new2)
                 continue
 
-            if hint1 >= 0 and head1 == head2:
+            if hint1 >= 0 and self._same_const(head1, head2):
                 args1 = store.unapp(h1)[1]
                 args2 = store.unapp(h2)[1]
                 if len(args1) == len(args2):
@@ -2319,6 +2403,17 @@ class RawMachine(object):
             if new2 != 0:
                 h2 = self.whnf_core(new2)
         return _LD_UNDEF, h1, h2
+
+    def _same_const(self, head1, head2):
+        """Whether two constant heads name the same declaration at
+        universes that are equal, if not identical, level expressions."""
+        if head1 == head2:
+            return True
+        c1 = self.store.const_leaf(head1)
+        c2 = self.store.const_leaf(head2)
+        if c1 is None or c2 is None:
+            return False
+        return c1.name.syntactic_eq(c2.name) and c1.def_eq(c2, self.tc)
 
     def _failed_before(self, h1, h2):
         key = self._pair_key(h1, h2)
@@ -2542,7 +2637,12 @@ class RawMachine(object):
         if prop and not sort.level.eq(W_LEVEL_ZERO):
             return W_NotAProp(tc, type, inferred_sort=sort, name=None)
         val_ty = self.infer(val, True)
-        if not self.def_eq(ty, val_ty):
+        if tc.tracer.recording:
+            tc.tracer.raw_phase("infer value")
+        ok = self.def_eq(ty, val_ty)
+        if tc.tracer.recording:
+            tc.tracer.raw_phase("def_eq type")
+        if not ok:
             return W_TypeError(tc, value, type, inferred_type=self.export(val_ty))
         return None
 

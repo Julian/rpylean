@@ -2270,8 +2270,12 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    _attrs_ = ['_hash']
+    _attrs_ = ['_hash', '_normal']
     _immutable_fields_ = ['_hash']
+
+    #: The normal form, once computed (levels are immutable and
+    #: interned, so it never changes).
+    _normal = None
 
     @elidable
     def hash(self):
@@ -2328,7 +2332,11 @@ class W_Level(_Item):
         equal normal forms far more often than not, which is what makes
         `eq` decide the reorderings that structural comparison cannot.
         """
-        return self.normalize_at(0)
+        normal = self._normal
+        if normal is None:
+            normal = self.normalize_at(0)
+            self._normal = normal
+        return normal
 
     def normalize_at(self, k):
         """The normal form of ``self + k`` (``self`` not a successor)."""
