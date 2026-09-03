@@ -3,9 +3,13 @@ Regression tests against the hand-crafted Lean Kernel Arena fixtures
 (``constlevels.ndjson``, ``nat-rec-rules.ndjson``, etc.).
 
 The arena's tutorial archive is fetched by ``test_lka_tutorial``; the
-focused regression NDJSONs live only in the arena's git tree. Set
+focused regression tests live only in the arena's git tree. Set
 ``LKA_TESTS_DIR`` to a checkout of ``lean-kernel-arena/tests`` to run
 these, or fall back to the conventional sibling location.
+
+A test ships either as an export next to its description, or as Lean
+source the arena builds into an export under ``_build/tests`` (``lka.py
+build-test NAME``); a built export is picked up from there when present.
 """
 
 from __future__ import print_function
@@ -28,15 +32,25 @@ _ARENA = py.path.local(
 )
 
 
+_BUILT = _ARENA.dirpath().join("_build", "tests")
+
+#: The corpora, which take minutes and have their own harness.
+_CORPORA = ["init-prelude", "init", "cedar", "std", "cslib", "mathlib"]
+
+
 def _arena_cases():
     """Pairs of (ndjson path, expected outcome) from the arena ``tests/``."""
     if not _ARENA.isdir():
         return []
     cases = []
-    for ndjson in sorted(_ARENA.listdir("*.ndjson")):
-        yaml = ndjson.new(ext=".yaml")
-        if not yaml.isfile():
+    for yaml in sorted(_ARENA.listdir("*.yaml")):
+        if yaml.purebasename in _CORPORA:
             continue
+        ndjson = yaml.new(ext=".ndjson")
+        if not ndjson.isfile():
+            ndjson = _BUILT.join(ndjson.basename)
+            if not ndjson.isfile():
+                continue
         outcome = None
         for line in yaml.readlines():
             line = line.strip()
