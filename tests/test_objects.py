@@ -659,3 +659,22 @@ class TestLevelOrderSoundness(object):
                 assert self._holds_leq(l1, l2), (l1, l2)
             if l1.eq(l2):
                 assert self._holds_leq(l1, l2) and self._holds_leq(l2, l1), (l1, l2)
+
+    def test_normal_form_keeps_the_value(self):
+        """
+        Normalizing never changes a level's value under any assignment,
+        and a level that claims it is never zero never is.
+        """
+        import itertools
+        import random
+        rng = random.Random(20260903)
+        for _ in range(400):
+            level = self._random_level(rng, 3)
+            normal = level.normalize()
+            never_zero = level.is_not_zero()
+            for values in itertools.product(range(4), repeat=len(self.PARAMS)):
+                assignment = dict(zip(self.PARAMS, values))
+                value = self._eval(level, assignment)
+                assert self._eval(normal, assignment) == value, (level, normal)
+                if never_zero:
+                    assert value != 0, level

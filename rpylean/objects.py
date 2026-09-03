@@ -2105,6 +2105,11 @@ class W_Level(_Item):
     def norm_lt_same_kind(self, other):
         return False
 
+    def is_not_zero(self):
+        """Whether this level is nonzero under every assignment of its
+        parameters."""
+        return False
+
     def push_max_args(self, out):
         """Append this level's max arguments (itself, unless a max)."""
         out.append(self)
@@ -2174,11 +2179,7 @@ class W_Level(_Item):
             return W_LEVEL_ZERO
         if syntactic_eq(self, W_LEVEL_ZERO.succ()):
             return other
-        if isinstance(other, W_LevelSucc):
-            return self.max(other)
-        if isinstance(other, W_LevelMax) and (
-            isinstance(other.lhs, W_LevelSucc) or isinstance(other.rhs, W_LevelSucc)
-        ):
+        if other.is_not_zero():
             return self.max(other)
         return _mk_level_imax(self, other)
 
@@ -2260,6 +2261,9 @@ class W_LevelSucc(W_Level):
     def norm_kind(self):
         return 1
 
+    def is_not_zero(self):
+        return True
+
     def pretty_parts(self):
         text, balance = self.parent.pretty_parts()
         return text, balance + 1
@@ -2321,6 +2325,9 @@ class W_LevelMax(W_Level):
         if not syntactic_eq(self.lhs, other.lhs):
             return self.lhs.norm_lt(other.lhs)
         return self.rhs.norm_lt(other.rhs)
+
+    def is_not_zero(self):
+        return self.lhs.is_not_zero() or self.rhs.is_not_zero()
 
     def push_max_args(self, out):
         self.lhs.push_max_args(out)
@@ -2441,8 +2448,16 @@ class W_LevelIMax(W_Level):
             return self.lhs.norm_lt(other.lhs)
         return self.rhs.norm_lt(other.rhs)
 
+    def is_not_zero(self):
+        return self.rhs.is_not_zero()
+
     def normalize_at(self, k):
-        return self.lhs.normalize().imax(self.rhs.normalize()).succ_n(k)
+        result = self.lhs.normalize().imax(self.rhs.normalize())
+        if not isinstance(result, W_LevelIMax):
+            # The imax turned into a max (or a side) that the flattening
+            # and sorting of normal forms still has to reach.
+            result = result.normalize()
+        return result.succ_n(k)
 
     def pretty_parts(self):
         return "(imax %s %s)" % (self.lhs.str(), self.rhs.str()), 0
