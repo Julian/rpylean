@@ -141,6 +141,21 @@ def _free_words(arr):
     lltype.free(arr, flavor='raw')
 
 
+def _zero_words(arr, n):
+    """Zero ``arr``'s first ``n`` words."""
+    if n <= 0:
+        return
+    if we_are_translated():
+        rffi.c_memset(
+            rffi.cast(rffi.VOIDP, arr), 0, n * rffi.sizeof(lltype.Signed),
+        )
+    else:
+        i = 0
+        while i < n:
+            arr[i] = 0
+            i += 1
+
+
 def _grow_words(arr, used, cap):
     """A fresh array of ``cap`` words holding ``arr``'s first ``used``
     words; ``arr`` is freed."""
@@ -241,15 +256,30 @@ class IntMap(object):
     non-zero (zero marks an empty slot).
     """
 
-    _attrs_ = ['keys', 'vals', 'mask', 'size']
+    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial']
 
     def __init__(self, capacity=1 << 10):
         cap = 1
         while cap < capacity:
             cap <<= 1
+        self.initial = cap
         self.keys = _alloc_words(cap)
         self.vals = _alloc_words(cap)
         self.mask = cap - 1
+        self.size = 0
+
+    def clear(self):
+        """Forget every entry, and most of the room a few were left."""
+        cap = self.mask + 1
+        if cap > self.initial and self.size * 8 < cap:
+            _free_words(self.keys)
+            _free_words(self.vals)
+            cap = self.initial
+            self.keys = _alloc_words(cap)
+            self.vals = _alloc_words(cap)
+            self.mask = cap - 1
+        elif self.size > 0:
+            _zero_words(self.keys, cap)
         self.size = 0
 
     def get(self, key, default):
@@ -322,15 +352,30 @@ class PairMap(object):
     first half of a key must be non-zero (zero marks an empty slot).
     """
 
-    _attrs_ = ['keys', 'vals', 'mask', 'size']
+    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial']
 
     def __init__(self, capacity=1 << 10):
         cap = 1
         while cap < capacity:
             cap <<= 1
+        self.initial = cap
         self.keys = _alloc_words(cap * 2)
         self.vals = _alloc_words(cap)
         self.mask = cap - 1
+        self.size = 0
+
+    def clear(self):
+        """Forget every entry, and most of the room a few were left."""
+        cap = self.mask + 1
+        if cap > self.initial and self.size * 8 < cap:
+            _free_words(self.keys)
+            _free_words(self.vals)
+            cap = self.initial
+            self.keys = _alloc_words(cap * 2)
+            self.vals = _alloc_words(cap)
+            self.mask = cap - 1
+        elif self.size > 0:
+            _zero_words(self.keys, cap * 2)
         self.size = 0
 
     def get(self, k1, k2, default):
@@ -429,6 +474,12 @@ class SubstMemo(IntMap):
             wide = self.wide = PairMap(1 << 10)
         wide.set(h, (other << _WIDE_DEPTH_BITS) | depth, val)
 
+    def clear(self):
+        IntMap.clear(self)
+        if self.wide is not None:
+            self.wide.free()
+            self.wide = None
+
     def count(self):
         wide = self.wide
         if wide is None:
@@ -460,7 +511,7 @@ class TermStore(object):
         '_import_memo', 'rec_node', 'nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_bindm_memo',
-        '_freed',
+        '_freed', 'initial_cap',
     ]
 
     def __init__(self, tc, capacity=1 << 14):
@@ -468,18 +519,12 @@ class TermStore(object):
         cap = 1
         while cap < capacity:
             cap <<= 1
-        self.cap = cap
-        self.recs = _alloc_words(cap * REC_WORDS)
-        self.rec_info = _alloc_words(cap)
-        self.memos = _alloc_words(cap * MEMO_SLOTS)
-        self.nrecs = 0
-        self.table = _alloc_words(cap * 2)
-        self.tmask = cap * 2 - 1
+        self.initial_cap = cap
+        self._alloc_records(cap)
         #: Leaves by index; `leaf_meta` / `leaf_bvar` mirror the two
         #: facts the machine reads on hot paths so it need not touch the
         #: object: the packed meta word, and the de Bruijn index for a
         #: bound variable (-1 otherwise).
-        self.leaves = []
         self.leaf_cap = 1 << 10
         self.leaf_meta = _alloc_words(self.leaf_cap)
         self.leaf_bvar = _alloc_words(self.leaf_cap)
@@ -489,7 +534,37 @@ class TermStore(object):
         #: run).
         self.leaf_infer = _alloc_words(self.leaf_cap)
         self.leaf_checked = _alloc_words(self.leaf_cap)
+        self._inst_memo = SubstMemo(1 << 12)
+        self._shift_memo = SubstMemo(1 << 10)
+        self._bind_memo = SubstMemo(1 << 10)
+        self._multi_memo = SubstMemo(1 << 10)
+        self._bindm_memo = SubstMemo(1 << 10)
+        self._freed = False
+        self._forget()
+
+    def _alloc_records(self, cap):
+        self.cap = cap
+        self.recs = _alloc_words(cap * REC_WORDS)
+        self.rec_info = _alloc_words(cap)
+        self.memos = _alloc_words(cap * MEMO_SLOTS)
+        #: record index -> 1 + its index in `nodes`, or 0: the `W_Expr`
+        #: a record was imported from or exported to
+        self.rec_node = _alloc_words(cap)
+        self.table = _alloc_words(cap * 2)
+        self.tmask = cap * 2 - 1
+
+    def _free_records(self):
+        _free_words(self.recs)
+        _free_words(self.rec_info)
+        _free_words(self.rec_node)
+        _free_words(self.memos)
+        _free_words(self.table)
+
+    def _forget(self):
+        """Start over on everything the garbage collector looks after."""
+        self.nrecs = 0
         self.nleaves = 0
+        self.leaves = []
         #: Binder infos (`Binder`s, for the name and style) and
         #: `Name`s (for projections and lets), by `rec_info` index.
         self.infos = []
@@ -499,16 +574,55 @@ class TermStore(object):
         self._fvar_leaves = {}
         self._content_leaves = {}
         self._import_memo = {}
-        #: record index -> 1 + its index in `nodes`, or 0: the `W_Expr`
-        #: a record was imported from or exported to
-        self.rec_node = _alloc_words(capacity)
         self.nodes = []
-        self._inst_memo = SubstMemo(1 << 12)
-        self._shift_memo = SubstMemo(1 << 10)
-        self._bind_memo = SubstMemo(1 << 10)
-        self._multi_memo = SubstMemo(1 << 10)
-        self._bindm_memo = SubstMemo(1 << 10)
-        self._freed = False
+
+    def reset(self):
+        """
+        Empty the store for another declaration, keeping its memory:
+        nearly every declaration is small, and allocating and growing
+        a store for each costs more than checking most of them does.
+        What is cleared is what was used, not what there is room for.
+        """
+        n = self.nrecs
+        if self.cap > self.initial_cap and n * 8 < self.cap:
+            self._free_records()
+            self._alloc_records(self.initial_cap)
+        else:
+            self._clear_table(n)
+            _zero_words(self.memos, n * MEMO_SLOTS)
+            _zero_words(self.rec_node, n)
+        leaves = self.nleaves
+        _zero_words(self.leaf_whnf, leaves)
+        _zero_words(self.leaf_infer, leaves)
+        _zero_words(self.leaf_checked, leaves)
+        self._inst_memo.clear()
+        self._shift_memo.clear()
+        self._bind_memo.clear()
+        self._multi_memo.clear()
+        self._bindm_memo.clear()
+        self._forget()
+
+    def _clear_table(self, n):
+        table = self.table
+        tmask = self.tmask
+        if n * 16 > tmask:
+            _zero_words(table, tmask + 1)
+            return
+        # Few slots are taken: empty each rather than all of them. A
+        # record's slot is found the way it was filled, which needs
+        # the records placed before it still to be there, so the last
+        # placed goes first.
+        recs = self.recs
+        idx = n - 1
+        while idx >= 0:
+            base = idx * REC_WORDS
+            h = _mix(_mix(_mix(recs[base + F_KIND], recs[base + F_A]),
+                          recs[base + F_B]), recs[base + F_C])
+            i = _spread(h) & tmask
+            while table[i] != idx + 1:
+                i = (i + 1) & tmask
+            table[i] = 0
+            idx -= 1
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -516,11 +630,7 @@ class TermStore(object):
         if self._freed:
             return
         self._freed = True
-        _free_words(self.recs)
-        _free_words(self.rec_info)
-        _free_words(self.rec_node)
-        _free_words(self.memos)
-        _free_words(self.table)
+        self._free_records()
         _free_words(self.leaf_meta)
         _free_words(self.leaf_bvar)
         _free_words(self.leaf_whnf)
@@ -1356,16 +1466,7 @@ class Machine(object):
 
     def __init__(self, tc):
         self.tc = tc
-        store = TermStore(tc)
-        self.store = store
-        #: const leaf index -> handle of its unfolded value (0 = none)
-        self._delta_memo = {}
-        #: (rec const leaf index, ctor leaf index) -> rule rhs handle
-        self._rule_memo = {}
-        #: (binder record, domain) -> the free-variable leaf opening it
-        self._fvars = {}
-        #: uids of binders' own free variables already opening a binder
-        self._opened = {}
+        self.store = TermStore(tc)
         #: (heavy open record, context chain and mode) -> its type there
         self._open_memo = PairMap(1 << 8)
         #: open record -> 1 if light, 2 if heavy
@@ -1377,12 +1478,25 @@ class Machine(object):
         self._neq = IntMap(1 << 10)
         #: pairs whose same-head argument comparison failed (symmetric)
         self._failed = IntMap(1 << 8)
+        self._forget()
+
+    def _forget(self):
+        """Start over on everything the garbage collector looks after."""
+        store = self.store
+        #: const leaf index -> handle of its unfolded value (0 = none)
+        self._delta_memo = {}
+        #: (rec const leaf index, ctor leaf index) -> rule rhs handle
+        self._rule_memo = {}
+        #: (binder record, domain) -> the free-variable leaf opening it
+        self._fvars = {}
+        #: uids of binders' own free variables already opening a binder
+        self._opened = {}
         self.h_prop = store.leaf_for(PROP)
         self.h_true = store.leaf_for(_BOOL_TRUE)
         self.h_nat = store.leaf_for(NAT)
         self.h_string = store.leaf_for(STRING)
 
-    def free(self):
+    def _census(self):
         store = self.store
         tracer = self.tc.tracer
         if tracer.recording:
@@ -1391,7 +1505,19 @@ class Machine(object):
                 store._shift_memo.count(), store._bind_memo.count(),
                 self._eqv.size, self._neq.size, self._failed.size,
             )
-        store.free()
+
+    def reset(self):
+        """Empty the machine for another declaration, keeping its memory."""
+        self.store.reset()
+        self._eqv.clear()
+        self._neq.clear()
+        self._failed.clear()
+        self._open_memo.clear()
+        self._heavy.clear()
+        self._forget()
+
+    def free(self):
+        self.store.free()
         self._eqv.free()
         self._neq.free()
         self._failed.free()
@@ -3075,3 +3201,34 @@ _OFFSET_TRUE = 1
 _OFFSET_FALSE = 2
 _LD_TRUE = 1
 _LD_UNDEF = 0
+
+
+class _Spare(object):
+    """The machine of the last declaration checked, emptied."""
+
+    def __init__(self):
+        self.machine = None
+
+
+_SPARE = _Spare()
+
+
+def acquire(tc):
+    """A machine for ``tc``'s declaration: the spare one, if there is one."""
+    machine = _SPARE.machine
+    if machine is None:
+        return Machine(tc)
+    _SPARE.machine = None
+    machine.tc = tc
+    machine.store.tc = tc
+    return machine
+
+
+def release(machine):
+    """Hand back a machine whose declaration has been checked."""
+    machine._census()
+    if _SPARE.machine is None:
+        machine.reset()
+        _SPARE.machine = machine
+    else:
+        machine.free()

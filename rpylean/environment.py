@@ -26,7 +26,7 @@ from rpylean.exceptions import (
     W_InvalidDeclaration,
     WallTimeExceeded,
 )
-from rpylean.machine import Machine
+from rpylean.machine import acquire, release
 from rpylean.objects import (
     W_CheckError,
     Name,
@@ -696,7 +696,7 @@ class TypeChecker(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
-        '_whnf_tick',
+        '_whnf_tick', '_released',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
@@ -721,11 +721,15 @@ class TypeChecker(object):
         self.start_time = clock()
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
-        self.machine = Machine(self)
+        self.machine = acquire(self)
+        self._released = False
 
     def free(self):
-        """Release the machine's memory once the check is over."""
-        self.machine.free()
+        """Release the machine once the check is over."""
+        if self._released:
+            return
+        self._released = True
+        release(self.machine)
 
     def tick_wall_time(self):
         """
