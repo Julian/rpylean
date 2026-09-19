@@ -192,6 +192,16 @@ def _pack_key(h, other, depth):
     return (h << 38) | (other << 13) | depth
 
 
+#: How many records a declaration's store holds before the types of
+#: heavy terms under binders are inferred without substituting into
+#: them. Few declarations get there, and those that don't are spared
+#: finding out what is heavy.
+_OPEN_RECORDS = 1 << 17
+
+#: How many nodes make a term heavy: one whose type is inferred without
+#: substituting into it (see `Machine._infer_open`).
+_HEAVY = 256
+
 #: The depths a `SubstMemo` remembers beyond what packs into a word.
 _WIDE_DEPTH_BITS = 24
 _WIDE_DEPTH = 1 << _WIDE_DEPTH_BITS
@@ -1337,6 +1347,7 @@ class Machine(object):
 
     _attrs_ = [
         'tc', 'store', '_delta_memo', '_rule_memo', '_fvars', '_opened',
+        '_open_memo', '_heavy', '_budget',
         '_eqv', '_neq', '_failed',
         'h_prop', 'h_true', 'h_nat', 'h_string',
     ]
@@ -1355,6 +1366,11 @@ class Machine(object):
         self._fvars = {}
         #: uids of binders' own free variables already opening a binder
         self._opened = {}
+        #: (heavy open record, context chain and mode) -> its type there
+        self._open_memo = PairMap(1 << 8)
+        #: open record -> 1 if light, 2 if heavy
+        self._heavy = IntMap(1 << 8)
+        self._budget = 0
         #: proven-def-eq forest over handles (handle -> parent)
         self._eqv = IntMap(1 << 10)
         #: pairs proven NOT def-eq
@@ -1379,6 +1395,8 @@ class Machine(object):
         self._eqv.free()
         self._neq.free()
         self._failed.free()
+        self._open_memo.free()
+        self._heavy.free()
 
     def _decl(self, const):
         return find_decl(self.tc.declarations, const.name)
@@ -1919,18 +1937,243 @@ class Machine(object):
         if kind == KIND_APP:
             t = self._infer_app(h, check)
         elif kind == KIND_LAMBDA:
-            t = self._infer_lambda(h, check)
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+                t = self._infer_open_lambda(h, [], 0, check)
+            else:
+                t = self._infer_lambda(h, check)
         elif kind == KIND_FORALL:
-            t = self._infer_forall(h, check)
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+                t = self._infer_open_forall(h, [], 0, check)
+            else:
+                t = self._infer_forall(h, check)
         elif kind == KIND_LET:
-            t = self._infer_let(h, check)
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+                t = self._infer_open_let(h, [], 0, check)
+            else:
+                t = self._infer_let(h, check)
         elif kind == KIND_PROJ:
-            t = self._infer_proj(h, check)
+            t = self._infer_proj(h, [], 0, check)
         else:
             raise RuntimeError("infer: internal pair record")
         if check:
             store.set_memo(h, M_INFER_CHECKED, t)
         store.set_memo(h, M_INFER, t)
+        return t
+
+    # Under the binders of a heavy term nothing is substituted into it:
+    # its loose bound variables are read off a context instead,
+    # innermost first, of what each stands for (the free variable
+    # opening a binder, or a let's value). `chain` is the context as a
+    # record chain, for keying what has been inferred under it. A
+    # subterm is given its context's entries only where a type comes to
+    # depend on it, or once it is light: substituting into a light term
+    # is cheap, and what is inferred of the result is shared with its
+    # every other occurrence, at whatever depth.
+
+    def _is_heavy(self, h):
+        """Whether ``h`` has `_HEAVY` nodes or more, as a tree."""
+        self._budget = _HEAVY
+        self._spend(h)
+        return self._budget <= 0
+
+    def _spend(self, h):
+        self._budget -= 1
+        if self._budget <= 0 or is_leaf(h):
+            return
+        store = self.store
+        self._spend(store.field_a(h))
+        if self._budget > 0 and store.kind(h) != KIND_PROJ:
+            self._spend(store.field_b(h))
+
+    def _is_heavy_memoised(self, h):
+        known = self._heavy.get(h, 0)
+        if known == 0:
+            known = 2 if self._is_heavy(h) else 1
+            self._heavy.set(h, known)
+        return known == 2
+
+    def _push(self, ctx, chain, entry):
+        """Extend the context innermost; the extended context's chain."""
+        if ctx:
+            chain = self.store.cons(KIND_PAIR, entry, chain, 0)
+        else:
+            chain = entry
+        ctx.insert(0, entry)
+        return chain
+
+    def _pop(self, ctx, count):
+        while count > 0:
+            ctx.pop(0)
+            count -= 1
+
+    def _materialize(self, h, ctx, chain):
+        """``h`` with the context substituted for its loose variables."""
+        store = self.store
+        if store.loose_bvar_range(h) == 0:
+            return h
+        if len(ctx) == 1:
+            return store.instantiate(h, ctx[0], 0)
+        return store._instantiate_multi(h, ctx, chain, 0)
+
+    def _infer_open(self, h, ctx, chain, check):
+        """The type of ``h`` with the context standing for its loose
+        bound variables."""
+        store = self.store
+        if store.loose_bvar_range(h) == 0:
+            return self.infer(h, check)
+        if is_leaf(h):
+            return self.infer(ctx[store.leaf_bvar[leaf_index(h)]], check)
+        if not self._is_heavy_memoised(h):
+            return self.infer(self._materialize(h, ctx, chain), check)
+        memo = self._open_memo
+        t = memo.get(h, (chain << 1) | 1, 0)
+        if t != 0:
+            return t
+        if not check:
+            t = memo.get(h, chain << 1, 0)
+            if t != 0:
+                return t
+        if stack_almost_full():
+            raise W_DeepRecursion("infer")
+        kind = store.kind(h)
+        if kind == KIND_APP:
+            t = self._infer_open_app(h, ctx, chain, check)
+        elif kind == KIND_LAMBDA:
+            t = self._infer_open_lambda(h, ctx, chain, check)
+        elif kind == KIND_FORALL:
+            t = self._infer_open_forall(h, ctx, chain, check)
+        elif kind == KIND_LET:
+            t = self._infer_open_let(h, ctx, chain, check)
+        elif kind == KIND_PROJ:
+            t = self._infer_proj(h, ctx, chain, check)
+        else:
+            raise RuntimeError("infer: internal pair record")
+        if check:
+            memo.set(h, (chain << 1) | 1, t)
+        else:
+            memo.set(h, chain << 1, t)
+        return t
+
+    def _infer_open_app(self, h, ctx, chain, check):
+        store = self.store
+        tc = self.tc
+        head, args = store.unapp(h)
+        fn_type = self._infer_open(head, ctx, chain, check)
+        n = len(args)
+        i = n - 1
+        while i >= 0:
+            arg = args[i]
+            if store.kind(fn_type) != KIND_FORALL:
+                fn_type_whnf = self.whnf(fn_type)
+                if store.kind(fn_type_whnf) != KIND_FORALL:
+                    closed = [
+                        self._materialize(each, ctx, chain) for each in args
+                    ]
+                    self._not_a_function(
+                        self._materialize(head, ctx, chain), closed, i,
+                        fn_type,
+                    )
+                fn_type = fn_type_whnf
+            if check:
+                arg_type = self._infer_open(arg, ctx, chain, True)
+                domain = store.field_a(fn_type)
+                tracing = tc.tracer.recording
+                if tracing:
+                    tc.tracer.begin_argcheck()
+                ok = self.def_eq(domain, arg_type)
+                if tracing:
+                    tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
+                if not ok:
+                    raise W_TypeError(
+                        tc,
+                        self.export(self._materialize(arg, ctx, chain)),
+                        self.export(domain),
+                        inferred_type=self.export(arg_type),
+                    )
+            body = store.field_b(fn_type)
+            if store.loose_bvar_range(body) > 0:
+                fn_type = store.instantiate(
+                    body, self._materialize(arg, ctx, chain), 0,
+                )
+            else:
+                fn_type = body
+            i -= 1
+        return fn_type
+
+    def _infer_open_lambda(self, h, ctx, chain, check):
+        store = self.store
+        records = []
+        domains = []
+        fvars = []
+        e = h
+        while store.kind(e) == KIND_LAMBDA:
+            domain = self._materialize(store.field_a(e), ctx, chain)
+            if check:
+                self._ensure_sort(domain, True)
+            fvar = self.fvar_for_domain(e, domain)
+            records.append(e)
+            domains.append(domain)
+            fvars.append(fvar)
+            chain = self._push(ctx, chain, fvar)
+            e = store.field_b(e)
+        r = self._cheap_beta(self._infer_open(e, ctx, chain, check))
+        n = len(fvars)
+        self._pop(ctx, n)
+        # Close the telescope back up as a Pi: the body type over all
+        # the variables, each domain over the variables before it.
+        r = store.bind_fvars(r, fvars, 0)
+        i = n - 1
+        while i >= 0:
+            domain = store.bind_fvars(domains[i], fvars[:i], 0)
+            r = store.cons(KIND_FORALL, domain, r, 0, store.info(records[i]))
+            i -= 1
+        return r
+
+    def _infer_open_forall(self, h, ctx, chain, check):
+        store = self.store
+        levels = []
+        e = h
+        while store.kind(e) == KIND_FORALL:
+            domain = self._materialize(store.field_a(e), ctx, chain)
+            levels.append(self._ensure_sort(domain, check))
+            chain = self._push(ctx, chain, self.fvar_for_domain(e, domain))
+            e = store.field_b(e)
+        t = self._infer_open(e, ctx, chain, check)
+        sort = store.sort_leaf(self.whnf(t))
+        if sort is None:
+            raise W_NotASort(
+                self.tc,
+                self.export(self._materialize(e, ctx, chain)),
+                inferred_type=self.export(t),
+            )
+        self._pop(ctx, len(levels))
+        level = sort.level
+        i = len(levels) - 1
+        while i >= 0:
+            level = levels[i].imax(level)
+            i -= 1
+        return store.leaf_for(level.sort())
+
+    def _infer_open_let(self, h, ctx, chain, check):
+        store = self.store
+        pushed = 0
+        while store.kind(h) == KIND_LET:
+            pair = store.field_b(h)
+            value = self._materialize(store.field_a(pair), ctx, chain)
+            if check:
+                type_h = self._materialize(store.field_a(h), ctx, chain)
+                self._ensure_sort(type_h, True)
+                value_type = self.infer(value, True)
+                if not self.def_eq(value_type, type_h):
+                    raise W_TypeError(
+                        self.tc, self.export(value), self.export(type_h),
+                        inferred_type=self.export(value_type),
+                    )
+            chain = self._push(ctx, chain, value)
+            pushed += 1
+            h = store.field_b(pair)
+        t = self._infer_open(h, ctx, chain, check)
+        self._pop(ctx, pushed)
         return t
 
     def _check_leaf(self, h):
@@ -2157,38 +2400,38 @@ class Machine(object):
                 )
         return self.infer(store.instantiate(body, value, 0), check)
 
-    def _infer_proj(self, h, check):
+    def _infer_proj(self, h, ctx, chain, check):
         store = self.store
         tc = self.tc
         struct = store.field_a(h)
         field_index = store.field_b(h)
         struct_name = store.name_of(h)
-        struct_type = self.whnf(self.infer(struct, check))
+        struct_type = self.whnf(self._infer_open(struct, ctx, chain, check))
         type_head, type_args = store.unapp(struct_type)
 
         struct_decl = find_decl(tc.declarations, struct_name)
         if struct_decl is None:
             raise InvalidProjection.unknown_structure(
-                struct_name, field_index, self.export(struct),
+                struct_name, field_index, self.export(self._materialize(struct, ctx, chain)),
             )
         head_const = store.const_leaf(type_head)
         if head_const is None:
             raise InvalidProjection.not_a_structure_type(
-                struct_name, field_index, self.export(struct),
+                struct_name, field_index, self.export(self._materialize(struct, ctx, chain)),
             )
         if not head_const.is_named(struct_name):
             raise InvalidProjection.mismatched_structure(
-                struct_name, field_index, head_const.name, self.export(struct),
+                struct_name, field_index, head_const.name, self.export(self._materialize(struct, ctx, chain)),
             )
         struct_kind = struct_decl.w_kind
         if not isinstance(struct_kind, W_Inductive):
             raise InvalidProjection.not_an_inductive(
-                struct_name, field_index, self.export(struct),
+                struct_name, field_index, self.export(self._materialize(struct, ctx, chain)),
             )
         if len(struct_kind.ctor_names) != 1:
             raise InvalidProjection.not_a_structure(
                 struct_name, field_index, len(struct_kind.ctor_names),
-                self.export(struct),
+                self.export(self._materialize(struct, ctx, chain)),
             )
         ind_type = self.whnf(store.import_term(
             apply_const_level_params(head_const, struct_decl.type, tc),
@@ -2206,7 +2449,7 @@ class Machine(object):
             ctor_type = self.whnf(ctor_type)
             if store.kind(ctor_type) != KIND_FORALL:
                 raise InvalidProjection.out_of_bounds(
-                    struct_name, field_index, 0, self.export(struct),
+                    struct_name, field_index, 0, self.export(self._materialize(struct, ctx, chain)),
                 )
             ctor_type = store.instantiate(store.field_b(ctor_type), type_args[i], 0)
             i -= 1
@@ -2215,30 +2458,35 @@ class Machine(object):
             ctor_type = self.whnf(ctor_type)
             if store.kind(ctor_type) != KIND_FORALL:
                 raise InvalidProjection.out_of_bounds(
-                    struct_name, field_index, i + 1, self.export(struct),
+                    struct_name, field_index, i + 1, self.export(self._materialize(struct, ctx, chain)),
                 )
             body = store.field_b(ctor_type)
             if store.loose_bvar_range(body) > 0:
                 if is_prop_type:
                     if not self._is_prop(store.field_a(ctor_type), check):
                         raise InvalidProjection.non_prop_field(
-                            struct_name, field_index, self.export(struct),
+                            struct_name, field_index, self.export(self._materialize(struct, ctx, chain)),
                         )
                 ctor_type = store.instantiate(
-                    body, store.proj(struct_name, i, struct), 0,
+                    body,
+                    store.proj(
+                        struct_name, i,
+                        self._materialize(struct, ctx, chain),
+                    ),
+                    0,
                 )
             else:
                 ctor_type = body
         ctor_type = self.whnf(ctor_type)
         if store.kind(ctor_type) != KIND_FORALL:
             raise InvalidProjection.out_of_bounds(
-                struct_name, field_index, i + 1, self.export(struct),
+                struct_name, field_index, i + 1, self.export(self._materialize(struct, ctx, chain)),
             )
         field_type = store.field_a(ctor_type)
         if is_prop_type:
             if not self._is_prop(field_type, check):
                 raise InvalidProjection.non_prop_field(
-                    struct_name, field_index, self.export(struct),
+                    struct_name, field_index, self.export(self._materialize(struct, ctx, chain)),
                 )
         return field_type
 
