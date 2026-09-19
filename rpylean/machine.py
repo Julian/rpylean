@@ -192,6 +192,11 @@ def _pack_key(h, other, depth):
     return (h << 38) | (other << 13) | depth
 
 
+#: The depths a `SubstMemo` remembers beyond what packs into a word.
+_WIDE_DEPTH_BITS = 24
+_WIDE_DEPTH = 1 << _WIDE_DEPTH_BITS
+
+
 def _canonical_const(const):
     """
     ``const`` with its universe levels in normal form, so constants at
@@ -301,6 +306,132 @@ class IntMap(object):
             self.size = 0
 
 
+class PairMap(object):
+    """
+    An open-addressed (int, int) -> int map in unmanaged memory. The
+    first half of a key must be non-zero (zero marks an empty slot).
+    """
+
+    _attrs_ = ['keys', 'vals', 'mask', 'size']
+
+    def __init__(self, capacity=1 << 10):
+        cap = 1
+        while cap < capacity:
+            cap <<= 1
+        self.keys = _alloc_words(cap * 2)
+        self.vals = _alloc_words(cap)
+        self.mask = cap - 1
+        self.size = 0
+
+    def get(self, k1, k2, default):
+        assert k1 != 0
+        mask = self.mask
+        keys = self.keys
+        i = _spread(k1 ^ _spread(k2)) & mask
+        while True:
+            k = keys[i * 2]
+            if k == k1 and keys[i * 2 + 1] == k2:
+                return self.vals[i]
+            if k == 0:
+                return default
+            i = (i + 1) & mask
+
+    def set(self, k1, k2, val):
+        assert k1 != 0
+        if (self.size + 1) * 2 > self.mask + 1:
+            self._grow()
+        mask = self.mask
+        keys = self.keys
+        i = _spread(k1 ^ _spread(k2)) & mask
+        while True:
+            k = keys[i * 2]
+            if k == k1 and keys[i * 2 + 1] == k2:
+                self.vals[i] = val
+                return
+            if k == 0:
+                keys[i * 2] = k1
+                keys[i * 2 + 1] = k2
+                self.vals[i] = val
+                self.size += 1
+                return
+            i = (i + 1) & mask
+
+    def _grow(self):
+        old_keys = self.keys
+        old_vals = self.vals
+        old_cap = self.mask + 1
+        cap = old_cap * 2
+        keys = _alloc_words(cap * 2)
+        vals = _alloc_words(cap)
+        mask = cap - 1
+        i = 0
+        while i < old_cap:
+            k1 = old_keys[i * 2]
+            if k1 != 0:
+                k2 = old_keys[i * 2 + 1]
+                j = _spread(k1 ^ _spread(k2)) & mask
+                while keys[j * 2] != 0:
+                    j = (j + 1) & mask
+                keys[j * 2] = k1
+                keys[j * 2 + 1] = k2
+                vals[j] = old_vals[i]
+            i += 1
+        self.keys = keys
+        self.vals = vals
+        self.mask = mask
+        _free_words(old_keys)
+        _free_words(old_vals)
+
+    def free(self):
+        if self.mask >= 0:
+            _free_words(self.keys)
+            _free_words(self.vals)
+            self.mask = -1
+            self.size = 0
+
+
+class SubstMemo(IntMap):
+    """
+    What a substitution made of a record: ``(h, other, depth)`` to the
+    result, with ``other`` whatever the substitution is of (a handle,
+    or a count) and 0 for a triple not yet seen. Triples small enough
+    to pack into one word, which nearly all are, are the `IntMap`'s own
+    entries; the rest go to a map keyed on two words.
+    """
+
+    _attrs_ = ['wide']
+
+    def __init__(self, capacity):
+        IntMap.__init__(self, capacity)
+        self.wide = None
+
+    def get_wide(self, h, other, depth):
+        wide = self.wide
+        if wide is None or depth >= _WIDE_DEPTH:
+            return 0
+        return wide.get(h, (other << _WIDE_DEPTH_BITS) | depth, 0)
+
+    def set_wide(self, h, other, depth, val):
+        if depth >= _WIDE_DEPTH:
+            return
+        wide = self.wide
+        if wide is None:
+            wide = self.wide = PairMap(1 << 10)
+        wide.set(h, (other << _WIDE_DEPTH_BITS) | depth, val)
+
+    def count(self):
+        wide = self.wide
+        if wide is None:
+            return self.size
+        return self.size + wide.size
+
+    def free(self):
+        IntMap.free(self)
+        if self.wide is not None:
+            self.wide.free()
+            self.wide = None
+
+
 class TermStore(object):
     """
     The record arena for one declaration's check: records, the consing
@@ -362,11 +493,11 @@ class TermStore(object):
         #: a record was imported from or exported to
         self.rec_node = _alloc_words(capacity)
         self.nodes = []
-        self._inst_memo = IntMap(1 << 12)
-        self._shift_memo = IntMap(1 << 10)
-        self._bind_memo = IntMap(1 << 10)
-        self._multi_memo = IntMap(1 << 10)
-        self._bindm_memo = IntMap(1 << 10)
+        self._inst_memo = SubstMemo(1 << 12)
+        self._shift_memo = SubstMemo(1 << 10)
+        self._bind_memo = SubstMemo(1 << 10)
+        self._multi_memo = SubstMemo(1 << 10)
+        self._bindm_memo = SubstMemo(1 << 10)
         self._freed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -733,8 +864,10 @@ class TermStore(object):
         key = _pack_key(h, sub, depth)
         if key != 0:
             r = self._inst_memo.get(key, 0)
-            if r != 0:
-                return r
+        else:
+            r = self._inst_memo.get_wide(h, sub, depth)
+        if r != 0:
+            return r
         if stack_almost_full():
             raise W_DeepRecursion("instantiate")
         recs = self.recs
@@ -777,6 +910,8 @@ class TermStore(object):
                 r = self.cons(KIND_LET, na, pair, 0, info)
         if key != 0:
             self._inst_memo.set(key, r)
+        else:
+            self._inst_memo.set_wide(h, sub, depth, r)
         return r
 
     def instantiate_multi(self, h, substs, depth=0):
@@ -807,8 +942,10 @@ class TermStore(object):
         key = _pack_key(h, chain, depth)
         if key != 0:
             r = self._multi_memo.get(key, 0)
-            if r != 0:
-                return r
+        else:
+            r = self._multi_memo.get_wide(h, chain, depth)
+        if r != 0:
+            return r
         if stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
         recs = self.recs
@@ -845,6 +982,8 @@ class TermStore(object):
                 r = self.cons(KIND_LET, na, pair, 0, info)
         if key != 0:
             self._multi_memo.set(key, r)
+        else:
+            self._multi_memo.set_wide(h, chain, depth, r)
         return r
 
     def shift(self, h, count, depth=0):
@@ -859,8 +998,10 @@ class TermStore(object):
         key = _pack_key(h, count, depth)
         if key != 0:
             r = self._shift_memo.get(key, 0)
-            if r != 0:
-                return r
+        else:
+            r = self._shift_memo.get_wide(h, count, depth)
+        if r != 0:
+            return r
         if stack_almost_full():
             raise W_DeepRecursion("shift")
         recs = self.recs
@@ -893,6 +1034,8 @@ class TermStore(object):
             r = self.cons(KIND_LET, self.shift(a, count, depth), pair, 0, info)
         if key != 0:
             self._shift_memo.set(key, r)
+        else:
+            self._shift_memo.set_wide(h, count, depth, r)
         return r
 
     def bind_fvar(self, h, fvar, depth=0):
@@ -909,8 +1052,10 @@ class TermStore(object):
         key = _pack_key(h, fvar, depth)
         if key != 0:
             r = self._bind_memo.get(key, 0)
-            if r != 0:
-                return r
+        else:
+            r = self._bind_memo.get_wide(h, fvar, depth)
+        if r != 0:
+            return r
         if stack_almost_full():
             raise W_DeepRecursion("bind_fvar")
         recs = self.recs
@@ -947,6 +1092,8 @@ class TermStore(object):
                 r = self.cons(KIND_LET, na, pair, 0, info)
         if key != 0:
             self._bind_memo.set(key, r)
+        else:
+            self._bind_memo.set_wide(h, fvar, depth, r)
         return r
 
     def chain(self, handles):
@@ -987,8 +1134,10 @@ class TermStore(object):
         key = _pack_key(h, chain, depth)
         if key != 0:
             r = self._bindm_memo.get(key, 0)
-            if r != 0:
-                return r
+        else:
+            r = self._bindm_memo.get_wide(h, chain, depth)
+        if r != 0:
+            return r
         if stack_almost_full():
             raise W_DeepRecursion("bind_fvars")
         recs = self.recs
@@ -1025,6 +1174,8 @@ class TermStore(object):
                 r = self.cons(KIND_LET, na, pair, 0, info)
         if key != 0:
             self._bindm_memo.set(key, r)
+        else:
+            self._bindm_memo.set_wide(h, chain, depth, r)
         return r
 
     def sort_leaf(self, h):
@@ -1220,8 +1371,8 @@ class Machine(object):
         tracer = self.tc.tracer
         if tracer.recording:
             tracer.census(
-                store.nrecs, store.nleaves, store._inst_memo.size,
-                store._shift_memo.size, store._bind_memo.size,
+                store.nrecs, store.nleaves, store._inst_memo.count(),
+                store._shift_memo.count(), store._bind_memo.count(),
                 self._eqv.size, self._neq.size, self._failed.size,
             )
         store.free()
