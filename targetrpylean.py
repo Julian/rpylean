@@ -8,8 +8,7 @@ import sys
 
 import py
 
-from rpython.rlib.rstack import _stack_set_length_fraction
-
+from rpylean import _stack
 from rpylean.cli import cli
 import rpylean
 
@@ -79,15 +78,14 @@ print(
 
 
 #: How much of the stack the machine may use before a check reports
-#: deep recursion, as a multiple of RPython's 768KB default budget: the
-#: main thread has 8MB, and the kernel nests thousands of frames deep
-#: on large terms (a long string literal imports as a chain of
-#: `List.cons` applications, one frame per character).
+#: deep recursion where the stack's size can't be found out, as a
+#: multiple of RPython's 768KB default budget: a main thread
+#: ordinarily has 8MB.
 STACK_BUDGET = 8.0
 
 
 def main(argv):
-    _stack_set_length_fraction(STACK_BUDGET)
+    _stack.grow(argv, STACK_BUDGET)
     return cli.main(argv)
 
 
