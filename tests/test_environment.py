@@ -10,6 +10,7 @@ from rpylean.exceptions import (
     UnknownDeclaration,
     W_InvalidDeclaration,
 )
+from rpylean._inductive import W_InvalidInductive
 from rpylean.objects import (
     NAT,
     PROP,
@@ -183,6 +184,7 @@ class TestInductive(object):
 
         body_type = forall(
             a.binder(type=W_BVar(0)),
+            a.binder(type=W_BVar(1)),
         )(PROP)
 
         inductive_type = forall(alpha.binder(type=TYPE))(body_type)
@@ -200,7 +202,7 @@ class TestInductive(object):
             type=inductive_type,
             constructors=[refl_ctor],
             num_params=1,
-            num_indices=1,
+            num_indices=2,
         )
 
         env = Environment.having([Eq_decl, refl_ctor])
@@ -341,7 +343,10 @@ class TestTypeError(object):
         b_decl = B.inductive(type=TYPE, constructors=[b_ctor], all=[A, B])
         env = Environment.having([a_decl, a_ctor, b_decl, b_ctor])
         errors = type_check(env=env)
-        assert isinstance(errors[0], W_InvalidConstructorResult)
+        assert [each.__class__ for each in errors] == [
+            W_InvalidInductive,
+            W_InvalidConstructorResult,
+        ]
 
     def test_constructor_result_too_few_args(self):
         """Rejects a constructor whose result type applies too few arguments."""
@@ -681,21 +686,23 @@ class TestRecursorRuleShape(object):
         ind = U.inductive(type=TYPE, constructors=[mk])
         return U, mk, ind
 
-    def _rec_type(self, ind_name, num_minors=1):
-        """A well-shaped recursor type for a 0-param 0-index inductive:
-        ``Π (motive : I → Sort) minors… (t : I), motive t``."""
-        from rpylean.objects import W_BVar
-        binders = [
-            Name.simple("motive").binder(
-                type=forall(x.binder(type=ind_name.const()))(TYPE),
-            ),
-        ]
-        for i in range(num_minors):
-            binders.append(Name.simple("m%d" % i).binder(type=TYPE))
-        binders.append(Name.simple("t").binder(type=ind_name.const()))
-        return forall(*binders)(
-            W_BVar(num_minors + 1).app(W_BVar(0)),
+    def _motive(self, ind_name):
+        u = Name.simple("u").as_level_param()
+        return Name.simple("motive").binder(
+            type=forall(x.binder(type=ind_name.const()))(W_Sort(u)),
         )
+
+    def _rec_type(self, ind_name):
+        """The recursor type of a 0-param 0-index inductive with one
+        field-less constructor `mk`:
+        ``Π (motive : I → Sort u) (mk : motive I.mk) (t : I), motive t``."""
+        return forall(
+            self._motive(ind_name),
+            Name.simple("mk").binder(
+                type=b0.app(ind_name.child("mk").const()),
+            ),
+            Name.simple("t").binder(type=ind_name.const()),
+        )(W_BVar(2).app(b0))
 
     def test_rule_count_mismatch_rejected(self):
         from rpylean.objects import W_RecRule, W_InvalidRecursorRule
@@ -778,19 +785,17 @@ class TestRecursorRuleShape(object):
     def test_well_shaped_rule_accepted(self):
         from rpylean.objects import W_RecRule
         U, mk, ind = self._build_unit_ind()
-        # Canonical rhs for the only ctor of a 1-ctor inductive with
-        # num_params=0, num_motives=1, num_minors=1, num_fields=0:
-        # `fun motive minor_mk => minor_mk` — bvar 0 inside two
-        # lambdas. The binder types don't matter for the head check.
-        motive_binder = Name.simple("motive").binder(type=TYPE)
-        minor_binder = Name.simple("minor_mk").binder(type=U.const())
-        good_rhs = fun(motive_binder, minor_binder)(b0)
+        good_rhs = fun(
+            self._motive(U),
+            Name.simple("mk").binder(type=b0.app(mk.name.const())),
+        )(b0)
         good_rec = U.child("rec").recursor(
             type=self._rec_type(U),
             num_motives=1,
             num_minors=1,
             rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=good_rhs)],
             all=[U],
+            levels=[Name.simple("u")],
         )
         env = Environment.having([ind, mk, good_rec])
         errors = list(env.type_check([good_rec]))
@@ -923,7 +928,11 @@ class TestInvalidDeclaration(object):
             type=forall(a.binder(type=N.const()))(N.const()),
             num_fields=1,
         )
-        N_decl = N.inductive(type=TYPE, constructors=[zero_decl, succ_decl])
+        N_decl = N.inductive(
+            type=TYPE,
+            constructors=[zero_decl, succ_decl],
+            is_recursive=True,
+        )
         bad = Name.simple("bad").definition(
             type=N.const(),
             value=fun(x.binder(type=N.const()))(N.proj(0, b0)),

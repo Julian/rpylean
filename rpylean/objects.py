@@ -4719,6 +4719,8 @@ class W_Inductive(W_DeclarationKind):
             error = self._check_constructor(ctor, target_sort.level, tc)
             if error is not None:
                 return error
+        from rpylean._inductive import recursors_of
+        recursors_of(get_decl(tc.declarations, self.all[0]), tc)
 
     def _check_constructor(self, ctor, inductive_level, env):
         """
@@ -4997,295 +4999,146 @@ class W_Recursor(W_DeclarationKind):
                 exporter.dump_constant(exporter.decls[ind])
 
     def type_check(self, type, tc):
+        from rpylean._inductive import alpha_eq, recursors_of
+
         env = tc.env
-        # Shape-level + rhs-head validation. Catches malformed exports
-        # where:
-        #   - the rec rules don't align with the inductive's ctors
-        #     (extra/missing rules, ctor name typos, wrong nfields)
-        #   - the rhs body's head isn't the minor for the rule's
-        #     constructor (e.g. arena's `nat-rec-rules`: a fabricated
-        #     `Nat.rec` succ rule whose body returns the zero-case
-        #     minor instead of the succ-case minor).
-        #
-        # Doesn't catch every wrong-rhs class: a body using the right
-        # minor with the wrong args still slips through. Full canonical
-        # rhs derivation + def-eq comparison would be a separate piece
-        # of work.
-        #
-        # Skip validation entirely if the parent inductive isn't in
-        # scope and can't be demand-loaded — under the standard
-        # (parser-based) flow inductives are registered in their block
-        # before their recursors, and under `ffi check` `get_decl`
-        # demand-loads them, so the skip only fires for genuinely
-        # incomplete environments.
-        all_ctors = []
-        first_kind = None
-        for ind_name in self.all:
-            try:
-                ind_decl = get_decl(env.declarations, ind_name)
-            except UnknownDeclaration:
-                return None
-            ind_kind = ind_decl.w_kind
-            if not isinstance(ind_kind, W_Inductive):
-                return W_InvalidRecursorRule(
-                    env,
-                    "recursor refers to %s which is not an inductive"
-                    % ind_name.str(),
-                )
-            if first_kind is None:
-                first_kind = ind_kind
-            for ctor in ind_kind.constructor_decls(env.declarations):
-                all_ctors.append(ctor)
-        if first_kind is None:
+        if not self.all:
             return W_InvalidRecursorRule(
                 env, "recursor targets no inductive types",
             )
-        error = self._check_name(env, tc.decl.name, first_kind)
-        if error is not None:
-            return error
-        # The kernel constructs one motive per type in the block —
-        # the mutual members (`all`) plus the auxiliary types nested
-        # occurrences are eliminated into (`num_nested`). A recursor
-        # claiming any other count is one the kernel never generates;
-        # in particular `num_motives = 0` would dodge every count-gated
-        # check below.
-        if self.num_motives != len(self.all) + first_kind.num_nested:
+        try:
+            first = get_decl(env.declarations, self.all[0])
+        except UnknownDeclaration:
             return W_InvalidRecursorRule(
                 env,
-                "recursor has %d motive(s) but its block has %d type(s)"
-                % (
-                    self.num_motives,
-                    len(self.all) + first_kind.num_nested,
-                ),
+                "recursor refers to %s which is not declared"
+                % self.all[0].str(),
             )
-        error = self._check_type_shape(env, type, first_kind)
-        if error is not None:
-            return error
-        # Split recursors (one per motive in a mutual or nested-inductive
-        # block) only have rules for ctors whose return matches *their*
-        # motive's type — so `len(rules) != len(ctors_of(all))` is fine
-        # for them. Only enforce the count for single-motive recursors.
-        if self.num_motives == 1 and len(self.rules) != len(all_ctors):
+        first_kind = first.w_kind
+        if not isinstance(first_kind, W_Inductive):
             return W_InvalidRecursorRule(
                 env,
-                "recursor has %d rule(s) but its inductive%s has %d "
-                "constructor(s)" % (
-                    len(self.rules),
-                    "s" if len(self.all) > 1 else "",
-                    len(all_ctors),
-                ),
+                "recursor refers to %s which is not an inductive"
+                % self.all[0].str(),
             )
-        # ctor_name → ctor decl, for looking up `num_fields` per rule.
-        # For *nested* inductives the recursor's rules may reference
-        # ctors of other types woven into the mutual block (e.g.
-        # `Lean.Syntax.rec_*` has rules for `Array.mk` and `List.nil`
-        # / `List.cons`); fall back to the global env when the ctor
-        # isn't one of the immediate inductives'.
-        ctor_by_name = name_dict()
-        for ctor in all_ctors:
-            ctor_by_name[ctor.name] = ctor
-        for rule_idx, rule in enumerate(self.rules):
-            ctor = ctor_by_name.get(rule.ctor_name, None)
-            if ctor is None:
-                try:
-                    env_decl = get_decl(env.declarations, rule.ctor_name)
-                except UnknownDeclaration:
-                    env_decl = None
-                if env_decl is None or not env_decl.w_kind.is_constructor():
+        if len(first_kind.all) != len(self.all):
+            return W_InvalidRecursorRule(
+                env, "recursor and inductive disagree on their block",
+            )
+        for i in range(len(self.all)):
+            if not self.all[i].syntactic_eq(first_kind.all[i]):
+                return W_InvalidRecursorRule(
+                    env, "recursor and inductive disagree on their block",
+                )
+
+        spec = None
+        for each in recursors_of(first, tc):
+            if each.name.syntactic_eq(tc.decl.name):
+                spec = each
+                break
+        if spec is None:
+            return W_InvalidRecursorRule(
+                env,
+                "recursor %s is not a name the kernel generates for %s"
+                % (tc.decl.name.str(), self.all[0].str()),
+            )
+
+        levels = tc.decl.levels
+        expected_type = spec.type
+        substs = None
+        offset = 0
+        if spec.elim_name is not None:
+            offset = 1
+            if len(levels) != len(first.levels) + 1:
+                return W_InvalidRecursorRule(
+                    env,
+                    "recursor does not take a universe to eliminate into",
+                )
+            elim = levels[0]
+            for each in first.levels:
+                if each.syntactic_eq(elim):
                     return W_InvalidRecursorRule(
-                        env,
-                        "rule's ctor %s is not a constructor"
-                        % rule.ctor_name.str(),
+                        env, "recursor repeats a universe parameter",
                     )
-                ctor = env_decl
-            ctor_kind = ctor.w_kind
-            assert isinstance(ctor_kind, W_Constructor)
-            if rule.num_fields != ctor_kind.num_fields:
-                return W_InvalidRecursorRule(
-                    env,
-                    "rule for %s claims %d fields but the ctor has %d"
-                    % (rule.ctor_name.str(),
-                       rule.num_fields,
-                       ctor_kind.num_fields),
-                )
-            # The minor for this rule is bound at position `rule_idx`
-            # in the recursor's minor lambda chain — minor lambdas
-            # appear in the same order as `rules`, since both reflect
-            # the constructors' source-declaration order. For split
-            # mutual / nested recursors (num_motives > 1) the minors
-            # are interleaved across the whole block, so `rule_idx`
-            # isn't the right global minor offset and this check would
-            # false-reject; skip it there.
-            if self.num_motives == 1:
-                error = self._check_rule_rhs_head(env, rule, rule_idx)
-                if error is not None:
-                    return error
-
-    def _check_name(self, env, name, first_kind):
-        """
-        Verify this recursor's name is one the kernel could have
-        generated for its inductive block. The kernel constructs
-        recursors (names included) from the inductive types alone:
-        ``mk_rec_name(member)`` (`<member>.rec`) for each block
-        member, plus ``mk_rec_name(all[0]).append_after(k)``
-        (`<all[0]>.rec_<k>`) for ``1 <= k <= num_nested`` — the
-        auxiliary recursors `mk_aux_rec_name_map` (lean4
-        inductive.cpp) renames when restoring eliminated nested
-        occurrences. A recursor under any other name — e.g. arena's
-        `misnamed_rec.not_rec` — is a declaration the kernel would
-        never produce.
-        """
-        if isinstance(name, StrName):
-            suffix = name.suffix
-            if suffix == "rec":
-                for ind_name in self.all:
-                    if name.parent.syntactic_eq(ind_name):
-                        return None
-            elif (
-                suffix.startswith("rec_")
-                and len(suffix) <= 13
-                and suffix[4] != "0"
-                and name.parent.syntactic_eq(self.all[0])
-            ):
-                k = 0
-                for i in range(4, len(suffix)):
-                    ch = suffix[i]
-                    if ch < "0" or ch > "9":
-                        k = 0
-                        break
-                    k = k * 10 + (ord(ch) - ord("0"))
-                if 1 <= k <= first_kind.num_nested:
-                    return None
-        return W_InvalidRecursorRule(
-            env,
-            "recursor %s is not a name the kernel generates for %s"
-            % (name.str(), self.all[0].str()),
-        )
-
-    def _check_type_shape(self, env, type, first_kind):
-        """
-        Verify this recursor's declared type has the one shape the
-        kernel ever generates:
-
-            Π params… motives… minors… indices… (major : I …) ⇒
-                motive_i indices… major
-
-        — a syntactic Pi telescope of exactly
-        ``num_params + num_motives + num_minors + num_indices`` binders,
-        then the major premise, whose domain is headed by an inductive
-        constant (a member of ``all``, or the nested container for the
-        split recursors of a nested block), with a result headed by one
-        of the motive binders.
-
-        Purely structural — binder *types* aren't derived and compared
-        here — but it pins the declared type to the recursor telescope,
-        so a recursor whose type is an arbitrary proposition (e.g.
-        `BogusRecursor.rec : False`) is rejected no matter how
-        plausible its counts and rules look: a telescope ending in an
-        application of its own motive binder cannot be a closed
-        statement.
-        """
-        t = type
-        n = (
-            self.num_params
-            + self.num_motives
-            + self.num_minors
-            + self.num_indices
-        )
-        for _ in range(n):
-            if not isinstance(t, W_ForAll):
-                return W_InvalidRecursorRule(
-                    env,
-                    "recursor type has fewer than %d binders "
-                    "(expected one each for params, motives, minors "
-                    "and indices)" % (n,),
-                )
-            t = t.body
-        if not isinstance(t, W_ForAll):
+            if not elim.syntactic_eq(spec.elim_name):
+                substs = {spec.elim_name: elim.as_level_param()}
+                expected_type = expected_type.subst_levels(substs)
+        elif len(levels) != len(first.levels):
             return W_InvalidRecursorRule(
-                env, "recursor type has no major premise binder",
+                env, "recursor may only eliminate into Prop",
             )
-        major_head = t.binder.type.head()
-        if not isinstance(major_head, W_Const):
-            return W_InvalidRecursorRule(
-                env,
-                "recursor major premise is not headed by an inductive",
-            )
-        if first_kind.num_nested == 0:
-            ok = False
-            for ind_name in self.all:
-                if major_head.name.syntactic_eq(ind_name):
-                    ok = True
-                    break
-            if not ok:
+        for i in range(len(first.levels)):
+            if not levels[i + offset].syntactic_eq(first.levels[i]):
                 return W_InvalidRecursorRule(
                     env,
-                    "recursor major premise type %s is not one of the "
-                    "recursor's inductives" % (major_head.name.str(),),
+                    "recursor and inductive differ in universe parameters",
                 )
-        else:
-            major_decl = find_decl(env.declarations, major_head.name)
-            if major_decl is None or not isinstance(
-                major_decl.w_kind, W_Inductive,
-            ):
-                return W_InvalidRecursorRule(
-                    env,
-                    "recursor major premise type %s is not an inductive"
-                    % (major_head.name.str(),),
-                )
-        result_head = t.body.head()
-        # Under params…motives…minors…indices…major, the motive
-        # binders sit at de Bruijn indices
-        # [num_indices + num_minors + 1, … + num_motives].
-        lo = self.num_indices + self.num_minors + 1
-        if not isinstance(result_head, W_BVar) or not (
-            lo <= result_head.id < lo + self.num_motives
+
+        if (
+            self.num_params != spec.num_params
+            or self.num_indices != spec.num_indices
+            or self.num_motives != spec.num_motives
+            or self.num_minors != spec.num_minors
         ):
             return W_InvalidRecursorRule(
                 env,
-                "recursor result is not an application of a motive",
+                "recursor should have %d param(s), %d index(es), "
+                "%d motive(s) and %d minor(s)" % (
+                    spec.num_params, spec.num_indices,
+                    spec.num_motives, spec.num_minors,
+                ),
             )
-        return None
-
-    def _check_rule_rhs_head(self, env, rule, ctor_idx):
-        """Verify the rule's rhs is `λ params... motives... minors...
-        fields... ⇒ minor_c args` — i.e. peeled to its body, its head
-        spine is the minor for the corresponding constructor.
-
-        The recursor's iota reduction expects this layout: when the
-        rec is applied to `params, motives, minors, c fields`, the
-        rhs beta-reduces by feeding those into its outer lambdas,
-        leaving the body to apply the right minor to the c-fields
-        and the appropriate IHs.
-        """
-        num_lambdas = (self.num_params + self.num_motives
-                       + self.num_minors + rule.num_fields)
-        body = rule.rhs
-        for _ in range(num_lambdas):
-            if not isinstance(body, W_Lambda):
+        if self.k != spec.k:
+            return W_InvalidRecursorRule(
+                env, "recursor is wrong about supporting K-like reduction",
+            )
+        if not alpha_eq(type, expected_type):
+            sort = type.infer(tc).whnf(tc)
+            if not isinstance(sort, W_Sort) or not tc.def_eq(
+                type, expected_type,
+            ):
                 return W_InvalidRecursorRule(
                     env,
-                    "rule for %s rhs has fewer than %d outer "
-                    "lambdas (expected one each for params, motives, "
-                    "minors, and the ctor's fields)"
-                    % (rule.ctor_name.str(), num_lambdas),
+                    "recursor type is not the one its inductive gives rise to",
                 )
-            body = body.body
-        # Inside the body, after wrapping `fun params, motives, minors,
-        # fields ⇒ body`, the minor for ctor at index `ctor_idx` is at
-        # bvar position `num_fields + (num_minors - 1 - ctor_idx)` —
-        # innermost-binds-lowest puts fields at 0..num_fields-1, then
-        # the minors (last minor at num_fields, first at num_fields +
-        # num_minors - 1).
-        expected_bvar = rule.num_fields + self.num_minors - 1 - ctor_idx
-        head = body.head()
-        if not isinstance(head, W_BVar) or head.id != expected_bvar:
+        if len(self.rules) != len(spec.rules):
             return W_InvalidRecursorRule(
                 env,
-                "rule for %s rhs head is not the corresponding minor "
-                "(expected bvar #%d)"
-                % (rule.ctor_name.str(), expected_bvar),
+                "recursor has %d rule(s) but should have %d"
+                % (len(self.rules), len(spec.rules)),
             )
+        for i in range(len(self.rules)):
+            rule = self.rules[i]
+            expected = spec.rules[i]
+            if not rule.ctor_name.syntactic_eq(expected.ctor_name):
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule #%d is for %s but should be for %s" % (
+                        i + 1,
+                        rule.ctor_name.str(),
+                        expected.ctor_name.str(),
+                    ),
+                )
+            if rule.num_fields != expected.num_fields:
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule for %s claims %d fields but the ctor has %d" % (
+                        rule.ctor_name.str(),
+                        rule.num_fields,
+                        expected.num_fields,
+                    ),
+                )
+            rhs = expected.rhs
+            if substs is not None:
+                rhs = rhs.subst_levels(substs)
+            if not alpha_eq(rule.rhs, rhs):
+                rule.rhs.infer(tc)
+                if not tc.def_eq(rule.rhs, rhs):
+                    return W_InvalidRecursorRule(
+                        env,
+                        "rule for %s is not the one its inductive gives "
+                        "rise to" % rule.ctor_name.str(),
+                    )
 
     def decl_format(self, name, levels, type, constants, marker):
         return _decl_signature_format(
