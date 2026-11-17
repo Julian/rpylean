@@ -697,6 +697,24 @@ class TestRecursorRuleShape(object):
             W_BVar(num_minors + 1).app(W_BVar(0)),
         )
 
+    def _one_field_rec_data(self, ind_name, ctor_name, field_type):
+        """Honest dependent recursor telescope for ``mk : A -> I``."""
+        motive_type = forall(
+            Name.simple("w").binder(type=ind_name.const()),
+        )(PROP)
+        motive = Name.simple("motive").binder(type=motive_type)
+        minor_type = forall(
+            Name.simple("field").binder(type=field_type),
+        )(
+            W_BVar(1).app(ctor_name.const().app(W_BVar(0)))
+        )
+        minor = Name.simple("minor").binder(type=minor_type)
+        major = Name.simple("w").binder(type=ind_name.const())
+        rec_type = forall(motive, minor, major)(
+            W_BVar(2).app(W_BVar(0))
+        )
+        return motive, minor, rec_type
+
     def test_rule_count_mismatch_rejected(self):
         from rpylean.objects import W_RecRule, W_InvalidRecursorRule
         U, mk, ind = self._build_unit_ind()
@@ -781,12 +799,20 @@ class TestRecursorRuleShape(object):
         # Canonical rhs for the only ctor of a 1-ctor inductive with
         # num_params=0, num_motives=1, num_minors=1, num_fields=0:
         # `fun motive minor_mk => minor_mk` — bvar 0 inside two
-        # lambdas. The binder types don't matter for the head check.
-        motive_binder = Name.simple("motive").binder(type=TYPE)
-        minor_binder = Name.simple("minor_mk").binder(type=U.const())
+        # lambdas, with the same dependent binder types as the recursor.
+        motive_binder = Name.simple("motive").binder(type=forall(
+            Name.simple("u").binder(type=U.const()),
+        )(PROP))
+        minor_binder = Name.simple("minor_mk").binder(
+            type=W_BVar(0).app(mk.name.const()),
+        )
+        major_binder = Name.simple("u").binder(type=U.const())
+        rec_type = forall(motive_binder, minor_binder, major_binder)(
+            W_BVar(2).app(W_BVar(0))
+        )
         good_rhs = fun(motive_binder, minor_binder)(b0)
         good_rec = U.child("rec").recursor(
-            type=self._rec_type(U),
+            type=rec_type,
             num_motives=1,
             num_minors=1,
             rules=[W_RecRule(ctor_name=mk.name, num_fields=0, rhs=good_rhs)],
@@ -831,6 +857,193 @@ class TestRecursorRuleShape(object):
         env = Environment.having([ind, ff, tt, bad_rec])
         errors = list(env.type_check([bad_rec]))
         assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_rule_wrong_constructor_argument_rejected(self):
+        """Arena #350: the right minor with the wrong field must fail."""
+        from rpylean.objects import W_InvalidRecursorRule
+        Bool = Name.simple("Bool")
+        Bool_true = Bool.child("true")
+        W = Name.simple("W")
+        mk = W.child("mk").constructor(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(
+                W.const()
+            ),
+            num_fields=1,
+        )
+        ind = W.inductive(type=TYPE, constructors=[mk])
+        motive, minor, rec_type = self._one_field_rec_data(
+            W, mk.name, Bool.const(),
+        )
+        field = Name.simple("b").binder(type=Bool.const())
+        wrong_rhs = fun(motive, minor, field)(
+            W_BVar(1).app(Bool_true.const())
+        )
+        rec = W.child("rec").recursor(
+            type=rec_type,
+            num_minors=1,
+            rules=[W_RecRule(mk.name, 1, wrong_rhs)],
+            all=[W],
+        )
+        env = Environment.having([
+            Bool.axiom(type=TYPE), Bool_true.axiom(type=Bool.const()),
+            ind, mk, rec,
+        ])
+        errors = list(env.type_check([rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule), repr(errors[0])
+
+    def test_dependent_one_field_rule_accepted(self):
+        """The corresponding honest field-sensitive rule stays valid."""
+        A = Name.simple("A")
+        W = Name.simple("DepW")
+        mk = W.child("mk").constructor(
+            type=forall(Name.simple("a").binder(type=A.const()))(
+                W.const()
+            ),
+            num_fields=1,
+        )
+        ind = W.inductive(type=TYPE, constructors=[mk])
+        motive, minor, rec_type = self._one_field_rec_data(
+            W, mk.name, A.const(),
+        )
+        field = Name.simple("a").binder(type=A.const())
+        honest_rhs = fun(motive, minor, field)(W_BVar(1).app(W_BVar(0)))
+        rec = W.child("rec").recursor(
+            type=rec_type, num_minors=1,
+            rules=[W_RecRule(mk.name, 1, honest_rhs)], all=[W],
+        )
+        env = Environment.having([A.axiom(type=TYPE), ind, mk, rec])
+        assert list(env.type_check([rec])) == []
+
+    def test_forged_minor_binder_cannot_hide_wrong_argument(self):
+        """Rule binder types must not make wrong proof args irrelevant."""
+        Bool = Name.simple("Bool")
+        Bool_true = Bool.child("true")
+        True_ = Name.simple("True")
+        W = Name.simple("ProofW")
+        mk = W.child("mk").constructor(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(
+                W.const()
+            ),
+            num_fields=1,
+        )
+        ind = W.inductive(type=TYPE, constructors=[mk])
+        motive, honest_minor, rec_type = self._one_field_rec_data(
+            W, mk.name, Bool.const(),
+        )
+        forged_minor = Name.simple("minor").binder(
+            type=forall(
+                Name.simple("b").binder(type=Bool.const()),
+            )(True_.const()),
+        )
+        field = Name.simple("b").binder(type=Bool.const())
+        wrong_rhs = fun(motive, forged_minor, field)(
+            W_BVar(1).app(Bool_true.const())
+        )
+        rec = W.child("rec").recursor(
+            type=rec_type, num_minors=1,
+            rules=[W_RecRule(mk.name, 1, wrong_rhs)], all=[W],
+        )
+        env = Environment.having([
+            Bool.axiom(type=TYPE), Bool_true.axiom(type=Bool.const()),
+            True_.axiom(type=PROP), ind, mk, rec,
+        ])
+        errors = list(env.type_check([rec]))
+        assert len(errors) == 1
+        from rpylean.objects import W_InvalidRecursorRule
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_direct_recursive_rule_accepted(self):
+        """A canonical Nat-like recursive field and IH application stays valid."""
+        R = Name.simple("R")
+        zero = R.child("zero").constructor(type=R.const(), cidx=0)
+        succ = R.child("succ").constructor(
+            type=forall(Name.simple("n").binder(type=R.const()))(R.const()),
+            num_fields=1, cidx=1,
+        )
+        ind = R.inductive(
+            type=TYPE, constructors=[zero, succ], is_recursive=True,
+        )
+        motive_type = forall(
+            Name.simple("r").binder(type=R.const()),
+        )(PROP)
+        motive = Name.simple("motive").binder(type=motive_type)
+        zminor = Name.simple("zero_case").binder(
+            type=W_BVar(0).app(zero.name.const()),
+        )
+        sminor_type = forall(
+            Name.simple("n").binder(type=R.const()),
+            Name.simple("ih").binder(type=W_BVar(2).app(W_BVar(0))),
+        )(
+            W_BVar(3).app(succ.name.const().app(W_BVar(1)))
+        )
+        sminor = Name.simple("succ_case").binder(type=sminor_type)
+        field = Name.simple("n").binder(type=R.const())
+        major = Name.simple("r").binder(type=R.const())
+        rec_type = forall(motive, zminor, sminor, major)(
+            W_BVar(3).app(W_BVar(0))
+        )
+        zero_rhs = fun(motive, zminor, sminor)(W_BVar(1))
+        recursive_call = R.child("rec").const().app(
+            W_BVar(3), W_BVar(2), W_BVar(1), W_BVar(0),
+        )
+        succ_rhs = fun(motive, zminor, sminor, field)(
+            W_BVar(1).app(W_BVar(0), recursive_call)
+        )
+        rec = R.child("rec").recursor(
+            type=rec_type, num_minors=2,
+            rules=[
+                W_RecRule(zero.name, 0, zero_rhs),
+                W_RecRule(succ.name, 1, succ_rhs),
+            ],
+            all=[R],
+        )
+        env = Environment.having([ind, zero, succ, rec])
+        errors = list(env.type_check([rec]))
+        assert errors == [], str(errors[0]) if errors else ""
+
+    def test_direct_recursive_rule_missing_ih_rejected(self):
+        """The right recursive minor is insufficient without its IH."""
+        R = Name.simple("MissingIH")
+        zero = R.child("zero").constructor(type=R.const(), cidx=0)
+        succ = R.child("succ").constructor(
+            type=forall(Name.simple("n").binder(type=R.const()))(R.const()),
+            num_fields=1, cidx=1,
+        )
+        ind = R.inductive(
+            type=TYPE, constructors=[zero, succ], is_recursive=True,
+        )
+        motive_type = forall(Name.simple("r").binder(type=R.const()))(PROP)
+        motive = Name.simple("motive").binder(type=motive_type)
+        zminor = Name.simple("zero_case").binder(
+            type=W_BVar(0).app(zero.name.const()),
+        )
+        sminor = Name.simple("succ_case").binder(type=forall(
+            Name.simple("n").binder(type=R.const()),
+            Name.simple("ih").binder(type=W_BVar(2).app(W_BVar(0))),
+        )(W_BVar(3).app(succ.name.const().app(W_BVar(1)))))
+        field = Name.simple("n").binder(type=R.const())
+        major = Name.simple("r").binder(type=R.const())
+        rec_type = forall(motive, zminor, sminor, major)(
+            W_BVar(3).app(W_BVar(0))
+        )
+        zero_rhs = fun(motive, zminor, sminor)(W_BVar(1))
+        missing_ih_rhs = fun(motive, zminor, sminor, field)(
+            W_BVar(1).app(W_BVar(0))
+        )
+        rec = R.child("rec").recursor(
+            type=rec_type, num_minors=2,
+            rules=[
+                W_RecRule(zero.name, 0, zero_rhs),
+                W_RecRule(succ.name, 1, missing_ih_rhs),
+            ],
+            all=[R],
+        )
+        env = Environment.having([ind, zero, succ, rec])
+        errors = list(env.type_check([rec]))
+        assert len(errors) == 1
+        from rpylean.objects import W_InvalidRecursorRule
         assert isinstance(errors[0], W_InvalidRecursorRule)
 
 

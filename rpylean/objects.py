@@ -4998,7 +4998,7 @@ class W_Recursor(W_DeclarationKind):
 
     def type_check(self, type, tc):
         env = tc.env
-        # Shape-level + rhs-head validation. Catches malformed exports
+        # Shape-level + rule validation. Catches malformed exports
         # where:
         #   - the rec rules don't align with the inductive's ctors
         #     (extra/missing rules, ctor name typos, wrong nfields)
@@ -5007,10 +5007,11 @@ class W_Recursor(W_DeclarationKind):
         #     `Nat.rec` succ rule whose body returns the zero-case
         #     minor instead of the succ-case minor).
         #
-        # Doesn't catch every wrong-rhs class: a body using the right
-        # minor with the wrong args still slips through. Full canonical
-        # rhs derivation + def-eq comparison would be a separate piece
-        # of work.
+        # For the ordinary non-indexed, non-mutual fragment below, the
+        # complete constructor-derived rhs is also compared by definitional
+        # equality. Other recursor shapes retain the conservative head check
+        # until their index / mutual / higher-order IH construction is
+        # implemented explicitly.
         #
         # Skip validation entirely if the parent inductive isn't in
         # scope and can't be demand-loaded — under the standard
@@ -5084,7 +5085,24 @@ class W_Recursor(W_DeclarationKind):
         ctor_by_name = name_dict()
         for ctor in all_ctors:
             ctor_by_name[ctor.name] = ctor
+        full_rule_check = self._supports_full_rule_check(
+            first_kind, all_ctors, tc,
+        )
         for rule_idx, rule in enumerate(self.rules):
+            if (
+                self.num_motives == 1
+                and not rule.ctor_name.syntactic_eq(
+                    all_ctors[rule_idx].name
+                )
+            ):
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule #%d is for %s but constructor #%d is %s"
+                    % (
+                        rule_idx, rule.ctor_name.str(), rule_idx,
+                        all_ctors[rule_idx].name.str(),
+                    ),
+                )
             ctor = ctor_by_name.get(rule.ctor_name, None)
             if ctor is None:
                 try:
@@ -5117,9 +5135,167 @@ class W_Recursor(W_DeclarationKind):
             # isn't the right global minor offset and this check would
             # false-reject; skip it there.
             if self.num_motives == 1:
-                error = self._check_rule_rhs_head(env, rule, rule_idx)
+                if full_rule_check:
+                    error = self._check_rule_rhs(
+                        env, tc, rule, rule_idx, ctor,
+                    )
+                else:
+                    error = self._check_rule_rhs_head(env, rule, rule_idx)
                 if error is not None:
                     return error
+
+    def _supports_full_rule_check(self, first_kind, all_ctors, tc):
+        """Whether every rule is in the fully derived fragment.
+
+        This first complete fragment is one ordinary inductive with one
+        motive, no parameters or indices, no nested types and no reflexive
+        (higher-order recursive) fields. Direct recursive fields are
+        supported: their IH is the recursor applied to that field.
+
+        Check the whole recursor before strengthening any one rule. This
+        avoids a mixed validation mode in which some constructors receive a
+        full comparison while an unrecognised constructor silently receives
+        only a partial comparison.
+        """
+        if (
+            len(self.all) != 1
+            or self.num_motives != 1
+            or self.num_params != 0
+            or self.num_indices != 0
+            or first_kind.num_nested != 0
+            or first_kind.is_reflexive
+        ):
+            return False
+        ind_name = self.all[0]
+        for ctor in all_ctors:
+            ctor_kind = ctor.w_kind
+            assert isinstance(ctor_kind, W_Constructor)
+            if ctor_kind.num_params != 0:
+                return False
+            t = ctor.type
+            for _ in range(ctor_kind.num_fields):
+                if not isinstance(t, W_ForAll):
+                    return False
+                field_type = t.binder.type.whnf(tc)
+                if field_type.contains_const(ind_name):
+                    head = field_type.head()
+                    if not head.is_named(ind_name):
+                        # A function returning the inductive has a generated
+                        # lambda IH. Derive that case before claiming it.
+                        return False
+                t = t.body
+        return True
+
+    def _check_rule_rhs(self, env, tc, rule, ctor_idx, ctor):
+        """Compare an imported rule with the kernel-derived complete rhs.
+
+        Lean's ``mk_rec_rules`` applies the constructor's minor to every
+        field, then to one recursively generated IH for each direct recursive
+        field. For this method's explicit fragment there are no parameters or
+        indices, so each IH is simply
+
+            Rec motive minors... recursive_field
+
+        and all de Bruijn positions are determined by the imported rule's
+        already shape-checked outer telescope.
+        """
+        num_lambdas = self.num_motives + self.num_minors + rule.num_fields
+        # First verify the imported rhs has the expected number of lambdas.
+        # Do not reuse their binders below: their types are untrusted too.
+        body = rule.rhs
+        for _ in range(num_lambdas):
+            if not isinstance(body, W_Lambda):
+                return W_InvalidRecursorRule(
+                    env,
+                    "rule for %s rhs has fewer than %d outer lambdas "
+                    "(expected one each for motives, minors, and fields)"
+                    % (rule.ctor_name.str(), num_lambdas),
+                )
+            body = body.body
+
+        # Build the expected telescope independently of the rule rhs. Motive
+        # and minor binder types come from the separately checked recursor
+        # declaration telescope; field binder types come from the constructor
+        # telescope. Reusing imported rule binders here would let forged types
+        # make two wrong proof-valued applications definitionally equal by
+        # proof irrelevance.
+        binders = []
+        rec_type = tc.decl.type
+        for _ in range(self.num_motives + self.num_minors):
+            assert isinstance(rec_type, W_ForAll)
+            binders.append(rec_type.binder)
+            rec_type = rec_type.body
+        ctor_binders = ctor.type
+        for _ in range(rule.num_fields):
+            assert isinstance(ctor_binders, W_ForAll)
+            binders.append(ctor_binders.binder)
+            ctor_binders = ctor_binders.body
+
+        nfields = rule.num_fields
+        expected_minor = W_BVar(
+            nfields + self.num_minors - 1 - ctor_idx
+        )
+        expected_body = expected_minor
+
+        # Constructor fields occur left-to-right in the minor application;
+        # the final field is the innermost (#0) lambda binder.
+        fields = []
+        for i in range(nfields):
+            field = W_BVar(nfields - 1 - i)
+            fields.append(field)
+            expected_body = expected_body.app(field)
+
+        ctor_kind = ctor.w_kind
+        assert isinstance(ctor_kind, W_Constructor)
+        ctor_type = ctor.type
+        recursive = []
+        for _ in range(ctor_kind.num_fields):
+            assert isinstance(ctor_type, W_ForAll)
+            field_type = ctor_type.binder.type.whnf(tc)
+            recursive.append(field_type.head().is_named(self.all[0]))
+            ctor_type = ctor_type.body
+
+        rec_const = tc.decl.const_with_level_params()
+        motive = W_BVar(nfields + self.num_minors)
+        minors = []
+        for i in range(self.num_minors):
+            minors.append(W_BVar(nfields + self.num_minors - 1 - i))
+        for i in range(nfields):
+            if recursive[i]:
+                rec_call = rec_const.app(motive)
+                for minor in minors:
+                    rec_call = rec_call.app(minor)
+                rec_call = rec_call.app(fields[i])
+                expected_body = expected_body.app(rec_call)
+
+        expected_rhs = expected_body
+        i = len(binders) - 1
+        while i >= 0:
+            expected_rhs = _mk_w_lambda(binders[i], expected_rhs)
+            i -= 1
+        machine = tc.machine
+        old_opaque = machine._opaque_recursor_name
+        machine._opaque_recursor_name = tc.decl.name
+        try:
+            try:
+                expected_type = tc.infer(expected_rhs)
+                imported_type = tc.infer(rule.rhs)
+                types_match = tc.def_eq(imported_type, expected_type)
+                bodies_match = types_match and tc.def_eq(
+                    rule.rhs, expected_rhs,
+                )
+            except W_Error:
+                bodies_match = False
+        finally:
+            machine._opaque_recursor_name = old_opaque
+        if not bodies_match:
+            return W_InvalidRecursorRule(
+                env,
+                "rule for %s rhs is not definitionally equal to the "
+                "constructor-derived minor application"
+                % rule.ctor_name.str(),
+            )
+        return None
 
     def _check_name(self, env, name, first_kind):
         """

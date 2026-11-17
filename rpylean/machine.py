@@ -1186,7 +1186,7 @@ class Machine(object):
 
     _attrs_ = [
         'tc', 'store', '_delta_memo', '_rule_memo', '_fvars', '_opened',
-        '_eqv', '_neq', '_failed',
+        '_eqv', '_neq', '_failed', '_opaque_recursor_name',
         'h_prop', 'h_true', 'h_nat', 'h_string',
     ]
 
@@ -1210,6 +1210,9 @@ class Machine(object):
         self._neq = IntMap(1 << 10)
         #: pairs whose same-head argument comparison failed (symmetric)
         self._failed = IntMap(1 << 8)
+        #: A recursor whose imported rules must not participate in iota while
+        #: those same rules are being validated against a derived rhs.
+        self._opaque_recursor_name = None
         self.h_prop = store.leaf_for(PROP)
         self.h_true = store.leaf_for(_BOOL_TRUE)
         self.h_nat = store.leaf_for(NAT)
@@ -1511,6 +1514,9 @@ class Machine(object):
         target, args = store.unapp(h)
         const = store.const_leaf(target)
         if const is None:
+            return 0
+        opaque = self._opaque_recursor_name
+        if opaque is not None and const.name.syntactic_eq(opaque):
             return 0
         decl = self._decl(const)
         if decl is None:
