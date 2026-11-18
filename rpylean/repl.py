@@ -172,9 +172,11 @@ def reduce_decl(env, args, _, stdoutw, stderrw):
 
     prev_tracer = env.tracer
     env.tracer = StreamTracer(stdoutw)
+    tc = TypeChecker(env, declaration)
     try:
-        const.whnf(TypeChecker(env, declaration))
+        const.whnf(tc)
     finally:
+        tc.free()
         env.tracer = prev_tracer
 
 

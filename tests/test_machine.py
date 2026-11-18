@@ -12,6 +12,8 @@ from rpylean.machine import (
     KIND_LET,
     KIND_PROJ,
     IntMap,
+    PairMap,
+    SubstMemo,
     TermStore,
     is_leaf,
 )
@@ -69,6 +71,57 @@ class TestIntMap(object):
         m = IntMap()
         m.free()
         m.free()
+
+    def test_limit_starts_over_rather_than_growing(self):
+        m = IntMap(capacity=4)
+        m.limit = 8
+        try:
+            for k in range(1, 5):
+                m.set(k, k * 10)
+            assert m.mask + 1 == 8
+            assert m.size == 4
+            # Next insert exceeds 50% of the 8-slot limit: wipes and inserts.
+            m.set(5, 50)
+            assert m.mask + 1 == 8
+            assert m.size == 1
+            assert m.get(1, -1) == -1
+            assert m.get(5, -1) == 50
+        finally:
+            m.free()
+
+    def test_pair_map_limit(self):
+        m = PairMap(capacity=4)
+        m.limit = 8
+        try:
+            for k in range(1, 5):
+                m.set(k, k + 100, k * 10)
+            assert m.mask + 1 == 8
+            assert m.size == 4
+            m.set(5, 105, 50)
+            assert m.mask + 1 == 8
+            assert m.size == 1
+            assert m.get(1, 101, -1) == -1
+            assert m.get(5, 105, -1) == 50
+        finally:
+            m.free()
+
+    def test_subst_memo_narrow_limit_keeps_wide_entries(self):
+        memo = SubstMemo(capacity=4)
+        memo.limit = 8
+        try:
+            memo.set_wide(1 << 26, 7, 3, 999)
+            assert memo.get_wide(1 << 26, 7, 3) == 999
+            for k in range(1, 6):
+                memo.set(k, k * 10)
+            assert memo.mask + 1 == 8
+            assert memo.size == 1
+            # Overflowing the narrow map must not evict or free `wide`.
+            assert memo.get_wide(1 << 26, 7, 3) == 999
+            memo.clear()
+            assert memo.wide is None
+            assert memo.get_wide(1 << 26, 7, 3) == 0
+        finally:
+            memo.free()
 
 
 class TestLeaves(object):

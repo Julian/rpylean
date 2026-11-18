@@ -1092,10 +1092,11 @@ class Environment(object):
                 stderr.write("\n\n")
                 pdb.post_mortem()
             raise
-        elapsed = clock() - start
-        gc_elapsed = _gc_time_seconds() - gc_start
-        bytes_allocated = _bytes_allocated() - bytes_start
-        tc.free()
+        finally:
+            elapsed = clock() - start
+            gc_elapsed = _gc_time_seconds() - gc_start
+            bytes_allocated = _bytes_allocated() - bytes_start
+            tc.free()
         if isinstance(error, W_MemoryError):
             # The decl blew the memory cap: collect now so the next
             # decl starts from a shrunken heap instead of riding the

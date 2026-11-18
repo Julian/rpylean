@@ -13,8 +13,8 @@ sorts, variables, literals) stay `W_Expr` objects referenced from a
 side table; they are canonicalised by content on the way in, which is
 what makes handle equality meaningful.
 
-A store is per declaration: the working set of one check, freed
-wholesale when the check ends.
+A store is per declaration: the working set of one check, emptied
+for the next when the check ends.
 """
 
 from rpython.rlib.objectmodel import always_inline, we_are_translated
@@ -217,6 +217,11 @@ _OPEN_RECORDS = 1 << 17
 #: substituting into it (see `Machine._infer_open`).
 _HEAVY = 256
 
+#: How many slots a `SubstMemo` may have. A substitution memo only
+#: pays for itself while a lookup is cheaper than redoing the work,
+#: which it stops being once the table has outgrown the caches.
+_MEMO_LIMIT = 1 << 21
+
 #: The depths a `SubstMemo` remembers beyond what packs into a word.
 _WIDE_DEPTH_BITS = 24
 _WIDE_DEPTH = 1 << _WIDE_DEPTH_BITS
@@ -256,13 +261,14 @@ class IntMap(object):
     non-zero (zero marks an empty slot).
     """
 
-    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial']
+    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial', 'limit']
 
     def __init__(self, capacity=1 << 10):
         cap = 1
         while cap < capacity:
             cap <<= 1
         self.initial = cap
+        self.limit = 0
         self.keys = _alloc_words(cap)
         self.vals = _alloc_words(cap)
         self.mask = cap - 1
@@ -315,6 +321,12 @@ class IntMap(object):
             i = (i + 1) & mask
 
     def _grow(self):
+        if self.limit > 0 and self.mask + 1 >= self.limit:
+            # Only ever a way to skip work already done: start over
+            # rather than outgrow the caches.
+            _zero_words(self.keys, self.mask + 1)
+            self.size = 0
+            return
         old_keys = self.keys
         old_vals = self.vals
         old_cap = self.mask + 1
@@ -352,13 +364,14 @@ class PairMap(object):
     first half of a key must be non-zero (zero marks an empty slot).
     """
 
-    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial']
+    _attrs_ = ['keys', 'vals', 'mask', 'size', 'initial', 'limit']
 
     def __init__(self, capacity=1 << 10):
         cap = 1
         while cap < capacity:
             cap <<= 1
         self.initial = cap
+        self.limit = 0
         self.keys = _alloc_words(cap * 2)
         self.vals = _alloc_words(cap)
         self.mask = cap - 1
@@ -412,6 +425,12 @@ class PairMap(object):
             i = (i + 1) & mask
 
     def _grow(self):
+        if self.limit > 0 and self.mask + 1 >= self.limit:
+            # Only ever a way to skip work already done: start over
+            # rather than outgrow the caches.
+            _zero_words(self.keys, (self.mask + 1) * 2)
+            self.size = 0
+            return
         old_keys = self.keys
         old_vals = self.vals
         old_cap = self.mask + 1
@@ -458,6 +477,7 @@ class SubstMemo(IntMap):
 
     def __init__(self, capacity):
         IntMap.__init__(self, capacity)
+        self.limit = _MEMO_LIMIT
         self.wide = None
 
     def get_wide(self, h, other, depth):
@@ -472,6 +492,7 @@ class SubstMemo(IntMap):
         wide = self.wide
         if wide is None:
             wide = self.wide = PairMap(1 << 10)
+            wide.limit = _MEMO_LIMIT
         wide.set(h, (other << _WIDE_DEPTH_BITS) | depth, val)
 
     def clear(self):

@@ -1144,18 +1144,20 @@ class TestHeartbeat(object):
         env.max_heartbeat = 3
         decl = Name.simple("Test").definition(type=TYPE, value=PROP)
         tc = TypeChecker(env, decl)
-
-        # First 3 calls succeed
-        tc.def_eq(PROP, PROP)
-        tc.def_eq(PROP, PROP)
-        tc.def_eq(PROP, PROP)
-        assert tc.heartbeat == 3
-
-        with pytest.raises(HeartbeatExceeded) as exc_info:
+        try:
+            # First 3 calls succeed
             tc.def_eq(PROP, PROP)
-        error_str = str(exc_info.value)
-        assert "in Test" in error_str
-        assert "heartbeat limit exceeded" in error_str
+            tc.def_eq(PROP, PROP)
+            tc.def_eq(PROP, PROP)
+            assert tc.heartbeat == 3
+
+            with pytest.raises(HeartbeatExceeded) as exc_info:
+                tc.def_eq(PROP, PROP)
+            error_str = str(exc_info.value)
+            assert "in Test" in error_str
+            assert "heartbeat limit exceeded" in error_str
+        finally:
+            tc.free()
 
     def test_check_one_resets_heartbeat(self):
         """`type_check_one` creates a fresh `TypeChecker` per decl, so
