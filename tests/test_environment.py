@@ -19,12 +19,14 @@ from rpylean.objects import (
     W_BVar,
     W_ConstructorFieldCountMismatch,
     W_InvalidConstructorResult,
+    W_InvalidRecursorRule,
     W_LEVEL_ZERO,
     W_LevelParam,
     W_LitNat,
     W_NonPositiveOccurrence,
     W_NotAFunction,
     W_NotAProp,
+    W_NotASort,
     W_NotYetDeclared,
     W_RecRule,
     W_UnsafeReference,
@@ -344,7 +346,7 @@ class TestTypeError(object):
         env = Environment.having([a_decl, a_ctor, b_decl, b_ctor])
         errors = type_check(env=env)
         assert [each.__class__ for each in errors] == [
-            W_InvalidInductive,
+            W_InvalidConstructorResult,
             W_InvalidConstructorResult,
         ]
 
@@ -672,6 +674,142 @@ class TestTypeError(object):
             "but is expected to be a Sort (Type or Prop)"
         )
 
+    def test_unattached_constructor_rejected(self):
+        """A constructor not listed by its parent inductive cannot pass."""
+        False_ = Name.simple("False")
+        ind = False_.inductive(type=PROP, constructors=[])
+        rogue = False_.child("mk").constructor(type=False_.const())
+        env = Environment.having([ind, rogue])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+        assert errors[0].name == rogue.name
+
+    def test_unattached_constructor_in_mutual_export_rejected(self):
+        """An extra constructor record in a mutual inductive line fails."""
+        from rpylean import parser
+        env = parser.from_str(
+            """
+            {"in":1,"str":{"pre":0,"str":"A"}}
+            {"in":2,"str":{"pre":0,"str":"B"}}
+            {"in":3,"str":{"pre":0,"str":"Rogue"}}
+            {"ie":0,"sort":0}
+            {"const":{"name":1,"us":[]},"ie":1}
+            {"inductive":{"ctors":[{"cidx":0,"induct":3,"isUnsafe":false,"levelParams":[],"name":3,"numFields":0,"numParams":0,"type":1}],"recs":[],"types":[{"all":[1,2],"ctors":[],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0},{"all":[1,2],"ctors":[],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":2,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
+            """,
+        ).finish()
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+        assert errors[0].name == Name.simple("Rogue")
+
+    def test_constructor_num_params_mismatch_rejected(self):
+        """A constructor claiming fewer params than its inductive is rejected."""
+        Ind = Name.simple("Ind")
+        mk = Ind.child("mk").constructor(
+            type=forall(x.binder(type=PROP))(Ind.const().app(b0)),
+            num_params=0,
+            num_fields=1,
+        )
+        ind = Ind.inductive(
+            type=forall(x.binder(type=PROP))(TYPE),
+            constructors=[mk],
+            num_params=1,
+        )
+        env = Environment.having([ind, mk])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidConstructorResult)
+
+    def test_inductive_non_sort_param_binder_rejected(self):
+        """An inductive whose parameter domain is not a Sort is rejected."""
+        Nat_decl = NAT.name.inductive(type=TYPE)
+        zero = Name.of(["Nat", "zero"]).axiom(type=NAT)
+        Bad = Name.simple("Bad").inductive(
+            type=forall(x.binder(type=zero.const()))(PROP),
+            num_params=1,
+        )
+        env = Environment.having([Nat_decl, zero, Bad])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotASort)
+
+    def test_inductive_self_reference_in_type_rejected(self):
+        """An inductive's own type may not mention the inductive itself."""
+        Self = Name.simple("Self")
+        decl = Self.inductive(
+            type=forall(x.binder(type=Self.const()))(PROP),
+            num_params=1,
+        )
+        env = Environment.having([decl])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+
+    def test_safe_inductive_unsafe_reference_in_type_rejected(self):
+        """A safe inductive may not mention an unsafe constant in its type."""
+        secret = Name.simple("secret").axiom(type=TYPE, is_unsafe=True)
+        Leak = Name.simple("Leak").inductive(
+            type=forall(x.binder(type=secret.const()))(PROP),
+            num_params=1,
+        )
+        env = Environment.having([secret, Leak])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)
+
+    def test_constructor_ill_typed_result_index_rejected(self):
+        """A constructor whose result index has the wrong type is rejected."""
+        Nat_decl = NAT.name.inductive(type=TYPE)
+        Bool = Name.simple("Bool")
+        Bool_decl = Bool.axiom(type=TYPE)
+        btrue = Bool.child("true").axiom(type=Bool.const())
+        Vec = Name.simple("Vec")
+        mk = Vec.child("mk").constructor(
+            type=Vec.const().app(btrue.const()),
+        )
+        ind = Vec.inductive(
+            type=forall(x.binder(type=NAT))(PROP),
+            constructors=[mk],
+            num_indices=1,
+        )
+        env = Environment.having([Nat_decl, Bool_decl, btrue, ind, mk])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_TypeError)
+
+    def test_constructor_referencing_sibling_constructor_rejected(self):
+        """Constructors of a block are not in scope inside constructor types."""
+        A = Name.simple("A")
+        c0 = A.child("a").constructor(type=A.const())
+        c1 = A.child("b").constructor(
+            type=forall(x.binder(type=c0.name.const()))(A.const()),
+            num_fields=1,
+        )
+        ind = A.inductive(type=TYPE, constructors=[c0, c1])
+        env = Environment.having([ind, c0, c1])
+        errors = type_check(env=env)
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+
+    def test_mutual_block_param_type_mismatch_rejected(self):
+        """Members of a mutual block must agree on parameter binder types."""
+        Nat_decl = NAT.name.inductive(type=TYPE)
+        A = Name.simple("A")
+        B = Name.simple("B")
+        a_decl = A.inductive(
+            type=forall(x.binder(type=NAT))(TYPE), num_params=1, all=[A, B],
+        )
+        b_decl = B.inductive(
+            type=forall(x.binder(type=PROP))(TYPE), num_params=1, all=[A, B],
+        )
+        env = Environment.having([Nat_decl, a_decl, b_decl])
+        errors = type_check(env=env)
+        assert [each.__class__ for each in errors] == [
+            W_InvalidInductive,
+            W_InvalidInductive,
+        ]
+
 
 class TestRecursorRuleShape(object):
     """`W_Recursor.type_check`'s shape-level validation: rule count,
@@ -835,6 +973,132 @@ class TestRecursorRuleShape(object):
         )
         env = Environment.having([ind, ff, tt, bad_rec])
         errors = list(env.type_check([bad_rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_rule_wrong_constructor_argument_rejected(self):
+        """Arena `rec-rule-wrong-arg`: right minor applied to wrong value."""
+        Bool = Name.simple("Bool")
+        Bool_true = Bool.child("true")
+        W = Name.simple("W")
+        mk = W.child("mk").constructor(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(W.const()),
+            num_fields=1,
+        )
+        ind = W.inductive(type=TYPE, constructors=[mk])
+        u = Name.simple("u")
+        motive = Name.simple("motive").binder(
+            type=forall(x.binder(type=W.const()))(u.level().sort()),
+        )
+        minor = Name.simple("minor").binder(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(
+                b1.app(mk.name.const().app(b0)),
+            ),
+        )
+        major = Name.simple("w").binder(type=W.const())
+        rec_type = forall(motive, minor, major)(W_BVar(2).app(b0))
+        wrong_rhs = fun(
+            motive, minor, Name.simple("b").binder(type=Bool.const()),
+        )(b1.app(Bool_true.const()))
+        rec = W.child("rec").recursor(
+            type=rec_type,
+            num_minors=1,
+            rules=[W_RecRule(mk.name, 1, wrong_rhs)],
+            all=[W],
+            levels=[u],
+        )
+        env = Environment.having([
+            Bool.axiom(type=TYPE), Bool_true.axiom(type=Bool.const()),
+            ind, mk, rec,
+        ])
+        errors = list(env.type_check([rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_forged_minor_binder_cannot_hide_wrong_argument(self):
+        """Forged Prop minor binders (even on both rec.type and rule.rhs)
+        cannot make a wrong argument pass via proof irrelevance."""
+        Bool = Name.simple("Bool")
+        Bool_true = Bool.child("true")
+        True_ = Name.simple("True")
+        W = Name.simple("ProofW")
+        mk = W.child("mk").constructor(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(W.const()),
+            num_fields=1,
+        )
+        ind = W.inductive(type=TYPE, constructors=[mk])
+        u = Name.simple("u")
+        motive = Name.simple("motive").binder(
+            type=forall(x.binder(type=W.const()))(u.level().sort()),
+        )
+        forged_minor = Name.simple("minor").binder(
+            type=forall(Name.simple("b").binder(type=Bool.const()))(
+                True_.const(),
+            ),
+        )
+        major = Name.simple("w").binder(type=W.const())
+        forged_rec_type = forall(motive, forged_minor, major)(
+            W_BVar(2).app(b0),
+        )
+        wrong_rhs = fun(
+            motive, forged_minor, Name.simple("b").binder(type=Bool.const()),
+        )(b1.app(Bool_true.const()))
+        rec = W.child("rec").recursor(
+            type=forged_rec_type,
+            num_minors=1,
+            rules=[W_RecRule(mk.name, 1, wrong_rhs)],
+            all=[W],
+            levels=[u],
+        )
+        env = Environment.having([
+            Bool.axiom(type=TYPE), Bool_true.axiom(type=Bool.const()),
+            True_.axiom(type=PROP), ind, mk, rec,
+        ])
+        errors = list(env.type_check([rec]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+
+    def test_direct_recursive_rule_missing_ih_rejected(self):
+        """A recursive rule applying the right minor without its IH fails."""
+        R = Name.simple("MissingIH")
+        zero = R.child("zero").constructor(type=R.const(), cidx=0)
+        succ = R.child("succ").constructor(
+            type=forall(Name.simple("n").binder(type=R.const()))(R.const()),
+            num_fields=1,
+            cidx=1,
+        )
+        ind = R.inductive(
+            type=TYPE, constructors=[zero, succ], is_recursive=True,
+        )
+        u = Name.simple("u")
+        motive = Name.simple("motive").binder(
+            type=forall(x.binder(type=R.const()))(u.level().sort()),
+        )
+        zminor = Name.simple("z").binder(type=b0.app(zero.name.const()))
+        sminor = Name.simple("s").binder(
+            type=forall(
+                Name.simple("n").binder(type=R.const()),
+                Name.simple("ih").binder(type=W_BVar(2).app(b0)),
+            )(W_BVar(3).app(succ.name.const().app(b1))),
+        )
+        major = Name.simple("r").binder(type=R.const())
+        rec_type = forall(motive, zminor, sminor, major)(W_BVar(3).app(b0))
+        zero_rhs = fun(motive, zminor, sminor)(b1)
+        missing_ih_rhs = fun(
+            motive, zminor, sminor, Name.simple("n").binder(type=R.const()),
+        )(b1.app(b0))
+        rec = R.child("rec").recursor(
+            type=rec_type,
+            num_minors=2,
+            rules=[
+                W_RecRule(zero.name, 0, zero_rhs),
+                W_RecRule(succ.name, 1, missing_ih_rhs),
+            ],
+            all=[R],
+            levels=[u],
+        )
+        env = Environment.having([ind, zero, succ, rec])
+        errors = list(env.type_check([rec]))
         assert len(errors) == 1
         assert isinstance(errors[0], W_InvalidRecursorRule)
 
@@ -1252,7 +1516,6 @@ class TestRecursorRuleValidation(object):
     See https://arena.lean-lang.org/checker/official-nightly/#test-nat-rec-rules
     """
 
-    @pytest.mark.xfail(reason="recursor rule validation not yet implemented")
     def test_wrong_succ_rec_rule_proves_false(self):
         """
         Nat with a wrong Nat.rec succ rule that always returns h_zero
@@ -1320,7 +1583,7 @@ class TestRecursorRuleValidation(object):
             rules=[
                 W_RecRule(
                     ctor_name=Bool_false, num_fields=0,
-                    val=fun(
+                    rhs=fun(
                         Name.simple("motive").binder(type=bmotive),
                         Name.simple("hf").binder(type=hf_ty),
                         Name.simple("ht").binder(type=ht_ty),
@@ -1328,7 +1591,7 @@ class TestRecursorRuleValidation(object):
                 ),
                 W_RecRule(
                     ctor_name=Bool_true, num_fields=0,
-                    val=fun(
+                    rhs=fun(
                         Name.simple("motive").binder(type=bmotive),
                         Name.simple("hf").binder(type=hf_ty),
                         Name.simple("ht").binder(type=ht_ty),
@@ -1354,8 +1617,8 @@ class TestRecursorRuleValidation(object):
         hz_ty = W_BVar(0).app(Nat_zero.const())
         hs_ty = forall(
             n.binder(type=Nat.const()),
-            Name.simple("ih").binder(type=W_BVar(1).app(W_BVar(0))),
-        )(W_BVar(2).app(Nat_succ.const().app(W_BVar(1))))
+            Name.simple("ih").binder(type=W_BVar(2).app(W_BVar(0))),
+        )(W_BVar(3).app(Nat_succ.const().app(W_BVar(1))))
 
         nat_rec_decl = Nat_rec.recursor(
             type=forall(
@@ -1368,7 +1631,7 @@ class TestRecursorRuleValidation(object):
                 # zero rule (correct): fun motive hz hs => hz
                 W_RecRule(
                     ctor_name=Nat_zero, num_fields=0,
-                    val=fun(
+                    rhs=fun(
                         Name.simple("motive").binder(type=nmotive),
                         Name.simple("hz").binder(type=hz_ty),
                         Name.simple("hs").binder(type=hs_ty),
@@ -1378,7 +1641,7 @@ class TestRecursorRuleValidation(object):
                 # Should be: fun motive hz hs n => hs n (rec motive hz hs n)
                 W_RecRule(
                     ctor_name=Nat_succ, num_fields=1,
-                    val=fun(
+                    rhs=fun(
                         Name.simple("motive").binder(type=nmotive),
                         Name.simple("hz").binder(type=hz_ty),
                         Name.simple("hs").binder(type=hs_ty),
@@ -1387,7 +1650,6 @@ class TestRecursorRuleValidation(object):
                 ),
             ],
             num_motives=1, num_minors=2, levels=[u],
-            is_recursive=True,
         )
 
         # -- Nat.beq (definition using Nat.rec, but natively reduced) --
@@ -1449,10 +1711,9 @@ class TestRecursorRuleValidation(object):
             proof_of_false,
         ])
         errors = type_check(env=env)
-        assert errors, (
-            "proof_of_false should not type check: "
-            "a wrong Nat.rec succ rule must be rejected"
-        )
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidRecursorRule)
+        assert errors[0].name == Nat_rec
 
 
 class TestAlreadyDeclared(object):

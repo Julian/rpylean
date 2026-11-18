@@ -192,7 +192,7 @@ class TestName(object):
             name=intro,
             type=True_.const(),
             levels=[],
-            w_kind=W_Constructor(num_params=0, num_fields=0),
+            w_kind=W_Constructor(num_params=0, num_fields=0, induct=True_),
         )
 
     def test_recursor(self):

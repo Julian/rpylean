@@ -794,9 +794,18 @@ def _register_single_inductive(
             if rec.k:
                 raise ReflexiveKError(name, builder.names[rec.nidx])
 
-    ctor_decls = [
-        _register_constructor(builder, c, block) for c in ctor_records
-    ]
+    ctor_names = [builder.names[i] for i in type_data.ctor_nidxs]
+    allowed = objects.name_dict()
+    for ctor_name in ctor_names:
+        allowed[ctor_name] = True
+    ctor_decls = []
+    for c in ctor_records:
+        decl = _register_constructor(builder, c, block)
+        if (
+            builder.names[c.induct_nidx].syntactic_eq(name)
+            and decl.name in allowed
+        ):
+            ctor_decls.append(decl)
     rec_decls = [_register_recursor(builder, r, block) for r in rec_records]
 
     inductive = name.inductive(
@@ -810,6 +819,7 @@ def _register_single_inductive(
         num_indices=type_data.num_indices,
         is_reflexive=type_data.is_reflexive,
         is_recursive=type_data.is_recursive,
+        ctor_names=ctor_names,
         is_unsafe=type_data.is_unsafe,
     )
     builder.register_declaration(inductive, group=block)
@@ -853,7 +863,10 @@ def _register_mutual_inductive(
         if parent is not None:
             parent_kind = parent.w_kind
             assert isinstance(parent_kind, objects.W_Inductive)
-            parent_kind.constructors.append(ctor_decl)
+            for cname in parent_kind.ctor_names:
+                if cname.syntactic_eq(ctor_decl.name):
+                    parent_kind.constructors.append(ctor_decl)
+                    break
     for rec in rec_records:
         _register_recursor(builder, rec, block)
 
@@ -866,6 +879,7 @@ def _register_constructor(builder, ctor, block):
         num_fields=ctor.num_fields,
         cidx=ctor.cidx,
         is_unsafe=ctor.is_unsafe,
+        induct=builder.names[ctor.induct_nidx],
     )
     builder.register_declaration(decl, group=block)
     return decl

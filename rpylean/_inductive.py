@@ -19,19 +19,27 @@ constructors. Members found this way get the recursors `T.rec_1`,
 from rpylean.objects import (
     Binder,
     Name,
+    STAGE_ALL,
+    STAGE_IND_ONLY,
+    STAGE_PRE_BLOCK,
     W_App,
     W_CheckError,
     W_Const,
     W_Constructor,
+    W_ConstructorFieldCountMismatch,
     W_ForAll,
     W_FVar,
     W_FunBase,
     W_Inductive,
+    W_InvalidConstructorResult,
     W_Lambda,
     W_Let,
+    W_NonPositiveOccurrence,
+    W_NotASort,
     W_Proj,
     W_RecRule,
     W_Sort,
+    W_UniverseTooHigh,
     W_LEVEL_ZERO,
     MESSAGE,
     _error_diagnostic,
@@ -39,6 +47,7 @@ from rpylean.objects import (
     _mk_w_lambda,
     get_decl,
     find_decl,
+    name_dict,
     syntactic_eq,
 )
 
@@ -203,6 +212,11 @@ class _Member(object):
     applied to the arguments it occurs at.
     """
 
+    _attrs_ = [
+        'decl', 'kind', 'name', 'levels', 'args', 'rec_name',
+        'ctors', 'indices', 'major', 'motive',
+    ]
+
     def __init__(self, decl, levels, args, rec_name):
         kind = decl.w_kind
         assert isinstance(kind, W_Inductive)
@@ -224,8 +238,15 @@ class _Member(object):
 class _Ctor(object):
     """A constructor of a member, its type instantiated at the member."""
 
-    def __init__(self, name, levels, type):
-        self.name = name
+    _attrs_ = [
+        'decl', 'name', 'levels', 'type', 'fields',
+        'rec_fields', 'rec_xs', 'rec_member', 'rec_indices',
+        'result_indices',
+    ]
+
+    def __init__(self, decl, levels, type):
+        self.decl = decl
+        self.name = decl.name
         self.levels = levels
         self.type = type
         self.fields = []
@@ -240,6 +261,11 @@ class _Ctor(object):
 
 class RecursorSpec(object):
     """A recursor as its inductive block determines it."""
+
+    _attrs_ = [
+        'name', 'elim_name', 'type', 'rules', 'k',
+        'num_params', 'num_indices', 'num_motives', 'num_minors',
+    ]
 
     def __init__(self, name, elim_name, type, rules, k,
                  num_params, num_indices, num_motives, num_minors):
@@ -257,6 +283,12 @@ class RecursorSpec(object):
 
 
 class _Block(object):
+    _attrs_ = [
+        'tc', 'env', 'first', 'first_kind', 'num_params', 'unsafe',
+        'level_names', 'levels', 'params', 'members', 'num_declared',
+        'result_level', 'elim_name', 'elim_level',
+    ]
+
     def __init__(self, first, tc):
         self.tc = tc
         self.env = tc.env
@@ -303,6 +335,10 @@ class _Block(object):
             kind = decl.w_kind
             if not isinstance(kind, W_Inductive):
                 raise self.fail("%s is not an inductive type" % name.str())
+            if decl.safety != self.first.safety:
+                raise self.fail(
+                    "the types of the block differ in safety",
+                )
             if kind.num_params != self.num_params:
                 raise self.fail(
                     "the types of the block differ in their number of "
@@ -328,6 +364,24 @@ class _Block(object):
             )
         self.num_declared = len(self.members)
 
+        tc = self.tc
+        tc.stage = STAGE_PRE_BLOCK
+        try:
+            for i in range(self.num_declared):
+                decl_type = self.members[i].decl.type
+                if self.first.group < 0 and self.has_occurrence(decl_type):
+                    raise self.fail(
+                        "the type of an inductive may not mention the "
+                        "types being declared",
+                    )
+                inferred = decl_type.infer(tc)
+                if not isinstance(inferred.whnf(tc), W_Sort):
+                    raise W_NotASort(
+                        tc, decl_type, inferred_type=inferred,
+                    )
+        finally:
+            tc.stage = STAGE_ALL
+
         type = self.first.type
         for _ in range(self.num_params):
             if not isinstance(type, W_ForAll):
@@ -350,29 +404,69 @@ class _Block(object):
                 names = member.decl.levels
                 for i in range(len(names)):
                     substs[names[i]] = member.levels[i]
+            seen_ctors = name_dict()
             for ctor_name in member.kind.ctor_names:
+                if declared:
+                    if ctor_name in seen_ctors:
+                        raise self.fail(
+                            "duplicate constructor %s" % ctor_name.str(),
+                        )
+                    seen_ctors[ctor_name] = True
                 ctor_decl = get_decl(declarations, ctor_name)
-                if not isinstance(ctor_decl.w_kind, W_Constructor):
+                ctor_kind = ctor_decl.w_kind
+                if not isinstance(ctor_kind, W_Constructor):
                     raise self.fail(
                         "%s is not a constructor" % ctor_name.str(),
                     )
+                if declared:
+                    if ctor_decl.safety != self.first.safety:
+                        raise self.fail(
+                            "%s differs in safety from its inductive"
+                            % ctor_name.str(),
+                        )
+                    if (
+                        not ctor_kind.induct.is_anonymous()
+                        and not ctor_kind.induct.syntactic_eq(member.name)
+                    ):
+                        raise W_InvalidConstructorResult(
+                            self.env, ctor_decl.type,
+                        )
+                    if ctor_kind.num_params != self.num_params:
+                        raise W_InvalidConstructorResult(
+                            self.env, ctor_decl.type,
+                        )
+                    if len(ctor_decl.levels) != len(self.level_names):
+                        raise W_InvalidConstructorResult(
+                            self.env, ctor_decl.type,
+                        )
+                    for i in range(len(ctor_decl.levels)):
+                        if not ctor_decl.levels[i].syntactic_eq(
+                            self.level_names[i]
+                        ):
+                            raise W_InvalidConstructorResult(
+                                self.env, ctor_decl.type,
+                            )
                 type = ctor_decl.type
                 if substs is not None:
                     type = type.subst_levels(substs)
                 for arg in member.args:
                     if not isinstance(type, W_ForAll):
+                        if declared:
+                            raise W_InvalidConstructorResult(
+                                self.env, ctor_decl.type,
+                            )
                         raise self.fail(
                             "%s has fewer binders than parameters"
                             % ctor_name.str(),
                         )
                     type = type.body.instantiate(arg, 0)
                 if declared:
-                    self.check_uniform_occurrences(type)
+                    self.check_uniform_occurrences(type, ctor_decl.type)
                 self.find_nested(type)
-                member.ctors.append(_Ctor(ctor_name, member.levels, type))
+                member.ctors.append(_Ctor(ctor_decl, member.levels, type))
             qhead += 1
 
-    def check_uniform_occurrences(self, expr):
+    def check_uniform_occurrences(self, expr, ctor_type):
         """
         Every occurrence of a type being declared must be applied to
         the block's universe levels and parameters.
@@ -390,26 +484,23 @@ class _Block(object):
                             ok = False
                             break
                 if not ok:
-                    raise self.fail(
-                        "%s occurs applied to other than the parameters and "
-                        "universe levels of the block" % head.name.str(),
-                    )
+                    raise W_InvalidConstructorResult(self.env, ctor_type)
                 for i in range(self.num_params, len(args)):
-                    self.check_uniform_occurrences(args[i])
+                    self.check_uniform_occurrences(args[i], ctor_type)
                 return
             if not isinstance(head, W_Const):
-                self.check_uniform_occurrences(head)
+                self.check_uniform_occurrences(head, ctor_type)
             for each in args:
-                self.check_uniform_occurrences(each)
+                self.check_uniform_occurrences(each, ctor_type)
         elif isinstance(expr, W_FunBase):
-            self.check_uniform_occurrences(expr.binder.type)
-            self.check_uniform_occurrences(expr.body)
+            self.check_uniform_occurrences(expr.binder.type, ctor_type)
+            self.check_uniform_occurrences(expr.body, ctor_type)
         elif isinstance(expr, W_Let):
-            self.check_uniform_occurrences(expr.type)
-            self.check_uniform_occurrences(expr.value)
-            self.check_uniform_occurrences(expr.body)
+            self.check_uniform_occurrences(expr.type, ctor_type)
+            self.check_uniform_occurrences(expr.value, ctor_type)
+            self.check_uniform_occurrences(expr.body, ctor_type)
         elif isinstance(expr, W_Proj):
-            self.check_uniform_occurrences(expr.struct_expr)
+            self.check_uniform_occurrences(expr.struct_expr, ctor_type)
 
     def find_nested(self, expr):
         """Add a member for each container the block occurs nested in."""
@@ -537,6 +628,15 @@ class _Block(object):
                         "%s has fewer binders than parameters"
                         % member.name.str(),
                     )
+                if 0 < i < self.num_declared:
+                    assert isinstance(arg, W_FVar)
+                    if not self.tc.def_eq(
+                        _consume_type_annotations(type.binder.type),
+                        arg.binder.type,
+                    ):
+                        raise self.fail(
+                            "the types of the block differ in parameter types",
+                        )
                 type = type.body.instantiate(arg, 0)
             type = type.whnf(self.tc)
             while isinstance(type, W_ForAll):
@@ -572,26 +672,79 @@ class _Block(object):
     # -- the constructors ---------------------------------------------
 
     def check_constructors(self):
+        tc = self.tc
         recursive = False
         for i in range(len(self.members)):
             member = self.members[i]
+            declared = i < self.num_declared
             for ctor in member.ctors:
+                ctor_kind = ctor.decl.w_kind
+                assert isinstance(ctor_kind, W_Constructor)
+                orig = ctor.decl.type
+                if declared:
+                    for _ in range(len(member.args)):
+                        assert isinstance(orig, W_ForAll)
+                        orig = orig.body
                 type = ctor.type
                 number = 0
                 while isinstance(type, W_ForAll):
                     number += 1
                     field_type = type.binder.type
+                    orig_field_type = field_type
+                    if declared and isinstance(orig, W_ForAll):
+                        orig_field_type = orig.binder.type
+                        orig = orig.body
                     field = _local_for(type.binder)
                     ctor.fields.append(field)
                     if self.has_occurrence(field_type):
                         recursive = True
-                        self.check_field(ctor, field, field_type, number)
+                        self.check_field(
+                            ctor, field, field_type, orig_field_type,
+                            number, declared,
+                        )
                     type = type.body.instantiate(field, 0)
+                if declared and len(ctor.fields) != ctor_kind.num_fields:
+                    raise W_ConstructorFieldCountMismatch(
+                        self.env, ctor.decl.type,
+                        declared=ctor_kind.num_fields,
+                        actual=len(ctor.fields),
+                    )
                 if self.valid_app(type) != i:
+                    if declared:
+                        raise W_InvalidConstructorResult(
+                            self.env, ctor.decl.type,
+                        )
                     raise self.fail(
                         "%s does not construct %s"
                         % (ctor.name.str(), member.name.str()),
                     )
+                if declared:
+                    tc.stage = STAGE_IND_ONLY
+                    try:
+                        inferred = ctor.decl.type.infer(tc)
+                        if not isinstance(inferred.whnf(tc), W_Sort):
+                            raise W_NotASort(
+                                tc, ctor.decl.type,
+                                inferred_type=inferred,
+                            )
+                        if not self.result_level.eq(W_LEVEL_ZERO):
+                            for field in ctor.fields:
+                                assert isinstance(field, W_FVar)
+                                f_sort = field.binder.type.infer(tc).whnf(tc)
+                                if not isinstance(f_sort, W_Sort):
+                                    raise self.fail(
+                                        "a field of %s is not a type"
+                                        % ctor.name.str(),
+                                    )
+                                if not f_sort.level.leq(self.result_level):
+                                    raise W_UniverseTooHigh(
+                                        self.env, ctor.decl.type,
+                                        field.binder.type,
+                                        field_level=f_sort.level,
+                                        inductive_level=self.result_level,
+                                    )
+                    finally:
+                        tc.stage = STAGE_ALL
                 _, args = _args_of(type)
                 ctor.result_indices = _drop(args, len(member.args))
         for i in range(self.num_declared):
@@ -601,7 +754,7 @@ class _Block(object):
                     % self.members[i].name.str(),
                 )
 
-    def check_field(self, ctor, field, type, number):
+    def check_field(self, ctor, field, type, orig_field_type, number, declared):
         """
         A field mentioning the block must mention it strictly
         positively; a field which ends in a member is a recursive one.
@@ -612,6 +765,10 @@ class _Block(object):
         while self.has_occurrence(type):
             if isinstance(type, W_ForAll):
                 if self.has_occurrence(type.binder.type) and not self.unsafe:
+                    if declared:
+                        raise W_NonPositiveOccurrence(
+                            self.env, orig_field_type, field_number=number,
+                        )
                     raise self.fail(
                         "field #%d of %s has a non-positive occurrence of "
                         "the types being declared" % (number, ctor.name.str()),
@@ -624,6 +781,18 @@ class _Block(object):
             if index < 0:
                 if self.unsafe:
                     return
+                if declared:
+                    head, _ = _args_of(type)
+                    if (
+                        isinstance(head, W_Const)
+                        and self.is_declared_name(head.name)
+                    ):
+                        raise W_InvalidConstructorResult(
+                            self.env, ctor.decl.type,
+                        )
+                    raise W_NonPositiveOccurrence(
+                        self.env, orig_field_type, field_number=number,
+                    )
                 raise self.fail(
                     "field #%d of %s has an invalid occurrence of the "
                     "types being declared" % (number, ctor.name.str()),
@@ -799,10 +968,11 @@ def generate(first, tc):
 class _Cache(object):
     """The most recently constructed block's recursors."""
 
+    _attrs_ = ['first', 'specs']
+
     def __init__(self):
         self.first = None
         self.specs = None
-        self.error = None
 
 
 _CACHE = _Cache()
@@ -812,13 +982,7 @@ def recursors_of(first, tc):
     """`generate`, remembering the last block it was asked about."""
     cache = _CACHE
     if cache.first is not first:
+        specs = generate(first, tc)
         cache.first = first
-        cache.specs = None
-        cache.error = None
-        try:
-            cache.specs = generate(first, tc)
-        except W_InvalidInductive as error:
-            cache.error = error
-    if cache.error is not None:
-        raise W_InvalidInductive(cache.error.environment, cache.error.summary)
+        cache.specs = specs
     return cache.specs

@@ -28,9 +28,13 @@ from rpylean.exceptions import (
 )
 from rpylean.machine import acquire, release
 from rpylean.objects import (
+    STAGE_ALL,
+    STAGE_IND_ONLY,
+    STAGE_PRE_BLOCK,
     W_CheckError,
     Name,
     StrName,
+    W_Constructor,
     W_HeartbeatError,
     W_MemoryError,
     W_NotYetDeclared,
@@ -696,7 +700,7 @@ class TypeChecker(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
-        '_whnf_tick', '_released',
+        '_whnf_tick', '_released', 'stage',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
@@ -723,6 +727,7 @@ class TypeChecker(object):
         self._whnf_tick = 0
         self.machine = acquire(self)
         self._released = False
+        self.stage = STAGE_ALL
 
     def free(self):
         """Release the machine once the check is over."""
@@ -773,15 +778,23 @@ class TypeChecker(object):
         declaration ``target``: verify the declaration may use it.
 
         It may not use anything declared after it, nor itself, except
-        within its own block; and it may not use anything less safe
-        than it is.
+        within its own block (and only what is already in scope at the
+        current stage of checking an inductive block); and it may not
+        use anything less safe than it is.
         """
         current = self.decl
         if current is None:
             return
-        if current.index >= 0 and target.index >= current.index:
-            if current.group < 0 or target.group != current.group:
+        if current.group >= 0 and target.group == current.group:
+            if self.stage == STAGE_PRE_BLOCK:
                 raise W_NotYetDeclared(self, const)
+            if (
+                self.stage == STAGE_IND_ONLY
+                and not isinstance(target.w_kind, W_Inductive)
+            ):
+                raise W_NotYetDeclared(self, const)
+        elif current.index >= 0 and target.index >= current.index:
+            raise W_NotYetDeclared(self, const)
         if target.safety > current.safety:
             raise W_UnsafeReference(self, const, target.safety)
 
@@ -948,10 +961,17 @@ def _place_all(declarations):
     for each in declarations:
         kind = each.w_kind
         if isinstance(kind, W_Inductive):
+            groups[each.name] = each.group
             for member in kind.constructors:
                 member.group = each.group
             for member in kind.recursors:
                 member.group = each.group
+    for each in declarations:
+        kind = each.w_kind
+        if isinstance(kind, W_Constructor):
+            group = groups.get(kind.induct, -1)
+            if group >= 0:
+                each.group = group
 
 
 class Environment(object):

@@ -1546,7 +1546,7 @@ class Name(_Item):
         )
 
     def constructor(self, type, num_params=0, num_fields=0, cidx=0,
-                    levels=None, is_unsafe=False):
+                    levels=None, is_unsafe=False, induct=None):
         """
         Make a constructor declaration with this name.
         """
@@ -1554,6 +1554,7 @@ class Name(_Item):
             num_params=num_params,
             num_fields=num_fields,
             cidx=cidx,
+            induct=self.parent if induct is None else induct,
         )
         return self.declaration(
             type=type, w_kind=constructor, levels=levels,
@@ -2679,19 +2680,6 @@ class W_Expr(_Item):
         """
         return False
 
-    def _any_subexpr_invalid_index(self, inductive):
-        """Recurse into subexpressions for invalid index occurrences."""
-        return False
-
-    def is_strictly_positive(self, inductive, env):
-        """
-        Whether *inductive* occurs only in strictly positive positions.
-
-        A non-positive occurrence is one on the left side of an arrow
-        (in the binder type of a ``\u2200``).
-        """
-        return True
-
     @unroll_safe
     def app(self, arg, *more):
         """
@@ -3335,10 +3323,6 @@ class W_Proj(W_Expr):
         )
         return eid
 
-    def _any_subexpr_invalid_index(self, inductive):
-        return inductive._has_invalid_index_occurrence(self.struct_expr)
-
-
     def _field_name(self, constants):
         """The name of the projected field, or its numeric index as a string."""
         decl = constants.get(self.struct_name, None)
@@ -3526,18 +3510,6 @@ class W_FunBase(W_Expr):
                 % (self._export_tag, bi, bid, bnid, tid, eid),
             )
         return eid
-
-    def _any_subexpr_invalid_index(self, inductive):
-        return (inductive._has_invalid_index_occurrence(self.binder.type)
-                or inductive._has_invalid_index_occurrence(self.body))
-
-    def is_strictly_positive(self, inductive, env):
-        """The binder type must not mention any inductive in the block."""
-        if inductive._contains_any_inductive(self.binder.type):
-            return False
-        return self.body.instantiate(self.binder.fvar()).whnf(env).is_strictly_positive(
-            inductive, env,
-        )
 
 
 class W_ForAll(W_FunBase):
@@ -3962,11 +3934,6 @@ class W_Let(W_Expr):
         )
         return eid
 
-    def _any_subexpr_invalid_index(self, inductive):
-        return (inductive._has_invalid_index_occurrence(self.type)
-                or inductive._has_invalid_index_occurrence(self.value)
-                or inductive._has_invalid_index_occurrence(self.body))
-
     def to_format(self, constants, marker):
         fvar = self.name.binder(type=self.type).fvar()
         body = self.body.instantiate(fvar)
@@ -4075,10 +4042,6 @@ class W_App(W_Expr):
             '{"app":{"arg":%d,"fn":%d},"ie":%d}\n' % (arg, fn, eid),
         )
         return eid
-
-    def _any_subexpr_invalid_index(self, inductive):
-        return (inductive._has_invalid_index_occurrence(self.fn)
-                or inductive._has_invalid_index_occurrence(self.arg))
 
     def __repr__(self):
         current, args = self.unapp()
@@ -4221,6 +4184,12 @@ class W_RecRule(_Item):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
         self.rhs = rhs
+
+
+#: How much of an inductive block is already in scope during a check.
+STAGE_ALL = 0
+STAGE_PRE_BLOCK = 1
+STAGE_IND_ONLY = 2
 
 
 class W_Declaration(_Item):
@@ -4695,147 +4664,27 @@ class W_Inductive(W_DeclarationKind):
         return self.constructors[0].type.binder_name(self.num_params + index)
 
     def type_check(self, type, tc):
-        target = type
-        for _ in range(self.num_params + self.num_indices):
-            if not isinstance(target, W_ForAll):
-                # The remaining arity can hide behind a definition —
-                # e.g. `Presieve.ofArrows : … → Presieve X`, where
-                # `Presieve X` unfolds to a pi ending in a Sort and
-                # the export counts its binders among the indices.
-                target = target.whnf(tc)
-            if not isinstance(target, W_ForAll):
-                return W_NotASort(tc, type, inferred_type=target, name=None)
-            # The peeled binder is bvar(0) of the body — depth 0, not
-            # the loop index (an index-i substitution targets bvar(i)
-            # at the body's top level, which never exists, silently
-            # leaving every binder after the first loose).
-            target = target.body.instantiate(target.binder.fvar(), 0)
-        target_sort = target.whnf(tc)
-        if not isinstance(target_sort, W_Sort):
-            return W_NotASort(
-                tc, type, inferred_type=target.infer(tc), name=None,
-            )
-        for ctor in self.constructor_decls(tc.declarations):
-            error = self._check_constructor(ctor, target_sort.level, tc)
-            if error is not None:
-                return error
-        from rpylean._inductive import recursors_of
-        recursors_of(get_decl(tc.declarations, self.all[0]), tc)
+        from rpylean._inductive import W_InvalidInductive, recursors_of
 
-    def _check_constructor(self, ctor, inductive_level, env):
-        """
-        Verify a constructor is valid for this inductive.
-
-        Checks the result type, index arguments, universe levels,
-        and strict positivity of field types.
-        """
-        ctor_kind = ctor.w_kind
-        assert isinstance(ctor_kind, W_Constructor)
-        num_params = ctor_kind.num_params
-        assert num_params >= 0
-        ind_name = self.name
-        error = W_InvalidConstructorResult(env, ctor.type, name=ctor.name)
-        all_fvars, ctor_type = ctor.type.open_all_binders()
-        if len(all_fvars) < num_params:
-            return error
-        param_fvars = all_fvars[:num_params]
-        remaining_fvars = all_fvars[num_params:]
-        if len(remaining_fvars) != ctor_kind.num_fields:
-            return W_ConstructorFieldCountMismatch(
-                env, ctor.type,
-                declared=ctor_kind.num_fields,
-                actual=len(remaining_fvars),
-                name=ctor.name,
-            )
-        # ctor_type is now the result type, e.g. Ind p1 p2 ... idx1 idx2 ...
-        head, rev_args = ctor_type.unapp()
-        if not head.is_named(ind_name):
-            return error
-        assert isinstance(head, W_Const)
-        if len(head.levels) != len(ctor.levels):
-            return error
-        for i in range(len(ctor.levels)):
-            if not head.levels[i].is_named(ctor.levels[i]):
-                return error
-        rev_args.reverse()
-        if len(rev_args) < num_params:
-            return error
-        for i in range(num_params):
-            if not syntactic_eq(rev_args[i], param_fvars[i]):
-                return error
-        # Index args must not contain any inductive of this block.
-        for i in range(num_params, len(rev_args)):
-            if self._contains_any_inductive(rev_args[i]):
-                return error
-        # Check field types for invalid occurrences of the inductive.
-        for i in range(len(remaining_fvars)):
-            field_type = remaining_fvars[i].binder.type
-            # Inductive in its own index (e.g. I (I x)).
-            if self._has_invalid_index_occurrence(field_type):
-                return error
-            # Universe level: the field's sort must be ≤ the inductive's.
-            # Prop inductives are exempt (their fields can be in any universe).
-            field_sort = field_type.infer(env).whnf(env).expect_sort(env)
-            if (
-                not isinstance(inductive_level, W_LevelZero)
-                and not field_sort.leq(inductive_level)
-            ):
-                return W_UniverseTooHigh(
-                    env, ctor.type, field_type,
-                    field_level=field_sort,
-                    inductive_level=inductive_level,
-                    name=ctor.name,
-                )
-            # Strict positivity: the inductive must not appear in a
-            # negative position (left of an arrow).
-            if not field_type.whnf(env).is_strictly_positive(self, env):
-                # Walk the un-opened type to get the original field
-                # expression for diagnostic span marking.
-                original = ctor.type
-                for _ in range(num_params + i):
-                    assert isinstance(original, W_FunBase)
-                    original = original.body
-                assert isinstance(original, W_FunBase)
-                return W_NonPositiveOccurrence(
-                    env, original.binder.type,
-                    field_number=i + 1,
-                    name=ctor.name,
-                )
-
-    def _has_invalid_index_occurrence(self, expr):
-        """
-        Whether *expr* contains an application of an inductive in this
-        block whose index arguments themselves contain a block member.
-
-        Mutual blocks share their parameter telescope, so
-        ``self.num_params`` is the params/indices boundary for every
-        member's application.
-        """
-        head, rev_args = expr.unapp()
-        head_in_block = False
-        for member in self.all:
-            if head.is_named(member):
-                head_in_block = True
-                break
-        if head_in_block:
-            # Check index args (those after the params) for occurrences.
-            rev_args.reverse()
-            for i in range(self.num_params, len(rev_args)):
-                if self._contains_any_inductive(rev_args[i]):
-                    return True
-            # Recurse into all args for nested invalid occurrences.
-            for i in range(len(rev_args)):
-                if self._has_invalid_index_occurrence(rev_args[i]):
-                    return True
-            return False
-        return expr._any_subexpr_invalid_index(self)
-
-    def _contains_any_inductive(self, expr):
-        """Whether *expr* mentions any of the inductives in this block."""
+        if not self.all:
+            return W_InvalidInductive(tc.env, "inductive block is empty")
+        in_block = False
         for name in self.all:
-            if expr.contains_const(name):
-                return True
-        return False
+            if name.syntactic_eq(self.name):
+                in_block = True
+                break
+        if not in_block:
+            return W_InvalidInductive(
+                tc.env,
+                "%s is not listed in its own block" % self.name.str(),
+            )
+        first = find_decl(tc.declarations, self.all[0])
+        if first is None:
+            return W_InvalidInductive(
+                tc.env,
+                "%s is not declared" % self.all[0].str(),
+            )
+        recursors_of(first, tc)
 
     def decl_format(self, name, levels, type, constants, marker):
         parts = [_decl_signature_format(
@@ -4853,10 +4702,11 @@ class W_Inductive(W_DeclarationKind):
 
 
 class W_Constructor(W_DeclarationKind):
-    _attrs_ = ['num_params', 'num_fields', 'cidx']
-    _immutable_fields_ = ['num_params', 'num_fields', 'cidx']
+    _attrs_ = ['induct', 'num_params', 'num_fields', 'cidx']
+    _immutable_fields_ = ['induct', 'num_params', 'num_fields', 'cidx']
 
-    def __init__(self, num_params, num_fields, cidx=0):
+    def __init__(self, num_params, num_fields, cidx=0, induct=Name.ANONYMOUS):
+        self.induct = induct
         self.num_params = num_params
         self.num_fields = num_fields
         #: This constructor's index within its parent inductive's
@@ -4877,9 +4727,20 @@ class W_Constructor(W_DeclarationKind):
         exporter.emit_axiom(decl)
 
     def type_check(self, type, tc):
-        # TODO - implement type checking
-        # This includes checking that num_params and num_fields match the declared ctype
-        pass
+        # A constructor's type, arity, universe levels and positivity
+        # are checked as part of its inductive's block; here verify it
+        # really belongs to one, so an unattached constructor cannot
+        # slip through unchecked.
+        ind_decl = find_decl(tc.declarations, self.induct)
+        if ind_decl is None:
+            return W_InvalidConstructorResult(tc.env, type)
+        ind_kind = ind_decl.w_kind
+        if not isinstance(ind_kind, W_Inductive):
+            return W_InvalidConstructorResult(tc.env, type)
+        for name in ind_kind.ctor_names:
+            if name.syntactic_eq(tc.decl.name):
+                return None
+        return W_InvalidConstructorResult(tc.env, type)
 
     def decl_format(self, name, levels, type, constants, marker):
         return _decl_signature_format(
@@ -5021,6 +4882,10 @@ class W_Recursor(W_DeclarationKind):
                 "recursor refers to %s which is not an inductive"
                 % self.all[0].str(),
             )
+        if tc.decl.safety != first.safety:
+            return W_InvalidRecursorRule(
+                env, "recursor and inductive differ in safety",
+            )
         if len(first_kind.all) != len(self.all):
             return W_InvalidRecursorRule(
                 env, "recursor and inductive disagree on their block",
@@ -5132,8 +4997,10 @@ class W_Recursor(W_DeclarationKind):
             if substs is not None:
                 rhs = rhs.subst_levels(substs)
             if not alpha_eq(rule.rhs, rhs):
-                rule.rhs.infer(tc)
-                if not tc.def_eq(rule.rhs, rhs):
+                rhs_type = rule.rhs.infer(tc)
+                if not tc.def_eq(rhs_type, rhs.infer(tc)) or not tc.def_eq(
+                    rule.rhs, rhs,
+                ):
                     return W_InvalidRecursorRule(
                         env,
                         "rule for %s is not the one its inductive gives "

@@ -477,12 +477,13 @@ def read_constant_info(ci):
         #   3: numParams : Nat
         #   4: numFields : Nat
         # + scalar byte 0 = isUnsafe (5 obj fields).
+        induct = read_name(_lean.ctor_get(val, 1))
         cidx = read_nat(_lean.ctor_get(val, 2)).toint()
         num_params = read_nat(_lean.ctor_get(val, 3)).toint()
         num_fields = read_nat(_lean.ctor_get(val, 4)).toint()
         is_unsafe = _ctor_byte(val, 5, 0) != 0
         kind = W_Constructor(num_params=num_params, num_fields=num_fields,
-                             cidx=cidx)
+                             cidx=cidx, induct=induct)
         return W_Declaration(name=name, type=type_expr, w_kind=kind,
                              levels=levels, safety=_safety_of(is_unsafe))
     if tag == 7:  # recInfo
