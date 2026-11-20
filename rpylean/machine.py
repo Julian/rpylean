@@ -24,6 +24,7 @@ from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpython.rlib.rbigint import rbigint
 
+from rpylean._eval import eval_closed_scalar
 from rpylean.exceptions import HeartbeatExceeded, InvalidProjection
 from rpylean.objects import (
     HINT_ABBREV,
@@ -52,6 +53,7 @@ from rpylean.objects import (
     W_Sort,
     W_TypeError,
     W_LEVEL_ZERO,
+    _BOOL_FALSE,
     _BOOL_TRUE,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
@@ -1480,7 +1482,7 @@ class Machine(object):
         'tc', 'store', '_delta_memo', '_rule_memo', '_fvars', '_opened',
         '_open_memo', '_heavy', '_budget',
         '_eqv', '_neq', '_failed',
-        'h_prop', 'h_true', 'h_nat', 'h_string',
+        'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
 
     _LAZY_DELTA_MAX_ITER = 100000
@@ -1514,7 +1516,9 @@ class Machine(object):
         self._opened = {}
         self.h_prop = store.leaf_for(PROP)
         self.h_true = store.leaf_for(_BOOL_TRUE)
+        self.h_false = store.leaf_for(_BOOL_FALSE)
         self.h_nat = store.leaf_for(NAT)
+        self.h_nat_zero = store.leaf_for(NAT_ZERO)
         self.h_string = store.leaf_for(STRING)
 
     def _census(self):
@@ -2778,9 +2782,39 @@ class Machine(object):
             return "<proj " + store.name_of(head).str() + ">"
         return "<let>"
 
+    def _is_scalar_target(self, h):
+        if h == self.h_true or h == self.h_false or h == self.h_nat_zero:
+            return True
+        return self.store.litnat_leaf(h) is not None
+
+    def _is_closed_compound(self, h):
+        if is_leaf(h):
+            return False
+        return (
+            not self.store.has_fvar(h)
+            and self.store.loose_bvar_range(h) == 0
+        )
+
     def _def_eq_uncached(self, h1, h2):
         store = self.store
         tracer = self.tc.tracer
+        # Closed-term call-by-need fast path: when comparing a closed
+        # compound term against a Bool or Nat scalar (e.g. `decide +kernel`
+        # or `beta-ladder`), evaluate it in the meta-traced abstract machine
+        # before eager substitution touches it.
+        if not tracer.recording:
+            if self._is_scalar_target(h2) and self._is_closed_compound(h1):
+                ev = eval_closed_scalar(self, h1)
+                if ev != 0:
+                    if ev == h2:
+                        return True
+                    h1 = ev
+            elif self._is_scalar_target(h1) and self._is_closed_compound(h2):
+                ev = eval_closed_scalar(self, h2)
+                if ev != 0:
+                    if ev == h1:
+                        return True
+                    h2 = ev
         h1 = self.whnf_core(h1, True)
         h2 = self.whnf_core(h2, True)
         if h1 == h2:

@@ -56,7 +56,7 @@ export-simple path:
 
 # Translate (compile) rpylean into an rpylean-c binary.
 translate *ARGS:
-    "{{ pypy }}" "{{ rpython }}" --opt=3 --output="{{ translated }}" {{ ARGS }} "{{ target }}"
+    "{{ pypy }}" "{{ rpython }}" --opt=jit --output="{{ translated }}" {{ ARGS }} "{{ target }}"
 
 # Run rpylean's (untranslated) tests.
 test *ARGS=tests:

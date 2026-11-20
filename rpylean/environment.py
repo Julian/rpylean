@@ -983,6 +983,7 @@ class Environment(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory',
+        '_code_cache',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -996,6 +997,7 @@ class Environment(object):
         'count_heartbeats?',
         'max_wall_time?',
         'max_memory?',
+        '_code_cache?',
     ]
 
     def __init__(self, declarations, tracer=Tracer(None)):
@@ -1005,6 +1007,7 @@ class Environment(object):
         self.count_heartbeats = False
         self.max_wall_time = 0.0
         self.max_memory = 0
+        self._code_cache = None
 
     @not_rpython
     def __getitem__(self, value):
