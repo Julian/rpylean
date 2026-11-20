@@ -23,6 +23,7 @@ from rpylean.objects import (
     STAGE_IND_ONLY,
     STAGE_PRE_BLOCK,
     W_App,
+    W_BVar,
     W_CheckError,
     W_Const,
     W_Constructor,
@@ -43,6 +44,7 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     MESSAGE,
     _error_diagnostic,
+    _mk_w_bvar,
     _mk_w_forall,
     _mk_w_lambda,
     get_decl,
@@ -114,22 +116,185 @@ def _local(name, type):
     return Binder.default(Name.simple(name), type).fvar()
 
 
+def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
+    """DAG-memoized substitution of `fvars[0..limit-1]` with de Bruijn indices
+    starting at ``depth`` (innermost `fvars[limit-1]` -> ``depth``)."""
+    if limit <= 0 or not expr.has_fvar():
+        return expr
+    if isinstance(expr, W_FVar):
+        k = fvar_idx.get(expr.id, -1)
+        if 0 <= k < limit:
+            return _mk_w_bvar(depth + limit - 1 - k)
+        return expr
+    uid = expr._uid
+    use_memo = depth < 65536 and uid < (1 << 46)
+    key = 0
+    if use_memo:
+        key = (uid << 16) | depth
+        cached = memo.get(key, None)
+        if cached is not None:
+            return cached
+    if isinstance(expr, W_App):
+        new_fn = _bind_fvars_prefix(expr.fn, fvar_idx, limit, depth, memo)
+        new_arg = _bind_fvars_prefix(expr.arg, fvar_idx, limit, depth, memo)
+        if new_fn is expr.fn and new_arg is expr.arg:
+            res = expr
+        else:
+            res = new_fn.app(new_arg)
+    elif isinstance(expr, W_ForAll):
+        b = expr.binder
+        new_bt = _bind_fvars_prefix(b.type, fvar_idx, limit, depth, memo)
+        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_body = _bind_fvars_prefix(
+            expr.body, fvar_idx, limit, depth + 1, memo,
+        )
+        if new_b is b and new_body is expr.body:
+            res = expr
+        else:
+            res = _mk_w_forall(new_b, new_body)
+    elif isinstance(expr, W_Lambda):
+        b = expr.binder
+        new_bt = _bind_fvars_prefix(b.type, fvar_idx, limit, depth, memo)
+        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_body = _bind_fvars_prefix(
+            expr.body, fvar_idx, limit, depth + 1, memo,
+        )
+        if new_b is b and new_body is expr.body:
+            res = expr
+        else:
+            res = _mk_w_lambda(new_b, new_body)
+    elif isinstance(expr, W_Let):
+        new_type = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
+        new_val = _bind_fvars_prefix(expr.value, fvar_idx, limit, depth, memo)
+        new_body = _bind_fvars_prefix(
+            expr.body, fvar_idx, limit, depth + 1, memo,
+        )
+        if (new_type is expr.type
+                and new_val is expr.value
+                and new_body is expr.body):
+            res = expr
+        else:
+            res = expr.name.let(type=new_type, value=new_val, body=new_body)
+    elif isinstance(expr, W_Proj):
+        new_se = _bind_fvars_prefix(
+            expr.struct_expr, fvar_idx, limit, depth, memo,
+        )
+        res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
+    else:
+        res = expr
+    if use_memo:
+        memo[key] = res
+    return res
+
+
+def _inst_dag_rec(expr, val, depth, memo):
+    if expr.loose_bvar_range() <= depth:
+        return expr
+    if isinstance(expr, W_BVar):
+        return expr.instantiate(val, depth)
+    uid = expr._uid
+    use_memo = depth < 65536 and uid < (1 << 46)
+    key = 0
+    if use_memo:
+        key = (uid << 16) | depth
+        cached = memo.get(key, None)
+        if cached is not None:
+            return cached
+    if isinstance(expr, W_App):
+        new_fn = _inst_dag_rec(expr.fn, val, depth, memo)
+        new_arg = _inst_dag_rec(expr.arg, val, depth, memo)
+        if new_fn is expr.fn and new_arg is expr.arg:
+            res = expr
+        else:
+            res = new_fn.app(new_arg)
+    elif isinstance(expr, W_ForAll):
+        b = expr.binder
+        new_bt = _inst_dag_rec(b.type, val, depth, memo)
+        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        if new_b is b and new_body is expr.body:
+            res = expr
+        else:
+            res = _mk_w_forall(new_b, new_body)
+    elif isinstance(expr, W_Lambda):
+        b = expr.binder
+        new_bt = _inst_dag_rec(b.type, val, depth, memo)
+        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        if new_b is b and new_body is expr.body:
+            res = expr
+        else:
+            res = _mk_w_lambda(new_b, new_body)
+    elif isinstance(expr, W_Let):
+        new_type = _inst_dag_rec(expr.type, val, depth, memo)
+        new_val = _inst_dag_rec(expr.value, val, depth, memo)
+        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        if (new_type is expr.type
+                and new_val is expr.value
+                and new_body is expr.body):
+            res = expr
+        else:
+            res = expr.name.let(type=new_type, value=new_val, body=new_body)
+    elif isinstance(expr, W_Proj):
+        new_se = _inst_dag_rec(expr.struct_expr, val, depth, memo)
+        res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
+    else:
+        res = expr
+    if use_memo:
+        memo[key] = res
+    return res
+
+
+def _instantiate_dag(expr, val):
+    if expr.loose_bvar_range() == 0:
+        return expr
+    return _inst_dag_rec(expr, val, 0, {})
+
+
 def _mk_pi(fvars, body):
-    i = len(fvars) - 1
+    n = len(fvars)
+    if n == 0:
+        return body
+    fvar_idx = {}
+    for i in range(n):
+        fvar = fvars[i]
+        assert isinstance(fvar, W_FVar)
+        fvar_idx[fvar.id] = i
+    body = _bind_fvars_prefix(body, fvar_idx, n, 0, {})
+    i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
-        body = _mk_w_forall(fvar.binder, body.bind_fvar(fvar, 0))
+        binder = fvar.binder
+        if i > 0 and binder.type.has_fvar():
+            new_type = _bind_fvars_prefix(binder.type, fvar_idx, i, 0, {})
+            if new_type is not binder.type:
+                binder = binder.with_type(new_type)
+        body = _mk_w_forall(binder, body)
         i -= 1
     return body
 
 
 def _mk_lambda(fvars, body):
-    i = len(fvars) - 1
+    n = len(fvars)
+    if n == 0:
+        return body
+    fvar_idx = {}
+    for i in range(n):
+        fvar = fvars[i]
+        assert isinstance(fvar, W_FVar)
+        fvar_idx[fvar.id] = i
+    body = _bind_fvars_prefix(body, fvar_idx, n, 0, {})
+    i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
-        body = _mk_w_lambda(fvar.binder, body.bind_fvar(fvar, 0))
+        binder = fvar.binder
+        if i > 0 and binder.type.has_fvar():
+            new_type = _bind_fvars_prefix(binder.type, fvar_idx, i, 0, {})
+            if new_type is not binder.type:
+                binder = binder.with_type(new_type)
+        body = _mk_w_lambda(binder, body)
         i -= 1
     return body
 
@@ -166,30 +331,42 @@ def _levels_eq(levels, others):
     return True
 
 
-def alpha_eq(a, b):
-    """Whether two expressions differ at most in how binders are written."""
+def _alpha_eq_memo(a, b, seen):
+    keys = None
     while True:
         if a is b:
-            return True
+            ok = True
+            break
         if a.__class__ is not b.__class__:
             return False
+        au = a._uid
+        bu = b._uid
+        if au < (1 << 31) and bu < (1 << 31):
+            key = (au << 31) | bu
+            if key in seen:
+                ok = True
+                break
+            if keys is None:
+                keys = [key]
+            else:
+                keys.append(key)
         if isinstance(a, W_App):
             assert isinstance(b, W_App)
-            if not alpha_eq(a.arg, b.arg):
+            if not _alpha_eq_memo(a.arg, b.arg, seen):
                 return False
             a = a.fn
             b = b.fn
         elif isinstance(a, W_FunBase):
             assert isinstance(b, W_FunBase)
-            if not alpha_eq(a.binder.type, b.binder.type):
+            if not _alpha_eq_memo(a.binder.type, b.binder.type, seen):
                 return False
             a = a.body
             b = b.body
         elif isinstance(a, W_Let):
             assert isinstance(b, W_Let)
-            if not alpha_eq(a.type, b.type):
+            if not _alpha_eq_memo(a.type, b.type, seen):
                 return False
-            if not alpha_eq(a.value, b.value):
+            if not _alpha_eq_memo(a.value, b.value, seen):
                 return False
             a = a.body
             b = b.body
@@ -202,7 +379,17 @@ def alpha_eq(a, b):
             a = a.struct_expr
             b = b.struct_expr
         else:
-            return syntactic_eq(a, b)
+            ok = syntactic_eq(a, b)
+            break
+    if ok and keys is not None:
+        for k in keys:
+            seen[k] = True
+    return ok
+
+
+def alpha_eq(a, b):
+    """Whether two expressions differ at most in how binders are written."""
+    return _alpha_eq_memo(a, b, {})
 
 
 class _Member(object):
@@ -318,12 +505,35 @@ class _Block(object):
                 return True
         return False
 
+    def _has_occurrence_memo(self, expr, seen):
+        uid = expr._uid
+        if uid in seen:
+            return False
+        if isinstance(expr, W_Const):
+            if self.is_declared_name(expr.name):
+                return True
+        elif isinstance(expr, W_App):
+            if (self._has_occurrence_memo(expr.fn, seen)
+                    or self._has_occurrence_memo(expr.arg, seen)):
+                return True
+        elif isinstance(expr, W_FunBase):
+            if (self._has_occurrence_memo(expr.binder.type, seen)
+                    or self._has_occurrence_memo(expr.body, seen)):
+                return True
+        elif isinstance(expr, W_Let):
+            if (self._has_occurrence_memo(expr.type, seen)
+                    or self._has_occurrence_memo(expr.value, seen)
+                    or self._has_occurrence_memo(expr.body, seen)):
+                return True
+        elif isinstance(expr, W_Proj):
+            if self._has_occurrence_memo(expr.struct_expr, seen):
+                return True
+        seen[uid] = True
+        return False
+
     def has_occurrence(self, expr):
         """Whether ``expr`` mentions a type being declared."""
-        for i in range(self.num_declared):
-            if expr.contains_const(self.members[i].name):
-                return True
-        return False
+        return self._has_occurrence_memo(expr, {})
 
     def collect_members(self):
         declarations = self.tc.declarations
@@ -366,6 +576,8 @@ class _Block(object):
 
         tc = self.tc
         tc.stage = STAGE_PRE_BLOCK
+        prev_levels = tc.allowed_levels
+        tc.allowed_levels = self.level_names
         try:
             for i in range(self.num_declared):
                 decl_type = self.members[i].decl.type
@@ -380,6 +592,7 @@ class _Block(object):
                         tc, decl_type, inferred_type=inferred,
                     )
         finally:
+            tc.allowed_levels = prev_levels
             tc.stage = STAGE_ALL
 
         type = self.first.type
@@ -390,7 +603,7 @@ class _Block(object):
                 raise self.fail("the type has fewer binders than parameters")
             param = _local_for(type.binder)
             self.params.append(param)
-            type = type.body.instantiate(param, 0)
+            type = _instantiate_dag(type.body, param)
         for i in range(self.num_declared):
             self.members[i].args = self.params
 
@@ -459,18 +672,22 @@ class _Block(object):
                             "%s has fewer binders than parameters"
                             % ctor_name.str(),
                         )
-                    type = type.body.instantiate(arg, 0)
+                    type = _instantiate_dag(type.body, arg)
                 if declared:
-                    self.check_uniform_occurrences(type, ctor_decl.type)
-                self.find_nested(type)
+                    self.check_uniform_occurrences(type, ctor_decl.type, {})
+                self.find_nested(type, {})
                 member.ctors.append(_Ctor(ctor_decl, member.levels, type))
             qhead += 1
 
-    def check_uniform_occurrences(self, expr, ctor_type):
+    def check_uniform_occurrences(self, expr, ctor_type, seen):
         """
         Every occurrence of a type being declared must be applied to
         the block's universe levels and parameters.
         """
+        uid = expr._uid
+        if uid in seen:
+            return
+        seen[uid] = True
         if isinstance(expr, W_App) or isinstance(expr, W_Const):
             head, args = _args_of(expr)
             if isinstance(head, W_Const) and self.is_declared_name(head.name):
@@ -486,38 +703,42 @@ class _Block(object):
                 if not ok:
                     raise W_InvalidConstructorResult(self.env, ctor_type)
                 for i in range(self.num_params, len(args)):
-                    self.check_uniform_occurrences(args[i], ctor_type)
+                    self.check_uniform_occurrences(args[i], ctor_type, seen)
                 return
             if not isinstance(head, W_Const):
-                self.check_uniform_occurrences(head, ctor_type)
+                self.check_uniform_occurrences(head, ctor_type, seen)
             for each in args:
-                self.check_uniform_occurrences(each, ctor_type)
+                self.check_uniform_occurrences(each, ctor_type, seen)
         elif isinstance(expr, W_FunBase):
-            self.check_uniform_occurrences(expr.binder.type, ctor_type)
-            self.check_uniform_occurrences(expr.body, ctor_type)
+            self.check_uniform_occurrences(expr.binder.type, ctor_type, seen)
+            self.check_uniform_occurrences(expr.body, ctor_type, seen)
         elif isinstance(expr, W_Let):
-            self.check_uniform_occurrences(expr.type, ctor_type)
-            self.check_uniform_occurrences(expr.value, ctor_type)
-            self.check_uniform_occurrences(expr.body, ctor_type)
+            self.check_uniform_occurrences(expr.type, ctor_type, seen)
+            self.check_uniform_occurrences(expr.value, ctor_type, seen)
+            self.check_uniform_occurrences(expr.body, ctor_type, seen)
         elif isinstance(expr, W_Proj):
-            self.check_uniform_occurrences(expr.struct_expr, ctor_type)
+            self.check_uniform_occurrences(expr.struct_expr, ctor_type, seen)
 
-    def find_nested(self, expr):
+    def find_nested(self, expr, seen):
         """Add a member for each container the block occurs nested in."""
+        uid = expr._uid
+        if uid in seen:
+            return
+        seen[uid] = True
         if isinstance(expr, W_App):
             if self.add_if_nested(expr):
                 return
-            self.find_nested(expr.fn)
-            self.find_nested(expr.arg)
+            self.find_nested(expr.fn, seen)
+            self.find_nested(expr.arg, seen)
         elif isinstance(expr, W_FunBase):
-            self.find_nested(expr.binder.type)
-            self.find_nested(expr.body)
+            self.find_nested(expr.binder.type, seen)
+            self.find_nested(expr.body, seen)
         elif isinstance(expr, W_Let):
-            self.find_nested(expr.type)
-            self.find_nested(expr.value)
-            self.find_nested(expr.body)
+            self.find_nested(expr.type, seen)
+            self.find_nested(expr.value, seen)
+            self.find_nested(expr.body, seen)
         elif isinstance(expr, W_Proj):
-            self.find_nested(expr.struct_expr)
+            self.find_nested(expr.struct_expr, seen)
 
     def add_if_nested(self, expr):
         head, args = _args_of(expr)
@@ -637,12 +858,12 @@ class _Block(object):
                         raise self.fail(
                             "the types of the block differ in parameter types",
                         )
-                type = type.body.instantiate(arg, 0)
+                type = _instantiate_dag(type.body, arg)
             type = type.whnf(self.tc)
             while isinstance(type, W_ForAll):
                 index = _local_for(type.binder)
                 member.indices.append(index)
-                type = type.body.instantiate(index, 0).whnf(self.tc)
+                type = _instantiate_dag(type.body, index).whnf(self.tc)
             if not isinstance(type, W_Sort):
                 raise self.fail(
                     "%s is not a family of types" % member.name.str(),
@@ -702,7 +923,7 @@ class _Block(object):
                             ctor, field, field_type, orig_field_type,
                             number, declared,
                         )
-                    type = type.body.instantiate(field, 0)
+                    type = _instantiate_dag(type.body, field)
                 if declared and len(ctor.fields) != ctor_kind.num_fields:
                     raise W_ConstructorFieldCountMismatch(
                         self.env, ctor.decl.type,
@@ -720,6 +941,8 @@ class _Block(object):
                     )
                 if declared:
                     tc.stage = STAGE_IND_ONLY
+                    prev_levels = tc.allowed_levels
+                    tc.allowed_levels = self.level_names
                     try:
                         inferred = ctor.decl.type.infer(tc)
                         if not isinstance(inferred.whnf(tc), W_Sort):
@@ -744,6 +967,7 @@ class _Block(object):
                                         inductive_level=self.result_level,
                                     )
                     finally:
+                        tc.allowed_levels = prev_levels
                         tc.stage = STAGE_ALL
                 _, args = _args_of(type)
                 ctor.result_indices = _drop(args, len(member.args))
@@ -775,7 +999,7 @@ class _Block(object):
                     )
                 x = _local_for(type.binder)
                 xs.append(x)
-                type = type.body.instantiate(x, 0).whnf(tc)
+                type = _instantiate_dag(type.body, x).whnf(tc)
                 continue
             index = self.valid_app(type)
             if index < 0:

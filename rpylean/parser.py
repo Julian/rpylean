@@ -82,12 +82,280 @@ def validate_export_metadata(stream):
 def parse_line(line, builder):
     """
     Parse a single lean4export NDJSON line and apply it to ``builder``
-    via the appropriate ``register_*`` call. Lines come in 23 shapes:
-    names (str/num), four kinds of universe expressions, ten kinds of
-    expression atom, six declarations (axiom/def/opaque/thm/quot/inductive),
-    and standalone recursors.
+    via the appropriate ``register_*`` call.
     """
     cursor = LineCursor(line)
+    parse_cursor(cursor, builder)
+
+
+def _match_binder_info_compact(cursor):
+    """Match a compact ``binderInfo`` string value + closing quote without
+    allocating. Returns 0=default, 1=implicit, 2=instImplicit,
+    3=strictImplicit, or -1 on mismatch."""
+    p = cursor.pos
+    if p >= cursor.length:
+        return -1
+    c = cursor.line[p]
+    if c == 'd':
+        if cursor.match_lit('default"'):
+            return 0
+    elif c == 'i':
+        if cursor.match_lit('implicit"'):
+            return 1
+        if cursor.match_lit('instImplicit"'):
+            return 2
+    elif c == 's':
+        if cursor.match_lit('strictImplicit"'):
+            return 3
+    return -1
+
+
+def _binder_from_code(name, code, type):
+    if code == 0:
+        return name.binder(type=type)
+    if code == 1:
+        return name.implicit_binder(type=type)
+    if code == 2:
+        return name.instance_binder(type=type)
+    return name.strict_implicit_binder(type=type)
+
+
+def _try_parse_compact(cursor, builder):
+    """Fast zero-key-allocation path for canonical compact lean4export lines
+    (no whitespace, alphabetical keys). Returns True if handled; on any
+    deviation the caller rewinds ``cursor.pos`` and uses the general path."""
+    line = cursor.line
+    p = cursor.pos
+    end = cursor.length
+    if p + 6 > end or line[p] != '{' or line[p + 1] != '"':
+        return False
+    c2 = line[p + 2]
+    if c2 == 'a':
+        # {"app":{"arg":A,"fn":F},"ie":E}
+        if cursor.match_lit('{"app":{"arg":'):
+            arg_eidx = cursor.read_uint_compact()
+            if arg_eidx >= 0 and cursor.match_lit(',"fn":'):
+                fn_eidx = cursor.read_uint_compact()
+                if fn_eidx >= 0 and cursor.match_lit('},"ie":'):
+                    eidx = cursor.read_uint_compact()
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        builder.register_expr(
+                            eidx,
+                            builder.ref_expr(fn_eidx).app(
+                                builder.ref_expr(arg_eidx),
+                            ),
+                        )
+                        return True
+        return False
+    if c2 == 'c':
+        # {"const":{"name":N,"us":[...]},"ie":E}
+        if cursor.match_lit('{"const":{"name":'):
+            nidx = cursor.read_uint_compact()
+            if nidx >= 0 and cursor.match_lit(',"us":['):
+                if cursor.pos < end and line[cursor.pos] == ']':
+                    cursor.pos += 1
+                    levels = []
+                else:
+                    levels = []
+                    while True:
+                        lidx = cursor.read_uint_compact()
+                        if lidx < 0:
+                            return False
+                        levels.append(builder.levels[lidx])
+                        if cursor.pos >= end:
+                            return False
+                        ch = line[cursor.pos]
+                        if ch == ']':
+                            cursor.pos += 1
+                            break
+                        if ch != ',':
+                            return False
+                        cursor.pos += 1
+                if cursor.match_lit('},"ie":'):
+                    eidx = cursor.read_uint_compact()
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        builder.register_expr(
+                            eidx, builder.names[nidx].const(levels),
+                        )
+                        return True
+        return False
+    if c2 == 'i':
+        c3 = line[p + 3]
+        if c3 == 'e':
+            # {"ie":E,"lam":... | "sort":L | "proj":... | "letE":...}
+            if cursor.match_lit('{"ie":'):
+                eidx = cursor.read_uint_compact()
+                if eidx < 0 or cursor.pos + 4 >= end or line[cursor.pos] != ',' or line[cursor.pos + 1] != '"':
+                    return False
+                d0 = line[cursor.pos + 2]
+                if d0 == 'l':
+                    if cursor.match_lit(',"lam":{"binderInfo":"'):
+                        bcode = _match_binder_info_compact(cursor)
+                        if bcode >= 0 and cursor.match_lit(',"body":'):
+                            body_eidx = cursor.read_uint_compact()
+                            if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                                name_idx = cursor.read_uint_compact()
+                                if name_idx >= 0 and cursor.match_lit(',"type":'):
+                                    type_eidx = cursor.read_uint_compact()
+                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                        bound = _binder_from_code(
+                                            builder.names[name_idx],
+                                            bcode,
+                                            builder.ref_expr(type_eidx),
+                                        )
+                                        builder.register_expr(
+                                            eidx,
+                                            objects.fun(bound)(
+                                                builder.ref_expr(body_eidx),
+                                            ),
+                                        )
+                                        return True
+                elif d0 == 's':
+                    if cursor.match_lit(',"sort":'):
+                        lidx = cursor.read_uint_compact()
+                        if lidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            builder.register_expr(
+                                eidx, builder.levels[lidx].sort(),
+                            )
+                            return True
+                elif d0 == 'p':
+                    if cursor.match_lit(',"proj":{"idx":'):
+                        idx = cursor.read_uint_compact()
+                        if idx >= 0 and cursor.match_lit(',"struct":'):
+                            struct_eidx = cursor.read_uint_compact()
+                            if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
+                                tname_idx = cursor.read_uint_compact()
+                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                    builder.register_expr(
+                                        eidx,
+                                        builder.names[tname_idx].proj(
+                                            idx, builder.ref_expr(struct_eidx),
+                                        ),
+                                    )
+                                    return True
+            return False
+        if c3 == 'n':
+            # {"in":N,"str":{"pre":P,"str":"..."}} or {"in":N,"num":{"i":I,"pre":P}}
+            if cursor.match_lit('{"in":'):
+                nidx = cursor.read_uint_compact()
+                if nidx >= 0:
+                    if cursor.match_lit(',"str":{"pre":'):
+                        pre = cursor.read_uint_compact()
+                        if pre >= 0 and cursor.match_lit(',"str":'):
+                            part = cursor.read_string()
+                            if cursor.match_lit('}}') and cursor.pos == end:
+                                builder.register_name(
+                                    nidx, builder.names[pre].child(part),
+                                )
+                                return True
+                    elif cursor.match_lit(',"num":{"i":'):
+                        id_val = cursor.read_uint_compact()
+                        if id_val >= 0 and cursor.match_lit(',"pre":'):
+                            pre = cursor.read_uint_compact()
+                            if pre >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                builder.register_name(
+                                    nidx,
+                                    builder.names[pre].num_child(
+                                        rbigint.fromint(id_val),
+                                    ),
+                                )
+                                return True
+            return False
+        if c3 == 'l':
+            # {"il":U,"succ":P | "param":N | "max":[L,R] | "imax":[L,R]}
+            if cursor.match_lit('{"il":'):
+                uidx = cursor.read_uint_compact()
+                if uidx >= 0:
+                    if cursor.match_lit(',"succ":'):
+                        parent = cursor.read_uint_compact()
+                        if parent >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            builder.register_level(
+                                uidx, builder.levels[parent].succ(),
+                            )
+                            return True
+                    elif cursor.match_lit(',"param":'):
+                        nidx = cursor.read_uint_compact()
+                        if nidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            builder.register_level(
+                                uidx, builder.names[nidx].as_level_param(),
+                            )
+                            return True
+                    elif cursor.match_lit(',"max":['):
+                        lhs = cursor.read_uint_compact()
+                        if lhs >= 0 and cursor.match_lit(','):
+                            rhs = cursor.read_uint_compact()
+                            if rhs >= 0 and cursor.match_lit(']}') and cursor.pos == end:
+                                builder.register_level(
+                                    uidx,
+                                    objects.level_max(
+                                        builder.levels[lhs],
+                                        builder.levels[rhs],
+                                    ),
+                                )
+                                return True
+                    elif cursor.match_lit(',"imax":['):
+                        lhs = cursor.read_uint_compact()
+                        if lhs >= 0 and cursor.match_lit(','):
+                            rhs = cursor.read_uint_compact()
+                            if rhs >= 0 and cursor.match_lit(']}') and cursor.pos == end:
+                                builder.register_level(
+                                    uidx,
+                                    objects.level_imax(
+                                        builder.levels[lhs],
+                                        builder.levels[rhs],
+                                    ),
+                                )
+                                return True
+            return False
+        return False
+    if c2 == 'f':
+        # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
+        if cursor.match_lit('{"forallE":{"binderInfo":"'):
+            bcode = _match_binder_info_compact(cursor)
+            if bcode >= 0 and cursor.match_lit(',"body":'):
+                body_eidx = cursor.read_uint_compact()
+                if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                    name_idx = cursor.read_uint_compact()
+                    if name_idx >= 0 and cursor.match_lit(',"type":'):
+                        type_eidx = cursor.read_uint_compact()
+                        if type_eidx >= 0 and cursor.match_lit('},"ie":'):
+                            eidx = cursor.read_uint_compact()
+                            if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                                bound = _binder_from_code(
+                                    builder.names[name_idx],
+                                    bcode,
+                                    builder.ref_expr(type_eidx),
+                                )
+                                builder.register_expr(
+                                    eidx,
+                                    objects.forall(bound)(
+                                        builder.ref_expr(body_eidx),
+                                    ),
+                                )
+                                return True
+        return False
+    if c2 == 'b':
+        # {"bvar":B,"ie":E}
+        if cursor.match_lit('{"bvar":'):
+            bidx = cursor.read_uint_compact()
+            if bidx >= 0 and cursor.match_lit(',"ie":'):
+                eidx = cursor.read_uint_compact()
+                if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                    builder.register_expr(eidx, objects._mk_w_bvar(bidx))
+                    return True
+        return False
+    return False
+
+
+def parse_cursor(cursor, builder):
+    """
+    Parse a single lean4export NDJSON record from ``cursor`` and apply it to
+    ``builder`` via the appropriate ``register_*`` call.
+    """
+    start = cursor.pos
+    if _try_parse_compact(cursor, builder):
+        return
+    cursor.pos = start
     cursor.expect('{')
     first_key = cursor.read_key()
 
@@ -1125,3 +1393,477 @@ def _parse_format_inner(cursor):
         if cursor.maybe('}'):
             return version
         cursor.expect(',')
+
+
+# ---- Raw-byte expression refcount pre-scanner ----------------------------
+
+def _ensure_refcount_slot(counts, idx):
+    if idx < 0:
+        raise MalformedLine("negative expr index")
+    n = len(counts)
+    if idx >= n:
+        if idx == n:
+            counts.append(0)
+        else:
+            delta = idx - n + 1
+            assert delta > 0
+            counts.extend([0] * delta)
+
+
+def _bump_refcount_slot(counts, idx):
+    if idx < 0:
+        raise MalformedLine("negative expr index")
+    n = len(counts)
+    if idx >= n:
+        delta = idx - n + 1
+        assert delta > 0
+        counts.extend([0] * delta)
+    counts[idx] += 1
+
+
+def _try_prescan_compact(cursor, counts):
+    """Fast raw-byte prescan for compact canonical lean4export lines.
+    Returns True if handled; otherwise the caller falls back to the general
+    structural prescanner."""
+    line = cursor.line
+    p = cursor.pos
+    end = cursor.length
+    if p + 6 > end or line[p] != '{' or line[p + 1] != '"':
+        return False
+    c2 = line[p + 2]
+    if c2 == 'a':
+        # {"app":{"arg":A,"fn":F},"ie":E}
+        if cursor.match_lit('{"app":{"arg":'):
+            arg_eidx = cursor.read_uint_compact()
+            if arg_eidx >= 0 and cursor.match_lit(',"fn":'):
+                fn_eidx = cursor.read_uint_compact()
+                if fn_eidx >= 0 and cursor.match_lit('},"ie":'):
+                    eidx = cursor.read_uint_compact()
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        _ensure_refcount_slot(counts, eidx)
+                        _bump_refcount_slot(counts, fn_eidx)
+                        _bump_refcount_slot(counts, arg_eidx)
+                        return True
+        return False
+    if c2 == 'i':
+        c3 = line[p + 3]
+        if c3 == 'n':
+            # Name lines have zero expr definitions and zero expr refs.
+            if line[p + 4] == '"' and line[p + 5] == ':':
+                return True
+            return False
+        if c3 == 'l':
+            # Level lines have zero expr definitions and zero expr refs.
+            if line[p + 4] == '"' and line[p + 5] == ':':
+                return True
+            return False
+        if c3 == 'e':
+            if cursor.match_lit('{"ie":'):
+                eidx = cursor.read_uint_compact()
+                if eidx < 0 or cursor.pos + 4 >= end or line[cursor.pos] != ',' or line[cursor.pos + 1] != '"':
+                    return False
+                d0 = line[cursor.pos + 2]
+                if d0 == 's' or d0 == 'n' or d0 == 'b' or d0 == 'c':
+                    # sort / strVal / natVal / bvar / const: zero expr refs!
+                    if (cursor.match_lit(',"sort":')
+                            or cursor.match_lit(',"strVal":')
+                            or cursor.match_lit(',"natVal":')
+                            or cursor.match_lit(',"bvar":')
+                            or cursor.match_lit(',"const":')):
+                        _ensure_refcount_slot(counts, eidx)
+                        return True
+                elif d0 == 'l':
+                    if cursor.match_lit(',"lam":{"binderInfo":"'):
+                        if _match_binder_info_compact(cursor) >= 0 and cursor.match_lit(',"body":'):
+                            body_eidx = cursor.read_uint_compact()
+                            if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                                name_idx = cursor.read_uint_compact()
+                                if name_idx >= 0 and cursor.match_lit(',"type":'):
+                                    type_eidx = cursor.read_uint_compact()
+                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                        _ensure_refcount_slot(counts, eidx)
+                                        _bump_refcount_slot(counts, type_eidx)
+                                        _bump_refcount_slot(counts, body_eidx)
+                                        return True
+                elif d0 == 'p':
+                    if cursor.match_lit(',"proj":{"idx":'):
+                        idx = cursor.read_uint_compact()
+                        if idx >= 0 and cursor.match_lit(',"struct":'):
+                            struct_eidx = cursor.read_uint_compact()
+                            if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
+                                tname_idx = cursor.read_uint_compact()
+                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                    _ensure_refcount_slot(counts, eidx)
+                                    _bump_refcount_slot(counts, struct_eidx)
+                                    return True
+            return False
+        return False
+    if c2 == 'c':
+        # {"const":{"name":N,"us":[...]},"ie":E} -> zero expr refs, just need E!
+        if cursor.match_lit('{"const":{'):
+            # Walk back from the end `},"ie":E}` — const has no string values.
+            j = end - 1
+            if j > cursor.pos and line[j] == '}':
+                j -= 1
+                num_end = j + 1
+                while j >= cursor.pos and '0' <= line[j] <= '9':
+                    j -= 1
+                if j + 1 < num_end and j >= 6:
+                    k = j - 6
+                    assert k >= 0
+                    cursor.pos = k
+                    if cursor.match_lit('},"ie":'):
+                        eidx = cursor.read_uint_compact()
+                        if eidx >= 0 and cursor.pos == end - 1:
+                            _ensure_refcount_slot(counts, eidx)
+                            return True
+        return False
+    if c2 == 'f':
+        # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
+        if cursor.match_lit('{"forallE":{"binderInfo":"'):
+            if _match_binder_info_compact(cursor) >= 0 and cursor.match_lit(',"body":'):
+                body_eidx = cursor.read_uint_compact()
+                if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                    name_idx = cursor.read_uint_compact()
+                    if name_idx >= 0 and cursor.match_lit(',"type":'):
+                        type_eidx = cursor.read_uint_compact()
+                        if type_eidx >= 0 and cursor.match_lit('},"ie":'):
+                            eidx = cursor.read_uint_compact()
+                            if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                                _ensure_refcount_slot(counts, eidx)
+                                _bump_refcount_slot(counts, type_eidx)
+                                _bump_refcount_slot(counts, body_eidx)
+                                return True
+        return False
+    if c2 == 'b':
+        # {"bvar":B,"ie":E}
+        if cursor.match_lit('{"bvar":'):
+            bidx = cursor.read_uint_compact()
+            if bidx >= 0 and cursor.match_lit(',"ie":'):
+                eidx = cursor.read_uint_compact()
+                if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                    _ensure_refcount_slot(counts, eidx)
+                    return True
+        return False
+    return False
+
+
+def _skip_value_noalloc(cursor):
+    """Skip any JSON value without allocating strings or lists."""
+    cursor.skip_ws()
+    if cursor.pos >= cursor.length:
+        raise MalformedLine("unexpected end of input")
+    c = cursor.line[cursor.pos]
+    if c == '"':
+        cursor.skip_string()
+    elif c == '-' or ('0' <= c <= '9'):
+        cursor.read_int()
+    elif c == 't':
+        cursor.pos += 4
+    elif c == 'f':
+        cursor.pos += 5
+    elif c == 'n':
+        cursor.pos += 4
+    elif c == '[':
+        cursor.pos += 1
+        if cursor.maybe(']'):
+            return
+        while True:
+            _skip_value_noalloc(cursor)
+            if cursor.maybe(']'):
+                return
+            cursor.expect(',')
+    elif c == '{':
+        cursor.pos += 1
+        if cursor.maybe('}'):
+            return
+        while True:
+            cursor.read_key_span()
+            _skip_value_noalloc(cursor)
+            if cursor.maybe('}'):
+                return
+            cursor.expect(',')
+    else:
+        raise MalformedLine("unsupported value at pos %d" % cursor.pos)
+
+
+def _prescan_expr_value(cursor, counts, ks, ke):
+    if cursor.span_eq(ks, ke, "bvar") or cursor.span_eq(ks, ke, "sort"):
+        cursor.read_int()
+        return
+    if cursor.span_eq(ks, ke, "natVal") or cursor.span_eq(ks, ke, "strVal"):
+        cursor.skip_string()
+        return
+    if cursor.span_eq(ks, ke, "const"):
+        _skip_value_noalloc(cursor)
+        return
+    if cursor.span_eq(ks, ke, "app"):
+        cursor.expect('{')
+        fn_eidx = 0
+        arg_eidx = 0
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "fn"):
+                fn_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "arg"):
+                arg_eidx = cursor.read_int()
+            else:
+                raise MalformedLine("unexpected key in app")
+            if cursor.maybe('}'):
+                _bump_refcount_slot(counts, fn_eidx)
+                _bump_refcount_slot(counts, arg_eidx)
+                return
+            cursor.expect(',')
+    if cursor.span_eq(ks, ke, "lam") or cursor.span_eq(ks, ke, "forallE"):
+        cursor.expect('{')
+        type_eidx = 0
+        body_eidx = 0
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "type"):
+                type_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "body"):
+                body_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "binderInfo"):
+                cursor.skip_string()
+            elif cursor.span_eq(s, e, "name"):
+                cursor.read_int()
+            else:
+                raise MalformedLine("unexpected key in binder")
+            if cursor.maybe('}'):
+                _bump_refcount_slot(counts, type_eidx)
+                _bump_refcount_slot(counts, body_eidx)
+                return
+            cursor.expect(',')
+    if cursor.span_eq(ks, ke, "letE"):
+        cursor.expect('{')
+        type_eidx = 0
+        value_eidx = 0
+        body_eidx = 0
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "type"):
+                type_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "value"):
+                value_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "body"):
+                body_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "name"):
+                cursor.read_int()
+            elif cursor.span_eq(s, e, "nondep"):
+                _skip_value_noalloc(cursor)
+            else:
+                raise MalformedLine("unexpected key in letE")
+            if cursor.maybe('}'):
+                _bump_refcount_slot(counts, type_eidx)
+                _bump_refcount_slot(counts, value_eidx)
+                _bump_refcount_slot(counts, body_eidx)
+                return
+            cursor.expect(',')
+    if cursor.span_eq(ks, ke, "proj"):
+        cursor.expect('{')
+        struct_eidx = 0
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "struct"):
+                struct_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "idx") or cursor.span_eq(s, e, "typeName"):
+                cursor.read_int()
+            else:
+                raise MalformedLine("unexpected key in proj")
+            if cursor.maybe('}'):
+                _bump_refcount_slot(counts, struct_eidx)
+                return
+            cursor.expect(',')
+    raise MalformedLine("unknown expr discriminator")
+
+
+def _prescan_decl_type_only(cursor, counts):
+    cursor.expect('{')
+    type_eidx = 0
+    while True:
+        s, e = cursor.read_key_span()
+        if cursor.span_eq(s, e, "type"):
+            type_eidx = cursor.read_int()
+        else:
+            _skip_value_noalloc(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            _bump_refcount_slot(counts, type_eidx)
+            return
+        cursor.expect(',')
+
+
+def _prescan_decl_type_and_value(cursor, counts):
+    cursor.expect('{')
+    type_eidx = 0
+    value_eidx = 0
+    while True:
+        s, e = cursor.read_key_span()
+        if cursor.span_eq(s, e, "type"):
+            type_eidx = cursor.read_int()
+        elif cursor.span_eq(s, e, "value"):
+            value_eidx = cursor.read_int()
+        else:
+            _skip_value_noalloc(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            _bump_refcount_slot(counts, type_eidx)
+            _bump_refcount_slot(counts, value_eidx)
+            return
+        cursor.expect(',')
+
+
+def _prescan_recursor_record(cursor, counts):
+    cursor.expect('{')
+    type_eidx = 0
+    while True:
+        s, e = cursor.read_key_span()
+        if cursor.span_eq(s, e, "type"):
+            type_eidx = cursor.read_int()
+        elif cursor.span_eq(s, e, "rules"):
+            cursor.expect('[')
+            if not cursor.maybe(']'):
+                while True:
+                    cursor.expect('{')
+                    rhs_eidx = 0
+                    while True:
+                        rs, re_ = cursor.read_key_span()
+                        if cursor.span_eq(rs, re_, "rhs"):
+                            rhs_eidx = cursor.read_int()
+                        else:
+                            _skip_value_noalloc(cursor)
+                        if cursor.maybe('}'):
+                            _bump_refcount_slot(counts, rhs_eidx)
+                            break
+                        cursor.expect(',')
+                    if cursor.maybe(']'):
+                        break
+                    cursor.expect(',')
+        else:
+            _skip_value_noalloc(cursor)
+        if cursor.maybe('}'):
+            _bump_refcount_slot(counts, type_eidx)
+            return
+        cursor.expect(',')
+
+
+def _prescan_type_array(cursor, counts):
+    cursor.expect('[')
+    if cursor.maybe(']'):
+        return
+    while True:
+        cursor.expect('{')
+        type_eidx = 0
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "type"):
+                type_eidx = cursor.read_int()
+            else:
+                _skip_value_noalloc(cursor)
+            if cursor.maybe('}'):
+                _bump_refcount_slot(counts, type_eidx)
+                break
+            cursor.expect(',')
+        if cursor.maybe(']'):
+            return
+        cursor.expect(',')
+
+
+def _prescan_inductive(cursor, counts):
+    cursor.expect('{')
+    while True:
+        s, e = cursor.read_key_span()
+        if cursor.span_eq(s, e, "types") or cursor.span_eq(s, e, "ctors"):
+            _prescan_type_array(cursor, counts)
+        elif cursor.span_eq(s, e, "recs"):
+            cursor.expect('[')
+            if not cursor.maybe(']'):
+                while True:
+                    _prescan_recursor_record(cursor, counts)
+                    if cursor.maybe(']'):
+                        break
+                    cursor.expect(',')
+        else:
+            _skip_value_noalloc(cursor)
+        if cursor.maybe('}'):
+            cursor.expect('}')
+            return
+        cursor.expect(',')
+
+
+def _prescan_line(cursor, counts):
+    start = cursor.pos
+    if _try_prescan_compact(cursor, counts):
+        return
+    cursor.pos = start
+    cursor.expect('{')
+    ks, ke = cursor.read_key_span()
+    if cursor.span_eq(ks, ke, "in") or cursor.span_eq(ks, ke, "il"):
+        return
+    if cursor.span_eq(ks, ke, "ie"):
+        eidx = cursor.read_int()
+        cursor.expect(',')
+        ds, de = cursor.read_key_span()
+        _prescan_expr_value(cursor, counts, ds, de)
+        cursor.expect('}')
+        _ensure_refcount_slot(counts, eidx)
+        return
+    if cursor.span_eq(ks, ke, "thm") or cursor.span_eq(ks, ke, "def") or cursor.span_eq(ks, ke, "opaque"):
+        _prescan_decl_type_and_value(cursor, counts)
+        return
+    if cursor.span_eq(ks, ke, "axiom") or cursor.span_eq(ks, ke, "quot"):
+        _prescan_decl_type_only(cursor, counts)
+        return
+    if cursor.span_eq(ks, ke, "inductive"):
+        _prescan_inductive(cursor, counts)
+        return
+    if cursor.span_eq(ks, ke, "rec"):
+        _prescan_recursor_record(cursor, counts)
+        cursor.expect('}')
+        return
+    _prescan_expr_value(cursor, counts, ks, ke)
+    cursor.expect(',')
+    cursor.expect_key("ie")
+    eidx = cursor.read_int()
+    cursor.expect('}')
+    _ensure_refcount_slot(counts, eidx)
+
+
+def prescan_refcounts(stream):
+    """Scan an export stream (positioned after its metadata line) at raw-byte
+    level and return a ``list[int]`` of parse-time expression reference counts."""
+    counts = []
+    cursor = LineCursor("")
+    buf = ""
+    while True:
+        chunk = stream.read(262144)
+        if not chunk:
+            if buf:
+                end = len(buf)
+                if end > 0 and buf[end - 1] == '\r':
+                    end -= 1
+                cursor.reset(buf, 0, end)
+                _prescan_line(cursor, counts)
+            return counts
+        if buf:
+            buf = buf + chunk
+        else:
+            buf = chunk
+        pos = 0
+        blen = len(buf)
+        while pos < blen:
+            nl = buf.find('\n', pos)
+            if nl < 0:
+                break
+            end = nl
+            if end > pos and buf[end - 1] == '\r':
+                end -= 1
+            cursor.reset(buf, pos, end)
+            _prescan_line(cursor, counts)
+            pos = nl + 1
+        if pos < blen:
+            assert pos >= 0
+            buf = buf[pos:]
+        else:
+            buf = ""

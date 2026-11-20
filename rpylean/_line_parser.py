@@ -13,6 +13,7 @@ robustness we don't rely on that — every reader scans for its key by name.
 
 from __future__ import print_function
 
+from rpython.rlib.objectmodel import always_inline
 from rpython.rlib.rstring import StringBuilder
 from rpython.rlib.rutf8 import unichr_as_utf8_append
 
@@ -24,10 +25,126 @@ class LineCursor(object):
 
     _attrs_ = ['line', 'pos', 'length']
 
-    def __init__(self, line):
+    def __init__(self, line, start=0, end=-1):
+        assert start >= 0
         self.line = line
-        self.pos = 0
-        self.length = len(line)
+        self.pos = start
+        self.length = len(line) if end < 0 else end
+
+    @always_inline
+    def reset(self, line, start, end):
+        assert start >= 0
+        assert end >= 0
+        self.line = line
+        self.pos = start
+        self.length = end
+
+    @always_inline
+    def match_lit(self, lit):
+        """Match literal bytes ``lit`` at ``self.pos`` with no whitespace
+        skipping. Returns True and advances ``self.pos`` on match."""
+        n = len(lit)
+        p = self.pos
+        if p + n > self.length:
+            return False
+        line = self.line
+        i = 0
+        while i < n:
+            if line[p + i] != lit[i]:
+                return False
+            i += 1
+        self.pos = p + n
+        return True
+
+    @always_inline
+    def read_uint_compact(self):
+        """Read a non-negative integer at ``self.pos`` with no whitespace
+        skipping, or return -1 if no digit is present."""
+        line = self.line
+        n = self.length
+        i = self.pos
+        if i >= n:
+            return -1
+        c = line[i]
+        if c < '0' or c > '9':
+            return -1
+        zero = ord('0')
+        val = ord(c) - zero
+        i += 1
+        while i < n:
+            c = line[i]
+            if c < '0' or c > '9':
+                break
+            val = val * 10 + ord(c) - zero
+            i += 1
+        self.pos = i
+        return val
+
+    def skip_string(self):
+        """Advance past a JSON string literal without allocating it."""
+        self.skip_ws()
+        line = self.line
+        n = self.length
+        if self.pos >= n or line[self.pos] != '"':
+            raise MalformedLine("expected string at pos %d" % self.pos)
+        i = self.pos + 1
+        while i < n:
+            c = line[i]
+            if c == '"':
+                self.pos = i + 1
+                return
+            if c == '\\':
+                if i + 1 < n and line[i + 1] == 'u':
+                    i += 6
+                else:
+                    i += 2
+            else:
+                i += 1
+        raise MalformedLine("unterminated string at pos %d" % self.pos)
+
+    def read_key_span(self):
+        """Read ``"key":`` and return ``(start, end)`` indices in ``self.line``
+        (without allocating a substring when unescaped)."""
+        self.skip_ws()
+        line = self.line
+        n = self.length
+        if self.pos >= n or line[self.pos] != '"':
+            raise MalformedLine("expected string at pos %d" % self.pos)
+        i = self.pos + 1
+        start = i
+        while i < n:
+            c = line[i]
+            if c == '"':
+                end = i
+                i += 1
+                while i < n:
+                    wc = line[i]
+                    if wc == ' ' or wc == '\t' or wc == '\r' or wc == '\n':
+                        i += 1
+                    else:
+                        break
+                if i >= n or line[i] != ':':
+                    raise MalformedLine("expected ':' after key at pos %d" % i)
+                self.pos = i + 1
+                return start, end
+            if c == '\\':
+                # Rare escaped key: fall back cleanly via read_key semantics
+                raise MalformedLine("escaped key at pos %d" % start)
+            i += 1
+        raise MalformedLine("unterminated string at pos %d" % start)
+
+    @always_inline
+    def span_eq(self, start, end, lit):
+        n = len(lit)
+        if end - start != n:
+            return False
+        line = self.line
+        i = 0
+        while i < n:
+            if line[start + i] != lit[i]:
+                return False
+            i += 1
+        return True
 
     def skip_ws(self):
         line = self.line
@@ -157,13 +274,9 @@ class LineCursor(object):
 
     def read_bool(self):
         self.skip_ws()
-        line = self.line
-        n = self.length
-        if self.pos + 4 <= n and line[self.pos:self.pos + 4] == "true":
-            self.pos += 4
+        if self.match_lit("true"):
             return True
-        if self.pos + 5 <= n and line[self.pos:self.pos + 5] == "false":
-            self.pos += 5
+        if self.match_lit("false"):
             return False
         raise MalformedLine("expected bool at pos %d" % self.pos)
 

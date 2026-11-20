@@ -480,28 +480,22 @@ class _CheckRun(object):
 
 def _prescan_refcounts(path, stdin):
     """
-    Parse ``path`` once with a scanning builder to tally, per expression
-    index, how many times the real parse will reference it.
+    Scan ``path`` once at raw-byte level to tally, per expression index,
+    how many times the real parse will reference it.
 
-    The scan runs the identical parser, so the counts are exact by
-    construction; it hands every ``ref_expr`` a dummy and discards each
-    built expression, so it retains no expression DAG (only names, levels
-    and the integer count array). Returns the count list, or ``None`` if
-    the metadata line is malformed (the real pass will report the error).
+    Returns the count list, or ``None`` if the metadata line or any record
+    is malformed (the real pass will report the error).
     """
     scan_file = _open_export(path, stdin)
     try:
         try:
             parser.validate_export_metadata(scan_file)
-            scan_builder = EnvironmentBuilder()
-            scan_builder.start_scan()
-            scan_builder.consume(scan_file)
+            return parser.prescan_refcounts(scan_file)
         except ExportError:
             # Any malformed line makes the scan's counts unusable; fall
             # back to the unpruned path and let the real parse surface the
             # error (it is the authority on both checking and reporting).
             return None
-        return scan_builder._refcount
     finally:
         scan_file.close()
 

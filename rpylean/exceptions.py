@@ -238,6 +238,39 @@ class UnknownDeclaration(W_Error):
         ]
 
 
+class LooseBoundVariable(W_Error):
+    """
+    An expression contains an unbound de Bruijn variable.
+    """
+
+    _attrs_ = ['bvar_id']
+
+    def __init__(self, bvar_id):
+        self.bvar_id = bvar_id
+
+    def tokens(self):
+        return [
+            ERROR.emit("loose bound variable #%d" % self.bvar_id),
+        ]
+
+
+class UndeclaredLevelParam(W_Error):
+    """
+    A declaration mentions a universe parameter not listed in its levelParams.
+    """
+
+    _attrs_ = ['param']
+
+    def __init__(self, param):
+        self.param = param
+
+    def tokens(self):
+        return [
+            ERROR.emit("undeclared universe parameter "),
+            DECL_NAME.emit(self.param.str()),
+        ]
+
+
 class InvalidProjection(W_Error):
     """
     A projection expression is invalid.

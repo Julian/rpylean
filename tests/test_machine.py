@@ -372,3 +372,23 @@ class TestInstantiateMulti(object):
         assert multi == seq
         assert store.instantiate_multi(h, [s0], 0) == store.instantiate(h, s0, 0)
         assert store.instantiate_multi(h, [], 0) == h
+
+
+class TestImportConstTerm(object):
+    def test_overlapping_level_substitution(self, store):
+        # Simultaneous substitution {u -> 0, u_1 -> u} where u_1 maps onto u
+        # must never overwrite the memo entry for Sort u or const.{u}.
+        u_name = Name.simple("u")
+        u1_name = Name.simple("u_1")
+        u_lvl = u_name.as_level_param()
+        u1_lvl = u1_name.as_level_param()
+        target = forall(x.binder(u1_lvl.sort()))(
+            f.const([u1_lvl]).app(u_lvl.sort(), f.const([u_lvl])),
+        )
+        decl = g.axiom(levels=[u_name, u1_name], type=target)
+        const = g.const([PROP.level, u_lvl])
+        h = store.import_const_term(const, decl, target)
+        expected = forall(x.binder(u_lvl.sort()))(
+            f.const([u_lvl]).app(PROP, f.const([PROP.level])),
+        )
+        assert syntactic_eq(store.export_term(h), expected)

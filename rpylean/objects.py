@@ -987,16 +987,16 @@ _INTERN_NUM_NAME = {}      # int -> list[NumName]
 # entries on Mathlib-sized exports. The name/level tables stay chained:
 # they are small, and keeping every name canonical preserves the `is`
 # fast paths and per-instance caches (`_level_cache`) at full strength.
-_INTERN_W_APP = {}         # int -> W_App
 _INTERN_W_CONST = {}       # int -> W_Const
-_INTERN_W_PROJ = {}        # int -> W_Proj
-_INTERN_W_LET = {}         # int -> W_Let
 _INTERN_W_SORT = {}        # int -> list[W_Sort]
 _INTERN_LEVEL_SUCC = {}    # int -> list[W_LevelSucc]
 _INTERN_LEVEL_MAX = {}     # int -> list[W_LevelMax]
 _INTERN_LEVEL_IMAX = {}    # int -> list[W_LevelIMax]
 _INTERN_LEVEL_PARAM = {}   # int -> list[W_LevelParam]
 # NOT hash-consed (see comments by their `_mk_*` factories):
+#   * W_App / W_Proj / W_Let — `lean4export` already DAG-shares parsed terms
+#     by `ie` index and `TermStore` hash-conses them per declaration; keeping
+#     strong refs in global dicts pinned dead theorem proofs across Mathlib.
 #   * W_Lambda / W_ForAll — their binders can't be interned (below).
 #   * Binder — `_fvar` is *per-binding-position* mutable state that
 #     interning would silently share across distinct positions.
@@ -1019,12 +1019,9 @@ def _next_uid():
 
 def intern_stats():
     """
-    Entry counts of the persistent intern tables, for leak hunting: the
-    tables only ever grow, so a count climbing in step with declarations
-    checked (rather than with parsing) means reduction products are
-    being interned persistently somewhere.
+    Entry counts of the persistent intern tables, for leak hunting.
     """
-    return len(_INTERN_W_APP), len(_INTERN_W_PROJ), len(_INTERN_W_CONST)
+    return 0, 0, len(_INTERN_W_CONST)
 
 
 def _mk_str_name(parent, suffix):
@@ -1229,20 +1226,11 @@ def _mk_binder_strict_implicit(name, type):
 # FVar for that *binding occurrence*, so binders themselves can't be
 # interned (see the comment by `_mk_binder_default`).
 
-@elidable
 def _mk_app(fn, arg):
-    """
-    Allocate a `W_App(fn, arg)` against the persistent intern table.
-    """
+    """Allocate a `W_App(fn, arg)`."""
     assert isinstance(fn, W_Expr)
     assert isinstance(arg, W_Expr)
-    h = _mix2(fn.hash(), arg.hash())
-    existing = _INTERN_W_APP.get(h, None)
-    if existing is not None and existing.fn is fn and existing.arg is arg:
-        return existing
-    e = W_App(fn, arg)
-    _INTERN_W_APP[h] = e
-    return e
+    return W_App(fn, arg)
 
 
 def _mk_w_lambda(binder, body):
@@ -1253,20 +1241,10 @@ def _mk_w_forall(binder, body):
     return W_ForAll(binder, body)
 
 
-@elidable
 def _mk_w_proj(struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
-    h = _mix3(struct_name.hash(), field_index, struct_expr.hash())
-    existing = _INTERN_W_PROJ.get(h, None)
-    if (existing is not None
-            and existing.struct_name is struct_name
-            and existing.field_index == field_index
-            and existing.struct_expr is struct_expr):
-        return existing
-    e = W_Proj(struct_name, field_index, struct_expr)
-    _INTERN_W_PROJ[h] = e
-    return e
+    return W_Proj(struct_name, field_index, struct_expr)
 
 
 def _mk_w_let(name, type, value, body):
@@ -1274,15 +1252,7 @@ def _mk_w_let(name, type, value, body):
     assert isinstance(type, W_Expr)
     assert isinstance(value, W_Expr)
     assert isinstance(body, W_Expr)
-    h = _mix4(name.hash(), type.hash(), value.hash(), body.hash())
-    existing = _INTERN_W_LET.get(h, None)
-    if (existing is not None
-            and existing.name is name and existing.type is type
-            and existing.value is value and existing.body is body):
-        return existing
-    e = W_Let(name=name, type=type, value=value, body=body)
-    _INTERN_W_LET[h] = e
-    return e
+    return W_Let(name=name, type=type, value=value, body=body)
 
 
 class Name(_Item):
@@ -1953,6 +1923,8 @@ class Binder(_Item):
         return fvar
 
     def bind_fvar(self, fvar, depth):
+        if not self.type.has_fvar():
+            return self
         new_type = self.type.bind_fvar(fvar, depth)
         if new_type is self.type:
             return self
@@ -2013,12 +1985,16 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    _attrs_ = ['_hash', '_normal']
-    _immutable_fields_ = ['_hash']
+    _attrs_ = ['_hash', '_normal', 'has_param']
+    _immutable_fields_ = ['_hash', 'has_param']
 
     #: The normal form, once computed (levels are immutable and
     #: interned, so it never changes).
     _normal = None
+
+    def check_params(self, allowed):
+        """Return the first `W_LevelParam` name not in ``allowed``, or None."""
+        return None
 
     @elidable
     def hash(self):
@@ -2190,6 +2166,7 @@ class W_LevelZero(W_Level):
 
     def __init__(self):
         self._hash = 0x4C5A  # arbitrary distinct from other level kinds
+        self.has_param = False
 
     def __repr__(self):
         return "<Level 0>"
@@ -2232,7 +2209,13 @@ class W_LevelSucc(W_Level):
 
     def __init__(self, parent):
         self.parent = parent
+        self.has_param = parent.has_param
         self._hash = ((parent.hash() * 1000003) ^ 0x53C7) & 0xFFFFFFFF
+
+    def check_params(self, allowed):
+        if not self.has_param:
+            return None
+        return self.parent.check_params(allowed)
 
     def __repr__(self):
         joined = " + ".join(str(part) for part in self.pretty_parts() if part)
@@ -2296,8 +2279,17 @@ class W_LevelMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+        self.has_param = lhs.has_param or rhs.has_param
         h = (lhs.hash() * 1000003) ^ rhs.hash()
         self._hash = ((h * 1000003) ^ 0x6D4A) & 0xFFFFFFFF
+
+    def check_params(self, allowed):
+        if not self.has_param:
+            return None
+        bad = self.lhs.check_params(allowed)
+        if bad is not None:
+            return bad
+        return self.rhs.check_params(allowed)
 
     def __repr__(self):
         return "<Level max({!r} {!r})>".format(self.lhs, self.rhs)
@@ -2415,8 +2407,17 @@ class W_LevelIMax(W_Level):
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs
+        self.has_param = lhs.has_param or rhs.has_param
         h = (lhs.hash() * 1000003) ^ rhs.hash()
         self._hash = ((h * 1000003) ^ 0x694D) & 0xFFFFFFFF
+
+    def check_params(self, allowed):
+        if not self.has_param:
+            return None
+        bad = self.lhs.check_params(allowed)
+        if bad is not None:
+            return bad
+        return self.rhs.check_params(allowed)
 
     def __repr__(self):
         return "<Level imax({!r} {!r})>".format(self.lhs, self.rhs)
@@ -2481,7 +2482,14 @@ class W_LevelParam(W_Level):
 
     def __init__(self, name):
         self.name = name
+        self.has_param = True
         self._hash = ((name.hash() * 1000003) ^ 0x5041) & 0xFFFFFFFF
+
+    def check_params(self, allowed):
+        for each in allowed:
+            if self.name.syntactic_eq(each):
+                return None
+        return self.name
 
     def __repr__(self):
         return "<Level {}>".format(self.name.str())
@@ -3368,6 +3376,8 @@ class W_Proj(W_Expr):
         return self.with_expr(self.struct_expr.incr_free_bvars(count, depth))
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvar():
+            return self
         new_expr = self.struct_expr.bind_fvar(fvar, depth)
         if new_expr is self.struct_expr:
             return self
@@ -3539,6 +3549,8 @@ class W_ForAll(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvar():
+            return self
         new_binder = self.binder.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
@@ -3855,6 +3867,8 @@ class W_Lambda(W_FunBase):
         )
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvar():
+            return self
         new_binder = self.binder.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
         if new_binder is self.binder and new_body is self.body:
@@ -3973,6 +3987,8 @@ class W_Let(W_Expr):
         )
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvar():
+            return self
         new_type = self.type.bind_fvar(fvar, depth)
         new_value = self.value.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
@@ -4147,6 +4163,8 @@ class W_App(W_Expr):
 
 
     def bind_fvar(self, fvar, depth):
+        if not self.has_fvar():
+            return self
         new_fn = self.fn.bind_fvar(fvar, depth)
         new_arg = self.arg.bind_fvar(fvar, depth)
         if new_fn is self.fn and new_arg is self.arg:
@@ -4282,6 +4300,10 @@ class W_Declaration(_Item):
         )
 
     def type_check(self, tc):
+        from rpylean.exceptions import LooseBoundVariable
+
+        if self.type.loose_bvar_range() > 0:
+            raise LooseBoundVariable(self.type.loose_bvar_range() - 1)
         try:
             error = self.w_kind.type_check(self.type, tc)
         except W_CheckError as error:

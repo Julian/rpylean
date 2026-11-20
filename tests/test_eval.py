@@ -11,7 +11,9 @@ from rpylean.objects import (
     TYPE,
     Name,
     W_BVar,
+    W_LEVEL_ZERO,
     W_LitNat,
+    W_LitStr,
     W_RecRule,
     _BOOL_FALSE,
     _BOOL_TRUE,
@@ -232,3 +234,69 @@ def test_first_class_and_partial_native_nat_ops():
     assert syntactic_eq(_eval(env, pow_.app(W_LitNat.int(0), W_LitNat.int(5))), W_LitNat.int(0))
     assert syntactic_eq(_eval(env, pow_.app(W_LitNat.int(1), W_LitNat.int(999))), W_LitNat.int(1))
     assert syntactic_eq(_eval(env, pow_.app(W_LitNat.int(3), W_LitNat.int(5))), W_LitNat.int(243))
+
+
+def test_litstr_lazy_expansion():
+    """String literals expand lazily through `String.ofList` on projection."""
+    u = Name.simple("u")
+    u_lvl = u.as_level_param()
+    alpha, a, h, t, cs = names("α", "a", "h", "t", "cs")
+    List = Name.simple("List")
+    list_ty = forall(alpha.binder(u_lvl.sort()))(u_lvl.sort())
+    list_nil = List.child("nil").constructor(
+        levels=[u],
+        type=forall(alpha.binder(u_lvl.sort()))(List.const([u_lvl]).app(W_BVar(0))),
+        num_params=1, num_fields=0, cidx=0, induct=List,
+    )
+    list_cons = List.child("cons").constructor(
+        levels=[u],
+        type=forall(
+            alpha.binder(u_lvl.sort()),
+            h.binder(W_BVar(0)),
+            t.binder(List.const([u_lvl]).app(W_BVar(1))),
+        )(List.const([u_lvl]).app(W_BVar(2))),
+        num_params=1, num_fields=2, cidx=1, induct=List,
+    )
+    list_ind = List.inductive(
+        levels=[u], type=list_ty, constructors=[list_nil, list_cons],
+        num_params=1, is_recursive=True,
+    )
+
+    Char = Name.simple("Char")
+    char_mk = Char.child("mk").constructor(
+        type=forall(a.binder(NAT))(Char.const()),
+        num_params=0, num_fields=1, cidx=0, induct=Char,
+    )
+    char_ind = Char.inductive(type=TYPE, constructors=[char_mk])
+    char_of_nat = Char.child("ofNat").definition(
+        type=forall(a.binder(NAT))(Char.const()),
+        value=fun(a.binder(NAT))(char_mk.name.const().app(W_BVar(0))),
+    )
+
+    String = Name.simple("String")
+    list_char = List.const([W_LEVEL_ZERO]).app(Char.const())
+    str_mk = String.child("mk").constructor(
+        type=forall(cs.binder(list_char))(String.const()),
+        num_params=0, num_fields=1, cidx=0, induct=String,
+    )
+    str_ind = String.inductive(type=TYPE, constructors=[str_mk])
+    str_of_list = String.child("ofList").definition(
+        type=forall(cs.binder(list_char))(String.const()),
+        value=fun(cs.binder(list_char))(str_mk.name.const().app(W_BVar(0))),
+    )
+
+    env = _bool_nat_env(extra=[
+        list_ind, list_nil, list_cons,
+        char_ind, char_mk, char_of_nat,
+        str_ind, str_mk, str_of_list,
+    ])
+    # ("AB".0) -> List.cons (Char.mk 65) (List.cons (Char.mk 66) List.nil)
+    # Project head char (field 0 of List.cons) then field 0 of Char.mk -> 65 ('A').
+    lit = W_LitStr("AB")
+    data = String.proj(0, lit)
+    first_char = List.proj(0, data)
+    first_code = Char.proj(0, first_char)
+    assert syntactic_eq(_eval(env, first_code), W_LitNat.int(ord("A")))
+    # Second char via tail projection -> 66 ('B') (reuses cached expansion).
+    second_char = List.proj(0, List.proj(1, data))
+    assert syntactic_eq(_eval(env, Char.proj(0, second_char)), W_LitNat.int(ord("B")))

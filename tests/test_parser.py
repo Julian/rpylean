@@ -201,3 +201,35 @@ class TestSafety(object):
         groups = [env[n].group for n in ("MyTrue", "MyTrue.intro", "MyTrue.rec")]
         assert groups == [0, 0, 0]
         assert sorted(env[n].index for n in ("MyTrue", "MyTrue.intro", "MyTrue.rec")) == [0, 1, 2]
+
+
+def test_prescan_refcounts_matches_scan_builder():
+    body = "\n".join([
+        '{"in":1,"str":{"pre":0,"str":"MyTrue"}}',
+        '{"in":2,"str":{"pre":1,"str":"intro"}}',
+        '{"in":3,"str":{"pre":1,"str":"rec"}}',
+        '{"in":4,"str":{"pre":0,"str":"x"}}',
+        '{"in":5,"str":{"pre":0,"str":"d"}}',
+        '{"in":6,"str":{"pre":0,"str":"t"}}',
+        '{"il":1,"succ":0}',
+        '{"ie":0,"sort":0}',
+        '{"const":{"name":1,"us":[]},"ie":1}',
+        '{"bvar":0,"ie":2}',
+        '{"app":{"arg":2,"fn":1},"ie":3}',
+        '{"ie":4,"lam":{"binderInfo":"default","body":3,"name":4,"type":1}}',
+        '{"forallE":{"binderInfo":"implicit","body":3,"name":4,"type":1},"ie":5}',
+        '{"ie":6,"letE":{"body":2,"name":4,"nondep":false,"type":1,"value":3}}',
+        '{"ie":7,"proj":{"idx":0,"struct":3,"typeName":1}}',
+        '{"ie":8,"natVal":"42"}',
+        '{"ie":9,"strVal":"hello \\"type\\":1"}',
+        # Whitespace + reordered keys fallback
+        ' { "ie" : 10 , "app" : { "fn" : 4 , "arg" : 5 } } ',
+        '{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[],"name":3,"numIndices":0,"numMinors":0,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":4}],"type":5}],"types":[{"all":[1],"ctors":[2],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}',
+        '{"def":{"all":[5],"hints":{"regular":1},"levelParams":[],"name":5,"safety":"safe","type":5,"value":6}}',
+        '{"thm":{"levelParams":[],"name":6,"type":0,"value":7}}',
+    ]) + "\n"
+    expected = EnvironmentBuilder()
+    expected.start_scan()
+    expected.consume(StringIO(body))
+    got = parser.prescan_refcounts(StringIO(body))
+    assert got == expected._refcount

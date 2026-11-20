@@ -32,6 +32,7 @@ from rpylean.objects import (
     W_Lambda,
     W_Let,
     W_LitNat,
+    W_LitStr,
     W_Proj,
     W_Recursor,
     _BOOL_FALSE,
@@ -288,6 +289,18 @@ class VAtom(Val):
 
     def __init__(self, node):
         self.node = node
+
+
+class VLitStr(Val):
+    """A string literal, lazily expanded to its kernel `String.ofList`
+    constructor value on first projection or recursor match."""
+
+    _attrs_ = ['lit', 'expanded']
+    _immutable_fields_ = ['lit']
+
+    def __init__(self, lit):
+        self.lit = lit
+        self.expanded = None
 
 
 class Thunk(Slot):
@@ -947,7 +960,7 @@ class CodeCache(object):
     """Persistent immutable `CodeNode` compiler attached to an `Environment`."""
 
     _attrs_ = [
-        'declarations', '_consts', '_induct_ids', '_ctor_ids',
+        'declarations', '_consts', '_induct_ids', '_ctor_ids', '_str_vals',
         'v_true', 'v_false',
     ]
     _immutable_fields_ = ['declarations', 'v_true?', 'v_false?']
@@ -957,8 +970,16 @@ class CodeCache(object):
         self._consts = r_dict(_const_eq, _const_hash)
         self._induct_ids = r_dict(_name_eq, _name_hash)
         self._ctor_ids = r_dict(_name_eq, _name_hash)
+        self._str_vals = {}
         self.v_true = None
         self.v_false = None
+
+    def litstr_val(self, lit):
+        val = self._str_vals.get(lit.val, None)
+        if val is None:
+            val = VLitStr(lit)
+            self._str_vals[lit.val] = val
+        return val
 
     def _refresh_bools(self):
         if self.v_true is None:
@@ -1147,6 +1168,9 @@ class CodeCache(object):
                 elif cls is W_LitNat:
                     assert isinstance(e, W_LitNat)
                     memo[uid] = CVal(mk_const_nat_from_bigint(e.val))
+                elif cls is W_LitStr:
+                    assert isinstance(e, W_LitStr)
+                    memo[uid] = CVal(self.litstr_val(e))
                 elif cls is W_Const:
                     assert isinstance(e, W_Const)
                     c = _subst_const_levels(e, level_subst)
@@ -1259,6 +1283,9 @@ class CodeCache(object):
                     elif cls is W_LitNat:
                         assert isinstance(e, W_LitNat)
                         memo[h] = CVal(mk_const_nat_from_bigint(e.val))
+                    elif cls is W_LitStr:
+                        assert isinstance(e, W_LitStr)
+                        memo[h] = CVal(self.litstr_val(e))
                     elif cls is W_Const:
                         assert isinstance(e, W_Const)
                         node = self.const_node(e)
@@ -1349,7 +1376,7 @@ class CodeCache(object):
                         memo[store.field_a(pair)], memo[store.field_b(pair)],
                     )
                 elif kind == KIND_PROJ:
-                    memo[h] = CProj(memo[store.field_a(h)], store.field_b(h))
+                    memo[h] = CProj(memo[store.field_a(h)], store.proj_index(h))
         return memo[root_h]
 
 
@@ -1393,6 +1420,17 @@ eval_jitdriver = jit.JitDriver(
 @jit.dont_look_inside
 def _check_limits(tc):
     tc.tick_wall_time()
+
+
+@jit.dont_look_inside
+def _expand_litstr(val, cache, tc):
+    exp = val.expanded
+    if exp is not None:
+        return exp
+    code = cache.compile_wexpr(val.lit.build_str_expr(), None)
+    exp = eval_whnf(code, cache, tc)
+    val.expanded = exp
+    return exp
 
 
 def _arg_to_slot(arg_code, env):
@@ -1756,6 +1794,12 @@ def eval_whnf(root_code, cache, tc):
                     trailing = cont.args
                     next_cont = cont.next
 
+                    if isinstance(val, VLitStr):
+                        exp = val.expanded
+                        if exp is None:
+                            exp = _expand_litstr(val, cache, tc)
+                        val = exp
+
                     if rec_node.is_nat_rec:
                         if isinstance(val, VSmallNat):
                             n = val.n
@@ -1844,6 +1888,11 @@ def eval_whnf(root_code, cache, tc):
 
                 if isinstance(cont, KProj):
                     fidx = jit.promote(cont.field_idx)
+                    if isinstance(val, VLitStr):
+                        exp = val.expanded
+                        if exp is None:
+                            exp = _expand_litstr(val, cache, tc)
+                        val = exp
                     if isinstance(val, VCtor1):
                         if fidx != 0:
                             raise _EvalBail()

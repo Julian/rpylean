@@ -59,6 +59,39 @@ class TestLitNat(object):
     def test_large_not_eq(self):
         assert not env.def_eq(W_LitNat.long(4294967296), W_LitNat.long(4294967297))
 
+    def test_nonzero_lit_not_eq_nat_zero(self):
+        """Comparing a nonzero Nat literal against Nat.zero must terminate
+        immediately without ping-ponging between one-step expansion and
+        closed-scalar evaluation."""
+        zero_name = Name.of(["Nat", "zero"])
+        succ_name = Name.of(["Nat", "succ"])
+        nat_ind = Name.simple("Nat").inductive(
+            type=TYPE,
+            constructors=[
+                zero_name.constructor(type=NAT),
+                succ_name.constructor(
+                    type=forall(x.binder(type=NAT))(NAT),
+                    num_fields=1,
+                ),
+            ],
+            is_recursive=True,
+        )
+        nat_env = Environment.having(
+            [nat_ind] + nat_ind.w_kind.constructors,
+        )
+        zero = zero_name.const()
+        succ = succ_name.const()
+        assert nat_env.def_eq(W_LitNat.int(0), zero)
+        assert nat_env.def_eq(zero, W_LitNat.int(0))
+        assert not nat_env.def_eq(W_LitNat.int(1), zero)
+        assert not nat_env.def_eq(zero, W_LitNat.int(1))
+        assert not nat_env.def_eq(W_LitNat.int(5), zero)
+        assert not nat_env.def_eq(zero, W_LitNat.int(5))
+        assert not nat_env.def_eq(succ.app(zero), zero)
+        assert not nat_env.def_eq(zero, succ.app(zero))
+        assert nat_env.def_eq(W_LitNat.int(1), succ.app(zero))
+        assert not nat_env.def_eq(W_LitNat.int(2), succ.app(zero))
+
 
 class TestLitStr(object):
     def test_eq(self):

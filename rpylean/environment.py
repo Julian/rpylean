@@ -21,6 +21,7 @@ from rpylean.exceptions import (
     DuplicateLevels,
     HeartbeatExceeded,
     MemoryExceeded,
+    UndeclaredLevelParam,
     UnknownQuotient,
     W_Error,
     W_InvalidDeclaration,
@@ -199,23 +200,50 @@ class EnvironmentBuilder(object):
 
         Returns self.
         """
-        if hook is None:
-            while True:
-                line = stream.readline()
-                if not line:
-                    return self
-                parser.parse_line(line, self)
-
+        cursor = parser.LineCursor("")
+        buf = ""
         n = 0
         while True:
-            line = stream.readline()
-            if not line:
+            chunk = stream.read(262144)
+            if not chunk:
+                if buf:
+                    end = len(buf)
+                    if end > 0 and buf[end - 1] == '\r':
+                        end -= 1
+                    cursor.reset(buf, 0, end)
+                    parser.parse_cursor(cursor, self)
+                    if hook is not None:
+                        while n < len(self.declarations):
+                            if hook.on_declaration(self.declarations[n]):
+                                return self
+                            n += 1
                 return self
-            parser.parse_line(line, self)
-            while n < len(self.declarations):
-                if hook.on_declaration(self.declarations[n]):
-                    return self
-                n += 1
+            if buf:
+                buf = buf + chunk
+            else:
+                buf = chunk
+            pos = 0
+            blen = len(buf)
+            while pos < blen:
+                nl = buf.find('\n', pos)
+                if nl < 0:
+                    break
+                end = nl
+                if end > pos and buf[end - 1] == '\r':
+                    end -= 1
+                cursor.reset(buf, pos, end)
+                parser.parse_cursor(cursor, self)
+                if hook is not None:
+                    while n < len(self.declarations):
+                        if hook.on_declaration(self.declarations[n]):
+                            return self
+                        n += 1
+                pos = nl + 1
+            if pos < blen:
+                assert pos >= 0
+                buf = buf[pos:]
+            else:
+                buf = ""
 
     # The export format only requires `in`/`ie`/`il` references to be integers,
     # so an index may skip values or fill a previously-skipped one even though
@@ -700,7 +728,7 @@ class TypeChecker(object):
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'start_time', 'start_peak',
-        '_whnf_tick', '_released', 'stage',
+        '_whnf_tick', '_released', 'stage', 'allowed_levels',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
@@ -728,6 +756,19 @@ class TypeChecker(object):
         self.machine = acquire(self)
         self._released = False
         self.stage = STAGE_ALL
+        self.allowed_levels = decl.levels if decl is not None else None
+
+    def check_level(self, level):
+        """Verify every universe parameter in ``level`` is declared on the
+        declaration currently under check."""
+        if not level.has_param:
+            return
+        allowed = self.allowed_levels
+        if allowed is None:
+            return
+        bad = level.check_params(allowed)
+        if bad is not None:
+            raise UndeclaredLevelParam(bad)
 
     def free(self):
         """Release the machine once the check is over."""
