@@ -820,38 +820,21 @@ def _decl_with_value_format(keyword, name, levels, type, value,
     ])
 
 
-@elidable
+@always_inline
 def name_eq(name, other):
-    # FIXME: this duplicates Name.syntactic_eq, but if we remove it and use
-    #        that directly, RPython seems unable to be convinced that name and
-    #        other are always Names no matter how much I assert.
-    #
-    return name.syntactic_eq(other)
+    # Names are globally hash-consed, so structural equality is pointer identity.
+    return name is other
 
 
 @specialize.call_location()
 def name_dict():
-    """A fresh empty `r_dict` keyed by `Name`.
+    """A fresh empty dict keyed by `Name`.
 
-    Both the value annotation AND the hash function need to be
-    specialised per call site. RPython merges the arg type of any
-    function shared across r_dict instances; if we used a single
-    module-level ``_name_hash``, the annotator would widen its arg to
-    `_Item` once we had multiple `name_dict()` sites with differing
-    value types, and r_dict's hlinvoke would mismatch its callers
-    (which always pass `Name`). Defining the eq/hash funcs *inside*
-    this call_location-specialised helper gives each call site its
-    own pair of function PBCs, breaking the merge.
+    All `Name` instances are globally hash-consed (`_mk_str_name`,
+    `_mk_num_name`, `Name.ANONYMOUS`), so plain identity dicts replace
+    `r_dict` and eliminate indirect hash/eq calls on hot lookups.
     """
-    from rpython.rlib.objectmodel import r_dict
-
-    def _eq(a, b):
-        return a.syntactic_eq(b)
-
-    def _hash(name):
-        return name.hash()
-
-    return r_dict(_eq, _hash)
+    return {}
 
 
 # ---- Hash-consing intern tables -----------------------------------------
@@ -1385,32 +1368,13 @@ class Name(_Item):
             self.to_format(constants, _marker_for(mark)), span_holder,
         )
 
+    @always_inline
     def syntactic_eq(self, other):
         """
-        Lean's ``Name.beq``: structural equality, walked iteratively
-        leaf-to-root so deep names don't blow the C stack on translated
-        builds.
+        Lean's ``Name.beq``: all `Name`s are globally hash-consed, so
+        structural equality is pointer identity.
         """
-        a = self
-        b = other
-        while True:
-            if a is b:
-                return True
-            if a.is_anonymous() or b.is_anonymous():
-                return a.is_anonymous() and b.is_anonymous()
-            if isinstance(a, NumName):
-                if not isinstance(b, NumName):
-                    return False
-                if not a.idx.eq(b.idx):
-                    return False
-            else:
-                assert isinstance(a, StrName)
-                if not isinstance(b, StrName):
-                    return False
-                if a.suffix != b.suffix:
-                    return False
-            a = a.parent
-            b = b.parent
+        return self is other
 
     def user_name(self):
         """
@@ -2190,6 +2154,9 @@ class W_LevelZero(W_Level):
     def subst_levels(self, substs):
         return self
 
+    def subst_levels_lists(self, params, levels):
+        return self
+
     def syntactic_eq(self, other):
         return True
 
@@ -2239,8 +2206,12 @@ class W_LevelSucc(W_Level):
         return base, k + 1
 
     def normalize(self):
-        base, k = self.to_offset()
-        return base.normalize_at(k)
+        normal = self._normal
+        if normal is None:
+            base, k = self.to_offset()
+            normal = base.normalize_at(k)
+            self._normal = normal
+        return normal
 
     def norm_kind(self):
         return 1
@@ -2253,7 +2224,17 @@ class W_LevelSucc(W_Level):
         return text, balance + 1
 
     def subst_levels(self, substs):
+        if not self.has_param:
+            return self
         new_parent = self.parent.subst_levels(substs)
+        if new_parent is self.parent:
+            return self
+        return new_parent.succ()
+
+    def subst_levels_lists(self, params, levels):
+        if not self.has_param:
+            return self
+        new_parent = self.parent.subst_levels_lists(params, levels)
         if new_parent is self.parent:
             return self
         return new_parent.succ()
@@ -2389,8 +2370,19 @@ class W_LevelMax(W_Level):
         return "(max %s %s)" % (lhs, rhs), 0
 
     def subst_levels(self, substs):
+        if not self.has_param:
+            return self
         new_lhs = self.lhs.subst_levels(substs)
         new_rhs = self.rhs.subst_levels(substs)
+        if new_lhs is self.lhs and new_rhs is self.rhs:
+            return self
+        return new_lhs.max(new_rhs)
+
+    def subst_levels_lists(self, params, levels):
+        if not self.has_param:
+            return self
+        new_lhs = self.lhs.subst_levels_lists(params, levels)
+        new_rhs = self.rhs.subst_levels_lists(params, levels)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.max(new_rhs)
@@ -2465,8 +2457,19 @@ class W_LevelIMax(W_Level):
         return "(imax %s %s)" % (self.lhs.str(), self.rhs.str()), 0
 
     def subst_levels(self, substs):
+        if not self.has_param:
+            return self
         new_lhs = self.lhs.subst_levels(substs)
         new_rhs = self.rhs.subst_levels(substs)
+        if new_lhs is self.lhs and new_rhs is self.rhs:
+            return self
+        return new_lhs.imax(new_rhs)
+
+    def subst_levels_lists(self, params, levels):
+        if not self.has_param:
+            return self
+        new_lhs = self.lhs.subst_levels_lists(params, levels)
+        new_rhs = self.rhs.subst_levels_lists(params, levels)
         if new_lhs is self.lhs and new_rhs is self.rhs:
             return self
         return new_lhs.imax(new_rhs)
@@ -2532,6 +2535,18 @@ class W_LevelParam(W_Level):
     def subst_levels(self, substs):
         return substs.get(self.name, self)
 
+    def subst_levels_lists(self, params, levels):
+        name = self.name
+        n = len(params)
+        if n == 1:
+            return levels[0] if name is params[0] else self
+        i = 0
+        while i < n:
+            if name is params[i]:
+                return levels[i]
+            i += 1
+        return self
+
     def norm_kind(self):
         return 4
 
@@ -2567,29 +2582,23 @@ class W_LevelParam(W_Level):
         )
 
 
+_LP_BIT = 1 << 62
+_LOOSE_MASK = 0x1FFFFFFF
+
+
 class W_Expr(_Item):
-    # Three per-node immutable scalars are packed into one `_packed` word:
+    # Four per-node immutable scalars are packed into one `_packed` word:
     #
     #   bits  0-31 : the content `hash()` (already masked to 32 bits)
     #   bit     32 : `has_fvar` (does any free variable occur)
-    #   bits 33-63 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bits 33-61 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bit     62 : `has_level_param` (does any universe level param occur)
     #
     # Each was its own machine word before (`_hash`, plus a `_bvar_fvar`
     # that already folded the latter two). They are all small — a term's
     # bvar depth is tiny and the hash is 32-bit — so one word holds them
-    # with `loose_bvar_range` never reaching bit 63 (it stays positive,
-    # so the `>> 33` unpack needs no mask). Tens of millions of nodes are
-    # live on a Mathlib-sized heap, so collapsing three words to one is a
-    # direct cut to the parsed-heap footprint and thus to GC
-    # survivor-tracing time. `Name` / `W_Level` keep their own separate
-    # `_hash` field — only `W_Expr` is packed.
-    #
-    # Accessors are `@always_inline` (not `@elidable`): they sit on hot
-    # paths — `loose_bvar_range() <= depth` in substitution, `hash()` in
-    # every node's construction — and the default binary runs the JIT
-    # off, so they must inline to a bare shift/mask rather than stay a
-    # call for a tracer to fold. `_packed` is immutable, so the unpack is
-    # still JIT-foldable.
+    # with bit 62 tracking universe-parameter presence for O(1) skips
+    # during polymorphic constant import.
     _attrs_ = ['_packed', '_uid']
     _immutable_fields_ = ['_packed', '_uid']
 
@@ -2606,12 +2615,17 @@ class W_Expr(_Item):
     @always_inline
     def loose_bvar_range(self):
         """The largest loose de-Bruijn index occurring + 1 (0 if none)."""
-        return self._packed >> 33
+        return (self._packed >> 33) & _LOOSE_MASK
 
     @always_inline
     def has_fvar(self):
         """Whether any free variable (`W_FVar`) occurs in this term."""
         return ((self._packed >> 32) & 1) != 0
+
+    @always_inline
+    def has_level_param(self):
+        """Whether any universe level parameter (`W_LevelParam`) occurs."""
+        return (self._packed & _LP_BIT) != 0
 
 
     def collect_consts_into(self, out, seen):
@@ -2774,6 +2788,9 @@ class W_BVar(W_Expr):
     def subst_levels(self, substs):
         return self
 
+    def subst_levels_lists(self, params, levels):
+        return self
+
 
 class W_FVar(W_Expr):
     """An FVar which refers to its binder by identity."""
@@ -2881,6 +2898,9 @@ class W_LitStr(W_Expr):
     def subst_levels(self, substs):
         return self
 
+    def subst_levels_lists(self, params, levels):
+        return self
+
     def bind_fvar(self, fvar, depth):
         return self
 
@@ -2893,14 +2913,15 @@ class W_LitStr(W_Expr):
 
 
 class W_Sort(W_Expr):
-    _attrs_ = ['level']
+    _attrs_ = ['level', '_canonical']
     _immutable_fields_ = ['level']
 
     def __init__(self, level):
         self.level = level
-        bf = 0
+        self._canonical = None
+        lp = _LP_BIT if level.has_param else 0
         self._uid = _next_uid()
-        self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | lp
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
@@ -2983,7 +3004,7 @@ def apply_const_level_params(const, target, env):
 
 class W_Const(W_Expr):
     _attrs_ = [
-        'name', 'levels',
+        'name', 'levels', '_canonical',
         '_infer_cache_env', '_infer_cache_result',
         '_delta_cache_env', '_delta_cache_result',
     ]
@@ -2991,10 +3012,13 @@ class W_Const(W_Expr):
 
     def __init__(self, name, levels):
         self.name = name
+        lp = 0
         for each in levels:
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
+            if each.has_param:
+                lp = _LP_BIT
         self.levels = levels
-        bf = 0
+        self._canonical = self if not levels else None
         # Inline caches, tagged with the env — hash-consing shares this
         # instance across `Environment`s and both the inferred type
         # and the delta-unfolded value depend on the env's declarations.
@@ -3011,7 +3035,7 @@ class W_Const(W_Expr):
         for lvl in levels:
             h = (h * 1000003) ^ lvl.hash()
         self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | lp
 
     def __repr__(self):
         return "`%s" % self.str()
@@ -3192,6 +3216,9 @@ class W_LitNat(W_Expr):
     def subst_levels(self, substs):
         return self
 
+    def subst_levels_lists(self, params, levels):
+        return self
+
     def syntactic_eq(self, other):
         assert isinstance(other, W_LitNat)
         return self.val.eq(other.val)
@@ -3309,10 +3336,11 @@ class W_Proj(W_Expr):
             (struct_expr.loose_bvar_range() << 1)
             | (1 if struct_expr.has_fvar() else 0)
         )
+        lp = struct_expr._packed & _LP_BIT
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ struct_expr.hash()
         self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32) | lp
 
 
     def contains_const(self, name):
@@ -3389,6 +3417,8 @@ class W_Proj(W_Expr):
         return self.with_expr(self.struct_expr.instantiate(expr, depth))
 
     def subst_levels(self, substs):
+        if not self.has_level_param():
+            return self
         new_expr = self.struct_expr.subst_levels(substs)
         if new_expr is self.struct_expr:
             return self
@@ -3481,11 +3511,12 @@ class W_FunBase(W_Expr):
             loose = body_range
         fvar = binder.type.has_fvar() or body.has_fvar()
         bf = (loose << 1) | (1 if fvar else 0)
+        lp = (binder.type._packed | body._packed) & _LP_BIT
         # Content hash: mix binder's name + type + binder-info + body.
         h = (binder.name.hash() * 1000003) ^ binder.type.hash()
         h = (h * 1000003) ^ body.hash()
         self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32) | lp
 
 
     def contains_const(self, name):
@@ -3565,6 +3596,8 @@ class W_ForAll(W_FunBase):
         )
 
     def subst_levels(self, levels):
+        if not self.has_level_param():
+            return self
         new_binder = self.binder.subst_levels(levels)
         new_body = self.body.subst_levels(levels)
         if new_binder is self.binder and new_body is self.body:
@@ -3893,6 +3926,8 @@ class W_Lambda(W_FunBase):
 
 
     def subst_levels(self, substs):
+        if not self.has_level_param():
+            return self
         new_binder = self.binder.subst_levels(substs)
         new_body = self.body.subst_levels(substs)
         if new_binder is self.binder and new_body is self.body:
@@ -3920,11 +3955,12 @@ class W_Let(W_Expr):
             r = body_range
         fvar = type.has_fvar() or value.has_fvar() or body.has_fvar()
         bf = (r << 1) | (1 if fvar else 0)
+        lp = (type._packed | value._packed | body._packed) & _LP_BIT
         h = (name.hash() * 1000003) ^ type.hash()
         h = (h * 1000003) ^ value.hash()
         h = (h * 1000003) ^ body.hash()
         self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF) | (bf << 32) | lp
 
     def contains_const(self, name):
         return (self.type.contains_const(name)
@@ -4011,6 +4047,8 @@ class W_Let(W_Expr):
 
 
     def subst_levels(self, substs):
+        if not self.has_level_param():
+            return self
         new_type = self.type.subst_levels(substs)
         new_value = self.value.subst_levels(substs)
         new_body = self.body.subst_levels(substs)
@@ -4038,9 +4076,10 @@ class W_App(W_Expr):
             loose = arg_range
         fvar = fn.has_fvar() or arg.has_fvar()
         bf = (loose << 1) | (1 if fvar else 0)
+        lp = (fn._packed | arg._packed) & _LP_BIT
         h = (fn.hash() * 1000003) ^ arg.hash()
         self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32)
+        self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32) | lp
 
 
     def contains_const(self, name):
@@ -4187,6 +4226,8 @@ class W_App(W_Expr):
         )
 
     def subst_levels(self, substs):
+        if not self.has_level_param():
+            return self
         new_fn = self.fn.subst_levels(substs)
         new_arg = self.arg.subst_levels(substs)
         if new_fn is self.fn and new_arg is self.arg:

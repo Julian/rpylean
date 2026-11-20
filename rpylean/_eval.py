@@ -968,8 +968,8 @@ class CodeCache(object):
     def __init__(self, declarations):
         self.declarations = declarations
         self._consts = r_dict(_const_eq, _const_hash)
-        self._induct_ids = r_dict(_name_eq, _name_hash)
-        self._ctor_ids = r_dict(_name_eq, _name_hash)
+        self._induct_ids = {}
+        self._ctor_ids = {}
         self._str_vals = {}
         self.v_true = None
         self.v_false = None
