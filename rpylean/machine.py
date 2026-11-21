@@ -130,6 +130,9 @@ F_A = 1
 F_B = 2
 F_INFO = 3
 _KIND_MASK = 7
+_INFO_MASK = 0xFFFFFF
+_SIZE_SHIFT = 24
+_HEAVY_ENC = 255
 _PROJ_SHIFT = 10
 _PROJ_MASK = (1 << _PROJ_SHIFT) - 1
 _PROJ_OVF_NAME = _PROJ_MASK
@@ -1256,7 +1259,14 @@ class TermStore(object):
 
     @always_inline
     def info(self, h):
-        return _s32(self.recs[(rec_index(h) << 2) + F_INFO])
+        return _s32(self.recs[(rec_index(h) << 2) + F_INFO]) & _INFO_MASK
+
+    @always_inline
+    def is_heavy(self, h):
+        return (
+            not is_leaf(h)
+            and (_s32(self.recs[(rec_index(h) << 2) + F_INFO]) >> _SIZE_SHIFT) == _HEAVY_ENC
+        )
 
     @always_inline
     def memo(self, h, slot):
@@ -1348,31 +1358,49 @@ class TermStore(object):
             if (entry >> 21) == pair:
                 return (entry & _APP_SLOT_MASK) << 1
             if entry == 0:
-                break
+                return self._cons_app_miss(fn, arg, pair, i)
             i = (i + 1) & amask
+
+    @dont_inline
+    def _cons_app_miss(self, fn, arg, pair, i):
         idx = self.nrecs
         if idx + 1 >= _APP_PACK_LIMIT:
             return self._cons_app_wide(fn, arg)
         if idx == self.cap:
             self._grow_records()
-        ma = self.meta(fn)
-        mb = self.meta(arg)
+        recs = self.recs
+        if is_leaf(fn):
+            ma = _s32(self.leaf_meta[leaf_index(fn)])
+            ea = 0
+        else:
+            fbase = rec_index(fn) << 2
+            ma = _s32(recs[fbase]) >> 3
+            ea = _s32(recs[fbase + F_INFO]) >> _SIZE_SHIFT
+        if is_leaf(arg):
+            mb = _s32(self.leaf_meta[leaf_index(arg)])
+            eb = 0
+        else:
+            abase = rec_index(arg) << 2
+            mb = _s32(recs[abase]) >> 3
+            eb = _s32(recs[abase + F_INFO]) >> _SIZE_SHIFT
         la = ma & ~1
         lb = mb & ~1
         meta = (la if la > lb else lb) | ((ma | mb) & 1)
+        sz = ea + eb + 2
+        if sz > _HEAVY_ENC:
+            sz = _HEAVY_ENC
         base = idx << 2
-        recs = self.recs
         recs[base] = _u32((meta << 3) | KIND_APP)
         recs[base + F_A] = _u32(fn)
         recs[base + F_B] = _u32(arg)
-        recs[base + F_INFO] = _u32(_NO_INFO)
+        recs[base + F_INFO] = _u32(sz << _SIZE_SHIFT)
         self.nrecs = idx + 1
         napps = self.napps + 1
         self.napps = napps
-        if napps * 2 > amask + 1:
+        if napps * 2 > self.app_mask + 1:
             self._rehash_apps()
         else:
-            app_table[i] = (pair << 21) | (idx + 1)
+            self.app_table[i] = (pair << 21) | (idx + 1)
         return rec_handle(idx)
 
     @dont_inline
@@ -1445,17 +1473,32 @@ class TermStore(object):
         idx = self.nrecs
         if idx == self.cap:
             self._grow_records()
-        ma = self.meta(fn)
-        mb = self.meta(arg)
+        recs = self.recs
+        if is_leaf(fn):
+            ma = _s32(self.leaf_meta[leaf_index(fn)])
+            ea = 0
+        else:
+            fbase = rec_index(fn) << 2
+            ma = _s32(recs[fbase]) >> 3
+            ea = _s32(recs[fbase + F_INFO]) >> _SIZE_SHIFT
+        if is_leaf(arg):
+            mb = _s32(self.leaf_meta[leaf_index(arg)])
+            eb = 0
+        else:
+            abase = rec_index(arg) << 2
+            mb = _s32(recs[abase]) >> 3
+            eb = _s32(recs[abase + F_INFO]) >> _SIZE_SHIFT
         la = ma & ~1
         lb = mb & ~1
         meta = (la if la > lb else lb) | ((ma | mb) & 1)
+        sz = ea + eb + 2
+        if sz > _HEAVY_ENC:
+            sz = _HEAVY_ENC
         base = idx << 2
-        recs = self.recs
         recs[base] = _u32((meta << 3) | KIND_APP)
         recs[base + F_A] = _u32(fn)
         recs[base + F_B] = _u32(arg)
-        recs[base + F_INFO] = _u32(_NO_INFO)
+        recs[base + F_INFO] = _u32(sz << _SIZE_SHIFT)
         self.nrecs = idx + 1
         h = rec_handle(idx)
         napps = self.napps + 1
@@ -1479,6 +1522,17 @@ class TermStore(object):
             return self.cons_app(a, b)
         return self._cons_general(kind, a, b, info)
 
+    @always_inline
+    def _size_enc_for(self, kind, a, b):
+        recs = self.recs
+        ea = 0 if is_leaf(a) else (_s32(recs[(rec_index(a) << 2) + F_INFO]) >> _SIZE_SHIFT)
+        if kind == KIND_PROJ:
+            sz = ea + 1
+        else:
+            eb = 0 if is_leaf(b) else (_s32(recs[(rec_index(b) << 2) + F_INFO]) >> _SIZE_SHIFT)
+            sz = ea + eb + 2
+        return _HEAVY_ENC if sz > _HEAVY_ENC else sz
+
     def _cons_general(self, kind, a, b, info):
         """Dedicated single-word packed `(kind:3 | a:20 | b:20 | slot:20)`
         hash table for non-`KIND_APP` records (zero `recs[]` load on hit),
@@ -1494,27 +1548,31 @@ class TermStore(object):
             if (entry >> 20) == key:
                 return (entry & _OTHER_SLOT_MASK) << 1
             if entry == 0:
-                break
+                return self._cons_general_miss(kind, a, b, info, key, i)
             i = (i + 1) & tmask
+
+    @dont_inline
+    def _cons_general_miss(self, kind, a, b, info, key, i):
         idx = self.nrecs
         if idx + 1 >= _OTHER_PACK_LIMIT:
             return self._cons_general_wide(kind, a, b, info)
         if idx == self.cap:
             self._grow_records()
         meta = self._meta_for(kind, a, b)
+        sz = self._size_enc_for(kind, a, b)
         base = idx << 2
         recs = self.recs
         recs[base] = _u32((meta << 3) | kind)
         recs[base + F_A] = _u32(a)
         recs[base + F_B] = _u32(b)
-        recs[base + F_INFO] = _u32(info)
+        recs[base + F_INFO] = _u32((sz << _SIZE_SHIFT) | (info & _INFO_MASK))
         self.nrecs = idx + 1
         nother = self.nother + 1
         self.nother = nother
-        if nother * 2 > tmask + 1:
+        if nother * 2 > self.tmask + 1:
             self._rehash()
         else:
-            table[i] = (key << 20) | (idx + 1)
+            self.table[i] = (key << 20) | (idx + 1)
         return rec_handle(idx)
 
     @dont_inline
@@ -1595,11 +1653,12 @@ class TermStore(object):
             self._grow_records()
             recs = self.recs
         meta = self._meta_for(kind, a, b)
+        sz = self._size_enc_for(kind, a, b)
         base = idx << 2
         recs[base] = _u32((meta << 3) | kind)
         recs[base + F_A] = _u32(a)
         recs[base + F_B] = _u32(b)
-        recs[base + F_INFO] = _u32(info)
+        recs[base + F_INFO] = _u32((sz << _SIZE_SHIFT) | (info & _INFO_MASK))
         self.nrecs = idx + 1
         nother = self.nother + 1
         self.nother = nother
@@ -2028,14 +2087,11 @@ class TermStore(object):
         if hdr < 16:
             return h
         tag = gen << 8
+        tag_hi = tag << 32
         call_slot = self.call_slot
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (entry >> 40) == gen:
-            r = self._call_memo.get(h << 16, 0)
-            if r != 0:
-                return r
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate")
         kind = hdr & _KIND_MASK
@@ -2084,11 +2140,6 @@ class TermStore(object):
                         if (centry >> 32) == tag:
                             na = centry & _TABLE_SLOT_MASK
                             break
-                        if (centry >> 40) == gen:
-                            cr = self._call_memo.get(cur << 16, 0)
-                            if cr != 0:
-                                na = cr
-                                break
                         if (chdr & _KIND_MASK) != KIND_APP:
                             self._subst_top = stop
                             na = self._inst_d0(cur, sub, gen, nr)
@@ -2100,11 +2151,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -2126,13 +2175,11 @@ class TermStore(object):
                                 if (bentry2 >> 32) == tag:
                                     nb2 = bentry2 & _TABLE_SLOT_MASK
                                 else:
+                                    self._subst_top = stop
                                     nb2 = self._inst_d0(old_b, sub, gen, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
-                        call_slot = self.call_slot
-                        if (call_slot[nri] >> 40) != gen:
-                            call_slot[nri] = (tag << 32) | na
-                        else:
-                            self._call_memo.set(node << 16, na)
+                        self.call_slot[nri] = tag_hi | na
+                    self._subst_top = smark
             if is_leaf(b):
                 bm = _s32(self.leaf_meta[leaf_index(b)])
                 if bm <= 1:
@@ -2196,11 +2243,7 @@ class TermStore(object):
             else:
                 pair = self.cons(KIND_PAIR, nv, nbody)
                 r = self.cons(KIND_LET, na, pair, info)
-        call_slot = self.call_slot
-        if (call_slot[ri] >> 40) != gen:
-            call_slot[ri] = (tag << 32) | r
-        else:
-            self._call_memo.set(h << 16, r)
+        self.call_slot[ri] = tag_hi | r
         return r
 
     def _inst_oneshot(self, h, sub, depth, gen, sub_closed, rdepth):
@@ -2670,14 +2713,11 @@ class TermStore(object):
         if hdr < 16:
             return h
         tag = gen << 8
+        tag_hi = tag << 32
         call_slot = self.call_slot
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (entry >> 40) == gen:
-            r = self._call_memo.get(h << 16, 0)
-            if r != 0:
-                return r
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
         kind = hdr & _KIND_MASK
@@ -2726,11 +2766,6 @@ class TermStore(object):
                         if (centry >> 32) == tag:
                             na = centry & _TABLE_SLOT_MASK
                             break
-                        if (centry >> 40) == gen:
-                            cr = self._call_memo.get(cur << 16, 0)
-                            if cr != 0:
-                                na = cr
-                                break
                         if (chdr & _KIND_MASK) != KIND_APP:
                             self._subst_top = stop
                             na = self._inst_multi_buf_d0(cur, buf, start, n, gen, nr)
@@ -2742,11 +2777,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -2768,13 +2801,11 @@ class TermStore(object):
                                 if (bentry2 >> 32) == tag:
                                     nb2 = bentry2 & _TABLE_SLOT_MASK
                                 else:
+                                    self._subst_top = stop
                                     nb2 = self._inst_multi_buf_d0(old_b, buf, start, n, gen, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
-                        call_slot = self.call_slot
-                        if (call_slot[nri] >> 40) != gen:
-                            call_slot[nri] = (tag << 32) | na
-                        else:
-                            self._call_memo.set(node << 16, na)
+                        self.call_slot[nri] = tag_hi | na
+                    self._subst_top = smark
             if is_leaf(b):
                 bm = _s32(self.leaf_meta[leaf_index(b)])
                 if bm <= 1:
@@ -2840,11 +2871,7 @@ class TermStore(object):
             else:
                 pair = self.cons(KIND_PAIR, nv, nbody)
                 r = self.cons(KIND_LET, na, pair, info)
-        call_slot = self.call_slot
-        if (call_slot[ri] >> 40) != gen:
-            call_slot[ri] = (tag << 32) | r
-        else:
-            self._call_memo.set(h << 16, r)
+        self.call_slot[ri] = tag_hi | r
         return r
 
     def _inst_multi_buf_oneshot(self, h, buf, start, n, depth, gen, all_closed, rdepth):
@@ -3096,14 +3123,11 @@ class TermStore(object):
         if hdr < 16:
             return h
         tag = gen << 8
+        tag_hi = tag << 32
         call_slot = self.call_slot
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (entry >> 40) == gen:
-            r = self._call_memo.get(h << 16, 0)
-            if r != 0:
-                return r
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
         kind = hdr & _KIND_MASK
@@ -3152,11 +3176,6 @@ class TermStore(object):
                         if (centry >> 32) == tag:
                             na = centry & _TABLE_SLOT_MASK
                             break
-                        if (centry >> 40) == gen:
-                            cr = self._call_memo.get(cur << 16, 0)
-                            if cr != 0:
-                                na = cr
-                                break
                         if (chdr & _KIND_MASK) != KIND_APP:
                             self._subst_top = stop
                             na = self._inst_multi_rev_d0(cur, substs, n, gen, nr)
@@ -3168,11 +3187,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -3194,13 +3211,11 @@ class TermStore(object):
                                 if (bentry2 >> 32) == tag:
                                     nb2 = bentry2 & _TABLE_SLOT_MASK
                                 else:
+                                    self._subst_top = stop
                                     nb2 = self._inst_multi_rev_d0(old_b, substs, n, gen, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
-                        call_slot = self.call_slot
-                        if (call_slot[nri] >> 40) != gen:
-                            call_slot[nri] = (tag << 32) | na
-                        else:
-                            self._call_memo.set(node << 16, na)
+                        self.call_slot[nri] = tag_hi | na
+                    self._subst_top = smark
             if is_leaf(b):
                 bm = _s32(self.leaf_meta[leaf_index(b)])
                 if bm <= 1:
@@ -3266,11 +3281,7 @@ class TermStore(object):
             else:
                 pair = self.cons(KIND_PAIR, nv, nbody)
                 r = self.cons(KIND_LET, na, pair, info)
-        call_slot = self.call_slot
-        if (call_slot[ri] >> 40) != gen:
-            call_slot[ri] = (tag << 32) | r
-        else:
-            self._call_memo.set(h << 16, r)
+        self.call_slot[ri] = tag_hi | r
         return r
 
     def _inst_multi_rev_oneshot(self, h, substs, n, depth, gen, all_closed, rdepth):
@@ -3477,17 +3488,44 @@ class TermStore(object):
             self._call_memo.set((h << 16) | depth, r)
         return r
 
-    def _instantiate_multi(self, h, substs, chain, depth, rdepth=0):
-        if self.loose_bvar_range(h) <= depth:
+    def instantiate_multi_ctx(self, h, substs, chain):
+        """Memoised multi-substitution for open-context materialization."""
+        if self.loose_bvar_range(h) == 0:
             return h
         n = len(substs)
         if is_leaf(h):
             id = (_s32(self.leaf_meta[leaf_index(h)]) >> 1) - 1
+            return substs[id] if id < n else self.bvar(id - n)
+        key = _pack_key(h, chain, 0)
+        if key != 0:
+            r = self._multi_memo.get(key, 0)
+        else:
+            r = self._multi_memo.get_wide(h, chain, 0)
+        if r != 0:
+            return r
+        smark = self._subst_top
+        all_closed = self._list_all_closed(substs, n)
+        try:
+            return self._instantiate_multi(h, substs, n, chain, 0, all_closed, 0)
+        finally:
+            self._subst_top = smark
+
+    def _instantiate_multi(self, h, substs, n, chain, depth, all_closed, rdepth):
+        if is_leaf(h):
+            lo = _s32(self.leaf_meta[leaf_index(h)]) >> 1
+            if lo <= depth:
+                return h
+            id = lo - 1
             rel = id - depth
             if rel < n:
                 s = substs[rel]
-                return s if (depth == 0 or self.loose_bvar_range(s) == 0) else self.shift(s, depth, 0)
+                return s if (all_closed or depth == 0) else self.shift(s, depth, 0)
             return self.bvar(id - n)
+        recs = self.recs
+        base = rec_index(h) << 2
+        hdr = _s32(recs[base])
+        if (hdr >> 4) <= depth:
+            return h
         key = _pack_key(h, chain, depth)
         if key != 0:
             r = self._multi_memo.get(key, 0)
@@ -3497,9 +3535,7 @@ class TermStore(object):
             return r
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
-        recs = self.recs
-        base = rec_index(h) << 2
-        kind = _s32(recs[base]) & _KIND_MASK
+        kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
         info = _s32(recs[base + F_INFO])
@@ -3514,13 +3550,88 @@ class TermStore(object):
                     arel = aid - depth
                     if arel < n:
                         sa = substs[arel]
-                        na = sa if (depth == 0 or self.loose_bvar_range(sa) == 0) else self.shift(sa, depth, 0)
+                        na = sa if (all_closed or depth == 0) else self.shift(sa, depth, 0)
                     else:
                         na = self.bvar(aid - n)
-            elif (_s32(recs[rec_index(a) << 2]) >> 4) <= depth:
-                na = a
             else:
-                na = self._instantiate_multi(a, substs, chain, depth, nr)
+                ahdr = _s32(recs[rec_index(a) << 2])
+                if (ahdr >> 4) <= depth:
+                    na = a
+                elif (ahdr & _KIND_MASK) != KIND_APP:
+                    na = self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
+                else:
+                    smark = self._subst_top
+                    stop = smark
+                    cur = a
+                    while True:
+                        if is_leaf(cur):
+                            clo = _s32(self.leaf_meta[leaf_index(cur)]) >> 1
+                            if clo <= depth:
+                                na = cur
+                            else:
+                                cid = clo - 1
+                                crel = cid - depth
+                                if crel < n:
+                                    cs = substs[crel]
+                                    na = cs if (all_closed or depth == 0) else self.shift(cs, depth, 0)
+                                else:
+                                    na = self.bvar(cid - n)
+                            break
+                        cbase = rec_index(cur) << 2
+                        chdr = _s32(recs[cbase])
+                        if (chdr >> 4) <= depth:
+                            na = cur
+                            break
+                        ckey = _pack_key(cur, chain, depth)
+                        if ckey != 0:
+                            cr = self._multi_memo.get(ckey, 0)
+                        else:
+                            cr = self._multi_memo.get_wide(cur, chain, depth)
+                        if cr != 0:
+                            na = cr
+                            break
+                        if (chdr & _KIND_MASK) != KIND_APP:
+                            self._subst_top = stop
+                            na = self._instantiate_multi(cur, substs, n, chain, depth, all_closed, nr)
+                            break
+                        if stop == self._subst_cap:
+                            ncap = self._subst_cap * 2
+                            self._subst_stack = _grow_u32(self._subst_stack, stop, ncap)
+                            self._subst_cap = ncap
+                        self._subst_stack[stop] = _u32(cur)
+                        stop += 1
+                        cur = _s32(recs[cbase + F_A])
+                    while stop > smark:
+                        stop -= 1
+                        node = _s32(self._subst_stack[stop])
+                        recs = self.recs
+                        nbase = rec_index(node) << 2
+                        old_a = _s32(recs[nbase + F_A])
+                        old_b = _s32(recs[nbase + F_B])
+                        if is_leaf(old_b):
+                            blo2 = _s32(self.leaf_meta[leaf_index(old_b)]) >> 1
+                            if blo2 <= depth:
+                                nb2 = old_b
+                            else:
+                                bid2 = blo2 - 1
+                                brel2 = bid2 - depth
+                                if brel2 < n:
+                                    sb2 = substs[brel2]
+                                    nb2 = sb2 if (all_closed or depth == 0) else self.shift(sb2, depth, 0)
+                                else:
+                                    nb2 = self.bvar(bid2 - n)
+                        elif (_s32(recs[rec_index(old_b) << 2]) >> 4) <= depth:
+                            nb2 = old_b
+                        else:
+                            self._subst_top = stop
+                            nb2 = self._instantiate_multi(old_b, substs, n, chain, depth, all_closed, nr)
+                        na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
+                        nkey = _pack_key(node, chain, depth)
+                        if nkey != 0:
+                            self._multi_memo.set(nkey, na)
+                        else:
+                            self._multi_memo.set_wide(node, chain, depth, na)
+                    self._subst_top = smark
             if is_leaf(b):
                 blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
                 if blo <= depth:
@@ -3530,20 +3641,20 @@ class TermStore(object):
                     brel = bid - depth
                     if brel < n:
                         sb = substs[brel]
-                        nb = sb if (depth == 0 or self.loose_bvar_range(sb) == 0) else self.shift(sb, depth, 0)
+                        nb = sb if (all_closed or depth == 0) else self.shift(sb, depth, 0)
                     else:
                         nb = self.bvar(bid - n)
             elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= depth:
                 nb = b
             else:
-                nb = self._instantiate_multi(b, substs, chain, depth, nr)
+                nb = self._instantiate_multi(b, substs, n, chain, depth, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._instantiate_multi(a, substs, chain, depth, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._instantiate_multi(b, substs, chain, depth + 1, nr)
+            na = a if self.loose_bvar_range(a) <= depth else self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._instantiate_multi(b, substs, n, chain, depth + 1, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
-            na = self._instantiate_multi(a, substs, chain, depth, nr)
+            na = self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
             if na == a:
                 r = h
             else:
@@ -3552,9 +3663,9 @@ class TermStore(object):
             assert kind == KIND_LET
             value = self.field_a(b)
             body = self.field_b(b)
-            na = self._instantiate_multi(a, substs, chain, depth, nr)
-            nv = self._instantiate_multi(value, substs, chain, depth, nr)
-            nbody = self._instantiate_multi(body, substs, chain, depth + 1, nr)
+            na = self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
+            nv = self._instantiate_multi(value, substs, n, chain, depth, all_closed, nr)
+            nbody = self._instantiate_multi(body, substs, n, chain, depth + 1, all_closed, nr)
             if na == a and nv == value and nbody == body:
                 r = h
             else:
@@ -4160,12 +4271,10 @@ class TermStore(object):
                     spine.append(cur)
                 top += 1
                 cur = cur.fn
-            self._import_spine_len = top
             while top > mark:
                 top -= 1
                 app = spine[top]
                 spine[top] = None
-                self._import_spine_len = top
                 arg = app.arg
                 ac = arg._cache
                 if (ac >> 32) == gen:
@@ -4183,12 +4292,14 @@ class TermStore(object):
                     else:
                         arg_h = self.leaf_for(arg)
                 else:
+                    self._import_spine_len = top
                     arg_h = self._import_rec(arg, gen, nr)
                 head = self.cons_app(head, arg_h)
                 if gen > 0:
                     app._cache = (gen << 32) | head
                 if self.record_nodes:
                     self.set_node(head, app)
+            self._import_spine_len = mark
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
@@ -4424,22 +4535,20 @@ class TermStore(object):
                     spine.append(cur)
                 top += 1
                 cur = cur.fn
-            self._import_spine_len = top
             while top > mark:
                 top -= 1
                 app = spine[top]
                 spine[top] = None
-                self._import_spine_len = top
                 arg = app.arg
                 if arg.has_level_param():
                     ac = arg._cache
-                    arg_h = (
-                        ac & _TABLE_SLOT_MASK
-                        if (ac >> 32) == lgen
-                        else self._import_with_levels(
+                    if (ac >> 32) == lgen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    else:
+                        self._import_spine_len = top
+                        arg_h = self._import_with_levels(
                             arg, params, clevels, lgen, nr,
                         )
-                    )
                 else:
                     ac = arg._cache
                     if (ac >> 32) == sgen:
@@ -4457,10 +4566,12 @@ class TermStore(object):
                         else:
                             arg_h = self.leaf_for(arg)
                     else:
+                        self._import_spine_len = top
                         arg_h = self._import_rec(arg, sgen, nr)
                 head = self.cons_app(head, arg_h)
                 if lgen > 0:
                     app._cache = (lgen << 32) | head
+            self._import_spine_len = mark
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
@@ -4640,7 +4751,7 @@ class Machine(object):
 
     _attrs_ = [
         'tc', 'store', '_rule_memo', '_fvars', '_opened',
-        '_open_memo', '_heavy', '_decl_start_recs',
+        '_open_memo', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
@@ -4653,8 +4764,6 @@ class Machine(object):
         self.store = TermStore(tc)
         #: (heavy open record, context chain and mode) -> its type there
         self._open_memo = PairMap(1 << 8)
-        #: open record -> 1 if light, 2 if heavy
-        self._heavy = U32Map(1 << 8)
         self._decl_start_recs = 0
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = IntMap(1 << 8, keep_cap=1 << 12)
@@ -4685,7 +4794,6 @@ class Machine(object):
             and self._eqv_count < _WARM_MAX_EQV
             and self._neq.size < _WARM_MAX_NEQ
             and self._failed.size < _WARM_MAX_FAILED
-            and self._heavy.size < _WARM_MAX_FAILED
         )
 
     def _forget(self):
@@ -4720,7 +4828,6 @@ class Machine(object):
         self._neq.clear()
         self._failed.clear()
         self._open_memo.clear()
-        self._heavy.clear()
         self._decl_start_recs = 0
         self.check_gen = 1
         self._is_clean = True
@@ -4734,7 +4841,6 @@ class Machine(object):
         self._neq.free()
         self._failed.free()
         self._open_memo.free()
-        self._heavy.free()
 
     def _decl(self, const):
         return find_decl(self.tc.declarations, const.name)
@@ -4915,18 +5021,18 @@ class Machine(object):
                     return store.instantiate(
                         _s32(recs[fbase + F_B]), _s32(recs[base + F_B]), 0,
                     )
-                head = fn
-                hk = fk
-                while hk == KIND_APP:
-                    head = _s32(recs[(rec_index(head) << 2) + F_A])
-                    if (head & 1) != 0:
-                        hk = 0
-                        break
-                    hk = _s32(recs[rec_index(head) << 2]) & _KIND_MASK
+                if fk == KIND_APP:
+                    head = _s32(recs[fbase + F_A])
+                    while (head & 1) == 0:
+                        hbase = rec_index(head) << 2
+                        if (_s32(recs[hbase]) & _KIND_MASK) != KIND_APP:
+                            break
+                        head = _s32(recs[hbase + F_A])
+                else:
+                    head = fn
             else:
                 head = fn
-                hk = 0
-            if hk == 0:
+            if (head & 1) != 0:
                 flags = self._leaf_flags(head)
                 if (flags & (_LF_RECURSOR | _LF_QUOT_LIFT)) == 0:
                     return 0
@@ -4950,6 +5056,7 @@ class Machine(object):
                     return self._try_quot_lift_spine(mark, n)
                 finally:
                     store.unapp_pop(mark)
+            hk = _s32(recs[rec_index(head) << 2]) & _KIND_MASK
             if hk == KIND_LAMBDA:
                 _, mark, n = store.unapp_push(h)
                 try:
@@ -5526,19 +5633,19 @@ class Machine(object):
             t = self._infer_app(h, check)
         elif kind == KIND_LAMBDA:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
-                    and self._is_heavy_memoised(h)):
+                    and store.is_heavy(h)):
                 t = self._infer_open_lambda(h, [], 0, check)
             else:
                 t = self._infer_lambda(h, check)
         elif kind == KIND_FORALL:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
-                    and self._is_heavy_memoised(h)):
+                    and store.is_heavy(h)):
                 t = self._infer_open_forall(h, [], 0, check)
             else:
                 t = self._infer_forall(h, check)
         elif kind == KIND_LET:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
-                    and self._is_heavy_memoised(h)):
+                    and store.is_heavy(h)):
                 t = self._infer_open_let(h, [], 0, check)
             else:
                 t = self._infer_let(h, check)
@@ -5561,65 +5668,6 @@ class Machine(object):
     # is cheap, and what is inferred of the result is shared with its
     # every other occurrence, at whatever depth.
 
-    def _is_heavy(self, h):
-        """Whether ``h`` has `_HEAVY` nodes or more, as a tree."""
-        store = self.store
-        recs = store.recs
-        heavy = self._heavy
-        check_memo = heavy.size > 0
-        budget = _HEAVY
-        smark = store._subst_top
-        stop = smark
-        sstack = store._subst_stack
-        scap = store._subst_cap
-        cur = h
-        while True:
-            budget -= 1
-            if budget <= 0:
-                store._subst_top = smark
-                return True
-            if not is_leaf(cur):
-                if check_memo and (budget & 7) == 0 and heavy.get(cur, 0) == 2:
-                    store._subst_top = smark
-                    return True
-                base = rec_index(cur) << 2
-                kind = _s32(recs[base]) & _KIND_MASK
-                a = _s32(recs[base + F_A])
-                if kind != KIND_PROJ:
-                    b = _s32(recs[base + F_B])
-                    if is_leaf(b):
-                        budget -= 1
-                        if budget <= 0:
-                            store._subst_top = smark
-                            return True
-                    else:
-                        if stop == scap:
-                            scap *= 2
-                            sstack = _grow_u32(sstack, stop, scap)
-                            store._subst_stack = sstack
-                            store._subst_cap = scap
-                        sstack[stop] = _u32(b)
-                        stop += 1
-                if not is_leaf(a):
-                    cur = a
-                    continue
-                budget -= 1
-                if budget <= 0:
-                    store._subst_top = smark
-                    return True
-            if stop == smark:
-                store._subst_top = smark
-                return False
-            stop -= 1
-            cur = _s32(sstack[stop])
-
-    def _is_heavy_memoised(self, h):
-        known = self._heavy.get(h, 0)
-        if known == 0:
-            known = 2 if self._is_heavy(h) else 1
-            self._heavy.set(h, known)
-        return known == 2
-
     def _push(self, ctx, chain, entry):
         """Extend the context innermost; the extended context's chain."""
         if ctx:
@@ -5641,7 +5689,7 @@ class Machine(object):
             return h
         if len(ctx) == 1:
             return store.instantiate(h, ctx[0], 0)
-        return store._instantiate_multi(h, ctx, chain, 0)
+        return store.instantiate_multi_ctx(h, ctx, chain)
 
     def _infer_open(self, h, ctx, chain, check):
         """The type of ``h`` with the context standing for its loose
@@ -5653,7 +5701,7 @@ class Machine(object):
             return self.infer(
                 ctx[(_s32(store.leaf_meta[leaf_index(h)]) >> 1) - 1], check,
             )
-        if not self._is_heavy_memoised(h):
+        if not store.is_heavy(h):
             return self.infer(self._materialize(h, ctx, chain), check)
         memo = self._open_memo
         t = memo.get(h, (chain << 1) | 1, 0)

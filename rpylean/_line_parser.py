@@ -14,6 +14,7 @@ robustness we don't rely on that — every reader scans for its key by name.
 from __future__ import print_function
 
 from rpython.rlib.objectmodel import always_inline
+from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rstring import StringBuilder
 from rpython.rlib.rutf8 import unichr_as_utf8_append
 
@@ -83,17 +84,16 @@ class LineCursor(object):
         i = self.pos
         if i >= n:
             return -1
-        c = line[i]
-        if c < '0' or c > '9':
+        d = ord(line[i]) - 48
+        if r_uint(d) > r_uint(9):
             return -1
-        zero = ord('0')
-        val = ord(c) - zero
+        val = d
         i += 1
         while i < n:
-            c = line[i]
-            if c < '0' or c > '9':
+            d = ord(line[i]) - 48
+            if r_uint(d) > r_uint(9):
                 break
-            val = val * 10 + ord(c) - zero
+            val = val * 10 + d
             i += 1
         self.pos = i
         return val
