@@ -40,6 +40,24 @@ class LineCursor(object):
         self.length = end
 
     @always_inline
+    def at_eol(self):
+        """Return True if at end of line (``self.pos == self.length``, or
+        immediately at ``\\n`` / ``\\r\\n`` in chunk-streaming mode, advancing
+        past the newline)."""
+        p = self.pos
+        end = self.length
+        if p == end:
+            return True
+        c = self.line[p]
+        if c == '\n':
+            self.pos = p + 1
+            return True
+        if c == '\r' and p + 1 < end and self.line[p + 1] == '\n':
+            self.pos = p + 2
+            return True
+        return False
+
+    @always_inline
     def match_lit(self, lit):
         """Match literal bytes ``lit`` at ``self.pos`` with no whitespace
         skipping. Returns True and advances ``self.pos`` on match."""

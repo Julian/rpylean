@@ -222,23 +222,34 @@ class EnvironmentBuilder(object):
                 buf = buf + chunk
             else:
                 buf = chunk
+            last_nl = buf.rfind('\n')
+            if last_nl < 0:
+                continue
+            limit = last_nl + 1
+            cursor.line = buf
+            cursor.length = limit
             pos = 0
-            blen = len(buf)
-            while pos < blen:
-                nl = buf.find('\n', pos)
-                if nl < 0:
-                    break
-                end = nl
-                if end > pos and buf[end - 1] == '\r':
-                    end -= 1
-                cursor.reset(buf, pos, end)
-                parser.parse_cursor(cursor, self)
+            while pos <= last_nl:
+                cursor.pos = pos
+                if parser._try_parse_compact(cursor, self):
+                    pos = cursor.pos
+                else:
+                    nl = buf.find('\n', pos)
+                    assert nl >= 0
+                    end = nl
+                    if end > pos and buf[end - 1] == '\r':
+                        end -= 1
+                    cursor.pos = pos
+                    cursor.length = end
+                    parser.parse_cursor_general(cursor, self)
+                    cursor.length = limit
+                    pos = nl + 1
                 if hook is not None:
                     while n < len(self.declarations):
                         if hook.on_declaration(self.declarations[n]):
                             return self
                         n += 1
-                pos = nl + 1
+            blen = len(buf)
             if pos < blen:
                 assert pos >= 0
                 buf = buf[pos:]

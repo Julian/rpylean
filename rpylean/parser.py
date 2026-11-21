@@ -138,7 +138,7 @@ def _try_parse_compact(cursor, builder):
                 fn_eidx = cursor.read_uint_compact()
                 if fn_eidx >= 0 and cursor.match_lit('},"ie":'):
                     eidx = cursor.read_uint_compact()
-                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                         builder.register_expr(
                             eidx,
                             objects.W_App(
@@ -157,13 +157,55 @@ def _try_parse_compact(cursor, builder):
                     cursor.pos += 1
                     if cursor.match_lit('},"ie":'):
                         eidx = cursor.read_uint_compact()
-                        if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                             builder.register_expr(
                                 eidx, builder.names[nidx].const_empty(),
                             )
                             return True
                     return False
-                levels = []
+                l0 = cursor.read_uint_compact()
+                if l0 < 0 or cursor.pos >= end:
+                    return False
+                ch = line[cursor.pos]
+                if ch == ']':
+                    cursor.pos += 1
+                    if cursor.match_lit('},"ie":'):
+                        eidx = cursor.read_uint_compact()
+                        if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
+                            builder.register_expr(
+                                eidx,
+                                objects._mk_w_const1(
+                                    builder.names[nidx], builder.levels[l0],
+                                ),
+                            )
+                            return True
+                    return False
+                if ch != ',':
+                    return False
+                cursor.pos += 1
+                l1 = cursor.read_uint_compact()
+                if l1 < 0 or cursor.pos >= end:
+                    return False
+                ch = line[cursor.pos]
+                if ch == ']':
+                    cursor.pos += 1
+                    if cursor.match_lit('},"ie":'):
+                        eidx = cursor.read_uint_compact()
+                        if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
+                            builder.register_expr(
+                                eidx,
+                                objects._mk_w_const2(
+                                    builder.names[nidx],
+                                    builder.levels[l0],
+                                    builder.levels[l1],
+                                ),
+                            )
+                            return True
+                    return False
+                if ch != ',':
+                    return False
+                cursor.pos += 1
+                levels = [builder.levels[l0], builder.levels[l1]]
                 while True:
                     lidx = cursor.read_uint_compact()
                     if lidx < 0:
@@ -180,7 +222,7 @@ def _try_parse_compact(cursor, builder):
                     cursor.pos += 1
                 if cursor.match_lit('},"ie":'):
                     eidx = cursor.read_uint_compact()
-                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                         builder.register_expr(
                             eidx, builder.names[nidx].const(levels),
                         )
@@ -204,7 +246,7 @@ def _try_parse_compact(cursor, builder):
                                 name_idx = cursor.read_uint_compact()
                                 if name_idx >= 0 and cursor.match_lit(',"type":'):
                                     type_eidx = cursor.read_uint_compact()
-                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                         bound = _binder_from_code(
                                             builder.names[name_idx],
                                             bcode,
@@ -228,7 +270,7 @@ def _try_parse_compact(cursor, builder):
                                 type_eidx = cursor.read_uint_compact()
                                 if type_eidx >= 0 and cursor.match_lit(',"value":'):
                                     value_eidx = cursor.read_uint_compact()
-                                    if value_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                    if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                         builder.register_expr(
                                             eidx,
                                             objects.W_Let(
@@ -242,7 +284,7 @@ def _try_parse_compact(cursor, builder):
                 elif d0 == 's':
                     if cursor.match_lit(',"sort":'):
                         lidx = cursor.read_uint_compact()
-                        if lidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        if lidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                             builder.register_expr(
                                 eidx, builder.levels[lidx].sort(),
                             )
@@ -254,7 +296,7 @@ def _try_parse_compact(cursor, builder):
                             struct_eidx = cursor.read_uint_compact()
                             if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
                                 tname_idx = cursor.read_uint_compact()
-                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                     builder.register_expr(
                                         eidx,
                                         builder.names[tname_idx].proj(
@@ -264,10 +306,20 @@ def _try_parse_compact(cursor, builder):
                                     return True
                 elif d0 == 'n':
                     if cursor.match_lit(',"natVal":"'):
-                        dstart = cursor.pos
-                        if end - dstart <= 20 and end - dstart >= 3:
-                            val = cursor.read_uint_compact()
-                            if val >= 0 and cursor.pos - dstart <= 18 and cursor.match_lit('"}') and cursor.pos == end:
+                        q = cursor.pos
+                        val = 0
+                        zero = ord('0')
+                        digits = 0
+                        while q < end and digits < 18:
+                            ch = line[q]
+                            if ch < '0' or ch > '9':
+                                break
+                            val = val * 10 + ord(ch) - zero
+                            q += 1
+                            digits += 1
+                        if digits > 0 and q < end and line[q] == '"':
+                            cursor.pos = q
+                            if cursor.match_lit('"}') and cursor.at_eol():
                                 builder.register_expr(
                                     eidx, objects._mk_w_litnat(rbigint.fromint(val)),
                                 )
@@ -282,7 +334,7 @@ def _try_parse_compact(cursor, builder):
                         pre = cursor.read_uint_compact()
                         if pre >= 0 and cursor.match_lit(',"str":'):
                             part = cursor.read_string()
-                            if cursor.match_lit('}}') and cursor.pos == end:
+                            if cursor.match_lit('}}') and cursor.at_eol():
                                 builder.register_name(
                                     nidx, builder.names[pre].child(part),
                                 )
@@ -291,7 +343,7 @@ def _try_parse_compact(cursor, builder):
                         id_val = cursor.read_uint_compact()
                         if id_val >= 0 and cursor.match_lit(',"pre":'):
                             pre = cursor.read_uint_compact()
-                            if pre >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                            if pre >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                 builder.register_name(
                                     nidx,
                                     builder.names[pre].num_child(
@@ -307,14 +359,14 @@ def _try_parse_compact(cursor, builder):
                 if uidx >= 0:
                     if cursor.match_lit(',"succ":'):
                         parent = cursor.read_uint_compact()
-                        if parent >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        if parent >= 0 and cursor.match_lit('}') and cursor.at_eol():
                             builder.register_level(
                                 uidx, builder.levels[parent].succ(),
                             )
                             return True
                     elif cursor.match_lit(',"param":'):
                         nidx = cursor.read_uint_compact()
-                        if nidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                        if nidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                             builder.register_level(
                                 uidx, builder.names[nidx].as_level_param(),
                             )
@@ -323,7 +375,7 @@ def _try_parse_compact(cursor, builder):
                         lhs = cursor.read_uint_compact()
                         if lhs >= 0 and cursor.match_lit(','):
                             rhs = cursor.read_uint_compact()
-                            if rhs >= 0 and cursor.match_lit(']}') and cursor.pos == end:
+                            if rhs >= 0 and cursor.match_lit(']}') and cursor.at_eol():
                                 builder.register_level(
                                     uidx,
                                     objects.level_max(
@@ -336,7 +388,7 @@ def _try_parse_compact(cursor, builder):
                         lhs = cursor.read_uint_compact()
                         if lhs >= 0 and cursor.match_lit(','):
                             rhs = cursor.read_uint_compact()
-                            if rhs >= 0 and cursor.match_lit(']}') and cursor.pos == end:
+                            if rhs >= 0 and cursor.match_lit(']}') and cursor.at_eol():
                                 builder.register_level(
                                     uidx,
                                     objects.level_imax(
@@ -359,7 +411,7 @@ def _try_parse_compact(cursor, builder):
                         type_eidx = cursor.read_uint_compact()
                         if type_eidx >= 0 and cursor.match_lit('},"ie":'):
                             eidx = cursor.read_uint_compact()
-                            if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                                 bound = _binder_from_code(
                                     builder.names[name_idx],
                                     bcode,
@@ -380,7 +432,7 @@ def _try_parse_compact(cursor, builder):
             bidx = cursor.read_uint_compact()
             if bidx >= 0 and cursor.match_lit(',"ie":'):
                 eidx = cursor.read_uint_compact()
-                if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                     builder.register_expr(eidx, objects._mk_w_bvar(bidx))
                     return True
         return False
@@ -412,7 +464,7 @@ def _try_parse_compact(cursor, builder):
                     type_eidx = cursor.read_uint_compact()
                     if type_eidx >= 0 and cursor.match_lit(',"value":'):
                         value_eidx = cursor.read_uint_compact()
-                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                             decl = builder.names[name_idx].theorem(
                                 levels=levels,
                                 type=builder.ref_expr(type_eidx),
@@ -433,6 +485,11 @@ def parse_cursor(cursor, builder):
     if _try_parse_compact(cursor, builder):
         return
     cursor.pos = start
+    parse_cursor_general(cursor, builder)
+
+
+def parse_cursor_general(cursor, builder):
+    """General NDJSON line parser (whitespace/key-order agnostic)."""
     cursor.expect('{')
     first_key = cursor.read_key()
 

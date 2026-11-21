@@ -970,7 +970,9 @@ _INTERN_NUM_NAME = {}      # int -> list[NumName]
 # entries on Mathlib-sized exports. The name/level tables stay chained:
 # they are small, and keeping every name canonical preserves the `is`
 # fast paths and per-instance caches (`_level_cache`) at full strength.
-_INTERN_W_CONST = {}       # int -> W_Const
+_CONST_CACHE_SIZE = 1 << 16
+_CONST_CACHE_MASK = _CONST_CACHE_SIZE - 1
+_CONST_CACHE = [None] * _CONST_CACHE_SIZE
 _INTERN_W_SORT = {}        # int -> list[W_Sort]
 _INTERN_LEVEL_SUCC = {}    # int -> list[W_LevelSucc]
 _INTERN_LEVEL_MAX = {}     # int -> list[W_LevelMax]
@@ -1004,7 +1006,7 @@ def intern_stats():
     """
     Entry counts of the persistent intern tables, for leak hunting.
     """
-    return 0, 0, len(_INTERN_W_CONST)
+    return 0, 0, _CONST_CACHE_SIZE
 
 
 def _mk_str_name(parent, suffix):
@@ -1153,19 +1155,51 @@ def _mk_w_const(name, levels):
     for lvl in levels:
         assert isinstance(lvl, W_Level)
         h = (h * 1000003) ^ lvl.hash()
-    h = h & _HASH_MASK
-    existing = _INTERN_W_CONST.get(h, None)
+    slot = (h ^ (h >> 16)) & _CONST_CACHE_MASK
+    existing = _CONST_CACHE[slot]
     if existing is not None and existing.name is name:
-        if len(existing.levels) == len(levels):
+        el = existing.levels
+        if len(el) == len(levels):
             match = True
             for i in range(len(levels)):
-                if existing.levels[i] is not levels[i]:
+                if el[i] is not levels[i]:
                     match = False
                     break
             if match:
                 return existing
     e = W_Const(name=name, levels=levels)
-    _INTERN_W_CONST[h] = e
+    _CONST_CACHE[slot] = e
+    return e
+
+
+def _mk_w_const1(name, l0):
+    assert isinstance(name, Name)
+    assert isinstance(l0, W_Level)
+    h = (name.hash() * 1000003) ^ l0.hash()
+    slot = (h ^ (h >> 16)) & _CONST_CACHE_MASK
+    existing = _CONST_CACHE[slot]
+    if existing is not None and existing.name is name:
+        el = existing.levels
+        if len(el) == 1 and el[0] is l0:
+            return existing
+    e = W_Const(name=name, levels=[l0])
+    _CONST_CACHE[slot] = e
+    return e
+
+
+def _mk_w_const2(name, l0, l1):
+    assert isinstance(name, Name)
+    assert isinstance(l0, W_Level)
+    assert isinstance(l1, W_Level)
+    h = (((name.hash() * 1000003) ^ l0.hash()) * 1000003) ^ l1.hash()
+    slot = (h ^ (h >> 16)) & _CONST_CACHE_MASK
+    existing = _CONST_CACHE[slot]
+    if existing is not None and existing.name is name:
+        el = existing.levels
+        if len(el) == 2 and el[0] is l0 and el[1] is l1:
+            return existing
+    e = W_Const(name=name, levels=[l0, l1])
+    _CONST_CACHE[slot] = e
     return e
 
 
