@@ -484,3 +484,27 @@ class TestU32Map(object):
         fh2 = store.import_term(f.const())
         xh2 = store.import_term(x.const())
         assert store.cons_app(fh2, xh2) == store.cons_app(fh2, xh2)
+
+    def test_concurrent_stores_intrusive_cache_and_fvar_identity(self):
+        from rpylean.machine import TermStore
+        s1 = TermStore(None, capacity=16)
+        s2 = TermStore(None, capacity=16)
+        try:
+            fv = x.binder(type=NAT).fvar()
+            term = f.const().app(fv, y.const())
+            h1_term = s1.import_term(term)
+            h1_fv = s1.leaf_for(fv)
+            assert s1.has_fvar_leaf(fv)
+            # Importing into a second store overwrites W_Expr._cache,
+            # but s1 must still preserve canonical handles and FVar identity!
+            h2_term = s2.import_term(term)
+            h2_fv = s2.leaf_for(fv)
+            assert s2.has_fvar_leaf(fv)
+            assert s1.has_fvar_leaf(fv)
+            assert s1.leaf_for(fv) == h1_fv
+            assert s1.import_term(term) == h1_term
+            assert s2.leaf_for(fv) == h2_fv
+            assert s2.import_term(term) == h2_term
+        finally:
+            s1.free()
+            s2.free()

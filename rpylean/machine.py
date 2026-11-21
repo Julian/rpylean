@@ -48,6 +48,7 @@ from rpylean.objects import (
     W_Inductive,
     W_Lambda,
     W_Let,
+    W_LevelParam,
     W_LitNat,
     W_LitStr,
     W_NotAFunction,
@@ -269,7 +270,27 @@ _APP_PACK_LIMIT = 1 << 21
 _APP_SLOT_MASK = (1 << 21) - 1
 _U32_KEY_LIMIT = 1 << 31
 _U32_VAL_MASK = 0xFFFFFFFF
+_CACHE_GEN_LIMIT = 1 << 31
 _BVAR_ARR_LEN = 256
+
+
+class _CacheGen(object):
+    _attrs_ = ['count']
+
+    def __init__(self):
+        self.count = 0
+
+
+_CACHE_GEN = _CacheGen()
+
+
+@always_inline
+def _next_cache_gen():
+    g = _CACHE_GEN.count + 1
+    if g < _CACHE_GEN_LIMIT:
+        _CACHE_GEN.count = g
+        return g
+    return -1
 _LHK_UNKNOWN = 0
 _LHK_NORMAL = 1
 _LHK_RECURSOR = 2
@@ -816,8 +837,8 @@ class TermStore(object):
         'leaf_checked', 'leaf_delta', 'leaf_next', 'leaf_eqv', 'leaf_head_kind',
         'nleaves', 'leaf_cap',
         'infos', 'names', '_name_ids', '_proj_overflow',
-        '_bvar_arr', '_bvar_max', '_bvar_leaves', '_leaf_uid', '_content_head',
-        '_import_memo', '_level_memo', '_import_spine', '_import_spine_len',
+        '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
+        '_store_gen', '_import_spine', '_import_spine_len',
         'rec_node', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_call_memo',
@@ -862,12 +883,13 @@ class TermStore(object):
         #: Flat array for small bound-variable leaf handles (`id < 256`).
         self._bvar_arr = _alloc_words(_BVAR_ARR_LEN)
         self._bvar_max = 0
-        #: Per-declaration `W_Expr._uid -> leaf handle` fast cache.
-        self._leaf_uid = U32Map(1 << 11, keep_cap=1 << 14)
+        #: Per-store `W_FVar._uid -> leaf handle` map (preserves FVar identity
+        #: even when multiple `TermStore`s coexist).
+        self._fvar_uid = U32Map(1 << 8, keep_cap=1 << 12)
         #: `(e.hash() & 0x7FFFFFFF or 1) -> first canonical leaf handle`.
         self._content_head = U32Map(1 << 11, keep_cap=1 << 15)
-        self._import_memo = U32Map(1 << 13, keep_cap=1 << 18)
-        self._level_memo = U32Map(1 << 11, keep_cap=1 << 14)
+        #: Unique generation tag stamping `W_Expr._cache` for this store epoch.
+        self._store_gen = _next_cache_gen()
         self._import_spine = []
         self._import_spine_len = 0
         self.record_nodes = True
@@ -972,10 +994,9 @@ class TermStore(object):
         if self._bvar_max > 0:
             _zero_words(self._bvar_arr, self._bvar_max)
             self._bvar_max = 0
-        self._leaf_uid.clear()
+        self._fvar_uid.clear()
         self._content_head.clear()
-        self._import_memo.clear()
-        self._level_memo.clear()
+        self._store_gen = _next_cache_gen()
         self._inst_memo.clear()
         self._shift_memo.clear()
         self._bind_memo.clear()
@@ -1043,10 +1064,8 @@ class TermStore(object):
         _free_u32(self.leaf_eqv)
         _free_u32(self.leaf_head_kind)
         _free_words(self._bvar_arr)
-        self._leaf_uid.free()
+        self._fvar_uid.free()
         self._content_head.free()
-        self._import_memo.free()
-        self._level_memo.free()
         self._inst_memo.free()
         self._shift_memo.free()
         self._bind_memo.free()
@@ -1493,7 +1512,10 @@ class TermStore(object):
 
     def has_fvar_leaf(self, fvar):
         """Whether the free variable ``fvar`` already has a leaf."""
-        return self._leaf_uid.get(fvar._uid, 0) != 0
+        gen = self._store_gen
+        if (fvar._cache >> 32) == gen:
+            return True
+        return self._fvar_uid.get(fvar._uid, 0) != 0
 
     def leaf_for(self, e):
         """
@@ -1520,13 +1542,18 @@ class TermStore(object):
             h = self._new_leaf(e, id)
             self._bvar_leaves[id] = h
             return h
-        uid_key = e._uid
-        h = self._leaf_uid.get(uid_key, 0)
-        if h != 0:
-            return h
+        gen = self._store_gen
+        c = e._cache
+        if (c >> 32) == gen:
+            return c & _TABLE_SLOT_MASK
         if cls is W_FVar:
-            h = self._new_leaf(e, -1)
-            self._leaf_uid.set(uid_key, h)
+            uid_key = e._uid
+            h = self._fvar_uid.get(uid_key, 0)
+            if h == 0:
+                h = self._new_leaf(e, -1)
+                self._fvar_uid.set(uid_key, h)
+            if gen > 0:
+                e._cache = (gen << 32) | h
             return h
         orig = e
         if cls is W_Const:
@@ -1536,9 +1563,11 @@ class TermStore(object):
             assert isinstance(e, W_Sort)
             e = _canonical_sort(e)
         if e is not orig:
-            h = self._leaf_uid.get(e._uid, 0)
-            if h != 0:
-                self._leaf_uid.set(uid_key, h)
+            ec = e._cache
+            if (ec >> 32) == gen:
+                h = ec & _TABLE_SLOT_MASK
+                if gen > 0:
+                    orig._cache = ec
                 return h
         h31 = e.hash() & 0x7FFFFFFF
         key = h31 if h31 != 0 else 1
@@ -1547,17 +1576,21 @@ class TermStore(object):
         while cur != 0:
             j = leaf_index(cur)
             if syntactic_eq(self.leaves[j], e):
-                self._leaf_uid.set(uid_key, cur)
-                if e is not orig:
-                    self._leaf_uid.set(e._uid, cur)
+                if gen > 0:
+                    tagged = (gen << 32) | cur
+                    orig._cache = tagged
+                    if e is not orig:
+                        e._cache = tagged
                 return cur
             cur = _s32(self.leaf_next[j])
         h = self._new_leaf(e, -1)
         self.leaf_next[leaf_index(h)] = _u32(head)
         self._content_head.set(key, h)
-        self._leaf_uid.set(uid_key, h)
-        if e is not orig:
-            self._leaf_uid.set(e._uid, h)
+        if gen > 0:
+            tagged = (gen << 32) | h
+            orig._cache = tagged
+            if e is not orig:
+                e._cache = tagged
         return h
 
     # ---- spines ----------------------------------------------------------
@@ -3024,7 +3057,11 @@ class TermStore(object):
         self.rec_node[rec_index(h)] = _u32(len(self.nodes))
 
     def import_term(self, e, rdepth=0):
-        """The handle for the term ``e``, memoised per `W_Expr`."""
+        """The handle for the term ``e``, memoised intrusively on `W_Expr._cache`."""
+        gen = self._store_gen
+        c = e._cache
+        if (c >> 32) == gen:
+            return c & _TABLE_SLOT_MASK
         cls = e.__class__
         if cls is W_BVar:
             assert isinstance(e, W_BVar)
@@ -3039,11 +3076,6 @@ class TermStore(object):
                     self._bvar_max = id + 1
                 return h
             return self.leaf_for(e)
-        memo = self._import_memo
-        uid = e._uid
-        h = memo.get(uid, 0)
-        if h != 0:
-            return h
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("import_term")
         nr = rdepth + 1
@@ -3051,10 +3083,32 @@ class TermStore(object):
             assert isinstance(e, W_App)
             fn = e.fn
             if not isinstance(fn, W_App):
-                head = self.cons_app(
-                    self.import_term(fn, nr), self.import_term(e.arg, nr),
-                )
-                memo.set(uid, head)
+                fc = fn._cache
+                if (fc >> 32) == gen:
+                    fn_h = fc & _TABLE_SLOT_MASK
+                else:
+                    fn_h = self.import_term(fn, nr)
+                arg = e.arg
+                ac = arg._cache
+                if (ac >> 32) == gen:
+                    arg_h = ac & _TABLE_SLOT_MASK
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    bid = arg.id
+                    if 0 <= bid < _BVAR_ARR_LEN:
+                        arg_h = self._bvar_arr[bid]
+                        if arg_h == 0:
+                            arg_h = self._new_leaf(arg, bid)
+                            self._bvar_arr[bid] = arg_h
+                            if bid + 1 > self._bvar_max:
+                                self._bvar_max = bid + 1
+                    else:
+                        arg_h = self.leaf_for(arg)
+                else:
+                    arg_h = self.import_term(arg, nr)
+                head = self.cons_app(fn_h, arg_h)
+                if gen > 0:
+                    e._cache = (gen << 32) | head
                 if self.record_nodes:
                     self.set_node(head, e)
                 return head
@@ -3070,11 +3124,15 @@ class TermStore(object):
                 while True:
                     if not isinstance(cur, W_App):
                         self._import_spine_len = top
-                        head = self.import_term(cur, nr)
+                        cc = cur._cache
+                        if (cc >> 32) == gen:
+                            head = cc & _TABLE_SLOT_MASK
+                        else:
+                            head = self.import_term(cur, nr)
                         break
-                    hh = memo.get(cur._uid, 0)
-                    if hh != 0:
-                        head = hh
+                    cc = cur._cache
+                    if (cc >> 32) == gen:
+                        head = cc & _TABLE_SLOT_MASK
                         break
                     if top < len(spine):
                         spine[top] = cur
@@ -3089,7 +3147,10 @@ class TermStore(object):
                     spine[top] = None
                     self._import_spine_len = top
                     arg = app.arg
-                    if arg.__class__ is W_BVar:
+                    ac = arg._cache
+                    if (ac >> 32) == gen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_BVar:
                         assert isinstance(arg, W_BVar)
                         bid = arg.id
                         if 0 <= bid < _BVAR_ARR_LEN:
@@ -3104,7 +3165,8 @@ class TermStore(object):
                     else:
                         arg_h = self.import_term(arg, nr)
                     head = self.cons_app(head, arg_h)
-                    memo.set(app._uid, head)
+                    if gen > 0:
+                        app._cache = (gen << 32) | head
                     if self.record_nodes:
                         self.set_node(head, app)
                 return head
@@ -3136,10 +3198,9 @@ class TermStore(object):
                 self.import_term(e.body, nr),
             )
         else:
-            h = self.leaf_for(e)
-            memo.set(uid, h)
-            return h
-        memo.set(uid, h)
+            return self.leaf_for(e)
+        if gen > 0:
+            e._cache = (gen << 32) | h
         if self.record_nodes:
             self.set_node(h, e)
         return h
@@ -3159,7 +3220,7 @@ class TermStore(object):
                 % (n, len(clevels)),
             )
         # Identity instantiation (e.g. polymorphic decl referring to another
-        # at the same universe params): reuse `_import_memo` directly.
+        # at the same universe params): reuse `_store_gen` directly.
         identity = True
         i = 0
         while i < n:
@@ -3169,39 +3230,67 @@ class TermStore(object):
             i += 1
         if identity:
             return self.import_term(target)
-        memo = self._level_memo
-        try:
-            return self._import_with_levels(target, params, clevels, memo, 0)
-        finally:
-            memo.clear()
+        lgen = _next_cache_gen()
+        return self._import_with_levels(target, params, clevels, lgen, 0)
 
-    def _import_with_levels(self, e, params, clevels, memo, rdepth):
+    def _import_with_levels(self, e, params, clevels, lgen, rdepth):
         if not e.has_level_param():
             return self.import_term(e, rdepth)
-        h = memo.get(e._uid, 0)
-        if h != 0:
-            return h
+        c = e._cache
+        if (c >> 32) == lgen:
+            return c & _TABLE_SLOT_MASK
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("import_term")
         cls = e.__class__
         nr = rdepth + 1
+        sgen = self._store_gen
         if cls is W_App:
             assert isinstance(e, W_App)
             fn = e.fn
             if not isinstance(fn, W_App):
-                fn_h = (
-                    self._import_with_levels(fn, params, clevels, memo, nr)
-                    if fn.has_level_param()
-                    else self.import_term(fn, nr)
-                )
+                if fn.has_level_param():
+                    fc = fn._cache
+                    fn_h = (
+                        fc & _TABLE_SLOT_MASK
+                        if (fc >> 32) == lgen
+                        else self._import_with_levels(fn, params, clevels, lgen, nr)
+                    )
+                else:
+                    fc = fn._cache
+                    fn_h = (
+                        fc & _TABLE_SLOT_MASK
+                        if (fc >> 32) == sgen
+                        else self.import_term(fn, nr)
+                    )
                 arg = e.arg
-                arg_h = (
-                    self._import_with_levels(arg, params, clevels, memo, nr)
-                    if arg.has_level_param()
-                    else self.import_term(arg, nr)
-                )
+                if arg.has_level_param():
+                    ac = arg._cache
+                    arg_h = (
+                        ac & _TABLE_SLOT_MASK
+                        if (ac >> 32) == lgen
+                        else self._import_with_levels(arg, params, clevels, lgen, nr)
+                    )
+                else:
+                    ac = arg._cache
+                    if (ac >> 32) == sgen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg, bid)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self.import_term(arg, nr)
                 head = self.cons_app(fn_h, arg_h)
-                memo.set(e._uid, head)
+                if lgen > 0:
+                    e._cache = (lgen << 32) | head
                 return head
             spine = self._import_spine
             mark = self._import_spine_len
@@ -3212,17 +3301,27 @@ class TermStore(object):
                 while True:
                     if not cur.has_level_param():
                         self._import_spine_len = top
-                        head = self.import_term(cur, nr)
+                        cc = cur._cache
+                        head = (
+                            cc & _TABLE_SLOT_MASK
+                            if (cc >> 32) == sgen
+                            else self.import_term(cur, nr)
+                        )
                         break
                     if not isinstance(cur, W_App):
                         self._import_spine_len = top
-                        head = self._import_with_levels(
-                            cur, params, clevels, memo, nr,
+                        cc = cur._cache
+                        head = (
+                            cc & _TABLE_SLOT_MASK
+                            if (cc >> 32) == lgen
+                            else self._import_with_levels(
+                                cur, params, clevels, lgen, nr,
+                            )
                         )
                         break
-                    hh = memo.get(cur._uid, 0)
-                    if hh != 0:
-                        head = hh
+                    cc = cur._cache
+                    if (cc >> 32) == lgen:
+                        head = cc & _TABLE_SLOT_MASK
                         break
                     if top < len(spine):
                         spine[top] = cur
@@ -3237,24 +3336,36 @@ class TermStore(object):
                     spine[top] = None
                     self._import_spine_len = top
                     arg = app.arg
-                    if arg.__class__ is W_BVar:
-                        assert isinstance(arg, W_BVar)
-                        bid = arg.id
-                        if 0 <= bid < _BVAR_ARR_LEN:
-                            arg_h = self._bvar_arr[bid]
-                            if arg_h == 0:
-                                arg_h = self._new_leaf(arg, bid)
-                                self._bvar_arr[bid] = arg_h
-                                if bid + 1 > self._bvar_max:
-                                    self._bvar_max = bid + 1
-                        else:
-                            arg_h = self.leaf_for(arg)
-                    elif arg.has_level_param():
-                        arg_h = self._import_with_levels(arg, params, clevels, memo, nr)
+                    if arg.has_level_param():
+                        ac = arg._cache
+                        arg_h = (
+                            ac & _TABLE_SLOT_MASK
+                            if (ac >> 32) == lgen
+                            else self._import_with_levels(
+                                arg, params, clevels, lgen, nr,
+                            )
+                        )
                     else:
-                        arg_h = self.import_term(arg, nr)
+                        ac = arg._cache
+                        if (ac >> 32) == sgen:
+                            arg_h = ac & _TABLE_SLOT_MASK
+                        elif arg.__class__ is W_BVar:
+                            assert isinstance(arg, W_BVar)
+                            bid = arg.id
+                            if 0 <= bid < _BVAR_ARR_LEN:
+                                arg_h = self._bvar_arr[bid]
+                                if arg_h == 0:
+                                    arg_h = self._new_leaf(arg, bid)
+                                    self._bvar_arr[bid] = arg_h
+                                    if bid + 1 > self._bvar_max:
+                                        self._bvar_max = bid + 1
+                            else:
+                                arg_h = self.leaf_for(arg)
+                        else:
+                            arg_h = self.import_term(arg, nr)
                     head = self.cons_app(head, arg_h)
-                    memo.set(app._uid, head)
+                    if lgen > 0:
+                        app._cache = (lgen << 32) | head
                 return head
             finally:
                 while top > mark:
@@ -3265,10 +3376,10 @@ class TermStore(object):
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
             binder = e.binder
             type_h = self._import_with_levels(
-                binder.type, params, clevels, memo, nr,
+                binder.type, params, clevels, lgen, nr,
             )
             body_h = self._import_with_levels(
-                e.body, params, clevels, memo, nr,
+                e.body, params, clevels, lgen, nr,
             )
             if cls is W_Lambda:
                 h = self.lam(binder, type_h, body_h)
@@ -3279,16 +3390,16 @@ class TermStore(object):
             h = self.proj(
                 e.struct_name, e.field_index,
                 self._import_with_levels(
-                    e.struct_expr, params, clevels, memo, nr,
+                    e.struct_expr, params, clevels, lgen, nr,
                 ),
             )
         elif cls is W_Let:
             assert isinstance(e, W_Let)
             h = self.let(
                 e.name,
-                self._import_with_levels(e.type, params, clevels, memo, nr),
-                self._import_with_levels(e.value, params, clevels, memo, nr),
-                self._import_with_levels(e.body, params, clevels, memo, nr),
+                self._import_with_levels(e.type, params, clevels, lgen, nr),
+                self._import_with_levels(e.value, params, clevels, lgen, nr),
+                self._import_with_levels(e.body, params, clevels, lgen, nr),
             )
         elif cls is W_Const:
             assert isinstance(e, W_Const)
@@ -3298,7 +3409,11 @@ class TermStore(object):
             if nlvls == 1:
                 l0 = lvls[0]
                 if l0.has_param:
-                    nl0 = l0.subst_levels_lists(params, clevels)
+                    if l0.__class__ is W_LevelParam and len(params) == 1:
+                        assert isinstance(l0, W_LevelParam)
+                        nl0 = clevels[0] if l0.name is params[0] else l0
+                    else:
+                        nl0 = l0.subst_levels_lists(params, clevels)
                     if nl0 is not l0:
                         leaf_e = _mk_w_const1(e.name, nl0)
             elif nlvls == 2:
@@ -3327,13 +3442,19 @@ class TermStore(object):
             assert isinstance(e, W_Sort)
             leaf_e = e
             if e.level.has_param:
-                nl = e.level.subst_levels_lists(params, clevels)
-                if nl is not e.level:
+                lvl = e.level
+                if lvl.__class__ is W_LevelParam and len(params) == 1:
+                    assert isinstance(lvl, W_LevelParam)
+                    nl = clevels[0] if lvl.name is params[0] else lvl
+                else:
+                    nl = lvl.subst_levels_lists(params, clevels)
+                if nl is not lvl:
                     leaf_e = nl.sort()
             h = self.leaf_for(leaf_e)
         else:
             h = self.leaf_for(e)
-        memo.set(e._uid, h)
+        if lgen > 0:
+            e._cache = (lgen << 32) | h
         return h
 
     def export_term(self, h):
@@ -4790,6 +4911,17 @@ class Machine(object):
 
     def _infer_lambda(self, h, check):
         store = self.store
+        body = store.field_b(h)
+        if store.kind(body) != KIND_LAMBDA:
+            domain = store.field_a(h)
+            if check:
+                self._ensure_sort(domain, True)
+            fvar = self.fvar_for_domain(h, domain)
+            if store.loose_bvar_range(body) > 0:
+                body = store.instantiate(body, fvar, 0)
+            r = self._cheap_beta(self.infer(body, check))
+            r = store.bind_fvar(r, fvar, 0)
+            return store.cons(KIND_FORALL, domain, r, store.info(h))
         records, domains, fvars, body = self._open_telescope(h, KIND_LAMBDA, check)
         r = self._cheap_beta(self.infer(body, check))
         # Close the telescope back up as a Pi: the body type over all
@@ -4805,6 +4937,15 @@ class Machine(object):
 
     def _infer_forall(self, h, check):
         store = self.store
+        body = store.field_b(h)
+        if store.kind(body) != KIND_FORALL:
+            domain = store.field_a(h)
+            l1 = self._ensure_sort(domain, check)
+            if store.loose_bvar_range(body) > 0:
+                fvar = self.fvar_for_domain(h, domain)
+                body = store.instantiate(body, fvar, 0)
+            l2 = self._ensure_sort(body, check)
+            return store.leaf_for(l1.imax(l2).sort())
         records, domains, fvars, body = self._open_telescope(h, KIND_FORALL, False)
         levels = []
         for domain in domains:
@@ -5911,6 +6052,7 @@ def acquire(tc, allow_warm=False):
     if (allow_warm
             and machine._last_env is tc.env
             and not machine._is_clean
+            and (machine.store.record_nodes or not tc.tracer.writes)
             and machine.is_warm_ready()):
         machine.check_gen += 1
         machine._open_memo.clear()

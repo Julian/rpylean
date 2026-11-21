@@ -1996,12 +1996,14 @@ def leq(fn):
 
 # Based on https://github.com/gebner/trepplein/blob/c704ffe81941779dacf9efa20a75bf22832f98a9/src/main/scala/trepplein/level.scala#L100
 class W_Level(_Item):
-    _attrs_ = ['_hash', '_normal', 'has_param']
+    _attrs_ = ['_hash', '_normal', '_sort_cache', '_succ_cache', 'has_param']
     _immutable_fields_ = ['_hash', 'has_param']
 
     #: The normal form, once computed (levels are immutable and
     #: interned, so it never changes).
     _normal = None
+    _sort_cache = None
+    _succ_cache = None
 
     def check_params(self, allowed):
         """Return the first `W_LevelParam` name not in ``allowed``, or None."""
@@ -2113,13 +2115,21 @@ class W_Level(_Item):
         """
         Return a Sort for this level.
         """
-        return _mk_w_sort(self)
+        s = self._sort_cache
+        if s is None:
+            s = _mk_w_sort(self)
+            self._sort_cache = s
+        return s
 
     def succ(self):
         """
         Return the level which is successor to this one.
         """
-        return _mk_level_succ(self)
+        s = self._succ_cache
+        if s is None:
+            s = _mk_level_succ(self)
+            self._succ_cache = s
+        return s
 
     def gt(self, other, balance):
         """Whether ``other + balance ≤ self``; every `leq` is
@@ -2646,8 +2656,11 @@ class W_Expr(_Item):
     # bvar depth is tiny and the hash is 32-bit — so one word holds them
     # with bit 62 tracking universe-parameter presence for O(1) skips
     # during polymorphic constant import.
-    _attrs_ = ['_packed', '_uid']
+    _attrs_ = ['_packed', '_uid', '_cache']
     _immutable_fields_ = ['_packed', '_uid']
+    #: Intrusive generation-stamped handle cache `(gen << 32) | handle` for
+    #: `TermStore.import_term`, `leaf_for`, and `_import_with_levels` (0 = empty).
+    _cache = 0
 
     @always_inline
     def hash(self):
