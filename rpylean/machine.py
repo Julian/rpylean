@@ -332,6 +332,12 @@ _LGEN_MASK = _LGEN_SIZE - 1
 
 
 @always_inline
+@dont_inline
+def _check_stack_store(label):
+    if stack_almost_full():
+        raise W_DeepRecursion(label)
+
+
 def _subst_level_fast(lvl, params, clevels):
     """Fast level substitution for `W_LevelParam` without virtual dispatch."""
     if not lvl.has_param:
@@ -2354,8 +2360,8 @@ class TermStore(object):
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -2538,8 +2544,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -2759,8 +2765,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -3246,8 +3252,8 @@ class TermStore(object):
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -3434,8 +3440,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -3656,8 +3662,8 @@ class TermStore(object):
         entry = call_slot[ri]
         if (entry >> 32) == tag:
             return entry & _TABLE_SLOT_MASK
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -3844,8 +3850,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -4061,8 +4067,8 @@ class TermStore(object):
             r = self._multi_memo.get_wide(h, chain, depth)
         if r != 0:
             return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("instantiate_multi")
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
         kind = hdr & _KIND_MASK
         a = _s32(recs[base + F_A])
         b = _s32(recs[base + F_B])
@@ -4230,8 +4236,8 @@ class TermStore(object):
             r = self._shift_memo.get_wide(h, count, depth)
         if r != 0:
             return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("shift")
+        if (rdepth & 31) == 31:
+            _check_stack_store("shift")
         recs = self.recs
         base = rec_index(h) << 2
         kind = _s32(recs[base]) & _KIND_MASK
@@ -4330,8 +4336,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("bind_fvar")
+        if (rdepth & 31) == 31:
+            _check_stack_store("bind_fvar")
         recs = self.recs
         base = ri << 2
         kind = _s32(recs[base]) & _KIND_MASK
@@ -4520,8 +4526,8 @@ class TermStore(object):
                 r = self._call_memo.get((h << 16) | depth, 0)
                 if r != 0:
                     return r
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("bind_fvars")
+        if (rdepth & 31) == 31:
+            _check_stack_store("bind_fvars")
         recs = self.recs
         base = ri << 2
         kind = _s32(recs[base]) & _KIND_MASK
@@ -4749,8 +4755,8 @@ class TermStore(object):
                     self._bvar_max = id + 1
                 return h
             return self.leaf_for(e)
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("import_term")
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
         nr = rdepth + 1
         if cls is W_App:
             assert isinstance(e, W_App)
@@ -4807,6 +4813,7 @@ class TermStore(object):
                 if (cc >> 32) == gen:
                     head = cc & _TABLE_SLOT_MASK
                     break
+                assert top >= 0
                 if top < len(spine):
                     spine[top] = cur
                 else:
@@ -4815,6 +4822,7 @@ class TermStore(object):
                 cur = cur.fn
             while top > mark:
                 top -= 1
+                assert top >= 0
                 app = spine[top]
                 spine[top] = None
                 arg = app.arg
@@ -4989,8 +4997,8 @@ class TermStore(object):
         c = e._cache
         if (c >> 32) == lgen:
             return c & _TABLE_SLOT_MASK
-        if (rdepth & 31) == 0 and stack_almost_full():
-            raise W_DeepRecursion("import_term")
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
         cls = e.__class__
         nr = rdepth + 1
         if cls is W_App:
@@ -5071,6 +5079,7 @@ class TermStore(object):
                 if (cc >> 32) == lgen:
                     head = cc & _TABLE_SLOT_MASK
                     break
+                assert top >= 0
                 if top < len(spine):
                     spine[top] = cur
                 else:
@@ -5079,6 +5088,7 @@ class TermStore(object):
                 cur = cur.fn
             while top > mark:
                 top -= 1
+                assert top >= 0
                 app = spine[top]
                 spine[top] = None
                 arg = app.arg
@@ -7246,13 +7256,77 @@ class Machine(object):
                     struct_name, field_index, len(struct_kind.ctor_names),
                     self.export(self._materialize(struct, ctx, chain)),
                 )
-            ind_type = self.whnf(
-                store.import_const_term(head_const, struct_decl, struct_decl.type),
-            )
-            ind_sort = store.sort_leaf(ind_type)
-            is_prop_type = ind_sort is not None and ind_sort.level.eq(W_LEVEL_ZERO)
+            stype = struct_decl.type
+            if isinstance(stype, W_ForAll):
+                is_prop_type = False
+            elif isinstance(stype, W_Sort):
+                if not stype.has_level_param():
+                    is_prop_type = stype.level.eq(W_LEVEL_ZERO)
+                elif len(head_const.levels) == len(struct_decl.levels):
+                    lvl = _subst_level_fast(
+                        stype.level, struct_decl.levels, head_const.levels,
+                    )
+                    is_prop_type = lvl.eq(W_LEVEL_ZERO)
+                else:
+                    ind_type = self.whnf(
+                        store.import_const_term(head_const, struct_decl, stype),
+                    )
+                    ind_sort = store.sort_leaf(ind_type)
+                    is_prop_type = (
+                        ind_sort is not None and ind_sort.level.eq(W_LEVEL_ZERO)
+                    )
+            else:
+                ind_type = self.whnf(
+                    store.import_const_term(head_const, struct_decl, stype),
+                )
+                ind_sort = store.sort_leaf(ind_type)
+                is_prop_type = (
+                    ind_sort is not None and ind_sort.level.eq(W_LEVEL_ZERO)
+                )
 
-            ctor_decl = get_decl(tc.declarations, struct_kind.ctor_names[0])
+            ctor_decl = struct_kind._proj_ctor
+            if ctor_decl is None:
+                ctor_decl = get_decl(tc.declarations, struct_kind.ctor_names[0])
+                struct_kind.init_proj_cache(ctor_decl)
+            fields = struct_kind._proj_fields
+            if (not is_prop_type
+                    and fields is not None
+                    and nt == struct_kind.num_params
+                    and 0 <= field_index < len(fields)
+                    and len(head_const.levels) == len(ctor_decl.levels)):
+                raw_ft = fields[field_index]
+                if isinstance(raw_ft, W_BVar):
+                    bid = raw_ft.id
+                    if bid >= field_index and bid - field_index < nt:
+                        return store.spine_arg(tmark + (bid - field_index))
+                if raw_ft.loose_bvar_range() == 0:
+                    return store.import_const_term(head_const, ctor_decl, raw_ft)
+                ft_h = store.import_const_term(head_const, ctor_decl, raw_ft)
+                if field_index == 0:
+                    if nt == 0:
+                        return ft_h
+                    if nt == 1:
+                        return store.instantiate(ft_h, store.spine_arg(tmark), 0)
+                    return store.instantiate_multi_buf(ft_h, tmark, nt, 0)
+                uses = struct_kind._proj_field_uses_earlier
+                assert uses is not None
+                mat_struct = 0
+                if uses[field_index]:
+                    mat_struct = self._materialize(struct, ctx, chain)
+                base = store._spine_top
+                j = field_index - 1
+                while j >= 0:
+                    if mat_struct != 0:
+                        store.spine_push(store.proj(struct_name, j, mat_struct))
+                    else:
+                        store.spine_push(self.h_prop)
+                    j -= 1
+                j = 0
+                while j < nt:
+                    store.spine_push(store.spine_arg(tmark + j))
+                    j += 1
+                return store.instantiate_multi_buf(ft_h, base, field_index + nt, 0)
+
             ctor_type = store.import_const_term(
                 head_const, ctor_decl, ctor_decl.type,
             )

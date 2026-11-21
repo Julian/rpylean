@@ -4730,11 +4730,43 @@ class W_Quotient(W_DeclarationKind):
         )
 
 
+def _expr_has_bvar_lt(e, k, depth):
+    """Whether ``e`` contains a bound variable referring to indices
+    ``[depth, depth + k)`` (used to test whether a structure field type
+    depends on earlier fields)."""
+    if k <= 0 or e.loose_bvar_range() <= depth:
+        return False
+    if depth > 256:
+        return True
+    if isinstance(e, W_BVar):
+        return depth <= e.id < depth + k
+    if isinstance(e, W_App):
+        return (
+            _expr_has_bvar_lt(e.fn, k, depth)
+            or _expr_has_bvar_lt(e.arg, k, depth)
+        )
+    if isinstance(e, W_FunBase):
+        return (
+            _expr_has_bvar_lt(e.binder.type, k, depth)
+            or _expr_has_bvar_lt(e.body, k, depth + 1)
+        )
+    if isinstance(e, W_Let):
+        return (
+            _expr_has_bvar_lt(e.type, k, depth)
+            or _expr_has_bvar_lt(e.value, k, depth)
+            or _expr_has_bvar_lt(e.body, k, depth + 1)
+        )
+    if isinstance(e, W_Proj):
+        return _expr_has_bvar_lt(e.struct_expr, k, depth)
+    return False
+
+
 class W_Inductive(W_DeclarationKind):
     _attrs_ = [
         'name', 'all', 'constructors', 'recursors',
         'num_nested', 'num_params', 'num_indices',
         'is_reflexive', 'is_recursive', 'ctor_names',
+        '_proj_ctor', '_proj_fields', '_proj_field_uses_earlier',
     ]
 
     def group_key(self, name, safety):
@@ -4784,6 +4816,37 @@ class W_Inductive(W_DeclarationKind):
         if ctor_names is None:
             ctor_names = [c.name for c in constructors]
         self.ctor_names = ctor_names
+        self._proj_ctor = None
+        self._proj_fields = None
+        self._proj_field_uses_earlier = None
+
+    @dont_inline
+    def init_proj_cache(self, ctor_decl):
+        """Cache the sole constructor and pre-stripped field domain types
+        for fast projection type inference."""
+        self._proj_ctor = ctor_decl
+        cur = ctor_decl.type
+        np = self.num_params
+        ok = True
+        k = 0
+        while k < np:
+            if not isinstance(cur, W_ForAll):
+                ok = False
+                break
+            cur = cur.body
+            k += 1
+        fields = []
+        uses = []
+        if ok:
+            fi = 0
+            while isinstance(cur, W_ForAll):
+                ft = cur.binder.type
+                fields.append(ft)
+                uses.append(_expr_has_bvar_lt(ft, fi, 0))
+                cur = cur.body
+                fi += 1
+        self._proj_fields = fields
+        self._proj_field_uses_earlier = uses
 
     def is_non_recursive_structure(self):
         """

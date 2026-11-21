@@ -317,3 +317,62 @@ class TestProj(object):
             str(e.value)
             == "invalid projection Foo.1: cannot project a non-propositional field from a propositional structure"
         )
+
+    def test_parametric_and_dependent_structure_projections(self):
+        # Prod-like structure: params α β, fields (fst : α) (snd : β) (tag : α → β)
+        b, y = names("b", "y")
+        b2, b3, b4 = W_BVar(2), W_BVar(3), W_BVar(4)
+        A = Name.simple("A")
+        B = Name.simple("B")
+        P = Name.simple("P")
+        Pmk = P.child("mk")
+        P_type = forall(a.binder(type=TYPE), b.binder(type=TYPE))(TYPE)
+        # Under α (bvar 1), β (bvar 0):
+        #   field 0 (fst) : α   = bvar 1
+        #   field 1 (snd) : β   = bvar 1 (under fst)
+        #   field 2 (fn)  : α → β = forall(_ : bvar 3)(bvar 3)
+        Pmk_type = forall(
+            a.binder(type=TYPE),
+            b.binder(type=TYPE),
+            x.binder(type=b1),
+            y.binder(type=b1),
+            Name.simple("f").binder(type=forall(Name.simple("_").binder(type=b3))(b3)),
+        )(P.app(b4, b3))
+        Pmk_decl = Pmk.constructor(type=Pmk_type, num_params=2, num_fields=3, induct=P)
+        P_decl = P.inductive(type=P_type, constructors=[Pmk_decl], num_params=2)
+        A_decl = A.axiom(type=TYPE)
+        B_decl = B.axiom(type=TYPE)
+        p_decl = Name.simple("p").axiom(type=P.app(A.const(), B.const()))
+
+        # Dependent Sigma-like structure: param α, pred : α → Type,
+        # field 0 (fst : α), field 1 (snd : pred fst)
+        Sig = Name.simple("Sig")
+        Smk = Sig.child("mk")
+        pred = Name.simple("pred")
+        Sig_type = forall(
+            a.binder(type=TYPE),
+            pred.binder(type=forall(x.binder(type=b0))(TYPE)),
+        )(TYPE)
+        Smk_type = forall(
+            a.binder(type=TYPE),
+            pred.binder(type=forall(x.binder(type=b0))(TYPE)),
+            x.binder(type=b1),
+            y.binder(type=b1.app(b0)),
+        )(Sig.app(b3, b2))
+        Smk_decl = Smk.constructor(type=Smk_type, num_params=2, num_fields=2, induct=Sig)
+        Sig_decl = Sig.inductive(type=Sig_type, constructors=[Smk_decl], num_params=2)
+        Q = Name.simple("Q")
+        Q_decl = Q.axiom(type=forall(x.binder(type=A.const()))(TYPE))
+        s_decl = Name.simple("s").axiom(type=Sig.app(A.const(), Q.const()))
+
+        env = Environment.having([
+            A_decl, B_decl, P_decl, Pmk_decl, p_decl,
+            Sig_decl, Smk_decl, Q_decl, s_decl,
+        ])
+        assert P.proj(0, p_decl.const()).infer(env) == A.const()
+        assert P.proj(1, p_decl.const()).infer(env) == B.const()
+        assert P.proj(2, p_decl.const()).infer(env) == forall(
+            Name.simple("_").binder(type=A.const()),
+        )(B.const())
+        assert Sig.proj(0, s_decl.const()).infer(env) == A.const()
+        assert Sig.proj(1, s_decl.const()).infer(env) == Q.app(Sig.proj(0, s_decl.const()))
