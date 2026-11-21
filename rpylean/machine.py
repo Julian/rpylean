@@ -390,6 +390,15 @@ _LF_HINT_OVF = 65535
 #: Bit 62 marks `TermStore.leaf_prop_mask[j]` as computed; bits `0..61`
 #: indicate that argument `k` of the leaf's type lives in `Prop`.
 _PROP_MASK_DONE = 1 << 62
+#: Tag bits (60..61) of `TermStore.leaf_delta_body[j]` for fast unfolds that
+#: bypass `import_const_term` and `instantiate`:
+#:   0 = generic stripped body `(arity << 32) | body_handle`
+#:   1 = identity/arg-picker `λ... => BVar(b)`: `_DB_BVAR_TAG | (m << 32) | b`
+#:   2 = projection `λ... => Proj(S, idx, BVar(b))`:
+#:       `_DB_PROJ_TAG | (m << 52) | (b << 44) | (name_id << 24) | proj_packed`
+_DB_TAG_SHIFT = 60
+_DB_BVAR_TAG = 1 << 60
+_DB_PROJ_TAG = 2 << 60
 _STORE_KEEP_CAP = 1 << 17
 _WARM_MAX_RECS = 98304
 _WARM_MAX_LEAVES = 1 << 15
@@ -1936,22 +1945,24 @@ class TermStore(object):
     def forall(self, binder, type, body):
         return self._cons_binder(KIND_FORALL, binder, type, body)
 
+    def _proj_pack(self, name_id, field_index):
+        if name_id < _PROJ_OVF_NAME and 0 <= field_index <= _PROJ_MASK:
+            return (name_id << _PROJ_SHIFT) | field_index
+        ov = self._proj_overflow
+        ov_idx = -1
+        for k in range(len(ov)):
+            pair = ov[k]
+            if pair[0] == name_id and pair[1] == field_index:
+                ov_idx = k
+                break
+        if ov_idx < 0:
+            ov_idx = len(ov)
+            ov.append((name_id, field_index))
+        return _PROJ_OVF_BASE + ov_idx
+
     def proj(self, struct_name, field_index, struct):
         name_id = self._name_index(struct_name)
-        if name_id < _PROJ_OVF_NAME and 0 <= field_index <= _PROJ_MASK:
-            packed = (name_id << _PROJ_SHIFT) | field_index
-        else:
-            ov = self._proj_overflow
-            ov_idx = -1
-            for k in range(len(ov)):
-                pair = ov[k]
-                if pair[0] == name_id and pair[1] == field_index:
-                    ov_idx = k
-                    break
-            if ov_idx < 0:
-                ov_idx = len(ov)
-                ov.append((name_id, field_index))
-            packed = _PROJ_OVF_BASE + ov_idx
+        packed = self._proj_pack(name_id, field_index)
         return self.cons(KIND_PROJ, struct, packed, name_id)
 
     def let(self, name, type, value, body):
@@ -5538,6 +5549,9 @@ class Machine(object):
             packed = self._delta_body(head, const, j)
         if packed < 0:
             return 0
+        tag = packed >> _DB_TAG_SHIFT
+        if tag != 0:
+            return self._unfold_fast(h, head, const, packed, tag)
         m = packed >> 32
         body_h = packed & 0xFFFFFFFF
         if store.field_a(h) == head:
@@ -5566,11 +5580,83 @@ class Machine(object):
         finally:
             store.unapp_pop(mark)
 
+    def _unfold_fast(self, h, head, const, packed, tag):
+        """Direct delta unfold for argument-picker (`λ... => BVar(b)`) and
+        structure-projection (`λ... => Proj(S, idx, BVar(b))`) definitions,
+        bypassing `import_const_term` and `instantiate`."""
+        store = self.store
+        if tag == 1:
+            m = (packed >> 32) & 0xFFFFFFF
+            b = packed & 0xFFFFFFFF
+            fn = store.field_a(h)
+            if m == 2 and store.kind(fn) == KIND_APP and store.field_a(fn) == head:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                    self.tc.tracer.beta()
+                return store.field_b(h) if b == 0 else store.field_b(fn)
+            if m == 1 and fn == head:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                return store.field_b(h)
+            mark = store._spine_top
+            store.unapp_push(h)
+            try:
+                n = store._spine_top - mark
+                if n >= m:
+                    if self.tc.tracer.recording:
+                        k = 0
+                        while k < m:
+                            self.tc.tracer.beta()
+                            k += 1
+                    res = store.spine_arg(mark + n - m + b)
+                    return store.apply_buf_rev(res, mark, n - 1 - m)
+                val = self._delta_value(head, const)
+                if val == 0:
+                    return 0
+                return self._beta_spine_buf(val, mark, n)
+            finally:
+                store.unapp_pop(mark)
+        # tag == 2: structure/typeclass projection `λ... => Proj(S, idx, BVar(b))`
+        m = (packed >> 52) & 0xFF
+        b = (packed >> 44) & 0xFF
+        name_id = (packed >> 24) & 0xFFFFF
+        proj_packed = packed & 0xFFFFFF
+        fn = store.field_a(h)
+        if m == 2 and store.kind(fn) == KIND_APP and store.field_a(fn) == head:
+            if self.tc.tracer.recording:
+                self.tc.tracer.beta()
+                self.tc.tracer.beta()
+            arg = store.field_b(h) if b == 0 else store.field_b(fn)
+            return store._cons_general(KIND_PROJ, arg, proj_packed, name_id)
+        if m == 1 and fn == head:
+            if self.tc.tracer.recording:
+                self.tc.tracer.beta()
+            return store._cons_general(KIND_PROJ, store.field_b(h), proj_packed, name_id)
+        mark = store._spine_top
+        store.unapp_push(h)
+        try:
+            n = store._spine_top - mark
+            if n >= m:
+                if self.tc.tracer.recording:
+                    k = 0
+                    while k < m:
+                        self.tc.tracer.beta()
+                        k += 1
+                arg = store.spine_arg(mark + n - m + b)
+                res = store._cons_general(KIND_PROJ, arg, proj_packed, name_id)
+                return store.apply_buf_rev(res, mark, n - 1 - m)
+            val = self._delta_value(head, const)
+            if val == 0:
+                return 0
+            return self._beta_spine_buf(val, mark, n)
+        finally:
+            store.unapp_pop(mark)
+
     @dont_inline
     def _delta_body(self, head, const, j):
         """Peel leading `W_Lambda` binders from a definition's value before
         importing so fully-applied delta unfolds never import discarded binder
-        domain types."""
+        domain types, and encode argument-picker / projection wrappers directly."""
         store = self.store
         cached_val = _si32(store.leaf_delta[j])
         if cached_val > 0:
@@ -5597,6 +5683,30 @@ class Machine(object):
         while isinstance(cur, W_Lambda):
             cur = cur.body
             m += 1
+        if m > 0:
+            if isinstance(cur, W_BVar):
+                bid = cur.id
+                if 0 <= bid < m and m < (1 << 28):
+                    packed = _DB_BVAR_TAG | (m << 32) | bid
+                    store.leaf_delta_body[j] = packed
+                    return packed
+            elif isinstance(cur, W_Proj) and m < 256:
+                inner = cur.struct_expr
+                if isinstance(inner, W_BVar):
+                    bid = inner.id
+                    if 0 <= bid < m:
+                        name_id = store._name_index(cur.struct_name)
+                        proj_packed = store._proj_pack(name_id, cur.field_index)
+                        if name_id < (1 << 20) and proj_packed < (1 << 24):
+                            packed = (
+                                _DB_PROJ_TAG
+                                | (m << 52)
+                                | (bid << 44)
+                                | (name_id << 24)
+                                | proj_packed
+                            )
+                            store.leaf_delta_body[j] = packed
+                            return packed
         body_h = store.import_const_term(const, decl, cur)
         if m == 0:
             store.leaf_delta[j] = _i32(body_h)
@@ -5905,8 +6015,59 @@ class Machine(object):
 
             total = rec.num_params + rec.num_motives + rec.num_minors
             assert total >= 0
+            nf = rule.num_fields
+            lo = n_ctor - (ctor_kind.num_params + nf)
+            hi = n_ctor - 1 - ctor_kind.num_params
+            sminor = rule.simple_minor(
+                rec.num_params, rec.num_motives, rec.num_minors,
+            )
+            if sminor >= 0 and lo >= 0:
+                if tc.tracer.recording:
+                    tc.tracer.iota(const.name)
+                    expected = total + nf
+                    j = 0
+                    while j < expected:
+                        tc.tracer.beta()
+                        j += 1
+                minor = store.spine_arg(
+                    mark + n_args - 1 - (rec.num_params + rec.num_motives + sminor),
+                )
+                if nf == 0:
+                    if major_idx == 0:
+                        return minor
+                    if (store.kind(minor) == KIND_LAMBDA
+                            and not (tc.tracer.recording and tc.tracer.writes)):
+                        return self._beta_spine_buf(minor, mark, major_idx)
+                    return store.apply_buf_rev(minor, mark, major_idx - 1)
+                if (store.kind(minor) == KIND_LAMBDA
+                        and not (tc.tracer.recording and tc.tracer.writes)):
+                    if nf == 1 and major_idx == 0:
+                        if tc.tracer.recording:
+                            tc.tracer.beta()
+                        return store.instantiate(
+                            store.field_b(minor), store.spine_arg(cmark + hi), 0,
+                        )
+                    rmark = store._spine_top
+                    i = 0
+                    while i < major_idx:
+                        store.spine_push(store.spine_arg(mark + i))
+                        i += 1
+                    i = lo
+                    while i <= hi:
+                        store.spine_push(store.spine_arg(cmark + i))
+                        i += 1
+                    return self._beta_spine_buf(
+                        minor, rmark, store._spine_top - rmark,
+                    )
+                res = minor
+                i = hi
+                while i >= lo:
+                    res = store.cons_app(res, store.spine_arg(cmark + i))
+                    i -= 1
+                return store.apply_buf_rev(res, mark, major_idx - 1)
+
             packed = self._rule_rhs_stripped(
-                target, const, ctor_head, rule, total + rule.num_fields,
+                target, const, ctor_head, rule, total + nf,
             )
             if tc.tracer.recording:
                 tc.tracer.iota(const.name)
@@ -5919,10 +6080,8 @@ class Machine(object):
             while i < major_idx:
                 store.spine_push(store.spine_arg(mark + i))
                 i += 1
-            lo = n_ctor - (ctor_kind.num_params + rule.num_fields)
             if lo < 0:
                 lo = 0
-            hi = n_ctor - 1 - ctor_kind.num_params
             i = lo
             while i <= hi:
                 store.spine_push(store.spine_arg(cmark + i))

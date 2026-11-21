@@ -2,7 +2,7 @@ from rpython.rlib.jit import (
     dont_look_inside, elidable, promote, unroll_safe,
 )
 from rpython.rlib.objectmodel import (
-    always_inline, compute_hash, newlist_hint,
+    always_inline, compute_hash, dont_inline, newlist_hint,
     not_rpython, specialize,
 )
 from rpython.rlib.rbigint import rbigint
@@ -4247,13 +4247,52 @@ class W_App(W_Expr):
 
 
 class W_RecRule(_Item):
-    _attrs_ = ['ctor_name', 'num_fields', 'rhs']
+    _attrs_ = ['ctor_name', 'num_fields', 'rhs', '_simple_minor']
     _immutable_fields_ = ['ctor_name', 'num_fields', 'rhs']
 
     def __init__(self, ctor_name, num_fields, rhs):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
         self.rhs = rhs
+        #: Cached 0-based minor index when `rhs` has the standard non-recursive
+        #: shape `λ params... motives... minors... fields... => minor_i f0..f{nf-1}`,
+        #: -2 = unchecked, -1 = general/recursive.
+        self._simple_minor = -2
+
+    def simple_minor(self, num_params, num_motives, num_minors):
+        m = self._simple_minor
+        if m != -2:
+            return m
+        m = self._compute_simple_minor(num_params, num_motives, num_minors)
+        self._simple_minor = m
+        return m
+
+    @dont_inline
+    def _compute_simple_minor(self, num_params, num_motives, num_minors):
+        nf = self.num_fields
+        expected = num_params + num_motives + num_minors + nf
+        cur = self.rhs
+        k = 0
+        while k < expected:
+            if not isinstance(cur, W_Lambda):
+                return -1
+            cur = cur.body
+            k += 1
+        j = 0
+        while j < nf:
+            if not isinstance(cur, W_App):
+                return -1
+            arg = cur.arg
+            if not isinstance(arg, W_BVar) or arg.id != j:
+                return -1
+            cur = cur.fn
+            j += 1
+        if not isinstance(cur, W_BVar):
+            return -1
+        minor_bvar = cur.id
+        if minor_bvar < nf or minor_bvar >= nf + num_minors:
+            return -1
+        return (nf + num_minors - 1) - minor_bvar
 
 
 #: How much of an inductive block is already in scope during a check.
