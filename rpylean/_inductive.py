@@ -16,6 +16,8 @@ constructors. Members found this way get the recursors `T.rec_1`,
 `T.rec_2`, … in order of discovery.
 """
 
+from rpython.rlib.objectmodel import compute_identity_hash, r_dict
+
 from rpylean.objects import (
     Binder,
     Name,
@@ -116,6 +118,30 @@ def _local(name, type):
     return Binder.default(Name.simple(name), type).fvar()
 
 
+def _expr_is(a, b):
+    return a is b
+
+
+def _expr_id_hash(a):
+    return compute_identity_hash(a)
+
+
+def _expr_depth_eq(a, b):
+    return a[0] is b[0] and a[1] == b[1]
+
+
+def _expr_depth_hash(a):
+    return (compute_identity_hash(a[0]) * 1000003) ^ a[1]
+
+
+def _expr_pair_eq(a, b):
+    return a[0] is b[0] and a[1] is b[1]
+
+
+def _expr_pair_hash(a):
+    return (compute_identity_hash(a[0]) * 1000003) ^ compute_identity_hash(a[1])
+
+
 def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
     """DAG-memoized substitution of `fvars[0..limit-1]` with de Bruijn indices
     starting at ``depth`` (innermost `fvars[limit-1]` -> ``depth``)."""
@@ -126,14 +152,10 @@ def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
         if 0 <= k < limit:
             return _mk_w_bvar(depth + limit - 1 - k)
         return expr
-    uid = expr._uid
-    use_memo = depth < 65536 and uid < (1 << 46)
-    key = 0
-    if use_memo:
-        key = (uid << 16) | depth
-        cached = memo.get(key, None)
-        if cached is not None:
-            return cached
+    key = (expr, depth)
+    cached = memo.get(key, None)
+    if cached is not None:
+        return cached
     if isinstance(expr, W_App):
         new_fn = _bind_fvars_prefix(expr.fn, fvar_idx, limit, depth, memo)
         new_arg = _bind_fvars_prefix(expr.arg, fvar_idx, limit, depth, memo)
@@ -182,8 +204,7 @@ def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
         res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
     else:
         res = expr
-    if use_memo:
-        memo[key] = res
+    memo[key] = res
     return res
 
 
@@ -192,14 +213,10 @@ def _inst_dag_rec(expr, val, depth, memo):
         return expr
     if isinstance(expr, W_BVar):
         return expr.instantiate(val, depth)
-    uid = expr._uid
-    use_memo = depth < 65536 and uid < (1 << 46)
-    key = 0
-    if use_memo:
-        key = (uid << 16) | depth
-        cached = memo.get(key, None)
-        if cached is not None:
-            return cached
+    key = (expr, depth)
+    cached = memo.get(key, None)
+    if cached is not None:
+        return cached
     if isinstance(expr, W_App):
         new_fn = _inst_dag_rec(expr.fn, val, depth, memo)
         new_arg = _inst_dag_rec(expr.arg, val, depth, memo)
@@ -240,15 +257,14 @@ def _inst_dag_rec(expr, val, depth, memo):
         res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
     else:
         res = expr
-    if use_memo:
-        memo[key] = res
+    memo[key] = res
     return res
 
 
 def _instantiate_dag(expr, val):
     if expr.loose_bvar_range() == 0:
         return expr
-    return _inst_dag_rec(expr, val, 0, {})
+    return _inst_dag_rec(expr, val, 0, r_dict(_expr_depth_eq, _expr_depth_hash))
 
 
 def _mk_pi(fvars, body):
@@ -260,14 +276,19 @@ def _mk_pi(fvars, body):
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         fvar_idx[fvar.id] = i
-    body = _bind_fvars_prefix(body, fvar_idx, n, 0, {})
+    body = _bind_fvars_prefix(
+        body, fvar_idx, n, 0, r_dict(_expr_depth_eq, _expr_depth_hash),
+    )
     i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         binder = fvar.binder
         if i > 0 and binder.type.has_fvar():
-            new_type = _bind_fvars_prefix(binder.type, fvar_idx, i, 0, {})
+            new_type = _bind_fvars_prefix(
+                binder.type, fvar_idx, i, 0,
+                r_dict(_expr_depth_eq, _expr_depth_hash),
+            )
             if new_type is not binder.type:
                 binder = binder.with_type(new_type)
         body = _mk_w_forall(binder, body)
@@ -284,14 +305,19 @@ def _mk_lambda(fvars, body):
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         fvar_idx[fvar.id] = i
-    body = _bind_fvars_prefix(body, fvar_idx, n, 0, {})
+    body = _bind_fvars_prefix(
+        body, fvar_idx, n, 0, r_dict(_expr_depth_eq, _expr_depth_hash),
+    )
     i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         binder = fvar.binder
         if i > 0 and binder.type.has_fvar():
-            new_type = _bind_fvars_prefix(binder.type, fvar_idx, i, 0, {})
+            new_type = _bind_fvars_prefix(
+                binder.type, fvar_idx, i, 0,
+                r_dict(_expr_depth_eq, _expr_depth_hash),
+            )
             if new_type is not binder.type:
                 binder = binder.with_type(new_type)
         body = _mk_w_lambda(binder, body)
@@ -339,17 +365,14 @@ def _alpha_eq_memo(a, b, seen):
             break
         if a.__class__ is not b.__class__:
             return False
-        au = a._uid
-        bu = b._uid
-        if au < (1 << 31) and bu < (1 << 31):
-            key = (au << 31) | bu
-            if key in seen:
-                ok = True
-                break
-            if keys is None:
-                keys = [key]
-            else:
-                keys.append(key)
+        key = (a, b)
+        if key in seen:
+            ok = True
+            break
+        if keys is None:
+            keys = [key]
+        else:
+            keys.append(key)
         if isinstance(a, W_App):
             assert isinstance(b, W_App)
             if not _alpha_eq_memo(a.arg, b.arg, seen):
@@ -389,7 +412,7 @@ def _alpha_eq_memo(a, b, seen):
 
 def alpha_eq(a, b):
     """Whether two expressions differ at most in how binders are written."""
-    return _alpha_eq_memo(a, b, {})
+    return _alpha_eq_memo(a, b, r_dict(_expr_pair_eq, _expr_pair_hash))
 
 
 class _Member(object):
@@ -506,8 +529,7 @@ class _Block(object):
         return False
 
     def _has_occurrence_memo(self, expr, seen):
-        uid = expr._uid
-        if uid in seen:
+        if expr in seen:
             return False
         if isinstance(expr, W_Const):
             if self.is_declared_name(expr.name):
@@ -528,12 +550,12 @@ class _Block(object):
         elif isinstance(expr, W_Proj):
             if self._has_occurrence_memo(expr.struct_expr, seen):
                 return True
-        seen[uid] = True
+        seen[expr] = True
         return False
 
     def has_occurrence(self, expr):
         """Whether ``expr`` mentions a type being declared."""
-        return self._has_occurrence_memo(expr, {})
+        return self._has_occurrence_memo(expr, r_dict(_expr_is, _expr_id_hash))
 
     def collect_members(self):
         declarations = self.tc.declarations
@@ -674,8 +696,10 @@ class _Block(object):
                         )
                     type = _instantiate_dag(type.body, arg)
                 if declared:
-                    self.check_uniform_occurrences(type, ctor_decl.type, {})
-                self.find_nested(type, {})
+                    self.check_uniform_occurrences(
+                        type, ctor_decl.type, r_dict(_expr_is, _expr_id_hash),
+                    )
+                self.find_nested(type, r_dict(_expr_is, _expr_id_hash))
                 member.ctors.append(_Ctor(ctor_decl, member.levels, type))
             qhead += 1
 
@@ -684,10 +708,9 @@ class _Block(object):
         Every occurrence of a type being declared must be applied to
         the block's universe levels and parameters.
         """
-        uid = expr._uid
-        if uid in seen:
+        if expr in seen:
             return
-        seen[uid] = True
+        seen[expr] = True
         if isinstance(expr, W_App) or isinstance(expr, W_Const):
             head, args = _args_of(expr)
             if isinstance(head, W_Const) and self.is_declared_name(head.name):
@@ -721,10 +744,9 @@ class _Block(object):
 
     def find_nested(self, expr, seen):
         """Add a member for each container the block occurs nested in."""
-        uid = expr._uid
-        if uid in seen:
+        if expr in seen:
             return
-        seen[uid] = True
+        seen[expr] = True
         if isinstance(expr, W_App):
             if self.add_if_nested(expr):
                 return

@@ -18,7 +18,7 @@ checking pays negligible JIT bookkeeping overhead.
 """
 
 from rpython.rlib import jit
-from rpython.rlib.objectmodel import r_dict
+from rpython.rlib.objectmodel import compute_identity_hash, r_dict
 from rpython.rlib.rarithmetic import LONG_BIT, ovfcheck
 from rpython.rlib.rbigint import rbigint
 
@@ -58,6 +58,14 @@ from rpylean.objects import (
     find_decl,
     syntactic_eq,
 )
+
+
+def _expr_is(a, b):
+    return a is b
+
+
+def _expr_id_hash(a):
+    return compute_identity_hash(a)
 
 
 # ---- Bail signal ---------------------------------------------------------
@@ -1145,7 +1153,7 @@ class CodeCache(object):
     @jit.dont_look_inside
     def compile_wexpr(self, expr, level_subst):
         """Iteratively compile a `W_Expr` DAG into immutable `CodeNode`s."""
-        memo = {}
+        memo = r_dict(_expr_is, _expr_id_hash)
         return self._compile_wexpr_iter(expr, level_subst, memo)
 
     def _compile_wexpr_iter(self, root, level_subst, memo):
@@ -1157,28 +1165,27 @@ class CodeCache(object):
         while stack_expr:
             e = stack_expr.pop()
             st = stack_state.pop()
-            uid = e._uid
-            if uid in memo:
+            if e in memo:
                 continue
             if st == 0:
                 cls = e.__class__
                 if cls is W_BVar:
                     assert isinstance(e, W_BVar)
-                    memo[uid] = _mk_bvar(e.id)
+                    memo[e] = _mk_bvar(e.id)
                 elif cls is W_LitNat:
                     assert isinstance(e, W_LitNat)
-                    memo[uid] = CVal(mk_const_nat_from_bigint(e.val))
+                    memo[e] = CVal(mk_const_nat_from_bigint(e.val))
                 elif cls is W_LitStr:
                     assert isinstance(e, W_LitStr)
-                    memo[uid] = CVal(self.litstr_val(e))
+                    memo[e] = CVal(self.litstr_val(e))
                 elif cls is W_Const:
                     assert isinstance(e, W_Const)
                     c = _subst_const_levels(e, level_subst)
                     node = self.const_node(c)
                     if isinstance(node, CCtor) and node.singleton_val is not None:
-                        memo[uid] = CVal(node.singleton_val)
+                        memo[e] = CVal(node.singleton_val)
                     else:
-                        memo[uid] = node
+                        memo[e] = node
                 elif cls is W_App:
                     # Flatten the entire spine iteratively.
                     cur = e
@@ -1188,40 +1195,40 @@ class CodeCache(object):
                         cur = cur.fn
                     stack_expr.append(e)
                     stack_state.append(1)
-                    if cur._uid not in memo:
+                    if cur not in memo:
                         stack_expr.append(cur)
                         stack_state.append(0)
                     for a in rev_args:
-                        if a._uid not in memo:
+                        if a not in memo:
                             stack_expr.append(a)
                             stack_state.append(0)
                 elif cls is W_Lambda:
                     assert isinstance(e, W_Lambda)
                     stack_expr.append(e)
                     stack_state.append(1)
-                    if e.body._uid not in memo:
+                    if e.body not in memo:
                         stack_expr.append(e.body)
                         stack_state.append(0)
                 elif cls is W_Let:
                     assert isinstance(e, W_Let)
                     stack_expr.append(e)
                     stack_state.append(1)
-                    if e.value._uid not in memo:
+                    if e.value not in memo:
                         stack_expr.append(e.value)
                         stack_state.append(0)
-                    if e.body._uid not in memo:
+                    if e.body not in memo:
                         stack_expr.append(e.body)
                         stack_state.append(0)
                 elif cls is W_Proj:
                     assert isinstance(e, W_Proj)
                     stack_expr.append(e)
                     stack_state.append(1)
-                    if e.struct_expr._uid not in memo:
+                    if e.struct_expr not in memo:
                         stack_expr.append(e.struct_expr)
                         stack_state.append(0)
                 else:
                     # W_Sort, W_ForAll, W_LitStr, W_FVar -> inert atom
-                    memo[uid] = CVal(VAtom(COpaque(None)))
+                    memo[e] = CVal(VAtom(COpaque(None)))
             else:
                 cls = e.__class__
                 if cls is W_App:
@@ -1230,11 +1237,11 @@ class CodeCache(object):
                     while isinstance(cur, W_App):
                         rev_args.append(cur.arg)
                         cur = cur.fn
-                    fn_node = memo[cur._uid]
+                    fn_node = memo[cur]
                     n = len(rev_args)
                     cargs = [None] * n
                     for i in range(n):
-                        cargs[i] = memo[rev_args[n - 1 - i]._uid]
+                        cargs[i] = memo[rev_args[n - 1 - i]]
                     if isinstance(fn_node, CCtor) and n == fn_node.total_arity:
                         fields_closed = True
                         np = fn_node.num_params
@@ -1243,21 +1250,21 @@ class CodeCache(object):
                             if ae.loose_bvar_range() != 0 or ae.has_fvar():
                                 fields_closed = False
                                 break
-                        memo[uid] = _compile_full_ctor(
+                        memo[e] = _compile_full_ctor(
                             fn_node, cargs, fields_closed,
                         )
                     else:
-                        memo[uid] = CApp(fn_node, cargs)
+                        memo[e] = CApp(fn_node, cargs)
                 elif cls is W_Lambda:
                     assert isinstance(e, W_Lambda)
-                    memo[uid] = CLam(memo[e.body._uid])
+                    memo[e] = CLam(memo[e.body])
                 elif cls is W_Let:
                     assert isinstance(e, W_Let)
-                    memo[uid] = CLet(memo[e.value._uid], memo[e.body._uid])
+                    memo[e] = CLet(memo[e.value], memo[e.body])
                 elif cls is W_Proj:
                     assert isinstance(e, W_Proj)
-                    memo[uid] = CProj(memo[e.struct_expr._uid], e.field_index)
-        return memo[root._uid]
+                    memo[e] = CProj(memo[e.struct_expr], e.field_index)
+        return memo[root]
 
     @jit.dont_look_inside
     def compile_handle(self, store, root_h):

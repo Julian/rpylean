@@ -14,6 +14,7 @@ from __future__ import print_function
 from StringIO import StringIO
 from textwrap import dedent
 
+from rpython.rlib.objectmodel import newlist_hint
 from rpython.rlib.rbigint import rbigint
 
 from rpylean import objects
@@ -1999,7 +2000,7 @@ def _prescan_line_general(cursor, counts):
 def prescan_refcounts(stream):
     """Scan an export stream (positioned after its metadata line) at raw-byte
     level and return a ``list[int]`` of parse-time expression reference counts."""
-    counts = []
+    counts = newlist_hint(65536)
     cursor = LineCursor("")
     buf = ""
     while True:

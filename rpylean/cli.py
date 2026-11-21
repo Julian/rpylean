@@ -525,7 +525,7 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
     file = _open_export(path, stdin)
     builder, checker, tracer = run.start(abort_at)
     if refcount is not None:
-        builder._refcount = refcount
+        builder.set_refcount(refcount)
     bytes_at_start = _bytes_allocated()
     try:
         try:

@@ -8,6 +8,7 @@ import pdb
 from rpython.rlib import rgc
 from rpython.rlib.jit import dont_look_inside
 from rpython.rlib.objectmodel import (
+    newlist_hint,
     not_rpython,
     specialize,
     we_are_translated,
@@ -130,6 +131,12 @@ class EnvironmentBuilder(object):
         """Configure this builder as the reference-counting pre-pass."""
         self._scanning = True
         self._refcount = []
+
+    def set_refcount(self, counts):
+        """Attach pre-scanned reference counts and pre-size the expr pool."""
+        self._refcount = counts
+        if not self.exprs and len(counts) > 0:
+            self.exprs = newlist_hint(len(counts))
 
     def ref_expr(self, eidx):
         """
@@ -270,7 +277,11 @@ class EnvironmentBuilder(object):
             # tally; the scaffolding-built expr itself is discarded.
             _register_at(self._refcount, eidx, 0, 0)
             return
-        _register_at(self.exprs, eidx, w_expr, PROP)
+        exprs = self.exprs
+        if eidx == len(exprs):
+            exprs.append(w_expr)
+        else:
+            _register_at(exprs, eidx, w_expr, PROP)
 
     def register_level(self, uidx, level):
         _register_at(self.levels, uidx, level, W_LEVEL_ZERO)

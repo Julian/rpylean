@@ -1828,8 +1828,8 @@ class Binder(_Item):
     strictly for pretty printing.
     """
 
-    _attrs_ = ['name', 'type', 'left', 'right', '_position', '_fvar', '_hash']
-    _immutable_fields_ = ['name', 'type', 'left', 'right', '_hash']
+    _attrs_ = ['name', 'type', 'left', 'right', '_position', '_fvar']
+    _immutable_fields_ = ['name', 'type', 'left', 'right']
 
     @staticmethod
     def default(name, type):
@@ -1869,13 +1869,12 @@ class Binder(_Item):
         #: which its free variable carries as its id.
         self._position = next(W_FVar._counter)
         self._fvar = None
-        h = name.hash() ^ type.hash()
-        h = (h * 1000003) ^ compute_hash(left)
-        h = (h * 1000003) ^ compute_hash(right)
-        self._hash = h & 0xFFFFFFFF
 
     def hash(self):
-        return self._hash
+        h = self.name.hash() ^ self.type.hash()
+        h = (h * 1000003) ^ compute_hash(self.left)
+        h = (h * 1000003) ^ compute_hash(self.right)
+        return h & 0xFFFFFFFF
 
     def __repr__(self):
         return "<Binder %s>" % (self.name.str())
@@ -2656,8 +2655,8 @@ class W_Expr(_Item):
     # bvar depth is tiny and the hash is 32-bit — so one word holds them
     # with bit 62 tracking universe-parameter presence for O(1) skips
     # during polymorphic constant import.
-    _attrs_ = ['_packed', '_uid', '_cache']
-    _immutable_fields_ = ['_packed', '_uid']
+    _attrs_ = ['_packed', '_cache']
+    _immutable_fields_ = ['_packed']
     #: Intrusive generation-stamped handle cache `(gen << 32) | handle` for
     #: `TermStore.import_term`, `leaf_for`, and `_import_with_levels` (0 = empty).
     _cache = 0
@@ -2805,7 +2804,6 @@ class W_BVar(W_Expr):
     def __init__(self, id):
         self.id = id
         bf = (id + 1) << 1
-        self._uid = _next_uid()
         self._packed = (((id * 1000003) ^ 0xB7A8) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -2855,8 +2853,8 @@ class W_BVar(W_Expr):
 class W_FVar(W_Expr):
     """An FVar which refers to its binder by identity."""
 
-    _attrs_ = ['id', 'binder']
-    _immutable_fields_ = ['id', 'binder']
+    _attrs_ = ['id', 'binder', '_uid']
+    _immutable_fields_ = ['id', 'binder', '_uid']
 
     _counter = count()
 
@@ -2906,7 +2904,6 @@ class W_LitStr(W_Expr):
         assert isinstance(val, str)
         self.val = val
         bf = 0
-        self._uid = _next_uid()
         self._packed = (((compute_hash(val) * 1000003) ^ 0x57A5) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -2980,7 +2977,6 @@ class W_Sort(W_Expr):
         self.level = level
         self._canonical = None
         lp = _LP_BIT if level.has_param else 0
-        self._uid = _next_uid()
         self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | lp
 
     def __repr__(self):
@@ -3063,11 +3059,7 @@ def apply_const_level_params(const, target, env):
 
 
 class W_Const(W_Expr):
-    _attrs_ = [
-        'name', 'levels', '_canonical',
-        '_infer_cache_env', '_infer_cache_result',
-        '_delta_cache_env', '_delta_cache_result',
-    ]
+    _attrs_ = ['name', 'levels', '_canonical']
     _immutable_fields_ = ['name', 'levels']
 
     def __init__(self, name, levels):
@@ -3079,22 +3071,9 @@ class W_Const(W_Expr):
                 lp = _LP_BIT
         self.levels = levels
         self._canonical = self if not levels else None
-        # Inline caches, tagged with the env — hash-consing shares this
-        # instance across `Environment`s and both the inferred type
-        # and the delta-unfolded value depend on the env's declarations.
-        # `_infer_cache_*` caches `apply_const_level_params(self, decl.type)`,
-        # `_delta_cache_*` caches the same applied to `decl.value`. Both
-        # walks were unconditionally re-running before — `subst_levels`
-        # showed up as ~10% leaf time in profiles because every shared
-        # `W_Const` reference repeated the full structural rewrite.
-        self._infer_cache_env = None
-        self._infer_cache_result = None
-        self._delta_cache_env = None
-        self._delta_cache_result = None
         h = name.hash()
         for lvl in levels:
             h = (h * 1000003) ^ lvl.hash()
-        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | lp
 
     def __repr__(self):
@@ -3236,7 +3215,6 @@ class W_LitNat(W_Expr):
     def __init__(self, val):
         self.val = val
         bf = 0
-        self._uid = _next_uid()
         self._packed = (((val.hash() * 1000003) ^ 0x4A75) & 0xFFFFFFFF) | (bf << 32)
 
     def __repr__(self):
@@ -3375,32 +3353,17 @@ def nat_binop_value(name, v1, v2):
 
 
 class W_Proj(W_Expr):
-    _attrs_ = [
-        'struct_name', 'field_index', 'struct_expr',
-        '_struct_whnf_env', '_struct_whnf',
-    ]
+    _attrs_ = ['struct_name', 'field_index', 'struct_expr']
     _immutable_fields_ = ['struct_name', 'field_index', 'struct_expr']
 
     def __init__(self, struct_name, field_index, struct_expr):
         self.struct_name = struct_name
         self.field_index = field_index
         self.struct_expr = struct_expr
-        # Inline cache of `struct_expr.whnf(env)` for the `env` it was
-        # computed under. Lives in its own mutable slot so `struct_expr`
-        # stays set-once (interning of `W_Proj` requires it). The env
-        # tag is needed because hash-consing shares the same `W_Proj`
-        # across `Environment`s and `whnf` is env-dependent.
-        self._struct_whnf_env = None
-        self._struct_whnf = None
-        bf = (
-            (struct_expr.loose_bvar_range() << 1)
-            | (1 if struct_expr.has_fvar() else 0)
-        )
-        lp = struct_expr._packed & _LP_BIT
+        sp = struct_expr._packed
         h = (struct_name.hash() * 1000003) ^ field_index
-        h = (h * 1000003) ^ struct_expr.hash()
-        self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (bf << 32) | lp
+        h = (h * 1000003) ^ (sp & 0xFFFFFFFF)
+        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (sp & ~0xFFFFFFFF)
 
 
     def contains_const(self, name):
@@ -3561,22 +3524,18 @@ class W_FunBase(W_Expr):
         assert isinstance(binder, Binder)
         self.binder = binder
         self.body = body
-        body_range = body.loose_bvar_range() - 1
+        tp = binder.type._packed
+        bp = body._packed
+        body_range = ((bp >> 33) & _LOOSE_MASK) - 1
         if body_range < 0:
             body_range = 0
-        binder_range = binder.type.loose_bvar_range()
-        if binder_range > body_range:
-            loose = binder_range
-        else:
-            loose = body_range
-        fvar = binder.type.has_fvar() or body.has_fvar()
-        bf = (loose << 1) | (1 if fvar else 0)
-        lp = (binder.type._packed | body._packed) & _LP_BIT
-        # Content hash: mix binder's name + type + binder-info + body.
-        h = (binder.name.hash() * 1000003) ^ binder.type.hash()
-        h = (h * 1000003) ^ body.hash()
-        self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (bf << 32) | lp
+        binder_range = (tp >> 33) & _LOOSE_MASK
+        loose = binder_range if binder_range > body_range else body_range
+        flags = (tp | bp) & ((1 << 32) | _LP_BIT)
+        # Content hash: mix binder's name + type + body.
+        h = (binder.name.hash() * 1000003) ^ (tp & 0xFFFFFFFF)
+        h = (h * 1000003) ^ (bp & 0xFFFFFFFF)
+        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (loose << 33) | flags
 
 
     def contains_const(self, name):
@@ -4019,7 +3978,6 @@ class W_Let(W_Expr):
         h = (name.hash() * 1000003) ^ type.hash()
         h = (h * 1000003) ^ value.hash()
         h = (h * 1000003) ^ body.hash()
-        self._uid = _next_uid()
         self._packed = (((h * 1000003) ^ 0x1ED7) & 0xFFFFFFFF) | (bf << 32) | lp
 
     def contains_const(self, name):
@@ -4128,18 +4086,14 @@ class W_App(W_Expr):
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg
-        fn_range = fn.loose_bvar_range()
-        arg_range = arg.loose_bvar_range()
-        if fn_range > arg_range:
-            loose = fn_range
-        else:
-            loose = arg_range
-        fvar = fn.has_fvar() or arg.has_fvar()
-        bf = (loose << 1) | (1 if fvar else 0)
-        lp = (fn._packed | arg._packed) & _LP_BIT
-        h = (fn.hash() * 1000003) ^ arg.hash()
-        self._uid = _next_uid()
-        self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (bf << 32) | lp
+        fp = fn._packed
+        ap = arg._packed
+        fn_range = (fp >> 33) & _LOOSE_MASK
+        arg_range = (ap >> 33) & _LOOSE_MASK
+        loose = fn_range if fn_range > arg_range else arg_range
+        flags = (fp | ap) & ((1 << 32) | _LP_BIT)
+        h = ((fp & 0xFFFFFFFF) * 1000003) ^ (ap & 0xFFFFFFFF)
+        self._packed = (((h * 1000003) ^ 0xAB30) & 0xFFFFFFFF) | (loose << 33) | flags
 
 
     def contains_const(self, name):

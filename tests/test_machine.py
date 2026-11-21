@@ -508,3 +508,74 @@ class TestU32Map(object):
         finally:
             s1.free()
             s2.free()
+
+    def test_cons_general_wide_promotion_and_proj_overflow(self):
+        from rpylean.machine import TermStore
+        store = TermStore(None, capacity=16)
+        try:
+            xh = store.import_term(x.const())
+            s = Name.simple("S")
+            # Normal packed projection
+            p0 = store.proj(s, 0, xh)
+            p5 = store.proj(s, 5, xh)
+            assert store.proj(s, 0, xh) == p0
+            assert store.proj_index(p0) == 0
+            assert store.proj_index(p5) == 5
+            # Overflow field_index >= 1024 promotes cleanly without losing proj_index
+            p_big = store.proj(s, 2000, xh)
+            assert store.proj(s, 2000, xh) == p_big
+            assert store.proj_index(p_big) == 2000
+            # Force _cons_general -> _cons_general_wide promotion
+            store._other_limit = 1
+            b = x.binder(type=NAT)
+            lam1 = store.lam(b, xh, p0)
+            assert store._other_limit == 0
+            assert store.lam(b, xh, p0) == lam1
+            assert store.proj(s, 0, xh) == p0
+            assert store.proj(s, 2000, xh) == p_big
+            # Reset restores packed mode cleanly
+            store.reset()
+            assert store._other_limit > 0
+            xh2 = store.import_term(x.const())
+            p2 = store.proj(s, 7, xh2)
+            assert store.proj(s, 7, xh2) == p2
+            assert store.proj_index(p2) == 7
+        finally:
+            store.free()
+
+    def test_lgen_cache_reuse_and_reset_isolation(self):
+        from rpylean.machine import TermStore
+        from rpylean.objects import W_LEVEL_ZERO
+        u = Name.simple("u")
+        v = Name.simple("v")
+        u_lvl = u.as_level_param()
+        v_lvl = v.as_level_param()
+        l1 = W_LEVEL_ZERO.succ()
+        shared = f.const([u_lvl]).app(u_lvl.sort())
+        d1 = Name.simple("D1").axiom(levels=[u], type=shared)
+        d2 = Name.simple("D2").axiom(levels=[u], type=g.const([u_lvl]).app(shared))
+        d3 = Name.simple("D3").axiom(
+            levels=[u, v],
+            type=f.const([u_lvl, v_lvl]).app(v_lvl.sort()),
+        )
+        store = TermStore(None, capacity=16)
+        try:
+            h1_0 = store.import_const_term(d1.name.const([W_LEVEL_ZERO]), d1, d1.type)
+            h1_1 = store.import_const_term(d1.name.const([l1]), d1, d1.type)
+            assert h1_0 != h1_1
+            h2_0 = store.import_const_term(d2.name.const([W_LEVEL_ZERO]), d2, d2.type)
+            assert store.field_b(h2_0) == h1_0
+            h2_1 = store.import_const_term(d2.name.const([l1]), d2, d2.type)
+            assert store.field_b(h2_1) == h1_1
+            h3_01 = store.import_const_term(d3.name.const([W_LEVEL_ZERO, l1]), d3, d3.type)
+            h3_10 = store.import_const_term(d3.name.const([l1, W_LEVEL_ZERO]), d3, d3.type)
+            assert h3_01 != h3_10
+            assert store.import_const_term(d3.name.const([W_LEVEL_ZERO, l1]), d3, d3.type) == h3_01
+            # Reset invalidates _lgen1/_lgen2 cleanly
+            store.reset()
+            h1_0_after = store.import_const_term(d1.name.const([W_LEVEL_ZERO]), d1, d1.type)
+            assert store.export_term(h1_0_after).syntactic_eq(
+                f.const([W_LEVEL_ZERO]).app(W_LEVEL_ZERO.sort()),
+            )
+        finally:
+            store.free()
