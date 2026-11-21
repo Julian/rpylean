@@ -255,11 +255,16 @@ class EnvironmentBuilder(object):
             limit = last_nl + 1
             cursor.line = chunk
             cursor.length = limit
+            stop_on_decl = hook is not None
             while pos <= last_nl:
-                cursor.pos = pos
-                if parser._try_parse_compact(cursor, self):
-                    pos = cursor.pos
+                res = parser._parse_chunk_fast(
+                    chunk, pos, limit, self, stop_on_decl,
+                )
+                if res >= 0:
+                    pos = res
                 else:
+                    pos = ~res
+                    assert pos >= 0
                     nl = chunk.find('\n', pos)
                     assert nl >= 0
                     end = nl

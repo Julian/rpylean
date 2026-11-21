@@ -12,12 +12,16 @@ no JSON tree, no per-line ``compile()`` step.
 from __future__ import print_function
 
 from StringIO import StringIO
+import sys
 from textwrap import dedent
 
 from rpython.rlib.objectmodel import always_inline, dont_inline, newlist_hint, we_are_translated
 from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rbigint import rbigint
-from rpython.rtyper.lltypesystem import lltype, rffi
+from rpython.rtyper.annlowlevel import llstr
+from rpython.rtyper.lltypesystem import llmemory, lltype, rffi
+from rpython.rtyper.lltypesystem.lloperation import llop
+from rpython.rtyper.lltypesystem.rstr import STR
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
@@ -66,26 +70,37 @@ class RefCountTable(object):
         self.data = new_data
         self.cap = cap
 
-    @always_inline
-    def ensure(self, idx):
+    @dont_inline
+    def _ensure_slow(self, idx):
         if idx < 0:
             raise MalformedLine("negative expr index")
-        if idx >= self.length:
-            if idx >= self.cap:
-                self._grow(idx + 1)
-            self.length = idx + 1
+        if idx >= self.cap:
+            self._grow(idx + 1)
+        self.length = idx + 1
 
     @always_inline
-    def bump(self, idx):
-        if idx < 0:
-            raise MalformedLine("negative expr index")
-        if idx >= self.length:
-            if idx >= self.cap:
-                self._grow(idx + 1)
-            self.length = idx + 1
+    def ensure(self, idx):
+        if r_uint(idx) >= r_uint(self.length):
+            if idx == self.length and idx < self.cap:
+                self.length = idx + 1
+            else:
+                self._ensure_slow(idx)
+
+    @dont_inline
+    def _bump_slow(self, idx):
+        self._ensure_slow(idx)
         self.data[idx] = rffi.cast(
             rffi.UINT, rffi.cast(lltype.Signed, self.data[idx]) + 1,
         )
+
+    @always_inline
+    def bump(self, idx):
+        if r_uint(idx) < r_uint(self.length):
+            self.data[idx] = rffi.cast(
+                rffi.UINT, rffi.cast(lltype.Signed, self.data[idx]) + 1,
+            )
+        else:
+            self._bump_slow(idx)
 
     @always_inline
     def set_zero(self, idx):
@@ -192,17 +207,268 @@ def parse_line(line, builder):
     parse_cursor(cursor, builder)
 
 
+_IS_LITTLE_ENDIAN = sys.byteorder == "little"
+_IS_64BIT = sys.maxint > 2147483647
+_USE_FAST_WORDS = _IS_LITTLE_ENDIAN and _IS_64BIT
+_STR_BASE_OFS = (
+    llmemory.offsetof(STR, 'chars') + llmemory.itemoffsetof(STR.chars, 0)
+)
+_CHAR_SCALE = llmemory.sizeof(lltype.Char)
+
+
+def _w2(s):
+    assert len(s) == 2
+    return r_uint(ord(s[0])) | (r_uint(ord(s[1])) << 8)
+
+
+def _w4(s):
+    assert len(s) == 4
+    return (
+        r_uint(ord(s[0]))
+        | (r_uint(ord(s[1])) << 8)
+        | (r_uint(ord(s[2])) << 16)
+        | (r_uint(ord(s[3])) << 24)
+    )
+
+
+def _w6(s):
+    assert len(s) == 6
+    if not _IS_64BIT:
+        return r_uint(0)
+    return (
+        r_uint(ord(s[0]))
+        | (r_uint(ord(s[1])) << 8)
+        | (r_uint(ord(s[2])) << 16)
+        | (r_uint(ord(s[3])) << 24)
+        | (r_uint(ord(s[4])) << 32)
+        | (r_uint(ord(s[5])) << 40)
+    )
+
+
+def _w8(s):
+    assert len(s) == 8
+    if not _IS_64BIT:
+        return r_uint(0)
+    return (
+        r_uint(ord(s[0]))
+        | (r_uint(ord(s[1])) << 8)
+        | (r_uint(ord(s[2])) << 16)
+        | (r_uint(ord(s[3])) << 24)
+        | (r_uint(ord(s[4])) << 32)
+        | (r_uint(ord(s[5])) << 40)
+        | (r_uint(ord(s[6])) << 48)
+        | (r_uint(ord(s[7])) << 56)
+    )
+
+
+_MASK48 = r_uint(0xffffffffffff) if _IS_64BIT else r_uint(0)
+_U64_NL = r_uint(0x0a0a0a0a0a0a0a0a) if _IS_64BIT else r_uint(0)
+_U64_01 = r_uint(0x0101010101010101) if _IS_64BIT else r_uint(0)
+_U64_80 = r_uint(0x8080808080808080) if _IS_64BIT else r_uint(0)
+
+# Compile-time packed little-endian word literals for canonical compact lines.
+_W8_APP_0 = _w8('{"app":{')
+_W8_APP_1 = _w8(':{"arg":')
+_W4_FN_0 = _w4(',"fn')
+_W2_COLON = _w2('":')
+_W4_IE_0 = _w4('},"i')
+_W4_IE_1 = _w4('ie":')
+
+_W6_IE = _w6('{"ie":')
+_W6_IN = _w6('{"in":')
+_W6_IL = _w6('{"il":')
+
+_W8_LAM_0 = _w8(',"lam":{')
+_W8_LAM_1 = _w8('"binderI')
+_W8_LAM_2 = _w8('rInfo":"')
+
+_W8_FORALL_0 = _w8('{"forall')
+_W8_FORALL_1 = _w8('E":{"bin')
+_W8_FORALL_2 = _w8('derInfo"')
+_W2_COL_Q = _w2(':"')
+
+_W8_BINFO_DEF = _w8('default"')
+_W8_BINFO_IMP = _w8('implicit')
+_W8_BINFO_INST0 = _w8('instImpl')
+_W8_BINFO_INST1 = _w8('mplicit"')
+_W8_BINFO_STR0 = _w8('strictIm')
+
+_W8_BODY = _w8(',"body":')
+_W8_NAME = _w8(',"name":')
+_W8_TYPE = _w8(',"type":')
+_W8_VAL0 = _w8(',"value"')
+
+_W8_CONST_0 = _w8('{"const"')
+_W8_CONST_1 = _w8(':{"name"')
+_W4_US_0 = _w4(',"us')
+_W4_US_1 = _w4('s":[')
+
+_W8_IN_STR_0 = _w8(',"str":{')
+_W8_IN_STR_1 = _w8(':{"pre":')
+_W8_IN_STR_2 = _w8(',"str":"')
+_W8_IN_NUM_0 = _w8(',"num":{')
+_W4_IN_NUM_1 = _w4('"i":')
+_W4_PRE_0 = _w4(',"pr')
+_W4_PRE_1 = _w4('re":')
+_W2_CLOSE2 = _w2('}}')
+
+_W8_THM_0 = _w8('{"thm":{')
+_W8_DEF_0 = _w8('{"def":{')
+_W8_OPQ_0 = _w8('{"opaque')
+_W4_OPQ_1 = _w4('e":{')
+_W4_ALL_0 = _w4('"all')
+_W4_ALL_1 = _w4('l":[')
+_W8_LPAR_0 = _w8('"levelPa')
+_W8_LPAR_1 = _w8('arams":[')
+_W8_CLPAR_0 = _w8(',"levelP')
+_W8_CLPAR_1 = _w8('Params":')
+
+_W8_HINTS_0 = _w8(',"hints"')
+_W8_H_ABBREV = _w8('"abbrev"')
+_W8_H_OPAQUE = _w8('"opaque"')
+_W8_H_REG_0 = _w8('{"regula')
+_W4_H_REG_1 = _w4('ar":')
+_W8_SAF_0 = _w8(',"safety')
+_W4_SAF_1 = _w4('y":"')
+_W4_SAFE = _w4('safe')
+_W8_PARTIAL = _w8('partial"')
+_W4_UNSA = _w4('unsa')
+_W4_AFE_Q = _w4('afe"')
+
+_W8_ISUN_0 = _w8('"isUnsaf')
+_W4_ISUN_1 = _w4('fe":')
+_W4_ALSE = _w4('alse')
+_W4_TRUE = _w4('true')
+
+_W8_BVAR_0 = _w8('{"bvar":')
+_W4_BVAR_IE0 = _w4(',"ie')
+_W8_SORT = _w8(',"sort":')
+_W8_LETE_0 = _w8(',"letE":')
+_W8_LETE_1 = _w8('{"body":')
+_W8_NDEP_0 = _w8(',"nondep')
+_W8_NDEP_F = _w8('":false,')
+_W8_NDEP_T = _w8('":true,"')
+_W8_PROJ_0 = _w8(',"proj":')
+_W8_PROJ_1 = _w8(':{"idx":')
+_W8_STRUCT_0 = _w8(',"struct')
+_W4_STRUCT_1 = _w4('ct":')
+_W8_TNAME_0 = _w8(',"typeNa')
+_W4_TNAME_1 = _w4('me":')
+_W8_STRV_0 = _w8(',"strVal')
+_W8_NATV_0 = _w8(',"natVal')
+_W4_VAL_Q = _w4('l":"')
+
+_W8_SUCC = _w8(',"succ":')
+_W8_PARAM_0 = _w8(',"param"')
+_W8_MAX = _w8(',"max":[')
+_W8_IMAX_0 = _w8(',"imax":')
+
+
+@always_inline
+def _load_u64(s, p):
+    if we_are_translated():
+        lls = llstr(s)
+        return llop.gc_load_indexed(
+            lltype.Unsigned,
+            lltype.cast_opaque_ptr(llmemory.GCREF, lls),
+            p,
+            _CHAR_SCALE,
+            _STR_BASE_OFS,
+        )
+    return (
+        r_uint(ord(s[p]))
+        | (r_uint(ord(s[p + 1])) << 8)
+        | (r_uint(ord(s[p + 2])) << 16)
+        | (r_uint(ord(s[p + 3])) << 24)
+        | (r_uint(ord(s[p + 4])) << 32)
+        | (r_uint(ord(s[p + 5])) << 40)
+        | (r_uint(ord(s[p + 6])) << 48)
+        | (r_uint(ord(s[p + 7])) << 56)
+    )
+
+
+@always_inline
+def _load_u32(s, p):
+    if we_are_translated():
+        lls = llstr(s)
+        return rffi.cast(
+            lltype.Unsigned,
+            llop.gc_load_indexed(
+                rffi.UINT,
+                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
+                p,
+                _CHAR_SCALE,
+                _STR_BASE_OFS,
+            ),
+        )
+    return (
+        r_uint(ord(s[p]))
+        | (r_uint(ord(s[p + 1])) << 8)
+        | (r_uint(ord(s[p + 2])) << 16)
+        | (r_uint(ord(s[p + 3])) << 24)
+    )
+
+
+@always_inline
+def _load_u16(s, p):
+    if we_are_translated():
+        lls = llstr(s)
+        return rffi.cast(
+            lltype.Unsigned,
+            llop.gc_load_indexed(
+                rffi.USHORT,
+                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
+                p,
+                _CHAR_SCALE,
+                _STR_BASE_OFS,
+            ),
+        )
+    return r_uint(ord(s[p])) | (r_uint(ord(s[p + 1])) << 8)
+
+
+@always_inline
+def _load_u8(s, p):
+    if we_are_translated():
+        lls = llstr(s)
+        return rffi.cast(
+            lltype.Signed,
+            llop.gc_load_indexed(
+                rffi.UCHAR,
+                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
+                p,
+                _CHAR_SCALE,
+                _STR_BASE_OFS,
+            ),
+        )
+    return ord(s[p])
+
+
+@always_inline
+def _find_nl(line, p, end):
+    """Return the index right after the next '\\n' in line[p:end], or ``end``."""
+    while p + 8 <= end:
+        x = _load_u64(line, p) ^ _U64_NL
+        if ((x - _U64_01) & (~x) & _U64_80) != r_uint(0):
+            break
+        p += 8
+    while p < end:
+        if _load_u8(line, p) == 10:
+            return p + 1
+        p += 1
+    return end
+
+
 @always_inline
 def _read_uint(line, p, end):
     if p >= end:
         return -1, p
-    d = ord(line[p]) - 48
+    d = _load_u8(line, p) - 48
     if r_uint(d) > r_uint(9):
         return -1, p
     val = d
     p += 1
     while p < end:
-        d = ord(line[p]) - 48
+        d = _load_u8(line, p) - 48
         if r_uint(d) > r_uint(9):
             break
         val = val * 10 + d
@@ -212,54 +478,91 @@ def _read_uint(line, p, end):
 
 @always_inline
 def _at_eol_pos(line, p, end):
-    if p == end:
-        return p
-    c = line[p]
-    if c == '\n':
-        return p + 1
-    if c == '\r' and p + 1 < end and line[p + 1] == '\n':
-        return p + 2
-    return -1
+    if p < end:
+        c = _load_u8(line, p)
+        if c == 10:
+            return p + 1
+        if c == 13 and p + 1 < end and _load_u8(line, p + 1) == 10:
+            return p + 2
+        return -1
+    return p
 
 
 @always_inline
 def _match_binfo_at(line, p, end):
-    if p >= end:
+    if p + 8 > end:
         return -1, p
-    c = line[p]
-    if c == 'd':
-        if (p + 8 <= end
-                and line[p + 1] == 'e' and line[p + 2] == 'f'
-                and line[p + 3] == 'a' and line[p + 4] == 'u'
-                and line[p + 5] == 'l' and line[p + 6] == 't'
-                and line[p + 7] == '"'):
-            return 0, p + 8
-    elif c == 'i':
-        if p + 9 <= end and line[p + 1] == 'm':
-            if (line[p + 2] == 'p' and line[p + 3] == 'l'
-                    and line[p + 4] == 'i' and line[p + 5] == 'c'
-                    and line[p + 6] == 'i' and line[p + 7] == 't'
-                    and line[p + 8] == '"'):
-                return 1, p + 9
-        elif p + 13 <= end and line[p + 1] == 'n':
-            if (line[p + 2] == 's' and line[p + 3] == 't'
-                    and line[p + 4] == 'I' and line[p + 5] == 'm'
-                    and line[p + 6] == 'p' and line[p + 7] == 'l'
-                    and line[p + 8] == 'i' and line[p + 9] == 'c'
-                    and line[p + 10] == 'i' and line[p + 11] == 't'
-                    and line[p + 12] == '"'):
-                return 2, p + 13
-    elif c == 's':
-        if (p + 15 <= end
-                and line[p + 1] == 't' and line[p + 2] == 'r'
-                and line[p + 3] == 'i' and line[p + 4] == 'c'
-                and line[p + 5] == 't' and line[p + 6] == 'I'
-                and line[p + 7] == 'm' and line[p + 8] == 'p'
-                and line[p + 9] == 'l' and line[p + 10] == 'i'
-                and line[p + 11] == 'c' and line[p + 12] == 'i'
-                and line[p + 13] == 't' and line[p + 14] == '"'):
+    w = _load_u64(line, p)
+    if w == _W8_BINFO_DEF:
+        return 0, p + 8
+    if w == _W8_BINFO_IMP:
+        if p + 9 <= end and _load_u8(line, p + 8) == 34:
+            return 1, p + 9
+    elif w == _W8_BINFO_INST0:
+        if p + 13 <= end and _load_u64(line, p + 5) == _W8_BINFO_INST1:
+            return 2, p + 13
+    elif w == _W8_BINFO_STR0:
+        if p + 15 <= end and _load_u64(line, p + 7) == _W8_BINFO_INST1:
             return 3, p + 15
     return -1, p
+
+
+@always_inline
+def _skip_uint_array(line, q, end):
+    """Skip ``]`` or ``N(,N)*]`` starting just after ``[``.
+    Returns position right after ``]``, or -1 on mismatch."""
+    if q < end and _load_u8(line, q) == 93:
+        return q + 1
+    while True:
+        v, q = _read_uint(line, q, end)
+        if v < 0 or q >= end:
+            return -1
+        ch = _load_u8(line, q)
+        if ch == 93:
+            return q + 1
+        if ch != 44:
+            return -1
+        q += 1
+
+
+@always_inline
+def _read_level_names(line, q, end, builder):
+    """Read ``]`` or ``N(,N)*]`` of name indices into a list of Names."""
+    if q < end and _load_u8(line, q) == 93:
+        return objects._EMPTY_LEVEL_NAMES, q + 1
+    levels = []
+    while True:
+        lidx, q = _read_uint(line, q, end)
+        if lidx < 0 or q >= end:
+            return None, -1
+        levels.append(builder.names[lidx])
+        ch = _load_u8(line, q)
+        if ch == 93:
+            return levels, q + 1
+        if ch != 44:
+            return None, -1
+        q += 1
+
+
+@always_inline
+def _ref_expr_rc(exprs, rc_data, eidx):
+    assert eidx >= 0
+    e = exprs[eidx]
+    assert e is not None
+    c = rffi.cast(lltype.Signed, rc_data[eidx]) - 1
+    assert c >= 0
+    rc_data[eidx] = rffi.cast(rffi.UINT, c)
+    if c == 0:
+        exprs[eidx] = None
+    return e
+
+
+@always_inline
+def _reg_expr_rc(builder, exprs, eidx, w_expr):
+    if eidx == len(exprs):
+        exprs.append(w_expr)
+    else:
+        builder.register_expr(eidx, w_expr)
 
 
 @always_inline
@@ -278,141 +581,131 @@ def _ref_expr_fast(builder, eidx):
     return e
 
 
-def _match_binder_info_compact(cursor):
-    """Match a compact ``binderInfo`` string value + closing quote without
-    allocating. Returns 0=default, 1=implicit, 2=instImplicit,
-    3=strictImplicit, or -1 on mismatch."""
-    code, np = _match_binfo_at(cursor.line, cursor.pos, cursor.length)
-    if code >= 0:
-        cursor.pos = np
-    return code
-
-
 @always_inline
 def _binder_from_code(name, code, type):
     return objects.Binder(name, type, style=code)
 
 
-def _try_parse_compact(cursor, builder):
-    """Fast zero-key-allocation path for canonical compact lean4export lines
-    (no whitespace, alphabetical keys). Returns True if handled; on any
-    deviation the caller rewinds ``cursor.pos`` and uses the general path."""
-    line = cursor.line
-    p = cursor.pos
-    end = cursor.length
-    if p + 6 > end or line[p] != '{' or line[p + 1] != '"':
-        return False
-    c2 = line[p + 2]
-    if c2 == 'a':
-        # {"app":{"arg":A,"fn":F},"ie":E}
-        if (p + 14 <= end
-                and line[p + 3] == 'p' and line[p + 4] == 'p'
-                and line[p + 5] == '"' and line[p + 6] == ':'
-                and line[p + 7] == '{' and line[p + 8] == '"'
-                and line[p + 9] == 'a' and line[p + 10] == 'r'
-                and line[p + 11] == 'g' and line[p + 12] == '"'
-                and line[p + 13] == ':'):
-            arg_eidx, q = _read_uint(line, p + 14, end)
-            if (arg_eidx >= 0 and q + 6 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'f' and line[q + 3] == 'n'
-                    and line[q + 4] == '"' and line[q + 5] == ':'):
-                fn_eidx, q = _read_uint(line, q + 6, end)
-                if (fn_eidx >= 0 and q + 7 <= end
-                        and line[q] == '}' and line[q + 1] == ','
-                        and line[q + 2] == '"' and line[q + 3] == 'i'
-                        and line[q + 4] == 'e' and line[q + 5] == '"'
-                        and line[q + 6] == ':'):
-                    eidx, q = _read_uint(line, q + 7, end)
-                    if eidx >= 0 and q < end and line[q] == '}':
-                        np = _at_eol_pos(line, q + 1, end)
+@dont_inline
+def _try_parse_compact_rare(line, pos, end, builder):
+    """Compact word-matched parser for non-app/lam/forallE canonical records:
+    ordered by frequency: ``in``, ``const``, ``thm``, ``ie:*``, ``def``,
+    ``opaque``, ``il``, ``bvar``.
+
+    Returns an integer ``(next_pos << 1) | (1 if is_decl else 0)`` on match
+    (zero tuple allocation), or ``-1`` to fall back to ``parse_cursor_general``.
+    """
+    if pos + 8 > end:
+        return -1
+    w0 = _load_u64(line, pos)
+    w6 = w0 & _MASK48
+    if w6 == _W6_IN:
+        # {"in":N,"str":{"pre":P,"str":"..."}} or {"in":N,"num":{"i":I,"pre":P}}
+        nidx, q = _read_uint(line, pos + 6, end)
+        if nidx >= 0 and q + 12 <= end:
+            dw = _load_u64(line, q)
+            if (dw == _W8_IN_STR_0 and q + 14 <= end
+                    and _load_u64(line, q + 6) == _W8_IN_STR_1):
+                pre, q = _read_uint(line, q + 14, end)
+                if pre >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_IN_STR_2:
+                    s = q + 8
+                    q = s
+                    while q < end:
+                        ch = _load_u8(line, q)
+                        if ch == 34:
+                            break
+                        if ch == 92 or ch == 10:
+                            q = -1
+                            break
+                        q += 1
+                    if (q >= 0 and q + 3 <= end and _load_u8(line, q) == 34
+                            and _load_u16(line, q + 1) == _W2_CLOSE2):
+                        np = _at_eol_pos(line, q + 3, end)
                         if np >= 0:
-                            cursor.pos = np
-                            builder.register_expr(
-                                eidx,
-                                objects.W_App(
-                                    _ref_expr_fast(builder, fn_eidx),
-                                    _ref_expr_fast(builder, arg_eidx),
+                            assert s >= 0 and q >= s
+                            builder.register_name(
+                                nidx, builder.names[pre].child(line[s:q]),
+                            )
+                            return np << 1
+            elif dw == _W8_IN_NUM_0 and _load_u32(line, q + 8) == _W4_IN_NUM_1:
+                id_val, q = _read_uint(line, q + 12, end)
+                if (id_val >= 0 and q + 7 <= end
+                        and _load_u32(line, q) == _W4_PRE_0
+                        and _load_u32(line, q + 3) == _W4_PRE_1):
+                    pre, q = _read_uint(line, q + 7, end)
+                    if (pre >= 0 and q + 2 <= end
+                            and _load_u16(line, q) == _W2_CLOSE2):
+                        np = _at_eol_pos(line, q + 2, end)
+                        if np >= 0:
+                            builder.register_name(
+                                nidx,
+                                builder.names[pre].num_child(
+                                    rbigint.fromint(id_val),
                                 ),
                             )
-                            return True
-        return False
-    if c2 == 'c':
+                            return np << 1
+        return -1
+    if w0 == _W8_CONST_0:
         # {"const":{"name":N,"us":[...]},"ie":E}
-        if (p + 17 <= end
-                and line[p + 3] == 'o' and line[p + 4] == 'n'
-                and line[p + 5] == 's' and line[p + 6] == 't'
-                and line[p + 7] == '"' and line[p + 8] == ':'
-                and line[p + 9] == '{' and line[p + 10] == '"'
-                and line[p + 11] == 'n' and line[p + 12] == 'a'
-                and line[p + 13] == 'm' and line[p + 14] == 'e'
-                and line[p + 15] == '"' and line[p + 16] == ':'):
-            nidx, q = _read_uint(line, p + 17, end)
+        if (pos + 17 <= end
+                and _load_u64(line, pos + 8) == _W8_CONST_1
+                and _load_u8(line, pos + 16) == 58):
+            nidx, q = _read_uint(line, pos + 17, end)
             if (nidx >= 0 and q + 7 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'u' and line[q + 3] == 's'
-                    and line[q + 4] == '"' and line[q + 5] == ':'
-                    and line[q + 6] == '['):
+                    and _load_u32(line, q) == _W4_US_0
+                    and _load_u32(line, q + 3) == _W4_US_1):
                 q += 7
-                if q < end and line[q] == ']':
+                if q < end and _load_u8(line, q) == 93:
                     q += 1
                     if (q + 7 <= end
-                            and line[q] == '}' and line[q + 1] == ','
-                            and line[q + 2] == '"' and line[q + 3] == 'i'
-                            and line[q + 4] == 'e' and line[q + 5] == '"'
-                            and line[q + 6] == ':'):
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
                         eidx, q = _read_uint(line, q + 7, end)
-                        if eidx >= 0 and q < end and line[q] == '}':
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
                             np = _at_eol_pos(line, q + 1, end)
                             if np >= 0:
-                                cursor.pos = np
                                 builder.register_expr(
                                     eidx, builder.names[nidx].const_empty(),
                                 )
-                                return True
-                    return False
+                                return np << 1
+                    return -1
                 l0, q = _read_uint(line, q, end)
                 if l0 < 0 or q >= end:
-                    return False
-                ch = line[q]
-                if ch == ']':
+                    return -1
+                ch = _load_u8(line, q)
+                if ch == 93:
                     q += 1
                     if (q + 7 <= end
-                            and line[q] == '}' and line[q + 1] == ','
-                            and line[q + 2] == '"' and line[q + 3] == 'i'
-                            and line[q + 4] == 'e' and line[q + 5] == '"'
-                            and line[q + 6] == ':'):
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
                         eidx, q = _read_uint(line, q + 7, end)
-                        if eidx >= 0 and q < end and line[q] == '}':
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
                             np = _at_eol_pos(line, q + 1, end)
                             if np >= 0:
-                                cursor.pos = np
                                 builder.register_expr(
                                     eidx,
                                     objects._mk_w_const1(
-                                        builder.names[nidx], builder.levels[l0],
+                                        builder.names[nidx],
+                                        builder.levels[l0],
                                     ),
                                 )
-                                return True
-                    return False
-                if ch != ',':
-                    return False
+                                return np << 1
+                    return -1
+                if ch != 44:
+                    return -1
                 l1, q = _read_uint(line, q + 1, end)
                 if l1 < 0 or q >= end:
-                    return False
-                ch = line[q]
-                if ch == ']':
+                    return -1
+                ch = _load_u8(line, q)
+                if ch == 93:
                     q += 1
                     if (q + 7 <= end
-                            and line[q] == '}' and line[q + 1] == ','
-                            and line[q + 2] == '"' and line[q + 3] == 'i'
-                            and line[q + 4] == 'e' and line[q + 5] == '"'
-                            and line[q + 6] == ':'):
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
                         eidx, q = _read_uint(line, q + 7, end)
-                        if eidx >= 0 and q < end and line[q] == '}':
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
                             np = _at_eol_pos(line, q + 1, end)
                             if np >= 0:
-                                cursor.pos = np
                                 builder.register_expr(
                                     eidx,
                                     objects._mk_w_const2(
@@ -421,292 +714,593 @@ def _try_parse_compact(cursor, builder):
                                         builder.levels[l1],
                                     ),
                                 )
-                                return True
-                    return False
-                if ch != ',':
-                    return False
+                                return np << 1
+                    return -1
+                if ch != 44:
+                    return -1
                 q += 1
                 levels = [builder.levels[l0], builder.levels[l1]]
                 while True:
                     lidx, q = _read_uint(line, q, end)
-                    if lidx < 0:
-                        return False
+                    if lidx < 0 or q >= end:
+                        return -1
                     levels.append(builder.levels[lidx])
-                    if q >= end:
-                        return False
-                    ch = line[q]
-                    if ch == ']':
+                    ch = _load_u8(line, q)
+                    if ch == 93:
                         q += 1
                         break
-                    if ch != ',':
-                        return False
+                    if ch != 44:
+                        return -1
                     q += 1
                 if (q + 7 <= end
-                        and line[q] == '}' and line[q + 1] == ','
-                        and line[q + 2] == '"' and line[q + 3] == 'i'
-                        and line[q + 4] == 'e' and line[q + 5] == '"'
-                        and line[q + 6] == ':'):
+                        and _load_u32(line, q) == _W4_IE_0
+                        and _load_u32(line, q + 3) == _W4_IE_1):
                     eidx, q = _read_uint(line, q + 7, end)
-                    if eidx >= 0 and q < end and line[q] == '}':
+                    if eidx >= 0 and q < end and _load_u8(line, q) == 125:
                         np = _at_eol_pos(line, q + 1, end)
                         if np >= 0:
-                            cursor.pos = np
                             builder.register_expr(
                                 eidx, builder.names[nidx].const(levels),
                             )
-                            return True
-        return False
-    if c2 == 'i':
-        c3 = line[p + 3]
-        if c3 == 'e':
-            # {"ie":E,"lam":... | "letE":... | "natVal":... | "sort":L | "proj":...}
-            if line[p + 4] == '"' and line[p + 5] == ':':
-                eidx, q = _read_uint(line, p + 6, end)
-                if eidx < 0 or q + 4 >= end or line[q] != ',' or line[q + 1] != '"':
-                    return False
-                d0 = line[q + 2]
-                if d0 == 'l':
-                    if (q + 22 <= end
-                            and line[q + 3] == 'a' and line[q + 4] == 'm'
-                            and line[q + 5] == '"' and line[q + 6] == ':'
-                            and line[q + 7] == '{' and line[q + 8] == '"'
-                            and line[q + 9] == 'b' and line[q + 10] == 'i'
-                            and line[q + 11] == 'n' and line[q + 12] == 'd'
-                            and line[q + 13] == 'e' and line[q + 14] == 'r'
-                            and line[q + 15] == 'I' and line[q + 16] == 'n'
-                            and line[q + 17] == 'f' and line[q + 18] == 'o'
-                            and line[q + 19] == '"' and line[q + 20] == ':'
-                            and line[q + 21] == '"'):
-                        bcode, q = _match_binfo_at(line, q + 22, end)
-                        if (bcode >= 0 and q + 8 <= end
-                                and line[q] == ',' and line[q + 1] == '"'
-                                and line[q + 2] == 'b' and line[q + 3] == 'o'
-                                and line[q + 4] == 'd' and line[q + 5] == 'y'
-                                and line[q + 6] == '"' and line[q + 7] == ':'):
-                            body_eidx, q = _read_uint(line, q + 8, end)
-                            if (body_eidx >= 0 and q + 8 <= end
-                                    and line[q] == ',' and line[q + 1] == '"'
-                                    and line[q + 2] == 'n' and line[q + 3] == 'a'
-                                    and line[q + 4] == 'm' and line[q + 5] == 'e'
-                                    and line[q + 6] == '"' and line[q + 7] == ':'):
-                                name_idx, q = _read_uint(line, q + 8, end)
-                                if (name_idx >= 0 and q + 8 <= end
-                                        and line[q] == ',' and line[q + 1] == '"'
-                                        and line[q + 2] == 't' and line[q + 3] == 'y'
-                                        and line[q + 4] == 'p' and line[q + 5] == 'e'
-                                        and line[q + 6] == '"' and line[q + 7] == ':'):
-                                    type_eidx, q = _read_uint(line, q + 8, end)
-                                    if (type_eidx >= 0 and q + 2 <= end
-                                            and line[q] == '}' and line[q + 1] == '}'):
-                                        np = _at_eol_pos(line, q + 2, end)
-                                        if np >= 0:
-                                            cursor.pos = np
-                                            bound = _binder_from_code(
-                                                builder.names[name_idx],
-                                                bcode,
-                                                _ref_expr_fast(builder, type_eidx),
-                                            )
-                                            builder.register_expr(
-                                                eidx,
-                                                objects.W_Lambda(
-                                                    bound,
-                                                    _ref_expr_fast(builder, body_eidx),
-                                                ),
-                                            )
-                                            return True
-                    else:
-                        cursor.pos = q
-                        if cursor.match_lit(',"letE":{"body":'):
-                            body_eidx = cursor.read_uint_compact()
-                            if body_eidx >= 0 and cursor.match_lit(',"name":'):
-                                name_idx = cursor.read_uint_compact()
-                                if name_idx >= 0 and (
-                                        cursor.match_lit(',"nondep":false,"type":')
-                                        or cursor.match_lit(',"nondep":true,"type":')):
-                                    type_eidx = cursor.read_uint_compact()
-                                    if type_eidx >= 0 and cursor.match_lit(',"value":'):
-                                        value_eidx = cursor.read_uint_compact()
-                                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                                            builder.register_expr(
-                                                eidx,
-                                                objects.W_Let(
-                                                    builder.names[name_idx],
-                                                    _ref_expr_fast(builder, type_eidx),
-                                                    _ref_expr_fast(builder, value_eidx),
-                                                    _ref_expr_fast(builder, body_eidx),
-                                                ),
-                                            )
-                                            return True
-                elif d0 == 's':
-                    if (q + 8 <= end
-                            and line[q + 3] == 'o' and line[q + 4] == 'r'
-                            and line[q + 5] == 't' and line[q + 6] == '"'
-                            and line[q + 7] == ':'):
-                        lidx, q = _read_uint(line, q + 8, end)
-                        if lidx >= 0 and q < end and line[q] == '}':
-                            np = _at_eol_pos(line, q + 1, end)
+                            return np << 1
+        return -1
+    if w0 == _W8_THM_0:
+        # {"thm":{"all":[...],"levelParams":[...],"name":N,"type":T,"value":V}}
+        # (also accepts missing "all" key)
+        q = pos + 8
+        if (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                and _load_u32(line, q + 3) == _W4_ALL_1):
+            q = _skip_uint_array(line, q + 7, end)
+            if q < 0 or q >= end or _load_u8(line, q) != 44:
+                return -1
+            q += 1
+        if (q + 15 <= end and _load_u64(line, q) == _W8_LPAR_0
+                and _load_u64(line, q + 7) == _W8_LPAR_1):
+            levels, q = _read_level_names(line, q + 15, end, builder)
+            if levels is not None and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                name_idx, q = _read_uint(line, q + 8, end)
+                if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                    type_eidx, q = _read_uint(line, q + 8, end)
+                    if (type_eidx >= 0 and q + 9 <= end
+                            and _load_u64(line, q) == _W8_VAL0
+                            and _load_u8(line, q + 8) == 58):
+                        value_eidx, q = _read_uint(line, q + 9, end)
+                        if (value_eidx >= 0 and q + 2 <= end
+                                and _load_u16(line, q) == _W2_CLOSE2):
+                            np = _at_eol_pos(line, q + 2, end)
                             if np >= 0:
-                                cursor.pos = np
-                                builder.register_expr(
-                                    eidx, builder.levels[lidx].sort(),
+                                decl = builder.names[name_idx].theorem(
+                                    levels=levels,
+                                    type=_ref_expr_fast(builder, type_eidx),
+                                    value=_ref_expr_fast(builder, value_eidx),
                                 )
-                                return True
-                elif d0 == 'p':
-                    cursor.pos = q
-                    if cursor.match_lit(',"proj":{"idx":'):
-                        idx = cursor.read_uint_compact()
-                        if idx >= 0 and cursor.match_lit(',"struct":'):
-                            struct_eidx = cursor.read_uint_compact()
-                            if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
-                                tname_idx = cursor.read_uint_compact()
-                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
+                                builder.register_declaration(decl)
+                                return (np << 1) | 1
+        return -1
+    if w6 == _W6_IE:
+        eidx, q = _read_uint(line, pos + 6, end)
+        if eidx < 0 or q + 8 > end:
+            return -1
+        dw = _load_u64(line, q)
+        if dw == _W8_LETE_0:
+            # ,"letE":{"body":B,"name":N,"nondep":false|true,"type":T,"value":V}}
+            if q + 16 <= end and _load_u64(line, q + 8) == _W8_LETE_1:
+                body_eidx, q = _read_uint(line, q + 16, end)
+                if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                    name_idx, q = _read_uint(line, q + 8, end)
+                    if name_idx >= 0 and q + 22 <= end and _load_u64(line, q) == _W8_NDEP_0:
+                        nw = _load_u64(line, q + 8)
+                        if (nw == _W8_NDEP_F and q + 23 <= end
+                                and _load_u64(line, q + 15) == _W8_TYPE):
+                            q += 23
+                        elif nw == _W8_NDEP_T and _load_u64(line, q + 14) == _W8_TYPE:
+                            q += 22
+                        else:
+                            return -1
+                        type_eidx, q = _read_uint(line, q, end)
+                        if (type_eidx >= 0 and q + 9 <= end
+                                and _load_u64(line, q) == _W8_VAL0
+                                and _load_u8(line, q + 8) == 58):
+                            value_eidx, q = _read_uint(line, q + 9, end)
+                            if (value_eidx >= 0 and q + 2 <= end
+                                    and _load_u16(line, q) == _W2_CLOSE2):
+                                np = _at_eol_pos(line, q + 2, end)
+                                if np >= 0:
                                     builder.register_expr(
                                         eidx,
-                                        builder.names[tname_idx].proj(
-                                            idx, _ref_expr_fast(builder, struct_eidx),
+                                        objects.W_Let(
+                                            builder.names[name_idx],
+                                            _ref_expr_fast(builder, type_eidx),
+                                            _ref_expr_fast(builder, value_eidx),
+                                            _ref_expr_fast(builder, body_eidx),
                                         ),
                                     )
-                                    return True
-                elif d0 == 'n':
-                    cursor.pos = q
-                    if cursor.match_lit(',"natVal":"'):
-                        q2 = cursor.pos
-                        val = 0
-                        digits = 0
-                        while q2 < end and digits < 18:
-                            dd = ord(line[q2]) - 48
-                            if r_uint(dd) > r_uint(9):
-                                break
-                            val = val * 10 + dd
-                            q2 += 1
-                            digits += 1
-                        if digits > 0 and q2 + 2 <= end and line[q2] == '"' and line[q2 + 1] == '}':
-                            np = _at_eol_pos(line, q2 + 2, end)
+                                    return np << 1
+            return -1
+        if dw == _W8_PROJ_0:
+            # ,"proj":{"idx":I,"struct":S,"typeName":N}}
+            if q + 15 <= end and _load_u64(line, q + 7) == _W8_PROJ_1:
+                idx, q = _read_uint(line, q + 15, end)
+                if (idx >= 0 and q + 10 <= end
+                        and _load_u64(line, q) == _W8_STRUCT_0
+                        and _load_u32(line, q + 6) == _W4_STRUCT_1):
+                    struct_eidx, q = _read_uint(line, q + 10, end)
+                    if (struct_eidx >= 0 and q + 12 <= end
+                            and _load_u64(line, q) == _W8_TNAME_0
+                            and _load_u32(line, q + 8) == _W4_TNAME_1):
+                        tname_idx, q = _read_uint(line, q + 12, end)
+                        if (tname_idx >= 0 and q + 2 <= end
+                                and _load_u16(line, q) == _W2_CLOSE2):
+                            np = _at_eol_pos(line, q + 2, end)
                             if np >= 0:
-                                cursor.pos = np
                                 builder.register_expr(
-                                    eidx, objects._mk_w_litnat(rbigint.fromint(val)),
-                                )
-                                return True
-            return False
-        if c3 == 'n':
-            # {"in":N,"str":{"pre":P,"str":"..."}} or {"in":N,"num":{"i":I,"pre":P}}
-            if cursor.match_lit('{"in":'):
-                nidx = cursor.read_uint_compact()
-                if nidx >= 0:
-                    if cursor.match_lit(',"str":{"pre":'):
-                        pre = cursor.read_uint_compact()
-                        if pre >= 0 and cursor.match_lit(',"str":'):
-                            part = cursor.read_string()
-                            if cursor.match_lit('}}') and cursor.at_eol():
-                                builder.register_name(
-                                    nidx, builder.names[pre].child(part),
-                                )
-                                return True
-                    elif cursor.match_lit(',"num":{"i":'):
-                        id_val = cursor.read_uint_compact()
-                        if id_val >= 0 and cursor.match_lit(',"pre":'):
-                            pre = cursor.read_uint_compact()
-                            if pre >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                                builder.register_name(
-                                    nidx,
-                                    builder.names[pre].num_child(
-                                        rbigint.fromint(id_val),
+                                    eidx,
+                                    builder.names[tname_idx].proj(
+                                        idx, _ref_expr_fast(builder, struct_eidx),
                                     ),
                                 )
-                                return True
-            return False
-        if c3 == 'l':
-            # {"il":U,"succ":P | "param":N | "max":[L,R] | "imax":[L,R]}
-            if cursor.match_lit('{"il":'):
-                uidx = cursor.read_uint_compact()
-                if uidx >= 0:
-                    if cursor.match_lit(',"succ":'):
-                        parent = cursor.read_uint_compact()
-                        if parent >= 0 and cursor.match_lit('}') and cursor.at_eol():
-                            builder.register_level(
-                                uidx, builder.levels[parent].succ(),
-                            )
-                            return True
-                    elif cursor.match_lit(',"param":'):
-                        nidx = cursor.read_uint_compact()
-                        if nidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
-                            builder.register_level(
-                                uidx, builder.names[nidx].as_level_param(),
-                            )
-                            return True
-                    elif cursor.match_lit(',"max":['):
-                        lhs = cursor.read_uint_compact()
-                        if lhs >= 0 and cursor.match_lit(','):
-                            rhs = cursor.read_uint_compact()
-                            if rhs >= 0 and cursor.match_lit(']}') and cursor.at_eol():
-                                builder.register_level(
-                                    uidx,
-                                    objects.level_max(
-                                        builder.levels[lhs],
-                                        builder.levels[rhs],
+                                return np << 1
+            return -1
+        if dw == _W8_STRV_0:
+            # ,"strVal":"..."}
+            if q + 11 <= end and _load_u32(line, q + 7) == _W4_VAL_Q:
+                s = q + 11
+                q = s
+                while q < end:
+                    ch = _load_u8(line, q)
+                    if ch == 34:
+                        break
+                    if ch == 92 or ch == 10:
+                        return -1
+                    q += 1
+                if (q + 2 <= end and _load_u8(line, q) == 34
+                        and _load_u8(line, q + 1) == 125):
+                    np = _at_eol_pos(line, q + 2, end)
+                    if np >= 0:
+                        assert s >= 0 and q >= s
+                        builder.register_expr(
+                            eidx, objects._mk_w_litstr(line[s:q]),
+                        )
+                        return np << 1
+            return -1
+        if dw == _W8_SORT:
+            # ,"sort":L}
+            lidx, q = _read_uint(line, q + 8, end)
+            if lidx >= 0 and q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    builder.register_expr(eidx, builder.levels[lidx].sort())
+                    return np << 1
+            return -1
+        if dw == _W8_NATV_0:
+            # ,"natVal":"..."}
+            if q + 11 <= end and _load_u32(line, q + 7) == _W4_VAL_Q:
+                q2 = q + 11
+                val = 0
+                digits = 0
+                while q2 < end and digits < 18:
+                    dd = _load_u8(line, q2) - 48
+                    if r_uint(dd) > r_uint(9):
+                        break
+                    val = val * 10 + dd
+                    q2 += 1
+                    digits += 1
+                if (digits > 0 and q2 + 2 <= end
+                        and _load_u8(line, q2) == 34
+                        and _load_u8(line, q2 + 1) == 125):
+                    np = _at_eol_pos(line, q2 + 2, end)
+                    if np >= 0:
+                        builder.register_expr(
+                            eidx, objects._mk_w_litnat(rbigint.fromint(val)),
+                        )
+                        return np << 1
+            return -1
+        return -1
+    if w0 == _W8_DEF_0:
+        # {"def":{"all":[...],"hints":...,"levelParams":[...],"name":N,"safety":"...","type":T,"value":V}}
+        q = pos + 8
+        if not (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                and _load_u32(line, q + 3) == _W4_ALL_1):
+            return -1
+        q += 7
+        all_names = None
+        if q < end and _load_u8(line, q) == 93:
+            q += 1
+        else:
+            a0, q = _read_uint(line, q, end)
+            if a0 < 0 or q >= end:
+                return -1
+            ch = _load_u8(line, q)
+            if ch == 93:
+                q += 1
+            elif ch == 44:
+                all_names = [builder.names[a0]]
+                q += 1
+                while True:
+                    ak, q = _read_uint(line, q, end)
+                    if ak < 0 or q >= end:
+                        return -1
+                    all_names.append(builder.names[ak])
+                    ch = _load_u8(line, q)
+                    if ch == 93:
+                        q += 1
+                        break
+                    if ch != 44:
+                        return -1
+                    q += 1
+            else:
+                return -1
+        if not (q + 9 <= end and _load_u64(line, q) == _W8_HINTS_0
+                and _load_u8(line, q + 8) == 58):
+            return -1
+        q += 9
+        if q + 8 > end:
+            return -1
+        hw = _load_u64(line, q)
+        if hw == _W8_H_ABBREV:
+            hint = objects.HINT_ABBREV
+            q += 8
+        elif hw == _W8_H_OPAQUE:
+            hint = objects.HINT_OPAQUE
+            q += 8
+        elif (hw == _W8_H_REG_0 and q + 11 <= end
+                and _load_u32(line, q + 7) == _W4_H_REG_1):
+            hint, q = _read_uint(line, q + 11, end)
+            if hint < 0 or q >= end or _load_u8(line, q) != 125:
+                return -1
+            q += 1
+        else:
+            return -1
+        if not (q + 16 <= end and _load_u64(line, q) == _W8_CLPAR_0
+                and _load_u64(line, q + 7) == _W8_CLPAR_1
+                and _load_u8(line, q + 15) == 91):
+            return -1
+        levels, q = _read_level_names(line, q + 16, end, builder)
+        if levels is None or q + 8 > end or _load_u64(line, q) != _W8_NAME:
+            return -1
+        name_idx, q = _read_uint(line, q + 8, end)
+        if (name_idx < 0 or q + 11 > end
+                or _load_u64(line, q) != _W8_SAF_0
+                or _load_u32(line, q + 7) != _W4_SAF_1):
+            return -1
+        q += 11
+        if q + 5 <= end and _load_u32(line, q) == _W4_SAFE and _load_u8(line, q + 4) == 34:
+            safety = objects.SAFETY_SAFE
+            q += 5
+        elif q + 8 <= end and _load_u64(line, q) == _W8_PARTIAL:
+            safety = objects.SAFETY_PARTIAL
+            q += 8
+        elif (q + 7 <= end and _load_u32(line, q) == _W4_UNSA
+                and _load_u32(line, q + 3) == _W4_AFE_Q):
+            safety = objects.SAFETY_UNSAFE
+            q += 7
+        else:
+            return -1
+        if q + 8 > end or _load_u64(line, q) != _W8_TYPE:
+            return -1
+        type_eidx, q = _read_uint(line, q + 8, end)
+        if (type_eidx < 0 or q + 9 > end
+                or _load_u64(line, q) != _W8_VAL0
+                or _load_u8(line, q + 8) != 58):
+            return -1
+        value_eidx, q = _read_uint(line, q + 9, end)
+        if value_eidx < 0 or q + 2 > end or _load_u16(line, q) != _W2_CLOSE2:
+            return -1
+        np = _at_eol_pos(line, q + 2, end)
+        if np < 0:
+            return -1
+        decl = builder.names[name_idx].definition(
+            levels=levels,
+            type=_ref_expr_fast(builder, type_eidx),
+            value=_ref_expr_fast(builder, value_eidx),
+            hint=hint,
+            safety=safety,
+            all=all_names,
+        )
+        builder.register_declaration(decl)
+        return (np << 1) | 1
+    if w0 == _W8_OPQ_0:
+        # {"opaque":{"all":[...],"isUnsafe":false|true,"levelParams":[...],"name":N,"type":T,"value":V}}
+        if pos + 11 <= end and _load_u32(line, pos + 7) == _W4_OPQ_1:
+            q = pos + 11
+            if (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                    and _load_u32(line, q + 3) == _W4_ALL_1):
+                q = _skip_uint_array(line, q + 7, end)
+                if q < 0 or q >= end or _load_u8(line, q) != 44:
+                    return -1
+                q += 1
+            if (q + 11 <= end and _load_u64(line, q) == _W8_ISUN_0
+                    and _load_u32(line, q + 7) == _W4_ISUN_1):
+                q += 11
+                if (q + 6 <= end and _load_u8(line, q) == 102
+                        and _load_u32(line, q + 1) == _W4_ALSE
+                        and _load_u8(line, q + 5) == 44):
+                    is_unsafe = False
+                    q += 6
+                elif (q + 5 <= end and _load_u32(line, q) == _W4_TRUE
+                        and _load_u8(line, q + 4) == 44):
+                    is_unsafe = True
+                    q += 5
+                else:
+                    return -1
+                if (q + 15 <= end and _load_u64(line, q) == _W8_LPAR_0
+                        and _load_u64(line, q + 7) == _W8_LPAR_1):
+                    levels, q = _read_level_names(line, q + 15, end, builder)
+                    if (levels is not None and q + 8 <= end
+                            and _load_u64(line, q) == _W8_NAME):
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if (name_idx >= 0 and q + 8 <= end
+                                and _load_u64(line, q) == _W8_TYPE):
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 9 <= end
+                                    and _load_u64(line, q) == _W8_VAL0
+                                    and _load_u8(line, q + 8) == 58):
+                                value_eidx, q = _read_uint(line, q + 9, end)
+                                if (value_eidx >= 0 and q + 2 <= end
+                                        and _load_u16(line, q) == _W2_CLOSE2):
+                                    np = _at_eol_pos(line, q + 2, end)
+                                    if np >= 0:
+                                        decl = builder.names[name_idx].opaque(
+                                            levels=levels,
+                                            type=_ref_expr_fast(builder, type_eidx),
+                                            value=_ref_expr_fast(builder, value_eidx),
+                                            is_unsafe=is_unsafe,
+                                        )
+                                        builder.register_declaration(decl)
+                                        return (np << 1) | 1
+        return -1
+    if w6 == _W6_IL:
+        # {"il":U,"succ":P | "param":N | "max":[L,R] | "imax":[L,R]}
+        uidx, q = _read_uint(line, pos + 6, end)
+        if uidx < 0 or q + 8 > end:
+            return -1
+        dw = _load_u64(line, q)
+        if dw == _W8_SUCC:
+            parent, q = _read_uint(line, q + 8, end)
+            if parent >= 0 and q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    builder.register_level(uidx, builder.levels[parent].succ())
+                    return np << 1
+        elif dw == _W8_PARAM_0 and q + 9 <= end and _load_u8(line, q + 8) == 58:
+            nidx, q = _read_uint(line, q + 9, end)
+            if nidx >= 0 and q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    builder.register_level(
+                        uidx, builder.names[nidx].as_level_param(),
+                    )
+                    return np << 1
+        elif dw == _W8_MAX:
+            lhs, q = _read_uint(line, q + 8, end)
+            if lhs >= 0 and q < end and _load_u8(line, q) == 44:
+                rhs, q = _read_uint(line, q + 1, end)
+                if (rhs >= 0 and q + 2 <= end
+                        and _load_u8(line, q) == 93
+                        and _load_u8(line, q + 1) == 125):
+                    np = _at_eol_pos(line, q + 2, end)
+                    if np >= 0:
+                        builder.register_level(
+                            uidx,
+                            objects.level_max(
+                                builder.levels[lhs], builder.levels[rhs],
+                            ),
+                        )
+                        return np << 1
+        elif dw == _W8_IMAX_0 and q + 9 <= end and _load_u8(line, q + 8) == 91:
+            lhs, q = _read_uint(line, q + 9, end)
+            if lhs >= 0 and q < end and _load_u8(line, q) == 44:
+                rhs, q = _read_uint(line, q + 1, end)
+                if (rhs >= 0 and q + 2 <= end
+                        and _load_u8(line, q) == 93
+                        and _load_u8(line, q + 1) == 125):
+                    np = _at_eol_pos(line, q + 2, end)
+                    if np >= 0:
+                        builder.register_level(
+                            uidx,
+                            objects.level_imax(
+                                builder.levels[lhs], builder.levels[rhs],
+                            ),
+                        )
+                        return np << 1
+        return -1
+    if w0 == _W8_BVAR_0:
+        # {"bvar":B,"ie":E}
+        bidx, q = _read_uint(line, pos + 8, end)
+        if (bidx >= 0 and q + 6 <= end
+                and _load_u32(line, q) == _W4_BVAR_IE0
+                and _load_u16(line, q + 4) == _W2_COLON):
+            eidx, q = _read_uint(line, q + 6, end)
+            if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    builder.register_expr(eidx, objects._mk_w_bvar(bidx))
+                    return np << 1
+        return -1
+    return -1
+
+
+def _parse_chunk_fast_rc(line, pos, end, builder, stop_on_decl):
+    """Ultra-tight 3-arm chunk loop (app/lam/forallE = ~91% of all lines) with
+    refcount table, exprs list, and names list hoisted into registers."""
+    counts = builder._refcount
+    assert counts is not None
+    rc_data = counts.data
+    exprs = builder.exprs
+    names = builder.names
+    while pos < end:
+        if pos + 8 > end:
+            return ~pos
+        w0 = _load_u64(line, pos)
+        if w0 == _W8_APP_0:
+            # {"app":{"arg":A,"fn":F},"ie":E}  (~73% of all lines)
+            if pos + 14 <= end and _load_u64(line, pos + 6) == _W8_APP_1:
+                arg_eidx, q = _read_uint(line, pos + 14, end)
+                if (arg_eidx >= 0 and q + 6 <= end
+                        and _load_u32(line, q) == _W4_FN_0
+                        and _load_u16(line, q + 4) == _W2_COLON):
+                    fn_eidx, q = _read_uint(line, q + 6, end)
+                    if (fn_eidx >= 0 and q + 7 <= end
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
+                        eidx, q = _read_uint(line, q + 7, end)
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                            np = _at_eol_pos(line, q + 1, end)
+                            if np >= 0:
+                                _reg_expr_rc(
+                                    builder, exprs, eidx,
+                                    objects.W_App(
+                                        _ref_expr_rc(exprs, rc_data, fn_eidx),
+                                        _ref_expr_rc(exprs, rc_data, arg_eidx),
                                     ),
                                 )
-                                return True
-                    elif cursor.match_lit(',"imax":['):
-                        lhs = cursor.read_uint_compact()
-                        if lhs >= 0 and cursor.match_lit(','):
-                            rhs = cursor.read_uint_compact()
-                            if rhs >= 0 and cursor.match_lit(']}') and cursor.at_eol():
-                                builder.register_level(
-                                    uidx,
-                                    objects.level_imax(
-                                        builder.levels[lhs],
-                                        builder.levels[rhs],
-                                    ),
-                                )
-                                return True
-            return False
-        return False
-    if c2 == 'f':
-        # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
-        if (p + 26 <= end
-                and line[p + 3] == 'o' and line[p + 4] == 'r'
-                and line[p + 5] == 'a' and line[p + 6] == 'l'
-                and line[p + 7] == 'l' and line[p + 8] == 'E'
-                and line[p + 9] == '"' and line[p + 10] == ':'
-                and line[p + 11] == '{' and line[p + 12] == '"'
-                and line[p + 13] == 'b' and line[p + 14] == 'i'
-                and line[p + 15] == 'n' and line[p + 16] == 'd'
-                and line[p + 17] == 'e' and line[p + 18] == 'r'
-                and line[p + 19] == 'I' and line[p + 20] == 'n'
-                and line[p + 21] == 'f' and line[p + 22] == 'o'
-                and line[p + 23] == '"' and line[p + 24] == ':'
-                and line[p + 25] == '"'):
-            bcode, q = _match_binfo_at(line, p + 26, end)
-            if (bcode >= 0 and q + 8 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'b' and line[q + 3] == 'o'
-                    and line[q + 4] == 'd' and line[q + 5] == 'y'
-                    and line[q + 6] == '"' and line[q + 7] == ':'):
-                body_eidx, q = _read_uint(line, q + 8, end)
-                if (body_eidx >= 0 and q + 8 <= end
-                        and line[q] == ',' and line[q + 1] == '"'
-                        and line[q + 2] == 'n' and line[q + 3] == 'a'
-                        and line[q + 4] == 'm' and line[q + 5] == 'e'
-                        and line[q + 6] == '"' and line[q + 7] == ':'):
-                    name_idx, q = _read_uint(line, q + 8, end)
-                    if (name_idx >= 0 and q + 8 <= end
-                            and line[q] == ',' and line[q + 1] == '"'
-                            and line[q + 2] == 't' and line[q + 3] == 'y'
-                            and line[q + 4] == 'p' and line[q + 5] == 'e'
-                            and line[q + 6] == '"' and line[q + 7] == ':'):
-                        type_eidx, q = _read_uint(line, q + 8, end)
-                        if (type_eidx >= 0 and q + 7 <= end
-                                and line[q] == '}' and line[q + 1] == ','
-                                and line[q + 2] == '"' and line[q + 3] == 'i'
-                                and line[q + 4] == 'e' and line[q + 5] == '"'
-                                and line[q + 6] == ':'):
-                            eidx, q = _read_uint(line, q + 7, end)
-                            if eidx >= 0 and q < end and line[q] == '}':
-                                np = _at_eol_pos(line, q + 1, end)
+                                pos = np
+                                continue
+            return ~pos
+        w6 = w0 & _MASK48
+        if w6 == _W6_IE:
+            # {"ie":E,"lam":{"binderInfo":"...","body":B,"name":N,"type":T}}
+            eidx, q = _read_uint(line, pos + 6, end)
+            if (eidx >= 0 and q + 22 <= end
+                    and _load_u64(line, q) == _W8_LAM_0
+                    and _load_u64(line, q + 8) == _W8_LAM_1
+                    and _load_u64(line, q + 14) == _W8_LAM_2):
+                bcode, q = _match_binfo_at(line, q + 22, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 2 <= end
+                                    and _load_u16(line, q) == _W2_CLOSE2):
+                                np = _at_eol_pos(line, q + 2, end)
                                 if np >= 0:
-                                    cursor.pos = np
+                                    bound = _binder_from_code(
+                                        names[name_idx],
+                                        bcode,
+                                        _ref_expr_rc(exprs, rc_data, type_eidx),
+                                    )
+                                    _reg_expr_rc(
+                                        builder, exprs, eidx,
+                                        objects.W_Lambda(
+                                            bound,
+                                            _ref_expr_rc(exprs, rc_data, body_eidx),
+                                        ),
+                                    )
+                                    pos = np
+                                    continue
+            rr = _try_parse_compact_rare(line, pos, end, builder)
+            if rr >= 0:
+                pos = rr >> 1
+                if (rr & 1) and stop_on_decl:
+                    return pos
+                continue
+            return ~pos
+        if w0 == _W8_FORALL_0:
+            # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
+            if (pos + 26 <= end
+                    and _load_u64(line, pos + 8) == _W8_FORALL_1
+                    and _load_u64(line, pos + 16) == _W8_FORALL_2
+                    and _load_u16(line, pos + 24) == _W2_COL_Q):
+                bcode, q = _match_binfo_at(line, pos + 26, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 7 <= end
+                                    and _load_u32(line, q) == _W4_IE_0
+                                    and _load_u32(line, q + 3) == _W4_IE_1):
+                                eidx, q = _read_uint(line, q + 7, end)
+                                if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                                    np = _at_eol_pos(line, q + 1, end)
+                                    if np >= 0:
+                                        bound = _binder_from_code(
+                                            names[name_idx],
+                                            bcode,
+                                            _ref_expr_rc(exprs, rc_data, type_eidx),
+                                        )
+                                        _reg_expr_rc(
+                                            builder, exprs, eidx,
+                                            objects.W_ForAll(
+                                                bound,
+                                                _ref_expr_rc(exprs, rc_data, body_eidx),
+                                            ),
+                                        )
+                                        pos = np
+                                        continue
+            return ~pos
+        rr = _try_parse_compact_rare(line, pos, end, builder)
+        if rr >= 0:
+            pos = rr >> 1
+            if (rr & 1) and stop_on_decl:
+                return pos
+            continue
+        return ~pos
+    return pos
+
+
+def _parse_chunk_fast(line, pos, end, builder, stop_on_decl):
+    """Tight chunk-level word-at-a-time parser for canonical compact lines.
+
+    Advances through as many lines in ``line[pos:end]`` as possible without
+    returning to the outer loop. Returns:
+      - ``new_pos >= 0`` if ``end`` was reached or a declaration was parsed
+        with ``stop_on_decl=True``;
+      - ``~pos`` (< 0) if the line at ``pos`` requires ``parse_cursor_general``.
+    """
+    if not _USE_FAST_WORDS:
+        return ~pos
+    if builder._refcount is not None and not builder._scanning:
+        return _parse_chunk_fast_rc(line, pos, end, builder, stop_on_decl)
+    while pos < end:
+        if pos + 8 > end:
+            return ~pos
+        w0 = _load_u64(line, pos)
+        if w0 == _W8_APP_0:
+            if pos + 14 <= end and _load_u64(line, pos + 6) == _W8_APP_1:
+                arg_eidx, q = _read_uint(line, pos + 14, end)
+                if (arg_eidx >= 0 and q + 6 <= end
+                        and _load_u32(line, q) == _W4_FN_0
+                        and _load_u16(line, q + 4) == _W2_COLON):
+                    fn_eidx, q = _read_uint(line, q + 6, end)
+                    if (fn_eidx >= 0 and q + 7 <= end
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
+                        eidx, q = _read_uint(line, q + 7, end)
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                            np = _at_eol_pos(line, q + 1, end)
+                            if np >= 0:
+                                builder.register_expr(
+                                    eidx,
+                                    objects.W_App(
+                                        _ref_expr_fast(builder, fn_eidx),
+                                        _ref_expr_fast(builder, arg_eidx),
+                                    ),
+                                )
+                                pos = np
+                                continue
+            return ~pos
+        w6 = w0 & _MASK48
+        if w6 == _W6_IE:
+            eidx, q = _read_uint(line, pos + 6, end)
+            if (eidx >= 0 and q + 22 <= end
+                    and _load_u64(line, q) == _W8_LAM_0
+                    and _load_u64(line, q + 8) == _W8_LAM_1
+                    and _load_u64(line, q + 14) == _W8_LAM_2):
+                bcode, q = _match_binfo_at(line, q + 22, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 2 <= end
+                                    and _load_u16(line, q) == _W2_CLOSE2):
+                                np = _at_eol_pos(line, q + 2, end)
+                                if np >= 0:
                                     bound = _binder_from_code(
                                         builder.names[name_idx],
                                         bcode,
@@ -714,70 +1308,62 @@ def _try_parse_compact(cursor, builder):
                                     )
                                     builder.register_expr(
                                         eidx,
-                                        objects.W_ForAll(
+                                        objects.W_Lambda(
                                             bound,
                                             _ref_expr_fast(builder, body_eidx),
                                         ),
                                     )
-                                    return True
-        return False
-    if c2 == 'b':
-        # {"bvar":B,"ie":E}
-        if (p + 8 <= end
-                and line[p + 3] == 'v' and line[p + 4] == 'a'
-                and line[p + 5] == 'r' and line[p + 6] == '"'
-                and line[p + 7] == ':'):
-            bidx, q = _read_uint(line, p + 8, end)
-            if (bidx >= 0 and q + 6 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'i' and line[q + 3] == 'e'
-                    and line[q + 4] == '"' and line[q + 5] == ':'):
-                eidx, q = _read_uint(line, q + 6, end)
-                if eidx >= 0 and q < end and line[q] == '}':
-                    np = _at_eol_pos(line, q + 1, end)
-                    if np >= 0:
-                        cursor.pos = np
-                        builder.register_expr(eidx, objects._mk_w_bvar(bidx))
-                        return True
-        return False
-    if c2 == 't':
-        # {"thm":{"levelParams":[...],"name":N,"type":T,"value":V}}
-        if cursor.match_lit('{"thm":{"levelParams":['):
-            if cursor.pos < end and line[cursor.pos] == ']':
-                cursor.pos += 1
-                levels = objects._EMPTY_LEVEL_NAMES
-            else:
-                levels = []
-                while True:
-                    lidx = cursor.read_uint_compact()
-                    if lidx < 0:
-                        return False
-                    levels.append(builder.names[lidx])
-                    if cursor.pos >= end:
-                        return False
-                    ch = line[cursor.pos]
-                    if ch == ']':
-                        cursor.pos += 1
-                        break
-                    if ch != ',':
-                        return False
-                    cursor.pos += 1
-            if cursor.match_lit(',"name":'):
-                name_idx = cursor.read_uint_compact()
-                if name_idx >= 0 and cursor.match_lit(',"type":'):
-                    type_eidx = cursor.read_uint_compact()
-                    if type_eidx >= 0 and cursor.match_lit(',"value":'):
-                        value_eidx = cursor.read_uint_compact()
-                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                            decl = builder.names[name_idx].theorem(
-                                levels=levels,
-                                type=builder.ref_expr(type_eidx),
-                                value=builder.ref_expr(value_eidx),
-                            )
-                            builder.register_declaration(decl)
-                            return True
-        return False
-    return False
+                                    pos = np
+                                    continue
+            rr = _try_parse_compact_rare(line, pos, end, builder)
+            if rr >= 0:
+                pos = rr >> 1
+                if (rr & 1) and stop_on_decl:
+                    return pos
+                continue
+            return ~pos
+        if w0 == _W8_FORALL_0:
+            if (pos + 26 <= end
+                    and _load_u64(line, pos + 8) == _W8_FORALL_1
+                    and _load_u64(line, pos + 16) == _W8_FORALL_2
+                    and _load_u16(line, pos + 24) == _W2_COL_Q):
+                bcode, q = _match_binfo_at(line, pos + 26, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 7 <= end
+                                    and _load_u32(line, q) == _W4_IE_0
+                                    and _load_u32(line, q + 3) == _W4_IE_1):
+                                eidx, q = _read_uint(line, q + 7, end)
+                                if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                                    np = _at_eol_pos(line, q + 1, end)
+                                    if np >= 0:
+                                        bound = _binder_from_code(
+                                            builder.names[name_idx],
+                                            bcode,
+                                            _ref_expr_fast(builder, type_eidx),
+                                        )
+                                        builder.register_expr(
+                                            eidx,
+                                            objects.W_ForAll(
+                                                bound,
+                                                _ref_expr_fast(builder, body_eidx),
+                                            ),
+                                        )
+                                        pos = np
+                                        continue
+            return ~pos
+        rr = _try_parse_compact_rare(line, pos, end, builder)
+        if rr >= 0:
+            pos = rr >> 1
+            if (rr & 1) and stop_on_decl:
+                return pos
+            continue
+        return ~pos
+    return pos
 
 
 def parse_cursor(cursor, builder):
@@ -786,7 +1372,9 @@ def parse_cursor(cursor, builder):
     ``builder`` via the appropriate ``register_*`` call.
     """
     start = cursor.pos
-    if _try_parse_compact(cursor, builder):
+    res = _parse_chunk_fast(cursor.line, start, cursor.length, builder, True)
+    if res >= 0:
+        cursor.pos = res
         return
     cursor.pos = start
     parse_cursor_general(cursor, builder)
@@ -1845,266 +2433,339 @@ def _bump_refcount_slot(counts, idx):
     counts.bump(idx)
 
 
-def _try_prescan_compact(cursor, counts):
-    """Fast raw-byte prescan for compact canonical lean4export lines.
-    Returns True if handled (advancing ``cursor.pos`` past EOL in chunk mode);
-    otherwise the caller falls back to the general structural prescanner."""
-    line = cursor.line
-    p = cursor.pos
-    end = cursor.length
-    if p + 6 > end or line[p] != '{' or line[p + 1] != '"':
-        return False
-    c2 = line[p + 2]
-    if c2 == 'a':
-        # {"app":{"arg":A,"fn":F},"ie":E}
-        if (p + 14 <= end
-                and line[p + 3] == 'p' and line[p + 4] == 'p'
-                and line[p + 5] == '"' and line[p + 6] == ':'
-                and line[p + 7] == '{' and line[p + 8] == '"'
-                and line[p + 9] == 'a' and line[p + 10] == 'r'
-                and line[p + 11] == 'g' and line[p + 12] == '"'
-                and line[p + 13] == ':'):
-            arg_eidx, q = _read_uint(line, p + 14, end)
-            if (arg_eidx >= 0 and q + 6 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'f' and line[q + 3] == 'n'
-                    and line[q + 4] == '"' and line[q + 5] == ':'):
-                fn_eidx, q = _read_uint(line, q + 6, end)
-                if (fn_eidx >= 0 and q + 7 <= end
-                        and line[q] == '}' and line[q + 1] == ','
-                        and line[q + 2] == '"' and line[q + 3] == 'i'
-                        and line[q + 4] == 'e' and line[q + 5] == '"'
-                        and line[q + 6] == ':'):
-                    eidx, q = _read_uint(line, q + 7, end)
-                    if eidx >= 0 and q < end and line[q] == '}':
-                        np = _at_eol_pos(line, q + 1, end)
-                        if np >= 0:
-                            cursor.pos = np
-                            _ensure_refcount_slot(counts, eidx)
-                            _bump_refcount_slot(counts, fn_eidx)
-                            _bump_refcount_slot(counts, arg_eidx)
-                            return True
-        return False
-    if c2 == 'i':
-        c3 = line[p + 3]
-        if c3 == 'n' or c3 == 'l':
-            # Name / Level lines have zero expr definitions and zero expr refs.
-            if line[p + 4] == '"' and line[p + 5] == ':':
-                nl = line.find('\n', p + 6)
-                cursor.pos = (nl + 1) if (nl >= 0 and nl < end) else end
-                return True
-            return False
-        if c3 == 'e':
-            if line[p + 4] == '"' and line[p + 5] == ':':
-                eidx, q = _read_uint(line, p + 6, end)
-                if eidx < 0 or q + 4 >= end or line[q] != ',' or line[q + 1] != '"':
-                    return False
-                d0 = line[q + 2]
-                if d0 == 's' or d0 == 'n' or d0 == 'b' or d0 == 'c':
-                    # sort / strVal / natVal / bvar / const: zero expr refs!
-                    cursor.pos = q
-                    if (cursor.match_lit(',"sort":')
-                            or cursor.match_lit(',"strVal":')
-                            or cursor.match_lit(',"natVal":')
-                            or cursor.match_lit(',"bvar":')
-                            or cursor.match_lit(',"const":')):
-                        nl = line.find('\n', cursor.pos)
-                        cursor.pos = (nl + 1) if (nl >= 0 and nl < end) else end
-                        _ensure_refcount_slot(counts, eidx)
-                        return True
-                elif d0 == 'l':
-                    if (q + 22 <= end
-                            and line[q + 3] == 'a' and line[q + 4] == 'm'
-                            and line[q + 5] == '"' and line[q + 6] == ':'
-                            and line[q + 7] == '{' and line[q + 8] == '"'
-                            and line[q + 9] == 'b' and line[q + 10] == 'i'
-                            and line[q + 11] == 'n' and line[q + 12] == 'd'
-                            and line[q + 13] == 'e' and line[q + 14] == 'r'
-                            and line[q + 15] == 'I' and line[q + 16] == 'n'
-                            and line[q + 17] == 'f' and line[q + 18] == 'o'
-                            and line[q + 19] == '"' and line[q + 20] == ':'
-                            and line[q + 21] == '"'):
-                        bcode, q = _match_binfo_at(line, q + 22, end)
-                        if (bcode >= 0 and q + 8 <= end
-                                and line[q] == ',' and line[q + 1] == '"'
-                                and line[q + 2] == 'b' and line[q + 3] == 'o'
-                                and line[q + 4] == 'd' and line[q + 5] == 'y'
-                                and line[q + 6] == '"' and line[q + 7] == ':'):
-                            body_eidx, q = _read_uint(line, q + 8, end)
-                            if (body_eidx >= 0 and q + 8 <= end
-                                    and line[q] == ',' and line[q + 1] == '"'
-                                    and line[q + 2] == 'n' and line[q + 3] == 'a'
-                                    and line[q + 4] == 'm' and line[q + 5] == 'e'
-                                    and line[q + 6] == '"' and line[q + 7] == ':'):
-                                name_idx, q = _read_uint(line, q + 8, end)
-                                if (name_idx >= 0 and q + 8 <= end
-                                        and line[q] == ',' and line[q + 1] == '"'
-                                        and line[q + 2] == 't' and line[q + 3] == 'y'
-                                        and line[q + 4] == 'p' and line[q + 5] == 'e'
-                                        and line[q + 6] == '"' and line[q + 7] == ':'):
-                                    type_eidx, q = _read_uint(line, q + 8, end)
-                                    if (type_eidx >= 0 and q + 2 <= end
-                                            and line[q] == '}' and line[q + 1] == '}'):
-                                        np = _at_eol_pos(line, q + 2, end)
-                                        if np >= 0:
-                                            cursor.pos = np
-                                            _ensure_refcount_slot(counts, eidx)
-                                            _bump_refcount_slot(counts, type_eidx)
-                                            _bump_refcount_slot(counts, body_eidx)
-                                            return True
-                    else:
-                        cursor.pos = q
-                        if cursor.match_lit(',"letE":{"body":'):
-                            body_eidx = cursor.read_uint_compact()
-                            if body_eidx >= 0 and cursor.match_lit(',"name":'):
-                                name_idx = cursor.read_uint_compact()
-                                if name_idx >= 0 and (
-                                        cursor.match_lit(',"nondep":false,"type":')
-                                        or cursor.match_lit(',"nondep":true,"type":')):
-                                    type_eidx = cursor.read_uint_compact()
-                                    if type_eidx >= 0 and cursor.match_lit(',"value":'):
-                                        value_eidx = cursor.read_uint_compact()
-                                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                                            _ensure_refcount_slot(counts, eidx)
-                                            _bump_refcount_slot(counts, type_eidx)
-                                            _bump_refcount_slot(counts, value_eidx)
-                                            _bump_refcount_slot(counts, body_eidx)
-                                            return True
-                elif d0 == 'p':
-                    cursor.pos = q
-                    if cursor.match_lit(',"proj":{"idx":'):
-                        idx = cursor.read_uint_compact()
-                        if idx >= 0 and cursor.match_lit(',"struct":'):
-                            struct_eidx = cursor.read_uint_compact()
-                            if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
-                                tname_idx = cursor.read_uint_compact()
-                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                                    _ensure_refcount_slot(counts, eidx)
-                                    _bump_refcount_slot(counts, struct_eidx)
-                                    return True
-            return False
-        return False
-    if c2 == 'c':
-        # {"const":{"name":N,"us":[...]},"ie":E} -> zero expr refs, just need E!
-        if (p + 17 <= end
-                and line[p + 3] == 'o' and line[p + 4] == 'n'
-                and line[p + 5] == 's' and line[p + 6] == 't'
-                and line[p + 7] == '"' and line[p + 8] == ':'
-                and line[p + 9] == '{' and line[p + 10] == '"'
-                and line[p + 11] == 'n' and line[p + 12] == 'a'
-                and line[p + 13] == 'm' and line[p + 14] == 'e'
-                and line[p + 15] == '"' and line[p + 16] == ':'):
-            nidx, q = _read_uint(line, p + 17, end)
+@dont_inline
+def _try_prescan_compact_rare(line, pos, end, counts):
+    """Word-matched prescan for less frequent canonical record types, ordered
+    by frequency: ``const``, ``thm``, ``def``, ``ie:*``, ``opaque``, ``bvar``.
+    Returns ``next_pos >= 0`` on match or ``-1``."""
+    if pos + 8 > end:
+        return -1
+    w0 = _load_u64(line, pos)
+    if w0 == _W8_CONST_0:
+        # {"const":{"name":N,"us":[...]},"ie":E} -> zero expr refs, need E!
+        if (pos + 17 <= end
+                and _load_u64(line, pos + 8) == _W8_CONST_1
+                and _load_u8(line, pos + 16) == 58):
+            nidx, q = _read_uint(line, pos + 17, end)
             if (nidx >= 0 and q + 7 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'u' and line[q + 3] == 's'
-                    and line[q + 4] == '"' and line[q + 5] == ':'
-                    and line[q + 6] == '['):
+                    and _load_u32(line, q) == _W4_US_0
+                    and _load_u32(line, q + 3) == _W4_US_1):
                 q += 7
-                while q < end and line[q] != ']':
+                while q < end and _load_u8(line, q) != 93:
                     q += 1
                 if q < end:
                     q += 1
                     if (q + 7 <= end
-                            and line[q] == '}' and line[q + 1] == ','
-                            and line[q + 2] == '"' and line[q + 3] == 'i'
-                            and line[q + 4] == 'e' and line[q + 5] == '"'
-                            and line[q + 6] == ':'):
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
                         eidx, q = _read_uint(line, q + 7, end)
-                        if eidx >= 0 and q < end and line[q] == '}':
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
                             np = _at_eol_pos(line, q + 1, end)
                             if np >= 0:
-                                cursor.pos = np
                                 _ensure_refcount_slot(counts, eidx)
-                                return True
-        return False
-    if c2 == 'f':
-        # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
-        if (p + 26 <= end
-                and line[p + 3] == 'o' and line[p + 4] == 'r'
-                and line[p + 5] == 'a' and line[p + 6] == 'l'
-                and line[p + 7] == 'l' and line[p + 8] == 'E'
-                and line[p + 9] == '"' and line[p + 10] == ':'
-                and line[p + 11] == '{' and line[p + 12] == '"'
-                and line[p + 13] == 'b' and line[p + 14] == 'i'
-                and line[p + 15] == 'n' and line[p + 16] == 'd'
-                and line[p + 17] == 'e' and line[p + 18] == 'r'
-                and line[p + 19] == 'I' and line[p + 20] == 'n'
-                and line[p + 21] == 'f' and line[p + 22] == 'o'
-                and line[p + 23] == '"' and line[p + 24] == ':'
-                and line[p + 25] == '"'):
-            bcode, q = _match_binfo_at(line, p + 26, end)
-            if (bcode >= 0 and q + 8 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'b' and line[q + 3] == 'o'
-                    and line[q + 4] == 'd' and line[q + 5] == 'y'
-                    and line[q + 6] == '"' and line[q + 7] == ':'):
-                body_eidx, q = _read_uint(line, q + 8, end)
-                if (body_eidx >= 0 and q + 8 <= end
-                        and line[q] == ',' and line[q + 1] == '"'
-                        and line[q + 2] == 'n' and line[q + 3] == 'a'
-                        and line[q + 4] == 'm' and line[q + 5] == 'e'
-                        and line[q + 6] == '"' and line[q + 7] == ':'):
+                                return np
+        return -1
+    if w0 == _W8_THM_0:
+        # {"thm":{"all":[...],"levelParams":[...],"name":N,"type":T,"value":V}}
+        q = pos + 8
+        if (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                and _load_u32(line, q + 3) == _W4_ALL_1):
+            q = _skip_uint_array(line, q + 7, end)
+            if q < 0 or q >= end or _load_u8(line, q) != 44:
+                return -1
+            q += 1
+        if (q + 15 <= end and _load_u64(line, q) == _W8_LPAR_0
+                and _load_u64(line, q + 7) == _W8_LPAR_1):
+            q = _skip_uint_array(line, q + 15, end)
+            if q >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                name_idx, q = _read_uint(line, q + 8, end)
+                if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                    type_eidx, q = _read_uint(line, q + 8, end)
+                    if (type_eidx >= 0 and q + 9 <= end
+                            and _load_u64(line, q) == _W8_VAL0
+                            and _load_u8(line, q + 8) == 58):
+                        value_eidx, q = _read_uint(line, q + 9, end)
+                        if (value_eidx >= 0 and q + 2 <= end
+                                and _load_u16(line, q) == _W2_CLOSE2):
+                            np = _at_eol_pos(line, q + 2, end)
+                            if np >= 0:
+                                _bump_refcount_slot(counts, type_eidx)
+                                _bump_refcount_slot(counts, value_eidx)
+                                return np
+        return -1
+    w6 = w0 & _MASK48
+    if w6 == _W6_IE:
+        eidx, q = _read_uint(line, pos + 6, end)
+        if eidx < 0 or q + 8 > end:
+            return -1
+        dw = _load_u64(line, q)
+        if dw == _W8_LETE_0:
+            if q + 16 <= end and _load_u64(line, q + 8) == _W8_LETE_1:
+                body_eidx, q = _read_uint(line, q + 16, end)
+                if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
                     name_idx, q = _read_uint(line, q + 8, end)
-                    if (name_idx >= 0 and q + 8 <= end
-                            and line[q] == ',' and line[q + 1] == '"'
-                            and line[q + 2] == 't' and line[q + 3] == 'y'
-                            and line[q + 4] == 'p' and line[q + 5] == 'e'
-                            and line[q + 6] == '"' and line[q + 7] == ':'):
-                        type_eidx, q = _read_uint(line, q + 8, end)
-                        if (type_eidx >= 0 and q + 7 <= end
-                                and line[q] == '}' and line[q + 1] == ','
-                                and line[q + 2] == '"' and line[q + 3] == 'i'
-                                and line[q + 4] == 'e' and line[q + 5] == '"'
-                                and line[q + 6] == ':'):
-                            eidx, q = _read_uint(line, q + 7, end)
-                            if eidx >= 0 and q < end and line[q] == '}':
-                                np = _at_eol_pos(line, q + 1, end)
+                    if name_idx >= 0 and q + 22 <= end and _load_u64(line, q) == _W8_NDEP_0:
+                        nw = _load_u64(line, q + 8)
+                        if (nw == _W8_NDEP_F and q + 23 <= end
+                                and _load_u64(line, q + 15) == _W8_TYPE):
+                            q += 23
+                        elif nw == _W8_NDEP_T and _load_u64(line, q + 14) == _W8_TYPE:
+                            q += 22
+                        else:
+                            return -1
+                        type_eidx, q = _read_uint(line, q, end)
+                        if (type_eidx >= 0 and q + 9 <= end
+                                and _load_u64(line, q) == _W8_VAL0
+                                and _load_u8(line, q + 8) == 58):
+                            value_eidx, q = _read_uint(line, q + 9, end)
+                            if (value_eidx >= 0 and q + 2 <= end
+                                    and _load_u16(line, q) == _W2_CLOSE2):
+                                np = _at_eol_pos(line, q + 2, end)
                                 if np >= 0:
-                                    cursor.pos = np
+                                    _ensure_refcount_slot(counts, eidx)
+                                    _bump_refcount_slot(counts, type_eidx)
+                                    _bump_refcount_slot(counts, value_eidx)
+                                    _bump_refcount_slot(counts, body_eidx)
+                                    return np
+            return -1
+        if dw == _W8_PROJ_0:
+            if q + 15 <= end and _load_u64(line, q + 7) == _W8_PROJ_1:
+                idx, q = _read_uint(line, q + 15, end)
+                if (idx >= 0 and q + 10 <= end
+                        and _load_u64(line, q) == _W8_STRUCT_0
+                        and _load_u32(line, q + 6) == _W4_STRUCT_1):
+                    struct_eidx, q = _read_uint(line, q + 10, end)
+                    if (struct_eidx >= 0 and q + 12 <= end
+                            and _load_u64(line, q) == _W8_TNAME_0
+                            and _load_u32(line, q + 8) == _W4_TNAME_1):
+                        tname_idx, q = _read_uint(line, q + 12, end)
+                        if (tname_idx >= 0 and q + 2 <= end
+                                and _load_u16(line, q) == _W2_CLOSE2):
+                            np = _at_eol_pos(line, q + 2, end)
+                            if np >= 0:
+                                _ensure_refcount_slot(counts, eidx)
+                                _bump_refcount_slot(counts, struct_eidx)
+                                return np
+            return -1
+        if dw == _W8_SORT or dw == _W8_STRV_0 or dw == _W8_NATV_0:
+            # sort / strVal / natVal: zero expr refs!
+            np = _find_nl(line, q + 8, end)
+            _ensure_refcount_slot(counts, eidx)
+            return np
+        return -1
+    if w0 == _W8_DEF_0:
+        # {"def":{"all":[...],"hints":...,"levelParams":[...],"name":N,"safety":"...","type":T,"value":V}}
+        q = pos + 8
+        if not (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                and _load_u32(line, q + 3) == _W4_ALL_1):
+            return -1
+        q = _skip_uint_array(line, q + 7, end)
+        if q < 0 or q + 9 > end or _load_u64(line, q) != _W8_HINTS_0 or _load_u8(line, q + 8) != 58:
+            return -1
+        q += 9
+        if q + 8 > end:
+            return -1
+        hw = _load_u64(line, q)
+        if hw == _W8_H_ABBREV or hw == _W8_H_OPAQUE:
+            q += 8
+        elif (hw == _W8_H_REG_0 and q + 11 <= end
+                and _load_u32(line, q + 7) == _W4_H_REG_1):
+            hv, q = _read_uint(line, q + 11, end)
+            if hv < 0 or q >= end or _load_u8(line, q) != 125:
+                return -1
+            q += 1
+        else:
+            return -1
+        if not (q + 16 <= end and _load_u64(line, q) == _W8_CLPAR_0
+                and _load_u64(line, q + 7) == _W8_CLPAR_1
+                and _load_u8(line, q + 15) == 91):
+            return -1
+        q = _skip_uint_array(line, q + 16, end)
+        if q < 0 or q + 8 > end or _load_u64(line, q) != _W8_NAME:
+            return -1
+        name_idx, q = _read_uint(line, q + 8, end)
+        if (name_idx < 0 or q + 11 > end
+                or _load_u64(line, q) != _W8_SAF_0
+                or _load_u32(line, q + 7) != _W4_SAF_1):
+            return -1
+        q += 11
+        if q + 5 <= end and _load_u32(line, q) == _W4_SAFE and _load_u8(line, q + 4) == 34:
+            q += 5
+        elif q + 8 <= end and _load_u64(line, q) == _W8_PARTIAL:
+            q += 8
+        elif (q + 7 <= end and _load_u32(line, q) == _W4_UNSA
+                and _load_u32(line, q + 3) == _W4_AFE_Q):
+            q += 7
+        else:
+            return -1
+        if q + 8 > end or _load_u64(line, q) != _W8_TYPE:
+            return -1
+        type_eidx, q = _read_uint(line, q + 8, end)
+        if (type_eidx < 0 or q + 9 > end
+                or _load_u64(line, q) != _W8_VAL0
+                or _load_u8(line, q + 8) != 58):
+            return -1
+        value_eidx, q = _read_uint(line, q + 9, end)
+        if value_eidx < 0 or q + 2 > end or _load_u16(line, q) != _W2_CLOSE2:
+            return -1
+        np = _at_eol_pos(line, q + 2, end)
+        if np >= 0:
+            _bump_refcount_slot(counts, type_eidx)
+            _bump_refcount_slot(counts, value_eidx)
+            return np
+        return -1
+    if w0 == _W8_OPQ_0:
+        if pos + 11 <= end and _load_u32(line, pos + 7) == _W4_OPQ_1:
+            q = pos + 11
+            if (q + 7 <= end and _load_u32(line, q) == _W4_ALL_0
+                    and _load_u32(line, q + 3) == _W4_ALL_1):
+                q = _skip_uint_array(line, q + 7, end)
+                if q < 0 or q >= end or _load_u8(line, q) != 44:
+                    return -1
+                q += 1
+            if (q + 11 <= end and _load_u64(line, q) == _W8_ISUN_0
+                    and _load_u32(line, q + 7) == _W4_ISUN_1):
+                q += 11
+                if (q + 6 <= end and _load_u8(line, q) == 102
+                        and _load_u32(line, q + 1) == _W4_ALSE
+                        and _load_u8(line, q + 5) == 44):
+                    q += 6
+                elif (q + 5 <= end and _load_u32(line, q) == _W4_TRUE
+                        and _load_u8(line, q + 4) == 44):
+                    q += 5
+                else:
+                    return -1
+                if (q + 15 <= end and _load_u64(line, q) == _W8_LPAR_0
+                        and _load_u64(line, q + 7) == _W8_LPAR_1):
+                    q = _skip_uint_array(line, q + 15, end)
+                    if q >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if (name_idx >= 0 and q + 8 <= end
+                                and _load_u64(line, q) == _W8_TYPE):
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 9 <= end
+                                    and _load_u64(line, q) == _W8_VAL0
+                                    and _load_u8(line, q + 8) == 58):
+                                value_eidx, q = _read_uint(line, q + 9, end)
+                                if (value_eidx >= 0 and q + 2 <= end
+                                        and _load_u16(line, q) == _W2_CLOSE2):
+                                    np = _at_eol_pos(line, q + 2, end)
+                                    if np >= 0:
+                                        _bump_refcount_slot(counts, type_eidx)
+                                        _bump_refcount_slot(counts, value_eidx)
+                                        return np
+        return -1
+    if w0 == _W8_BVAR_0:
+        bidx, q = _read_uint(line, pos + 8, end)
+        if (bidx >= 0 and q + 6 <= end
+                and _load_u32(line, q) == _W4_BVAR_IE0
+                and _load_u16(line, q + 4) == _W2_COLON):
+            eidx, q = _read_uint(line, q + 6, end)
+            if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    _ensure_refcount_slot(counts, eidx)
+                    return np
+        return -1
+    return -1
+
+
+def _prescan_chunk_fast(line, pos, end, counts):
+    """Tight chunk-level word-at-a-time prescanner for canonical compact lines.
+
+    Returns ``end`` when the whole chunk slice was handled, or ``~pos`` (< 0)
+    when the line at ``pos`` needs ``_prescan_line_general``.
+    """
+    if not _USE_FAST_WORDS:
+        return ~pos
+    while pos < end:
+        if pos + 8 > end:
+            return ~pos
+        w0 = _load_u64(line, pos)
+        if w0 == _W8_APP_0:
+            # {"app":{"arg":A,"fn":F},"ie":E}
+            if pos + 14 <= end and _load_u64(line, pos + 6) == _W8_APP_1:
+                arg_eidx, q = _read_uint(line, pos + 14, end)
+                if (arg_eidx >= 0 and q + 6 <= end
+                        and _load_u32(line, q) == _W4_FN_0
+                        and _load_u16(line, q + 4) == _W2_COLON):
+                    fn_eidx, q = _read_uint(line, q + 6, end)
+                    if (fn_eidx >= 0 and q + 7 <= end
+                            and _load_u32(line, q) == _W4_IE_0
+                            and _load_u32(line, q + 3) == _W4_IE_1):
+                        eidx, q = _read_uint(line, q + 7, end)
+                        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                            np = _at_eol_pos(line, q + 1, end)
+                            if np >= 0:
+                                _ensure_refcount_slot(counts, eidx)
+                                _bump_refcount_slot(counts, fn_eidx)
+                                _bump_refcount_slot(counts, arg_eidx)
+                                pos = np
+                                continue
+            return ~pos
+        w6 = w0 & _MASK48
+        if w6 == _W6_IE:
+            eidx, q = _read_uint(line, pos + 6, end)
+            if (eidx >= 0 and q + 22 <= end
+                    and _load_u64(line, q) == _W8_LAM_0
+                    and _load_u64(line, q + 8) == _W8_LAM_1
+                    and _load_u64(line, q + 14) == _W8_LAM_2):
+                bcode, q = _match_binfo_at(line, q + 22, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 2 <= end
+                                    and _load_u16(line, q) == _W2_CLOSE2):
+                                np = _at_eol_pos(line, q + 2, end)
+                                if np >= 0:
                                     _ensure_refcount_slot(counts, eidx)
                                     _bump_refcount_slot(counts, type_eidx)
                                     _bump_refcount_slot(counts, body_eidx)
-                                    return True
-        return False
-    if c2 == 'b':
-        # {"bvar":B,"ie":E}
-        if (p + 8 <= end
-                and line[p + 3] == 'v' and line[p + 4] == 'a'
-                and line[p + 5] == 'r' and line[p + 6] == '"'
-                and line[p + 7] == ':'):
-            bidx, q = _read_uint(line, p + 8, end)
-            if (bidx >= 0 and q + 6 <= end
-                    and line[q] == ',' and line[q + 1] == '"'
-                    and line[q + 2] == 'i' and line[q + 3] == 'e'
-                    and line[q + 4] == '"' and line[q + 5] == ':'):
-                eidx, q = _read_uint(line, q + 6, end)
-                if eidx >= 0 and q < end and line[q] == '}':
-                    np = _at_eol_pos(line, q + 1, end)
-                    if np >= 0:
-                        cursor.pos = np
-                        _ensure_refcount_slot(counts, eidx)
-                        return True
-        return False
-    if c2 == 't':
-        # {"thm":{"levelParams":[...],"name":N,"type":T,"value":V}}
-        if cursor.match_lit('{"thm":{"levelParams":['):
-            q = cursor.pos
-            while q < end and line[q] != ']':
-                q += 1
-            if q < end:
-                cursor.pos = q + 1
-                if cursor.match_lit(',"name":') and cursor.read_uint_compact() >= 0:
-                    if cursor.match_lit(',"type":'):
-                        type_eidx = cursor.read_uint_compact()
-                        if type_eidx >= 0 and cursor.match_lit(',"value":'):
-                            value_eidx = cursor.read_uint_compact()
-                            if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
-                                _bump_refcount_slot(counts, type_eidx)
-                                _bump_refcount_slot(counts, value_eidx)
-                                return True
-        return False
-    return False
+                                    pos = np
+                                    continue
+            np = _try_prescan_compact_rare(line, pos, end, counts)
+            if np >= 0:
+                pos = np
+                continue
+            return ~pos
+        if w0 == _W8_FORALL_0:
+            if (pos + 26 <= end
+                    and _load_u64(line, pos + 8) == _W8_FORALL_1
+                    and _load_u64(line, pos + 16) == _W8_FORALL_2
+                    and _load_u16(line, pos + 24) == _W2_COL_Q):
+                bcode, q = _match_binfo_at(line, pos + 26, end)
+                if bcode >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+                    body_eidx, q = _read_uint(line, q + 8, end)
+                    if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+                        name_idx, q = _read_uint(line, q + 8, end)
+                        if name_idx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                            type_eidx, q = _read_uint(line, q + 8, end)
+                            if (type_eidx >= 0 and q + 7 <= end
+                                    and _load_u32(line, q) == _W4_IE_0
+                                    and _load_u32(line, q + 3) == _W4_IE_1):
+                                eidx, q = _read_uint(line, q + 7, end)
+                                if eidx >= 0 and q < end and _load_u8(line, q) == 125:
+                                    np = _at_eol_pos(line, q + 1, end)
+                                    if np >= 0:
+                                        _ensure_refcount_slot(counts, eidx)
+                                        _bump_refcount_slot(counts, type_eidx)
+                                        _bump_refcount_slot(counts, body_eidx)
+                                        pos = np
+                                        continue
+            return ~pos
+        if w6 == _W6_IN or w6 == _W6_IL:
+            # Name / Level lines have zero expr definitions and zero expr refs.
+            pos = _find_nl(line, pos + 6, end)
+            continue
+        np = _try_prescan_compact_rare(line, pos, end, counts)
+        if np >= 0:
+            pos = np
+            continue
+        return ~pos
+    return pos
 
 
 def _skip_value_noalloc(cursor):
@@ -2353,7 +3014,9 @@ def _prescan_inductive(cursor, counts):
 
 def _prescan_line(cursor, counts):
     start = cursor.pos
-    if _try_prescan_compact(cursor, counts):
+    res = _prescan_chunk_fast(cursor.line, start, cursor.length, counts)
+    if res >= 0:
+        cursor.pos = res
         return
     cursor.pos = start
     _prescan_line_general(cursor, counts)
@@ -2437,10 +3100,12 @@ def prescan_refcounts(stream, size_hint=65536):
             cursor.line = chunk
             cursor.length = limit
             while pos <= last_nl:
-                cursor.pos = pos
-                if _try_prescan_compact(cursor, counts):
-                    pos = cursor.pos
+                res = _prescan_chunk_fast(chunk, pos, limit, counts)
+                if res >= 0:
+                    pos = res
                 else:
+                    pos = ~res
+                    assert pos >= 0
                     nl = chunk.find('\n', pos)
                     assert nl >= 0
                     end = nl

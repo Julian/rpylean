@@ -267,3 +267,103 @@ def test_chunked_consume_and_prescan_boundary_splits():
         assert len(b.declarations) == 1
         assert b.declarations[0].name == Name.simple("P")
         rc.free()
+
+
+def test_compact_fast_paths_all_record_kinds():
+    """Verify word-matched compact parse and prescan match general parser across
+    all canonical lean4export 3.1.0 record formats (including thm with 'all',
+    def hints/safety/mutual, opaque, strVal, in:str/num, il, letE, proj, etc.)."""
+    body = "\n".join([
+        '{"in":1,"str":{"pre":0,"str":"T"}}',
+        '{"in":2,"str":{"pre":1,"str":"x"}}',
+        '{"in":3,"num":{"i":7,"pre":1}}',
+        '{"in":4,"str":{"pre":0,"str":"d1"}}',
+        '{"in":5,"str":{"pre":0,"str":"d2"}}',
+        '{"in":6,"str":{"pre":0,"str":"d3"}}',
+        '{"in":7,"str":{"pre":0,"str":"t1"}}',
+        '{"in":8,"str":{"pre":0,"str":"t2"}}',
+        '{"in":9,"str":{"pre":0,"str":"op1"}}',
+        '{"in":10,"str":{"pre":0,"str":"op2"}}',
+        '{"in":11,"str":{"pre":0,"str":"u"}}',
+        '{"in":12,"str":{"pre":0,"str":"v"}}',
+        '{"in":13,"str":{"pre":0,"str":"esc\\"name"}}',
+        '{"il":1,"param":11}',
+        '{"il":2,"param":12}',
+        '{"il":3,"succ":1}',
+        '{"il":4,"max":[1,2]}',
+        '{"il":5,"imax":[3,4]}',
+        '{"ie":0,"sort":0}',
+        '{"ie":1,"sort":5}',
+        '{"bvar":0,"ie":2}',
+        '{"const":{"name":1,"us":[]},"ie":3}',
+        '{"const":{"name":1,"us":[1]},"ie":4}',
+        '{"const":{"name":1,"us":[1,2]},"ie":5}',
+        '{"const":{"name":1,"us":[1,2,3]},"ie":6}',
+        '{"app":{"arg":2,"fn":3},"ie":7}',
+        '{"ie":8,"lam":{"binderInfo":"default","body":7,"name":2,"type":0}}',
+        '{"ie":9,"lam":{"binderInfo":"implicit","body":7,"name":2,"type":0}}',
+        '{"ie":10,"lam":{"binderInfo":"instImplicit","body":7,"name":2,"type":0}}',
+        '{"ie":11,"lam":{"binderInfo":"strictImplicit","body":7,"name":2,"type":0}}',
+        '{"forallE":{"binderInfo":"default","body":7,"name":2,"type":0},"ie":12}',
+        '{"forallE":{"binderInfo":"instImplicit","body":7,"name":2,"type":0},"ie":13}',
+        '{"ie":14,"letE":{"body":2,"name":2,"nondep":false,"type":0,"value":3}}',
+        '{"ie":15,"letE":{"body":2,"name":2,"nondep":true,"type":0,"value":3}}',
+        '{"ie":16,"proj":{"idx":1,"struct":7,"typeName":1}}',
+        '{"ie":17,"natVal":"123456"}',
+        '{"ie":18,"strVal":"plain_text"}',
+        '{"ie":19,"strVal":"escaped \\"quote\\""}',
+        '{"def":{"all":[4],"hints":"abbrev","levelParams":[],"name":4,"safety":"safe","type":0,"value":8}}',
+        '{"def":{"all":[5,6],"hints":{"regular":42},"levelParams":[11],"name":5,"safety":"partial","type":0,"value":9}}',
+        '{"def":{"all":[5,6],"hints":"opaque","levelParams":[11,12],"name":6,"safety":"unsafe","type":0,"value":10}}',
+        '{"thm":{"all":[7],"levelParams":[],"name":7,"type":0,"value":11}}',
+        '{"thm":{"levelParams":[11],"name":8,"type":12,"value":13}}',
+        '{"opaque":{"all":[9],"isUnsafe":false,"levelParams":[],"name":9,"type":14,"value":15}}',
+        '{"opaque":{"isUnsafe":true,"levelParams":[11],"name":10,"type":16,"value":18}}',
+    ]) + "\n"
+    # Verify prescan_refcounts matches scanning builder identically
+    expected = EnvironmentBuilder()
+    expected.start_scan()
+    expected.consume(StringIO(body))
+    got_rc = parser.prescan_refcounts(StringIO(body))
+    assert got_rc == expected._refcount
+
+    # Verify compact-parsed builder matches general-parsed builder identically
+    b_compact = EnvironmentBuilder()
+    b_compact.set_refcount(got_rc)
+    b_compact.consume(StringIO(body))
+
+    b_general = EnvironmentBuilder()
+    for line in body.splitlines():
+        cur = parser.LineCursor(line)
+        parser.parse_cursor_general(cur, b_general)
+
+    assert len(b_compact.declarations) == len(b_general.declarations) == 7
+    assert b_compact.names == b_general.names
+    assert b_compact.levels == b_general.levels
+    for d1, d2 in zip(b_compact.declarations, b_general.declarations):
+        assert d1.name == d2.name
+        assert d1.levels == d2.levels
+        assert d1.safety == d2.safety
+        assert d1.type == d2.type
+        assert d1.group == d2.group
+    assert b_compact.env["d1"].w_kind.all is None
+    assert b_compact.env["d2"].w_kind.all == [Name.simple("d2"), Name.simple("d3")]
+    assert b_compact.env["d2"].w_kind.hint == 42
+    assert b_compact.env["op1"].is_unsafe() is False
+    assert b_compact.env["op2"].is_unsafe() is True
+    assert b_general.exprs[18] == W_LitStr("plain_text")
+    assert b_general.exprs[19] == W_LitStr('escaped "quote"')
+    # Also verify every unescaped compact line stays on the fast path (no fallback)
+    unescaped_lines = [l for l in body.splitlines() if '\\' not in l]
+    compact_chunk = "\n".join(unescaped_lines) + "\n"
+    rc_fast = parser.RefCountTable(64)
+    assert parser._prescan_chunk_fast(
+        compact_chunk, 0, len(compact_chunk), rc_fast,
+    ) == len(compact_chunk)
+    b_fast = EnvironmentBuilder()
+    assert parser._parse_chunk_fast(
+        compact_chunk, 0, len(compact_chunk), b_fast, False,
+    ) == len(compact_chunk)
+    rc_fast.free()
+    got_rc.free()
+    expected._refcount.free()
