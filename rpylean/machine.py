@@ -1083,7 +1083,7 @@ class TermStore(object):
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
         'rec_node', '_rec_node_dirty', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
-        '_call_memo',
+        '_call_memo', '_bind_lo', '_bind_span',
         '_freed', 'initial_cap',
     ]
 
@@ -1101,6 +1101,8 @@ class TermStore(object):
         self._subst_cap = 4096
         self._subst_stack = _alloc_u32(self._subst_cap)
         self._subst_top = 0
+        self._bind_lo = 0
+        self._bind_span = r_uint(0)
         #: Leaves by index; `leaf_meta` mirrors `(loose_bvar_range << 1) | has_fvar`
         #: in 32 bits (for a `W_BVar(id)`, `leaf_meta == (id + 1) << 1 > 1`, so
         #: `id == (leaf_meta >> 1) - 1` without a separate `leaf_bvar` array).
@@ -4492,6 +4494,18 @@ class TermStore(object):
                     return self.bvar(depth + n - 1 - j)
                 j += 1
             return h
+        lo = fvars[0]
+        hi = lo
+        j = 1
+        while j < n:
+            fj = fvars[j]
+            if fj < lo:
+                lo = fj
+            elif fj > hi:
+                hi = fj
+            j += 1
+        self._bind_lo = lo
+        self._bind_span = r_uint(hi - lo)
         gen = self._next_call_epoch()
         try:
             return self._bind_fvars_oneshot(h, fvars, n, depth, gen, 0)
@@ -4501,14 +4515,15 @@ class TermStore(object):
                 self._call_memo.clear()
 
     def _bind_fvars_oneshot(self, h, fvars, n, depth, gen, rdepth):
-        if not self.has_fvar(h):
-            return h
         if is_leaf(h):
-            j = 0
-            while j < n:
-                if fvars[j] == h:
-                    return self.bvar(depth + n - 1 - j)
-                j += 1
+            if r_uint(h - self._bind_lo) <= self._bind_span:
+                j = 0
+                while j < n:
+                    if fvars[j] == h:
+                        return self.bvar(depth + n - 1 - j)
+                    j += 1
+            return h
+        if not self.has_fvar(h):
             return h
         ri = rec_index(h)
         if depth < 256:
@@ -4536,11 +4551,11 @@ class TermStore(object):
         info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
+            bind_lo = self._bind_lo
+            bind_span = self._bind_span
             if is_leaf(a):
-                if (_s32(self.leaf_meta[leaf_index(a)]) & 1) == 0:
-                    na = a
-                else:
-                    na = a
+                na = a
+                if r_uint(a - bind_lo) <= bind_span:
                     j = 0
                     while j < n:
                         if fvars[j] == a:
@@ -4565,7 +4580,7 @@ class TermStore(object):
                     while True:
                         if is_leaf(cur):
                             na = cur
-                            if (_s32(self.leaf_meta[leaf_index(cur)]) & 1) != 0:
+                            if r_uint(cur - bind_lo) <= bind_span:
                                 j = 0
                                 while j < n:
                                     if fvars[j] == cur:
@@ -4616,7 +4631,7 @@ class TermStore(object):
                         old_b = _s32(recs[nbase + F_B])
                         if is_leaf(old_b):
                             nb2 = old_b
-                            if (_s32(self.leaf_meta[leaf_index(old_b)]) & 1) != 0:
+                            if r_uint(old_b - bind_lo) <= bind_span:
                                 j = 0
                                 while j < n:
                                     if fvars[j] == old_b:
@@ -4642,7 +4657,7 @@ class TermStore(object):
                             self._call_memo.set((node << 16) | depth, na)
             if is_leaf(b):
                 nb = b
-                if (_s32(self.leaf_meta[leaf_index(b)]) & 1) != 0:
+                if r_uint(b - bind_lo) <= bind_span:
                     j = 0
                     while j < n:
                         if fvars[j] == b:
@@ -5306,7 +5321,7 @@ class Machine(object):
         '_open_memo', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
         '_ld_h1', '_ld_h2', '_proj_rem',
-        '_def_eq_hooked', '_stack_tick',
+        '_def_eq_hooked', '_stack_tick', '_fvar_reused',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
@@ -5336,6 +5351,7 @@ class Machine(object):
         self._proj_rem = 0
         self._def_eq_hooked = tc.def_eq_hooked
         self._stack_tick = 0
+        self._fvar_reused = False
         #: Generation tag for `check=True` memos so warm cross-declaration
         #: caches re-verify reference ordering, safety, and universe params
         #: on every declaration while reusing pure whnf/infer/def_eq memos.
@@ -6570,7 +6586,9 @@ class Machine(object):
             fv = self._fvars.get(key, 0)
             if fv != 0:
                 self.store.leaf_checked[leaf_index(fv)] = _u32(self.check_gen)
+                self._fvar_reused = True
                 return fv
+        self._fvar_reused = False
         store = self.store
         binder = store.binder_of(h)
         own = binder.fvar()
@@ -7090,33 +7108,6 @@ class Machine(object):
             self.tc, self.export(spine), inferred_type=self.export(fn_type),
         )
 
-    def _open_telescope(self, h, kind, check):
-        """
-        Open every leading binder of the given kind at once: returns
-        ``(records, domains, fvars, body)`` with the domains and the
-        body instantiated with the free variables of the binders
-        before them. In check mode each domain is checked to be a sort.
-        """
-        store = self.store
-        records = []
-        domains = []
-        fvars = []
-        e = h
-        while store.kind(e) == kind:
-            domain = store.field_a(e)
-            n = len(fvars)
-            if n > 0 and store.loose_bvar_range(domain) > 0:
-                domain = store.instantiate_multi_rev(domain, fvars, n, 0)
-            if check:
-                self._ensure_sort(domain, True)
-            fvar = self.fvar_for_domain(e, domain)
-            records.append(e)
-            domains.append(domain)
-            fvars.append(fvar)
-            e = store.field_b(e)
-        body = store.instantiate_multi_rev(e, fvars, len(fvars), 0)
-        return records, domains, fvars, body
-
     def _infer_lambda(self, h, check):
         store = self.store
         body = store.field_b(h)
@@ -7130,16 +7121,53 @@ class Machine(object):
             r = self._cheap_beta(self.infer(body, check))
             r = store.bind_fvar(r, fvar, 0)
             return store.cons(KIND_FORALL, domain, r, store.info(h))
-        records, domains, fvars, body = self._open_telescope(h, KIND_LAMBDA, check)
+        records = []
+        fvars = []
+        reused_at = -1
+        reused_domains = None
+        e = h
+        while store.kind(e) == KIND_LAMBDA:
+            orig_d = store.field_a(e)
+            idx = len(fvars)
+            if idx > 0 and store.loose_bvar_range(orig_d) > 0:
+                if is_leaf(orig_d):
+                    bid = (_s32(store.leaf_meta[leaf_index(orig_d)]) >> 1) - 1
+                    domain = fvars[idx - 1 - bid] if bid < idx else store.bvar(bid - idx)
+                else:
+                    domain = store.instantiate_multi_rev(orig_d, fvars, idx, 0)
+            else:
+                domain = orig_d
+            if check:
+                self._ensure_sort(domain, True)
+            if reused_at >= 0:
+                assert reused_domains is not None
+                reused_domains.append(domain)
+            fvar = self.fvar_for_domain(e, domain)
+            if self._fvar_reused and reused_at < 0:
+                reused_at = idx
+                reused_domains = []
+            records.append(e)
+            fvars.append(fvar)
+            e = store.field_b(e)
+        n = len(fvars)
+        body = store.instantiate_multi_rev(e, fvars, n, 0)
         r = self._cheap_beta(self.infer(body, check))
         # Close the telescope back up as a Pi: the body type over all
-        # the variables, each domain over the variables before it.
-        n = len(fvars)
+        # the variables; each binder's original domain is already closed over
+        # earlier binders whenever earlier fvars were fresh (or domain has no fvars).
         r = store.bind_fvars(r, fvars, 0, n)
         i = n - 1
         while i >= 0:
-            domain = store.bind_fvars(domains[i], fvars, 0, i)
-            r = store.cons(KIND_FORALL, domain, r, store.info(records[i]))
+            rec = records[i]
+            orig_d = store.field_a(rec)
+            if reused_at >= 0 and i > reused_at and store.has_fvar(orig_d):
+                assert reused_domains is not None
+                domain = store.bind_fvars(
+                    reused_domains[i - reused_at - 1], fvars, 0, i,
+                )
+            else:
+                domain = orig_d
+            r = store.cons(KIND_FORALL, domain, r, store.info(rec))
             i -= 1
         return r
 
@@ -7154,11 +7182,32 @@ class Machine(object):
                 body = store.instantiate(body, fvar, 0)
             l2 = self._ensure_sort(body, check)
             return store.leaf_for(l1.imax(l2).sort())
-        records, domains, fvars, body = self._open_telescope(h, KIND_FORALL, False)
         levels = []
-        for domain in domains:
+        fvars = []
+        e = h
+        while store.kind(e) == KIND_FORALL:
+            orig_d = store.field_a(e)
+            nf = len(fvars)
+            if nf > 0 and store.loose_bvar_range(orig_d) > 0:
+                if is_leaf(orig_d):
+                    bid = (_s32(store.leaf_meta[leaf_index(orig_d)]) >> 1) - 1
+                    domain = fvars[nf - 1 - bid] if bid < nf else store.bvar(bid - nf)
+                else:
+                    domain = store.instantiate_multi_rev(orig_d, fvars, nf, 0)
+            else:
+                domain = orig_d
             levels.append(self._ensure_sort(domain, check))
-        level = self._ensure_sort(body, check)
+            nxt = store.field_b(e)
+            if store.loose_bvar_range(nxt) == 0:
+                if nf > 0:
+                    fvars = []
+            else:
+                fvars.append(self.fvar_for_domain(e, domain))
+            e = nxt
+        nf = len(fvars)
+        if nf > 0 and store.loose_bvar_range(e) > 0:
+            e = store.instantiate_multi_rev(e, fvars, nf, 0)
+        level = self._ensure_sort(e, check)
         i = len(levels) - 1
         while i >= 0:
             level = levels[i].imax(level)
@@ -8312,30 +8361,50 @@ class Machine(object):
             )
         fvars = []
         while store.kind(h1) == kind and store.kind(h2) == kind:
+            if h1 == h2 and not self._def_eq_hooked:
+                return True
             d1 = store.field_a(h1)
             d2 = store.field_a(h2)
             same_d = (d1 == d2)
             nf = len(fvars)
             if nf > 0:
                 if store.loose_bvar_range(d1) > 0:
-                    d1 = store.instantiate_multi_rev(d1, fvars, nf, 0)
+                    if is_leaf(d1):
+                        bid = (_s32(store.leaf_meta[leaf_index(d1)]) >> 1) - 1
+                        d1 = fvars[nf - 1 - bid] if bid < nf else store.bvar(bid - nf)
+                    else:
+                        d1 = store.instantiate_multi_rev(d1, fvars, nf, 0)
                 if same_d:
                     d2 = d1
                 elif store.loose_bvar_range(d2) > 0:
-                    d2 = store.instantiate_multi_rev(d2, fvars, nf, 0)
+                    if is_leaf(d2):
+                        bid = (_s32(store.leaf_meta[leaf_index(d2)]) >> 1) - 1
+                        d2 = fvars[nf - 1 - bid] if bid < nf else store.bvar(bid - nf)
+                    else:
+                        d2 = store.instantiate_multi_rev(d2, fvars, nf, 0)
             if not same_d or self._def_eq_hooked:
                 if not self.def_eq(d1, d2):
                     return False
-            fvars.append(self.fvar_for_domain(h1, d1))
-            h1 = store.field_b(h1)
-            h2 = store.field_b(h2)
+            nxt1 = store.field_b(h1)
+            nxt2 = store.field_b(h2)
+            if nxt1 == nxt2 and not self._def_eq_hooked:
+                return True
+            if (store.loose_bvar_range(nxt1) == 0
+                    and store.loose_bvar_range(nxt2) == 0):
+                if nf > 0:
+                    fvars = []
+            else:
+                fvars.append(self.fvar_for_domain(h1, d1))
+            h1 = nxt1
+            h2 = nxt2
         if h1 == h2 and not self._def_eq_hooked:
             return True
         nf = len(fvars)
-        if store.loose_bvar_range(h1) > 0:
-            h1 = store.instantiate_multi_rev(h1, fvars, nf, 0)
-        if store.loose_bvar_range(h2) > 0:
-            h2 = store.instantiate_multi_rev(h2, fvars, nf, 0)
+        if nf > 0:
+            if store.loose_bvar_range(h1) > 0:
+                h1 = store.instantiate_multi_rev(h1, fvars, nf, 0)
+            if store.loose_bvar_range(h2) > 0:
+                h2 = store.instantiate_multi_rev(h2, fvars, nf, 0)
         return self.def_eq(h1, h2)
 
     def try_eta_expand(self, h1, h2):
