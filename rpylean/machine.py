@@ -388,6 +388,9 @@ _LF_NAT_SUCC = 512
 _LF_NAT_ZERO = 1024
 _LF_HINT_SHIFT = 16
 _LF_HINT_OVF = 65535
+#: Bit 62 marks `TermStore.leaf_prop_mask[j]` as computed; bits `0..61`
+#: indicate that argument `k` of the leaf's type lives in `Prop`.
+_PROP_MASK_DONE = 1 << 62
 _STORE_KEEP_CAP = 1 << 17
 _WARM_MAX_RECS = 98304
 _WARM_MAX_LEAVES = 1 << 15
@@ -1056,6 +1059,7 @@ class TermStore(object):
         '_subst_stack', '_subst_cap', '_subst_top',
         'leaves', 'leaf_decl', 'leaf_meta', 'leaf_whnf', 'leaf_infer',
         'leaf_checked', 'leaf_delta', 'leaf_next', 'leaf_eqv', 'leaf_head_kind',
+        'leaf_prop_mask',
         'nleaves', 'leaf_cap',
         'infos', 'names', '_name_ids', '_proj_overflow',
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
@@ -1101,6 +1105,9 @@ class TermStore(object):
         self.leaf_eqv = _alloc_u32(self.leaf_cap)
         #: Packed classification flags & definition hint (`_LF_*`).
         self.leaf_head_kind = _alloc_u32(self.leaf_cap)
+        #: Per-leaf bitmask of argument positions (0..61) whose domain lives
+        #: in `Prop`, with `_PROP_MASK_DONE` (bit 62) marking computed entries.
+        self.leaf_prop_mask = _alloc_words(self.leaf_cap)
         #: Flat array for small bound-variable leaf handles (`id < 256`).
         self._bvar_arr = _alloc_words(_BVAR_ARR_LEN)
         self._bvar_max = 0
@@ -1239,6 +1246,7 @@ class TermStore(object):
         _zero_u32(self.leaf_next, leaves)
         _zero_u32(self.leaf_eqv, leaves)
         _zero_u32(self.leaf_head_kind, leaves)
+        _zero_words(self.leaf_prop_mask, leaves)
         if self._bvar_max > 0:
             _zero_words(self._bvar_arr, self._bvar_max)
             self._bvar_max = 0
@@ -1343,6 +1351,7 @@ class TermStore(object):
         _free_u32(self.leaf_next)
         _free_u32(self.leaf_eqv)
         _free_u32(self.leaf_head_kind)
+        _free_words(self.leaf_prop_mask)
         _free_words(self._bvar_arr)
         _free_words(self._lgen1_g)
         _free_words(self._lgen2_g)
@@ -1990,6 +1999,7 @@ class TermStore(object):
             self.leaf_next = _grow_u32(self.leaf_next, j, cap)
             self.leaf_eqv = _grow_u32(self.leaf_eqv, j, cap)
             self.leaf_head_kind = _grow_u32(self.leaf_head_kind, j, cap)
+            self.leaf_prop_mask = _grow_words(self.leaf_prop_mask, j, cap)
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_decl.append(None)
@@ -5131,6 +5141,75 @@ class Machine(object):
             return f
         return self._classify_const_leaf(h, j)
 
+    def _prop_mask_for(self, head):
+        """Bitmask of argument positions (0..61) of ``head`` whose domain
+        lives in ``Prop`` (and can therefore be skipped by proof irrelevance
+        during same-head application comparison once all earlier arguments
+        agree). Only active while checking a declaration (when both sides of
+        every `def_eq` are guaranteed well-typed) and when trace writing is
+        off."""
+        if not is_leaf(head) or self.tc.decl is None:
+            return 0
+        tracer = self.tc.tracer
+        if tracer.recording and tracer.writes:
+            return 0
+        j = leaf_index(head)
+        m = self.store.leaf_prop_mask[j]
+        if m != 0:
+            return m
+        return self._compute_prop_mask(head, j)
+
+    @dont_inline
+    def _compute_prop_mask(self, head, j):
+        store = self.store
+        # Store the done sentinel before walking `ty` so any re-entrant call
+        # for the same head sees mask 0 and terminates soundly.
+        store.leaf_prop_mask[j] = _PROP_MASK_DONE
+        e = store.leaves[j]
+        if isinstance(e, W_Const):
+            decl = self._leaf_decl(head, e)
+            if decl is None or len(e.levels) != len(decl.levels):
+                return _PROP_MASK_DONE
+        elif isinstance(e, W_FVar):
+            if _s32(store.leaf_infer[j]) == 0:
+                return _PROP_MASK_DONE
+        else:
+            return _PROP_MASK_DONE
+        ty = self.infer(head, False)
+        mask = 0
+        fvars = []
+        k = 0
+        while k < 62:
+            if store.kind(ty) != KIND_FORALL:
+                nf = len(fvars)
+                if nf > 0:
+                    if store.loose_bvar_range(ty) > 0:
+                        ty = store.instantiate_multi_rev(ty, fvars, nf, 0)
+                    fvars = []
+                ty = self.whnf(ty)
+                if store.kind(ty) != KIND_FORALL:
+                    break
+            dom = store.field_a(ty)
+            nf = len(fvars)
+            if nf > 0 and store.loose_bvar_range(dom) > 0:
+                dom = store.instantiate_multi_rev(dom, fvars, nf, 0)
+            if store.sort_leaf(dom) is None:
+                s = self.infer(dom, False)
+                if s != self.h_prop and store.sort_leaf(s) is None:
+                    s = self.whnf(s)
+                if s == self.h_prop:
+                    mask |= (1 << k)
+            body = store.field_b(ty)
+            if store.loose_bvar_range(body) == 0:
+                fvars = []
+            else:
+                fvars.append(self.fvar_for_domain(ty, dom))
+            ty = body
+            k += 1
+        res = _PROP_MASK_DONE | mask
+        store.leaf_prop_mask[j] = res
+        return res
+
     @dont_inline
     def _classify_const_leaf(self, h, j):
         const = self.store.leaves[j]
@@ -6955,15 +7034,24 @@ class Machine(object):
                     n2 = store._spine_top - m2
                     if n1 == n2:
                         all_eq = True
+                        pmask = -1
                         j = n1 - 1
+                        k = 0
                         while j >= 0:
                             a1 = store.spine_arg(m1 + j)
                             a2 = store.spine_arg(m2 + j)
                             if a1 != a2:
+                                if pmask == -1:
+                                    pmask = self._prop_mask_for(head1)
+                                if k < 62 and (pmask & (1 << k)) != 0:
+                                    j -= 1
+                                    k += 1
+                                    continue
                                 if not self._proj_lazy_eq(a1, a2, depth - 1):
                                     all_eq = False
                                     break
                             j -= 1
+                            k += 1
                         if all_eq:
                             self._union(h1, h2)
                             return True
@@ -7287,15 +7375,28 @@ class Machine(object):
                         if n1 == n2:
                             if not self._failed_before(h1, h2):
                                 all_eq = True
+                                pmask = -1
                                 j = n1 - 1
+                                k = 0
                                 while j >= 0:
-                                    if not self.def_eq(
-                                        store.spine_arg(m1 + j),
-                                        store.spine_arg(m2 + j),
-                                    ):
-                                        all_eq = False
-                                        break
+                                    a1 = store.spine_arg(m1 + j)
+                                    a2 = store.spine_arg(m2 + j)
+                                    if a1 != a2:
+                                        if pmask == -1:
+                                            pmask = self._prop_mask_for(head1)
+                                        if k < 62 and (pmask & (1 << k)) != 0:
+                                            j -= 1
+                                            k += 1
+                                            continue
+                                        if not self.def_eq(a1, a2):
+                                            all_eq = False
+                                            break
+                                    elif self._def_eq_hooked:
+                                        if not self.def_eq(a1, a2):
+                                            all_eq = False
+                                            break
                                     j -= 1
+                                    k += 1
                                 if all_eq:
                                     return _LD_TRUE
                                 self._cache_failure(h1, h2)
@@ -7463,9 +7564,20 @@ class Machine(object):
             if self.def_eq(h1, store.instantiate(store.field_b(fn2), store.field_b(h2), 0)):
                 return True
         if store.kind(fn1) != KIND_APP or store.kind(fn2) != KIND_APP:
-            return self.def_eq(fn1, fn2) and self.def_eq(
-                store.field_b(h1), store.field_b(h2),
-            )
+            if not self.def_eq(fn1, fn2):
+                return False
+            a1 = store.field_b(h1)
+            a2 = store.field_b(h2)
+            if a1 != a2:
+                pmask = self._prop_mask_for(fn1)
+                if pmask == 0 and is_leaf(fn2):
+                    pmask = self._prop_mask_for(fn2)
+                if (pmask & 1) != 0:
+                    return True
+                return self.def_eq(a1, a2)
+            if self._def_eq_hooked:
+                return self.def_eq(a1, a2)
+            return True
         mark = store._spine_top
         top = mark
         buf = store._spine_buf
@@ -7486,11 +7598,28 @@ class Machine(object):
             store._spine_top = top
             if not self.def_eq(h1, h2):
                 return False
+            pmask = -1
             i = top - 2
+            k = 0
             while i >= mark:
-                if not self.def_eq(store.spine_arg(i), store.spine_arg(i + 1)):
-                    return False
+                a1 = store.spine_arg(i)
+                a2 = store.spine_arg(i + 1)
+                if a1 != a2:
+                    if pmask == -1:
+                        pmask = self._prop_mask_for(h1)
+                        if pmask == 0 and is_leaf(h2):
+                            pmask = self._prop_mask_for(h2)
+                    if k < 62 and (pmask & (1 << k)) != 0:
+                        i -= 2
+                        k += 1
+                        continue
+                    if not self.def_eq(a1, a2):
+                        return False
+                elif self._def_eq_hooked:
+                    if not self.def_eq(a1, a2):
+                        return False
                 i -= 2
+                k += 1
             return True
         finally:
             store.unapp_pop(mark)

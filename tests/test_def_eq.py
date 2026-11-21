@@ -787,3 +787,231 @@ def test_trace_nested_result_on_own_line():
     output = trace.getvalue().decode("utf-8")
     lines = output.strip().split(u"\n")
     assert lines[-1] == u"✓"
+
+
+class TestProofArgSkipping(object):
+    """Proof-argument skipping via `TermStore.leaf_prop_mask` during
+    declaration checking must skip proof arguments once earlier arguments
+    match, never skip proposition/type/data arguments, respect universe
+    polymorphism, and still reject ill-typed proofs."""
+
+    def _base_decls(self):
+        from rpylean.objects import PROP
+        P, Q, h, n = names("P", "Q", "h", "n")
+        Eq = Name.simple("Eq")
+        Eq_refl = Name.of(["Eq", "refl"])
+        # Eq.{u} : {α : Sort u} → α → α → Prop
+        eq_const = Eq.const(levels=[u])
+        eq_refl_ctor = Eq_refl.constructor(
+            type=forall(
+                Name.simple("α").binder(type=u.sort()).to_implicit(),
+                a.binder(type=W_BVar(0)).to_implicit(),
+            )(eq_const.app(W_BVar(1), W_BVar(0), W_BVar(0))),
+            levels=[u.name],
+            num_params=2,
+            num_fields=0,
+        )
+        eq_ind = Eq.inductive(
+            type=forall(
+                Name.simple("α").binder(type=u.sort()).to_implicit(),
+                a.binder(type=W_BVar(0)),
+                Name.simple("b").binder(type=W_BVar(1)),
+            )(PROP),
+            constructors=[eq_refl_ctor],
+            levels=[u.name],
+            num_params=2,
+            num_indices=1,
+            is_recursive=False,
+        )
+        return [
+            Name.simple("Nat").axiom(type=TYPE),
+            Name.simple("z").axiom(type=NAT),
+            Name.simple("o").axiom(type=NAT),
+            eq_ind,
+            eq_refl_ctor,
+            P.axiom(type=forall(n.binder(type=NAT))(PROP)),
+            Q.axiom(type=PROP),
+            Name.simple("p1").axiom(type=P.const().app(Name.simple("z").const())),
+            Name.simple("p2").axiom(type=P.const().app(Name.simple("z").const())),
+            Name.simple("q1").axiom(type=Q.const()),
+            Name.simple("q2").axiom(type=Q.const()),
+            # fn : (n : Nat) → P n → Nat
+            Name.simple("fn").axiom(
+                type=forall(
+                    n.binder(type=NAT),
+                    h.binder(type=P.const().app(W_BVar(0))),
+                )(NAT),
+            ),
+            # takes_prop : (A : Prop) → A → Nat
+            Name.simple("takes_prop").axiom(
+                type=forall(
+                    Name.simple("A").binder(type=PROP),
+                    h.binder(type=W_BVar(0)),
+                )(NAT),
+            ),
+            # poly_id.{u} : (α : Sort u) → α → α
+            Name.simple("poly_id").axiom(
+                type=forall(
+                    Name.simple("α").binder(type=u.sort()),
+                    x.binder(type=W_BVar(0)),
+                )(W_BVar(1)),
+                levels=[u.name],
+            ),
+            # ho : (n : Nat) → (∀ m : Nat, P m) → Nat
+            Name.simple("ho").axiom(
+                type=forall(
+                    n.binder(type=NAT),
+                    h.binder(type=forall(Name.simple("m").binder(type=NAT))(
+                        P.const().app(W_BVar(0)),
+                    )),
+                )(NAT),
+            ),
+            Name.simple("hp1").axiom(
+                type=forall(Name.simple("m").binder(type=NAT))(P.const().app(W_BVar(0))),
+            ),
+            Name.simple("hp2").axiom(
+                type=forall(Name.simple("m").binder(type=NAT))(P.const().app(W_BVar(0))),
+            ),
+        ]
+
+    def test_skips_proof_arg_and_avoids_pi_fallback(self):
+        """Comparing `fn z p1` vs `fn z p2` skips the proof arg via
+        `leaf_prop_mask` without needing proof-irrelevance fallback."""
+        Eq = Name.simple("Eq").const(levels=[W_LEVEL_ZERO.succ()])
+        refl = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO.succ()])
+        fn = Name.simple("fn").const()
+        z = Name.simple("z").const()
+        p1 = Name.simple("p1").const()
+        p2 = Name.simple("p2").const()
+        thm = Name.simple("thm_ok").theorem(
+            type=Eq.app(NAT, fn.app(z, p1), fn.app(z, p2)),
+            value=refl.app(NAT, fn.app(z, p1)),
+        )
+        e = Environment.having(self._base_decls() + [thm])
+        e.tracer = StreamTracer(None)
+        res = e.type_check_one(thm)
+        assert res.error is None
+        assert e.tracer.pi_hit_count == 0
+
+    def test_never_skips_prop_type_arg(self):
+        """`(A : Prop) → A → Nat` must still compare `A`, only skipping the
+        proof of `A` once `A` agrees."""
+        Eq = Name.simple("Eq").const(levels=[W_LEVEL_ZERO.succ()])
+        refl = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO.succ()])
+        tp = Name.simple("takes_prop").const()
+        P = Name.simple("P").const()
+        Q = Name.simple("Q").const()
+        z = Name.simple("z").const()
+        p1 = Name.simple("p1").const()
+        q1 = Name.simple("q1").const()
+        q2 = Name.simple("q2").const()
+        # Same Prop `Q`, distinct proofs `q1`, `q2` -> succeeds without pi hit.
+        ok_thm = Name.simple("ok_tp").theorem(
+            type=Eq.app(NAT, tp.app(Q, q1), tp.app(Q, q2)),
+            value=refl.app(NAT, tp.app(Q, q1)),
+        )
+        # Distinct Props `P z` vs `Q` -> MUST fail!
+        bad_thm = Name.simple("bad_tp").theorem(
+            type=Eq.app(NAT, tp.app(P.app(z), p1), tp.app(Q, q1)),
+            value=refl.app(NAT, tp.app(P.app(z), p1)),
+        )
+        e = Environment.having(self._base_decls() + [ok_thm, bad_thm])
+        e.tracer = StreamTracer(None)
+        assert e.type_check_one(ok_thm).error is None
+        assert e.tracer.pi_hit_count == 0
+        assert e.type_check_one(bad_thm).error is not None
+
+    def test_universe_polymorphic_mask_is_per_instantiation(self):
+        """`poly_id.{0}` skips its value arg (a proof), whereas `poly_id.{1}`
+        and `poly_id.{u}` never do."""
+        Eq0 = Name.simple("Eq").const(levels=[W_LEVEL_ZERO])
+        refl0 = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO])
+        Eq1 = Name.simple("Eq").const(levels=[W_LEVEL_ZERO.succ()])
+        refl1 = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO.succ()])
+        pid0 = Name.simple("poly_id").const(levels=[W_LEVEL_ZERO])
+        pid1 = Name.simple("poly_id").const(levels=[W_LEVEL_ZERO.succ()])
+        Q = Name.simple("Q").const()
+        z = Name.simple("z").const()
+        o = Name.simple("o").const()
+        q1 = Name.simple("q1").const()
+        q2 = Name.simple("q2").const()
+        ok_thm = Name.simple("ok_pid0").theorem(
+            type=Eq0.app(Q, pid0.app(Q, q1), pid0.app(Q, q2)),
+            value=refl0.app(Q, pid0.app(Q, q1)),
+        )
+        bad_thm = Name.simple("bad_pid1").theorem(
+            type=Eq1.app(NAT, pid1.app(NAT, z), pid1.app(NAT, o)),
+            value=refl1.app(NAT, pid1.app(NAT, z)),
+        )
+        e = Environment.having(self._base_decls() + [ok_thm, bad_thm])
+        assert e.type_check_one(ok_thm).error is None
+        assert e.type_check_one(bad_thm).error is not None
+
+    def test_higher_order_proof_arg_and_ill_typed_rejection(self):
+        """Higher-order proof args `(∀ m, P m)` are skipped once earlier args
+        agree, while an ill-typed proof arg is still rejected by `_infer_app`."""
+        Eq = Name.simple("Eq").const(levels=[W_LEVEL_ZERO.succ()])
+        refl = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO.succ()])
+        ho = Name.simple("ho").const()
+        fn = Name.simple("fn").const()
+        z = Name.simple("z").const()
+        o = Name.simple("o").const()
+        hp1 = Name.simple("hp1").const()
+        hp2 = Name.simple("hp2").const()
+        q1 = Name.simple("q1").const()
+        ok_ho = Name.simple("ok_ho").theorem(
+            type=Eq.app(NAT, ho.app(z, hp1), ho.app(z, hp2)),
+            value=refl.app(NAT, ho.app(z, hp1)),
+        )
+        bad_earlier = Name.simple("bad_ho_earlier").theorem(
+            type=Eq.app(NAT, ho.app(z, hp1), ho.app(o, hp2)),
+            value=refl.app(NAT, ho.app(z, hp1)),
+        )
+        ill_typed = Name.simple("bad_ill_typed_proof").theorem(
+            type=Eq.app(NAT, fn.app(z, q1), fn.app(z, q1)),
+            value=refl.app(NAT, fn.app(z, q1)),
+        )
+        e = Environment.having(self._base_decls() + [ok_ho, bad_earlier, ill_typed])
+        e.tracer = StreamTracer(None)
+        assert e.type_check_one(ok_ho).error is None
+        assert e.tracer.pi_hit_count == 0
+        assert e.type_check_one(bad_earlier).error is not None
+        assert e.type_check_one(ill_typed).error is not None
+
+    def test_structure_proj_lazy_skips_proof_field(self):
+        """Comparing projections of two structure constructors differing only
+        in a proof field succeeds via `_proj_lazy_eq` + `leaf_prop_mask`."""
+        Eq = Name.simple("Eq").const(levels=[W_LEVEL_ZERO.succ()])
+        refl = Name.of(["Eq", "refl"]).const(levels=[W_LEVEL_ZERO.succ()])
+        Box = Name.simple("Box")
+        Box_mk = Name.of(["Box", "mk"])
+        P = Name.simple("P").const()
+        n, h = names("n", "h")
+        mk_ctor = Box_mk.constructor(
+            type=forall(
+                n.binder(type=NAT),
+                h.binder(type=P.app(W_BVar(0))),
+            )(Box.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        box_ind = Box.inductive(
+            type=TYPE,
+            constructors=[mk_ctor],
+            num_params=0,
+            num_indices=0,
+            is_recursive=False,
+        )
+        z = Name.simple("z").const()
+        p1 = Name.simple("p1").const()
+        p2 = Name.simple("p2").const()
+        proj1 = W_Proj(Box, 0, Box_mk.const().app(z, p1))
+        proj2 = W_Proj(Box, 0, Box_mk.const().app(z, p2))
+        thm = Name.simple("box_proj_ok").theorem(
+            type=Eq.app(NAT, proj1, proj2),
+            value=refl.app(NAT, proj1),
+        )
+        e = Environment.having(self._base_decls() + [box_ind, mk_ctor, thm])
+        e.tracer = StreamTracer(None)
+        assert e.type_check_one(thm).error is None
+        assert e.tracer.pi_hit_count == 0
