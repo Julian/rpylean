@@ -4387,6 +4387,12 @@ class W_DeclarationKind(_Item):
         """Polymorphic predicate: `W_Constructor` overrides to True."""
         return False
 
+    def allows_warm_cache(self):
+        """Whether checking a declaration of this kind may reuse a warm
+        `Machine` across consecutive declarations (the declaration only calls
+        `check_value` and never modifies inductive-block `stage`)."""
+        return False
+
     def field_name(self, index):
         """The name of the field at ``index``, or None."""
         return None
@@ -4452,6 +4458,9 @@ class W_Definition(W_DeclarationKind):
     def get_delta_reduce_target(self):
         return self.value
 
+    def allows_warm_cache(self):
+        return True
+
 
 class W_Opaque(W_Definition):
     """
@@ -4512,6 +4521,9 @@ class W_Theorem(W_DeclarationKind):
         value = self.value
         assert value is not None
         return tc.machine.check_value(type, value, True)
+
+    def allows_warm_cache(self):
+        return True
 
     def decl_format(self, name, levels, type, constants, marker):
         value = self.value

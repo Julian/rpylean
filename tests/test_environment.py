@@ -1966,3 +1966,89 @@ class TestSafety(object):
         errors = list(env.type_check([thm]))
         assert len(errors) == 1
         assert isinstance(errors[0], W_UnsafeReference)
+
+
+class TestWarmCacheSoundness(object):
+    """
+    Warm cross-declaration `Machine` reuse must never bypass reference
+    ordering, safety checks, universe-parameter checks, or error formatting.
+    """
+
+    def test_warm_cache_still_rejects_unsafe_ref_after_unsafe_decl(self):
+        id_name = Name.simple("idT")
+        id_decl = id_name.definition(
+            type=forall(x.binder(type=T.const()))(T.const()),
+            value=fun(x.binder(type=T.const()))(b0),
+        )
+        bad_ax = Name.simple("badAx").axiom(type=T.const(), is_unsafe=True)
+        shared_expr = id_name.const().app(bad_ax.const())
+        ok_unsafe = Name.simple("okUnsafe").definition(
+            type=T.const(), value=shared_expr, safety=SAFETY_UNSAFE,
+        )
+        bad_safe = Name.simple("badSafe").definition(
+            type=T.const(), value=shared_expr,
+        )
+        env = Environment.having([T.axiom(type=TYPE), id_decl, bad_ax, ok_unsafe, bad_safe])
+        errors = list(env.type_check([ok_unsafe, bad_safe]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_UnsafeReference)
+        assert errors[0].name == bad_safe.name
+
+    def test_warm_cache_still_rejects_undeclared_level_after_poly_decl(self):
+        u_name = Name.simple("u")
+        u_lvl = W_LevelParam(u_name)
+        const_prop = Name.simple("constProp")
+        const_prop_decl = const_prop.definition(
+            levels=[u_name],
+            type=forall(x.binder(type=W_Sort(u_lvl.succ())))(TYPE),
+            value=fun(x.binder(type=W_Sort(u_lvl.succ())))(PROP),
+        )
+        shared_val = const_prop.const([u_lvl]).app(W_Sort(u_lvl))
+        ok_poly = Name.simple("okPoly").definition(
+            levels=[u_name], type=TYPE, value=shared_val,
+        )
+        bad_mono = Name.simple("badMono").definition(
+            levels=[], type=TYPE, value=shared_val,
+        )
+        env = Environment.having([const_prop_decl, ok_poly, bad_mono])
+        errors = list(env.type_check([ok_poly, bad_mono]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_InvalidDeclaration)
+        assert errors[0].declaration is bad_mono
+
+    def test_warm_cache_still_rejects_forward_ref_when_checked_out_of_order(self):
+        id_name = Name.simple("idT")
+        id_decl = id_name.definition(
+            type=forall(x.binder(type=T.const()))(T.const()),
+            value=fun(x.binder(type=T.const()))(b0),
+        )
+        mid = Name.simple("mid").axiom(type=T.const())
+        shared_expr = id_name.const().app(mid.const())
+        earlier = Name.simple("earlier").definition(
+            type=T.const(), value=shared_expr,
+        )
+        later = Name.simple("later").definition(
+            type=T.const(), value=shared_expr,
+        )
+        # Order in env: T, idT, earlier, mid, later — so `later` can reference
+        # `mid` while `earlier` cannot. Check `later` first to warm the cache.
+        env = Environment.having([T.axiom(type=TYPE), id_decl, earlier, mid, later])
+        errors = list(env.type_check([later, earlier]))
+        assert len(errors) == 1
+        assert isinstance(errors[0], W_NotYetDeclared)
+        assert errors[0].name == earlier.name
+
+    def test_warm_cache_recheck_preserves_diagnostic_spans(self):
+        good = Name.simple("good").definition(type=TYPE, value=PROP)
+        bad = Name.simple("bad").definition(
+            type=forall(x.binder(type=TYPE))(PROP),
+            value=fun(y.binder(type=TYPE))(TYPE),
+        )
+        env = Environment.having([good, bad])
+        warm_errors = list(env.type_check([good, bad]))
+        cold_error = env.check_decl(bad)
+        assert len(warm_errors) == 1
+        assert (
+            warm_errors[0].as_diagnostic().format_with(FORMAT_PLAIN)
+            == cold_error.as_diagnostic().format_with(FORMAT_PLAIN)
+        )

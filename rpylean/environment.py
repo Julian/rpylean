@@ -727,20 +727,20 @@ class TypeChecker(object):
         'env', 'decl', 'heartbeat', 'machine',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time', 'max_memory', 'start_time', 'start_peak',
-        '_whnf_tick', '_released', 'stage', 'allowed_levels',
+        'max_wall_time', 'max_memory', 'has_limits', 'start_time', 'start_peak',
+        '_whnf_tick', '_released', '_keep_warm', 'stage', 'allowed_levels',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats', 'max_wall_time', 'max_memory',
-        'start_time', 'start_peak',
+        'has_limits', 'start_time', 'start_peak',
     ]
 
     # Mask for the wall-time sampling: `clock()` is read every 1024th
     # tick so the per-tick cost stays a counter bump and a mask test.
     _WALL_TIME_SAMPLE_MASK = 1023
 
-    def __init__(self, env, decl):
+    def __init__(self, env, decl, allow_warm=False):
         self.env = env
         self.decl = decl
         self.heartbeat = 0
@@ -750,10 +750,12 @@ class TypeChecker(object):
         self.count_heartbeats = env.count_heartbeats
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
-        self.start_time = clock()
+        self.has_limits = env.max_wall_time > 0.0 or env.max_memory > 0
+        self.start_time = clock() if env.max_wall_time > 0.0 else 0.0
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
-        self.machine = acquire(self)
+        self._keep_warm = allow_warm
+        self.machine = acquire(self, allow_warm)
         self._released = False
         self.stage = STAGE_ALL
         self.allowed_levels = decl.levels if decl is not None else None
@@ -770,12 +772,12 @@ class TypeChecker(object):
         if bad is not None:
             raise UndeclaredLevelParam(bad)
 
-    def free(self):
+    def free(self, failed=False):
         """Release the machine once the check is over."""
         if self._released:
             return
         self._released = True
-        release(self.machine)
+        release(self.machine, failed, self._keep_warm and not failed)
 
     def tick_wall_time(self):
         """
@@ -1090,8 +1092,9 @@ class Environment(object):
         """
         Type check each declaration, yielding only the errors.
         """
+        measure = printer is not None
         for each in declarations:
-            result = self.type_check_one(each, printer=printer)
+            result = self.type_check_one(each, printer=printer, measure=measure)
             if result.error is not None:
                 yield result.error
 
@@ -1109,19 +1112,42 @@ class Environment(object):
         finally:
             tc.free()
 
-    def type_check_one(self, decl, printer=None):
+    def type_check_one(self, decl, printer=None, measure=True):
         """
         Type check a single declaration, returning a `CheckResult`.
         """
         if printer is not None:
             printer.before(self, decl)
+        allow_warm = (
+            decl.index >= 0
+            and decl.group < 0
+            and decl.w_kind.allows_warm_cache()
+            and not self.tracer.recording
+            and self.max_heartbeat == 0
+            and not self.count_heartbeats
+            and self.max_memory == 0
+        )
+        result = self._run_type_check_one(
+            decl, measure or printer is not None, allow_warm,
+        )
+        if printer is not None:
+            printer.after(self, decl, result)
+        return result
 
-        tc = TypeChecker(self, decl)
+    def _run_type_check_one(self, decl, measure, allow_warm):
+        if measure:
+            gc_start = _gc_time_seconds()
+            bytes_start = _bytes_allocated()
+            peak_start = _peak_memory()
+            start = clock()
+        else:
+            gc_start = 0.0
+            bytes_start = 0
+            peak_start = 0
+            start = 0.0
+
+        tc = TypeChecker(self, decl, allow_warm=allow_warm)
         error = None
-        gc_start = _gc_time_seconds()
-        bytes_start = _bytes_allocated()
-        peak_start = _peak_memory()
-        start = clock()
         try:
             error = decl.type_check(tc)
         except HeartbeatExceeded as err:
@@ -1155,26 +1181,41 @@ class Environment(object):
                 stderr.write(decl.name.str())
                 stderr.write("\n\n")
                 pdb.post_mortem()
+            tc.free(True)
             raise
         finally:
-            elapsed = clock() - start
-            gc_elapsed = _gc_time_seconds() - gc_start
-            bytes_allocated = _bytes_allocated() - bytes_start
-            tc.free()
+            if measure:
+                elapsed = clock() - start
+                gc_elapsed = _gc_time_seconds() - gc_start
+                bytes_allocated = _bytes_allocated() - bytes_start
+            else:
+                elapsed = 0.0
+                gc_elapsed = 0.0
+                bytes_allocated = 0
+            recheck = tc.machine.recheck_on_error
+            tc.free(error is not None)
+        if (error is not None and recheck
+                and not isinstance(error, W_WallTimeError)
+                and not isinstance(error, W_MemoryError)
+                and not isinstance(error, W_HeartbeatError)):
+            # Re-check on a clean cold machine so error diagnostics keep exact
+            # binder names and original W_Expr highlight spans.
+            return self._run_type_check_one(decl, measure, False)
         if isinstance(error, W_MemoryError):
             # The decl blew the memory cap: collect now so the next
             # decl starts from a shrunken heap instead of riding the
             # high-water mark into swap.
             rgc.collect()
-        live_memory = _live_memory()
-        peak_growth = _peak_memory() - peak_start
-        result = CheckResult(
+        if measure:
+            live_memory = _live_memory()
+            peak_growth = _peak_memory() - peak_start
+        else:
+            live_memory = 0
+            peak_growth = 0
+        return CheckResult(
             elapsed, gc_elapsed, bytes_allocated, live_memory,
             peak_growth, tc.heartbeat, error,
         )
-        if printer is not None:
-            printer.after(self, decl, result)
-        return result
 
     def all(self):
         """

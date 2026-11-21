@@ -303,7 +303,14 @@ class _StreamingChecker(DeclarationHook):
             debug.debug_start("rpylean-decl")
             if debug.have_debug_prints():
                 debug.debug_print(decl.name.str())
-        result = self.env.type_check_one(decl, printer=self.printer)
+        measure = (
+            self.printer is not None
+            or self.slow_secs >= 0.0
+            or self.slow_hb >= 0
+        )
+        result = self.env.type_check_one(
+            decl, printer=self.printer, measure=measure,
+        )
         if we_are_translated():
             debug.debug_stop("rpylean-decl")
         self.total_heartbeats += result.heartbeats

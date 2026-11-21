@@ -1419,7 +1419,8 @@ eval_jitdriver = jit.JitDriver(
 
 @jit.dont_look_inside
 def _check_limits(tc):
-    tc.tick_wall_time()
+    if tc.has_limits:
+        tc.tick_wall_time()
 
 
 @jit.dont_look_inside

@@ -135,7 +135,7 @@ MEMO_SLOTS = 5
 M_WHNF_CORE = 0
 M_WHNF = 1
 M_INFER = 2
-M_INFER_CHECKED = 3
+M_CHECKED_GEN = 3
 M_WHNF_CORE_CHEAP = 4
 
 _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
@@ -210,6 +210,11 @@ _TABLE_SLOT_MASK = 0xFFFFFFFF
 _TABLE_TAG_MASK = 0x7FFFFFFF
 _BVAR_ARR_LEN = 256
 _STORE_KEEP_CAP = 1 << 17
+_WARM_MAX_RECS = 98304
+_WARM_MAX_LEAVES = 1 << 15
+_WARM_MAX_EQV = 1 << 16
+_WARM_MAX_NEQ = 1 << 16
+_WARM_MAX_FAILED = 1 << 16
 
 
 @always_inline
@@ -595,7 +600,8 @@ class TermStore(object):
         'leaf_checked', 'leaf_delta', 'nleaves', 'leaf_cap',
         'infos', 'names', '_name_ids',
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_leaf_uid', '_content_leaves',
-        '_import_memo', '_import_spine', 'rec_node', 'nodes',
+        '_import_memo', '_import_spine', '_import_spine_len',
+        'rec_node', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_bindm_memo', '_call_memo',
         '_freed', 'initial_cap',
@@ -630,6 +636,8 @@ class TermStore(object):
         self._leaf_uid = IntMap(1 << 11, keep_cap=1 << 14)
         self._import_memo = IntMap(1 << 13)
         self._import_spine = []
+        self._import_spine_len = 0
+        self.record_nodes = True
         self._inst_memo = SubstMemo(1 << 12)
         self._shift_memo = SubstMemo(1 << 10)
         self._bind_memo = SubstMemo(1 << 10)
@@ -1729,35 +1737,49 @@ class TermStore(object):
                     self.import_term(fn, nr), self.import_term(e.arg, nr),
                 )
                 memo.set(e._uid + 1, head)
-                self.set_node(head, e)
+                if self.record_nodes:
+                    self.set_node(head, e)
                 return head
             # Walk the spine down to the first already-imported node
-            # (or the head) using the shared `_import_spine` buffer, then
-            # fold applications back up, memoising every spine node.
+            # (or the head) using the cursor-indexed `_import_spine` buffer
+            # (no list.pop() shrink churn), then fold applications back up.
             spine = self._import_spine
-            mark = len(spine)
+            mark = self._import_spine_len
+            top = mark
             try:
                 cur = e
                 head = 0
                 while True:
                     if not isinstance(cur, W_App):
+                        self._import_spine_len = top
                         head = self.import_term(cur, nr)
                         break
                     hh = memo.get(cur._uid + 1, 0)
                     if hh != 0:
                         head = hh
                         break
-                    spine.append(cur)
+                    if top < len(spine):
+                        spine[top] = cur
+                    else:
+                        spine.append(cur)
+                    top += 1
                     cur = cur.fn
-                while len(spine) > mark:
-                    app = spine.pop()
+                self._import_spine_len = top
+                while top > mark:
+                    top -= 1
+                    app = spine[top]
+                    spine[top] = None
+                    self._import_spine_len = top
                     head = self.cons_app(head, self.import_term(app.arg, nr))
                     memo.set(app._uid + 1, head)
-                    self.set_node(head, app)
+                    if self.record_nodes:
+                        self.set_node(head, app)
                 return head
             finally:
-                while len(spine) > mark:
-                    spine.pop()
+                while top > mark:
+                    top -= 1
+                    spine[top] = None
+                self._import_spine_len = mark
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
             binder = e.binder
@@ -1785,7 +1807,8 @@ class TermStore(object):
             memo.set(e._uid + 1, h)
             return h
         memo.set(e._uid + 1, h)
-        self.set_node(h, e)
+        if self.record_nodes:
+            self.set_node(h, e)
         return h
 
     def import_const_term(self, const, decl, target):
@@ -1848,15 +1871,18 @@ class TermStore(object):
                 memo.set(e._uid + 1, head)
                 return head
             spine = self._import_spine
-            mark = len(spine)
+            mark = self._import_spine_len
+            top = mark
             try:
                 cur = e
                 head = 0
                 while True:
                     if not cur.has_level_param():
+                        self._import_spine_len = top
                         head = self.import_term(cur, nr)
                         break
                     if not isinstance(cur, W_App):
+                        self._import_spine_len = top
                         head = self._import_with_levels(
                             cur, params, clevels, memo, nr,
                         )
@@ -1865,10 +1891,18 @@ class TermStore(object):
                     if hh != 0:
                         head = hh
                         break
-                    spine.append(cur)
+                    if top < len(spine):
+                        spine[top] = cur
+                    else:
+                        spine.append(cur)
+                    top += 1
                     cur = cur.fn
-                while len(spine) > mark:
-                    app = spine.pop()
+                self._import_spine_len = top
+                while top > mark:
+                    top -= 1
+                    app = spine[top]
+                    spine[top] = None
+                    self._import_spine_len = top
                     arg = app.arg
                     arg_h = (
                         self._import_with_levels(arg, params, clevels, memo, nr)
@@ -1879,8 +1913,10 @@ class TermStore(object):
                     memo.set(app._uid + 1, head)
                 return head
             finally:
-                while len(spine) > mark:
-                    spine.pop()
+                while top > mark:
+                    top -= 1
+                    spine[top] = None
+                self._import_spine_len = mark
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
             binder = e.binder
@@ -2015,6 +2051,7 @@ class Machine(object):
         'tc', 'store', '_rule_memo', '_fvars', '_opened',
         '_open_memo', '_heavy', '_budget',
         '_eqv', '_neq', '_failed',
+        'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
 
@@ -2038,7 +2075,26 @@ class Machine(object):
         self._neq = IntMap(1 << 10)
         #: pairs whose same-head argument comparison failed (symmetric)
         self._failed = IntMap(1 << 8)
+        #: Generation tag for `check=True` memos so warm cross-declaration
+        #: caches re-verify reference ordering, safety, and universe params
+        #: on every declaration while reusing pure whnf/infer/def_eq memos.
+        self.check_gen = 1
+        self._last_env = tc.env
+        self._is_clean = True
+        self.recheck_on_error = False
         self._forget()
+
+    def is_warm_ready(self):
+        """Whether this machine is small enough to stay warm for another
+        declaration without growing unboundedly."""
+        store = self.store
+        return (
+            store.nrecs < _WARM_MAX_RECS
+            and store.nleaves < _WARM_MAX_LEAVES
+            and self._eqv.size < _WARM_MAX_EQV
+            and self._neq.size < _WARM_MAX_NEQ
+            and self._failed.size < _WARM_MAX_FAILED
+        )
 
     def _forget(self):
         """Start over on everything the garbage collector looks after."""
@@ -2065,6 +2121,7 @@ class Machine(object):
     def reset(self):
         """Empty the machine for another declaration, keeping its memory."""
         self.store.reset()
+        self.store.record_nodes = True
         self._rule_memo.clear()
         self._fvars.clear()
         self._eqv.clear()
@@ -2072,6 +2129,9 @@ class Machine(object):
         self._failed.clear()
         self._open_memo.clear()
         self._heavy.clear()
+        self.check_gen = 1
+        self._is_clean = True
+        self.recheck_on_error = False
         self._forget()
 
     def free(self):
@@ -2128,7 +2188,8 @@ class Machine(object):
             raise W_DeepRecursion("whnf_core")
         start = h
         while True:
-            tc.tick_wall_time()
+            if tc.has_limits:
+                tc.tick_wall_time()
             if writes:
                 tracer.whnf_step(self.export(h), tc.declarations)
             next = self._whnf_core_step(h, cheap_proj)
@@ -2273,6 +2334,10 @@ class Machine(object):
 
     def _delta_kind(self, head):
         """The `W_Definition` a delta-reducible head names, or None."""
+        if not is_leaf(head):
+            return None
+        if self.store.leaf_delta[leaf_index(head)] < 0:
+            return None
         const = self.store.const_leaf(head)
         if const is None:
             return None
@@ -2752,6 +2817,7 @@ class Machine(object):
         if key != 0:
             fv = self._fvars.get(key, 0)
             if fv != 0:
+                self.store.leaf_checked[leaf_index(fv)] = self.check_gen
                 return fv
         store = self.store
         binder = store.binder_of(h)
@@ -2766,7 +2832,7 @@ class Machine(object):
             fv = store.leaf_for(own)
         j = leaf_index(fv)
         store.leaf_infer[j] = domain
-        store.leaf_checked[j] = 1
+        store.leaf_checked[j] = self.check_gen
         if key != 0:
             self._fvars.set(key, fv)
         return fv
@@ -2784,14 +2850,14 @@ class Machine(object):
             j = leaf_index(h)
             t = store.leaf_infer[j]
             if t != 0:
-                if check and store.leaf_checked[j] == 0:
+                if check and store.leaf_checked[j] != self.check_gen:
                     self._check_leaf(h)
                 return t
             return self._infer_leaf(h, check)
-        t = store.memo(h, M_INFER_CHECKED)
-        if t != 0:
-            return t
-        if not check:
+        if check:
+            if store.memo(h, M_CHECKED_GEN) == self.check_gen:
+                return store.memo(h, M_INFER)
+        else:
             t = store.memo(h, M_INFER)
             if t != 0:
                 return t
@@ -2819,9 +2885,9 @@ class Machine(object):
             t = self._infer_proj(h, [], 0, check)
         else:
             raise RuntimeError("infer: internal pair record")
-        if check:
-            store.set_memo(h, M_INFER_CHECKED, t)
         store.set_memo(h, M_INFER, t)
+        if check:
+            store.set_memo(h, M_CHECKED_GEN, self.check_gen)
         return t
 
     # Under the binders of a heavy term nothing is substituted into it:
@@ -3052,7 +3118,7 @@ class Machine(object):
         elif isinstance(e, W_Sort):
             if e.level.has_param:
                 tc.check_level(e.level)
-        store.leaf_checked[leaf_index(h)] = 1
+        store.leaf_checked[leaf_index(h)] = self.check_gen
 
     def _infer_leaf(self, h, check):
         store = self.store
@@ -3066,23 +3132,23 @@ class Machine(object):
                 for lvl in e.levels:
                     if lvl.has_param:
                         tc.check_level(lvl)
-                store.leaf_checked[j] = 1
+                store.leaf_checked[j] = self.check_gen
             t = store.import_const_term(e, decl, decl.type)
         elif isinstance(e, W_Sort):
             if check:
                 if e.level.has_param:
                     tc.check_level(e.level)
-                store.leaf_checked[j] = 1
+                store.leaf_checked[j] = self.check_gen
             t = store.leaf_for(e.level.succ().sort())
         elif isinstance(e, W_LitNat):
             t = self.h_nat
-            store.leaf_checked[j] = 1
+            store.leaf_checked[j] = self.check_gen
         elif isinstance(e, W_LitStr):
             t = self.h_string
-            store.leaf_checked[j] = 1
+            store.leaf_checked[j] = self.check_gen
         elif isinstance(e, W_FVar):
             t = store.import_term(e.binder.type)
-            store.leaf_checked[j] = 1
+            store.leaf_checked[j] = self.check_gen
         else:
             raise LooseBoundVariable(store.leaf_bvar[j])
         store.leaf_infer[j] = t
@@ -3439,7 +3505,8 @@ class Machine(object):
             tc.heartbeat += 1
             if max_heartbeat > 0 and tc.heartbeat > max_heartbeat:
                 raise HeartbeatExceeded(tc.decl, tc.heartbeat, max_heartbeat)
-        tc.tick_wall_time()
+        if tc.has_limits:
+            tc.tick_wall_time()
         tracer = tc.tracer
         tracing = tracer.recording
         if tracing:
@@ -3770,7 +3837,8 @@ class Machine(object):
                 if z2:
                     return _OFFSET_FALSE
                 return _OFFSET_UNDEF
-            self.tc.tick_wall_time()
+            if self.tc.has_limits:
+                self.tc.tick_wall_time()
             h1 = pred1
             h2 = pred2
 
@@ -3861,7 +3929,8 @@ class Machine(object):
                 pred2 = self._nat_succ_pred(h2)
                 if pred2 == 0:
                     break
-                self.tc.tick_wall_time()
+                if self.tc.has_limits:
+                    self.tc.tick_wall_time()
                 h1 = pred1
                 h2 = pred2
                 peeled = True
@@ -4287,22 +4356,51 @@ class _Spare(object):
 _SPARE = _Spare()
 
 
-def acquire(tc):
-    """A machine for ``tc``'s declaration: the spare one, if there is one."""
+def acquire(tc, allow_warm=False):
+    """A machine for ``tc``'s declaration: the spare one, if there is one.
+
+    When ``allow_warm`` is true and the spare machine belongs to the same
+    `Environment` and is below its warm-cache caps, it is reused without
+    resetting — bumping `check_gen` so every `check=True` check (ordering,
+    safety, universe params) still runs fresh while pure whnf/infer/def_eq
+    and import caches stay warm across consecutive declarations.
+    """
     machine = _SPARE.machine
     if machine is None:
-        return Machine(tc)
+        machine = Machine(tc)
+        machine._last_env = tc.env
+        machine._is_clean = False
+        machine.store.record_nodes = (not allow_warm) or tc.tracer.writes
+        machine.recheck_on_error = not machine.store.record_nodes
+        return machine
     _SPARE.machine = None
     machine.tc = tc
     machine.store.tc = tc
+    if (allow_warm
+            and machine._last_env is tc.env
+            and not machine._is_clean
+            and machine.is_warm_ready()):
+        machine.check_gen += 1
+        machine._open_memo.clear()
+        machine.store.record_nodes = tc.tracer.writes
+        machine.recheck_on_error = True
+        return machine
+    if not machine._is_clean or machine._last_env is not tc.env:
+        machine.reset()
+    machine._last_env = tc.env
+    machine._is_clean = False
+    machine.store.record_nodes = (not allow_warm) or tc.tracer.writes
+    machine.recheck_on_error = not machine.store.record_nodes
     return machine
 
 
-def release(machine):
+def release(machine, failed=False, keep_warm=False):
     """Hand back a machine whose declaration has been checked."""
     machine._census()
     if _SPARE.machine is None:
-        machine.reset()
+        if failed or not keep_warm or not machine.is_warm_ready():
+            machine.reset()
+            machine._last_env = None
         _SPARE.machine = machine
     else:
         machine.free()
