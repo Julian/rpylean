@@ -887,7 +887,7 @@ def _open_export(path, stdin):
     if path == "-":
         return fdopen_as_stream(stdin.fileno(), "r")
     try:
-        return open_file_as_stream(path)
+        return open_file_as_stream(path, "r", 262144)
     except OSError as err:
         if err.errno != errno.ENOENT:
             raise

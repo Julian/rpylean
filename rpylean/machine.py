@@ -611,6 +611,129 @@ class IntMap(object):
             self._dirty_count = 0
 
 
+class IntSet(object):
+    """
+    A compact 8-byte/slot open-addressed set of non-zero signed 64-bit keys
+    (16 entries per 128-byte cache line), with sparse clearing and an optional
+    capacity limit for pure caches like `Machine._neq` and `Machine._failed`.
+    """
+
+    _attrs_ = [
+        'entries', 'dirty', '_dirty_count', 'mask', 'size',
+        'initial', 'keep_cap', 'limit',
+    ]
+
+    def __init__(self, capacity=1 << 10, keep_cap=1 << 15, limit=0):
+        cap = 1
+        while cap < capacity:
+            cap <<= 1
+        self.initial = cap
+        self.keep_cap = keep_cap if keep_cap >= cap else cap
+        self.limit = limit
+        self.entries = _alloc_words(cap)
+        self.dirty = _alloc_words(_DIRTY_CAP)
+        self._dirty_count = 0
+        self.mask = cap - 1
+        self.size = 0
+
+    def clear(self):
+        sz = self.size
+        if sz == 0:
+            self._dirty_count = 0
+            return
+        cap = self.mask + 1
+        if cap > self.keep_cap and sz * 8 < cap:
+            _free_words(self.entries)
+            cap = self.keep_cap
+            self.entries = _alloc_words(cap)
+            self.mask = cap - 1
+        elif self._dirty_count >= 0:
+            entries = self.entries
+            dirty = self.dirty
+            dc = self._dirty_count
+            i = 0
+            while i < dc:
+                entries[dirty[i]] = 0
+                i += 1
+        else:
+            _zero_words(self.entries, cap)
+        self.size = 0
+        self._dirty_count = 0
+
+    @always_inline
+    def contains(self, key):
+        if not we_are_translated():
+            assert key != 0
+        mask = self.mask
+        entries = self.entries
+        i = _spread(key) & mask
+        while True:
+            k = entries[i]
+            if k == key:
+                return True
+            if k == 0:
+                return False
+            i = (i + 1) & mask
+
+    def add(self, key):
+        if not we_are_translated():
+            assert key != 0
+        if (self.size + 1) * 2 > self.mask + 1:
+            self._grow()
+        mask = self.mask
+        entries = self.entries
+        i = _spread(key) & mask
+        while True:
+            k = entries[i]
+            if k == key:
+                return
+            if k == 0:
+                entries[i] = key
+                dc = self._dirty_count
+                if dc >= 0:
+                    if dc < _DIRTY_CAP:
+                        self.dirty[dc] = i
+                        self._dirty_count = dc + 1
+                    else:
+                        self._dirty_count = -1
+                self.size += 1
+                return
+            i = (i + 1) & mask
+
+    def _grow(self):
+        old_cap = self.mask + 1
+        if self.limit > 0 and old_cap >= self.limit:
+            _zero_words(self.entries, old_cap)
+            self.size = 0
+            self._dirty_count = 0
+            return
+        old_entries = self.entries
+        cap = old_cap * 2
+        entries = _alloc_words(cap)
+        mask = cap - 1
+        i = 0
+        while i < old_cap:
+            k = old_entries[i]
+            if k != 0:
+                j = _spread(k) & mask
+                while entries[j] != 0:
+                    j = (j + 1) & mask
+                entries[j] = k
+            i += 1
+        self.entries = entries
+        self.mask = mask
+        self._dirty_count = -1
+        _free_words(old_entries)
+
+    def free(self):
+        if self.mask >= 0:
+            _free_words(self.entries)
+            _free_words(self.dirty)
+            self.mask = -1
+            self.size = 0
+            self._dirty_count = 0
+
+
 class U32Map(object):
     """
     A compact 8-byte/slot open-addressed map for positive 31-bit keys ->
@@ -1456,9 +1579,8 @@ class TermStore(object):
         self.app_wide_mask = wmask
 
     @dont_inline
-    def _cons_app_wide(self, fn, arg):
-        if self._app_limit != 0:
-            self._promote_apps_to_wide()
+    def _cons_app_promote_and_insert(self, fn, arg):
+        self._promote_apps_to_wide()
         key = (fn << 32) | arg
         app_wide = self.app_wide
         wmask = self.app_wide_mask
@@ -1469,8 +1591,28 @@ class TermStore(object):
             if k == key:
                 return app_wide[p + 1]
             if k == 0:
-                break
+                return self._cons_app_wide_miss(fn, arg, key, i)
             i = (i + 1) & wmask
+
+    @dont_inline
+    def _cons_app_wide(self, fn, arg):
+        if self._app_limit != 0:
+            return self._cons_app_promote_and_insert(fn, arg)
+        key = (fn << 32) | arg
+        app_wide = self.app_wide
+        wmask = self.app_wide_mask
+        i = _spread(key) & wmask
+        while True:
+            p = i << 1
+            k = app_wide[p]
+            if k == key:
+                return app_wide[p + 1]
+            if k == 0:
+                return self._cons_app_wide_miss(fn, arg, key, i)
+            i = (i + 1) & wmask
+
+    @dont_inline
+    def _cons_app_wide_miss(self, fn, arg, key, i):
         idx = self.nrecs
         if idx == self.cap:
             self._grow_records()
@@ -1504,10 +1646,11 @@ class TermStore(object):
         h = rec_handle(idx)
         napps = self.napps + 1
         self.napps = napps
-        if napps * 2 > wmask + 1:
+        if napps * 2 > self.app_wide_mask + 1:
             self._rehash_app_wide()
         else:
             p = i << 1
+            app_wide = self.app_wide
             app_wide[p] = key
             app_wide[p + 1] = h
         return h
@@ -1816,6 +1959,16 @@ class TermStore(object):
         if (fvar._cache >> 32) == gen:
             return True
         return self._fvar_uid.get(fvar._uid, 0) != 0
+
+    def _new_fvar_leaf(self, fvar):
+        """Register a free variable known not to have a leaf in this store yet."""
+        assert isinstance(fvar, W_FVar)
+        h = self._new_leaf(fvar)
+        self._fvar_uid.set(fvar._uid, h)
+        gen = self._store_gen
+        if gen > 0:
+            fvar._cache = (gen << 32) | h
+        return h
 
     def leaf_for(self, e):
         """
@@ -3564,7 +3717,9 @@ class TermStore(object):
                 if (ahdr >> 4) <= depth:
                     na = a
                 elif (ahdr & _KIND_MASK) != KIND_APP:
-                    na = self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
+                    akey = _pack_key(a, chain, depth)
+                    ar = self._multi_memo.get(akey, 0) if akey != 0 else 0
+                    na = ar if ar != 0 else self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
                 else:
                     smark = self._subst_top
                     stop = smark
@@ -3629,8 +3784,13 @@ class TermStore(object):
                         elif (_s32(recs[rec_index(old_b) << 2]) >> 4) <= depth:
                             nb2 = old_b
                         else:
-                            self._subst_top = stop
-                            nb2 = self._instantiate_multi(old_b, substs, n, chain, depth, all_closed, nr)
+                            bkey2 = _pack_key(old_b, chain, depth)
+                            br2 = self._multi_memo.get(bkey2, 0) if bkey2 != 0 else 0
+                            if br2 != 0:
+                                nb2 = br2
+                            else:
+                                self._subst_top = stop
+                                nb2 = self._instantiate_multi(old_b, substs, n, chain, depth, all_closed, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
                         nkey = _pack_key(node, chain, depth)
                         if nkey != 0:
@@ -3653,7 +3813,9 @@ class TermStore(object):
             elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= depth:
                 nb = b
             else:
-                nb = self._instantiate_multi(b, substs, n, chain, depth, all_closed, nr)
+                bkey = _pack_key(b, chain, depth)
+                br = self._multi_memo.get(bkey, 0) if bkey != 0 else 0
+                nb = br if br != 0 else self._instantiate_multi(b, substs, n, chain, depth, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
             na = a if self.loose_bvar_range(a) <= depth else self._instantiate_multi(a, substs, n, chain, depth, all_closed, nr)
@@ -4756,10 +4918,11 @@ class Machine(object):
     """
 
     _attrs_ = [
-        'tc', 'store', '_rule_memo', '_fvars', '_opened',
+        'tc', 'store', '_rule_memo', '_fvars',
         '_open_memo', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
         '_ld_h1', '_ld_h2', '_proj_rem',
+        '_def_eq_hooked', '_stack_tick',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
@@ -4771,6 +4934,7 @@ class Machine(object):
         self.store = TermStore(tc)
         #: (heavy open record, context chain and mode) -> its type there
         self._open_memo = PairMap(1 << 8)
+        self._open_memo.limit = _MEMO_LIMIT
         self._decl_start_recs = 0
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = IntMap(1 << 8, keep_cap=1 << 12)
@@ -4778,14 +4942,16 @@ class Machine(object):
         self._fvars = IntMap(1 << 8, keep_cap=1 << 13)
         #: number of union-find merges recorded in `store.memos[M_EQV]`/`leaf_eqv`
         self._eqv_count = 0
-        #: pairs proven NOT def-eq
-        self._neq = IntMap(1 << 10)
-        #: pairs whose same-head argument comparison failed (symmetric)
-        self._failed = IntMap(1 << 8)
+        #: pairs proven NOT def-eq (packed symmetric keys, 8 B/slot, capped at 32 MiB)
+        self._neq = IntSet(1 << 10, limit=1 << 22)
+        #: pairs whose same-head argument comparison failed (symmetric, 8 B/slot)
+        self._failed = IntSet(1 << 8, limit=1 << 22)
         #: Out-slots for `_try_lazy_delta` and `_proj_lazy_eq` (zero-tuple return)
         self._ld_h1 = 0
         self._ld_h2 = 0
         self._proj_rem = 0
+        self._def_eq_hooked = tc.def_eq_hooked
+        self._stack_tick = 0
         #: Generation tag for `check=True` memos so warm cross-declaration
         #: caches re-verify reference ordering, safety, and universe params
         #: on every declaration while reusing pure whnf/infer/def_eq memos.
@@ -4794,6 +4960,11 @@ class Machine(object):
         self._is_clean = True
         self.recheck_on_error = False
         self._forget()
+
+    @dont_inline
+    def _check_stack_slow(self, label):
+        if stack_almost_full():
+            raise W_DeepRecursion(label)
 
     def is_warm_ready(self):
         """Whether this machine is small enough to stay warm for another
@@ -4810,8 +4981,6 @@ class Machine(object):
     def _forget(self):
         """Start over on everything the garbage collector looks after."""
         store = self.store
-        #: uids of binders' own free variables already opening a binder
-        self._opened = {}
         self.h_prop = store.leaf_for(PROP)
         self.h_true = store.leaf_for(_BOOL_TRUE)
         self.h_false = store.leaf_for(_BOOL_FALSE)
@@ -4929,6 +5098,13 @@ class Machine(object):
 
     # ---- whnf ------------------------------------------------------------
 
+    @dont_inline
+    def _trace_whnf_leaf(self, h):
+        tc = self.tc
+        if tc.tracer.writes:
+            tc.tracer.whnf_step(self.export(h), tc.declarations)
+        return h
+
     def whnf_core(self, h, cheap_proj=False, traced=True):
         """
         Weak head normal form without unfolding definitions: beta, zeta,
@@ -4940,14 +5116,11 @@ class Machine(object):
         each form the term takes unless ``traced`` is off, as it is for
         the reduction of an application's head on the way to its own.
         """
-        store = self.store
-        tc = self.tc
-        tracer = tc.tracer
-        writes = traced and tracer.recording and tracer.writes
         if is_leaf(h):
-            if writes:
-                tracer.whnf_step(self.export(h), tc.declarations)
+            if traced and self._def_eq_hooked:
+                return self._trace_whnf_leaf(h)
             return h
+        store = self.store
         slot = M_WHNF_CORE_CHEAP if cheap_proj else M_WHNF_CORE
         memos = store.memos
         mbase = rec_index(h) * MEMO_SLOTS
@@ -4960,8 +5133,18 @@ class Machine(object):
             return h
         if cheap_proj and _s32(memos[mbase + M_WHNF_CORE]) == h:
             return h
-        if stack_almost_full():
-            raise W_DeepRecursion("whnf_core")
+        return self._whnf_core_miss(h, cheap_proj, traced, slot)
+
+    @dont_inline
+    def _whnf_core_miss(self, h, cheap_proj, traced, slot):
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("whnf_core")
+        store = self.store
+        tc = self.tc
+        tracer = tc.tracer
+        writes = traced and tracer.recording and tracer.writes
         start = h
         while True:
             if tc.has_limits:
@@ -5109,6 +5292,11 @@ class Machine(object):
             cached = store.memo(h, M_WHNF)
         if cached != 0:
             return cached
+        return self._whnf_miss(h)
+
+    @dont_inline
+    def _whnf_miss(self, h):
+        store = self.store
         start = h
         while True:
             h = self.whnf_core(h)
@@ -5619,14 +5807,13 @@ class Machine(object):
         store = self.store
         binder = store.binder_of(h)
         own = binder.fvar()
-        if own._uid in self._opened or store.has_fvar_leaf(own):
-            fv = store.leaf_for(W_FVar(binder))
+        if store.has_fvar_leaf(own):
+            fv = store._new_fvar_leaf(W_FVar(binder))
         else:
             # The binder's own variable serves its first opening, so an
             # error in it is marked where whoever opens the binder
             # outside the machine (the printer, say) puts the variable.
-            self._opened[own._uid] = None
-            fv = store.leaf_for(own)
+            fv = store._new_fvar_leaf(own)
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
@@ -5648,7 +5835,7 @@ class Machine(object):
             t = _s32(store.leaf_infer[j])
             if t != 0:
                 if check and _s32(store.leaf_checked[j]) != self.check_gen:
-                    self._check_leaf(h)
+                    return self._check_leaf(h, t)
                 return t
             return self._infer_leaf(h, check)
         ri = rec_index(h)
@@ -5661,8 +5848,15 @@ class Machine(object):
             t = _s32(memos[mbase + M_INFER])
             if t != 0:
                 return t
-        if stack_almost_full():
-            raise W_DeepRecursion("infer")
+        return self._infer_miss(h, ri, mbase, check)
+
+    @dont_inline
+    def _infer_miss(self, h, ri, mbase, check):
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        store = self.store
         kind = _s32(store.recs[ri << 2]) & _KIND_MASK
         if kind == KIND_APP:
             t = self._infer_app(h, check)
@@ -5747,8 +5941,10 @@ class Machine(object):
             t = memo.get(h, chain << 1, 0)
             if t != 0:
                 return t
-        if stack_almost_full():
-            raise W_DeepRecursion("infer")
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
         kind = store.kind(h)
         if kind == KIND_APP:
             t = self._infer_open_app(h, ctx, chain, check)
@@ -5895,7 +6091,8 @@ class Machine(object):
         self._pop(ctx, pushed)
         return t
 
-    def _check_leaf(self, h):
+    @dont_inline
+    def _check_leaf(self, h, t):
         store = self.store
         tc = self.tc
         e = store.leaf(h)
@@ -5911,7 +6108,9 @@ class Machine(object):
             if e.level.has_param:
                 tc.check_level(e.level)
         store.leaf_checked[leaf_index(h)] = _u32(self.check_gen)
+        return t
 
+    @dont_inline
     def _infer_leaf(self, h, check):
         store = self.store
         tc = self.tc
@@ -6416,30 +6615,40 @@ class Machine(object):
 
     def def_eq(self, h1, h2):
         """Whether ``h1`` and ``h2`` are definitionally equal."""
-        tc = self.tc
-        if not tc.def_eq_hooked:
-            if h1 == h2:
-                return True
-            if self._eqv_count > 0 and self._find(h1) == self._find(h2):
-                return True
-            key = self._sym_pair_key(h1, h2)
-            if self._neq.size > 0 and key != 0 and self._neq.get(key, 0) != 0:
-                return False
-            store = self.store
-            if (self._eqv_count > 0
-                    and store.kind(h1) == KIND_APP
-                    and store.kind(h2) == KIND_APP):
-                if self._spine_cheap_eq(h1, h2):
-                    self._union(h1, h2)
-                    return True
-            if stack_almost_full():
-                raise W_DeepRecursion("def_eq")
-            result = self._def_eq_uncached(h1, h2)
-            if result:
+        if h1 == h2 and not self._def_eq_hooked:
+            return True
+        return self._def_eq_slow(h1, h2)
+
+    @dont_inline
+    def _def_eq_slow(self, h1, h2):
+        if self._def_eq_hooked:
+            return self._def_eq_hooked_slow(h1, h2)
+        if self._eqv_count > 0 and self._find(h1) == self._find(h2):
+            return True
+        key = self._sym_pair_key(h1, h2)
+        if self._neq.size > 0 and key != 0 and self._neq.contains(key):
+            return False
+        store = self.store
+        if (self._eqv_count > 0
+                and store.kind(h1) == KIND_APP
+                and store.kind(h2) == KIND_APP):
+            if self._spine_cheap_eq(h1, h2):
                 self._union(h1, h2)
-            elif key != 0:
-                self._neq.set(key, 1)
-            return result
+                return True
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("def_eq")
+        result = self._def_eq_uncached(h1, h2)
+        if result:
+            self._union(h1, h2)
+        elif key != 0:
+            self._neq.add(key)
+        return result
+
+    @dont_inline
+    def _def_eq_hooked_slow(self, h1, h2):
+        tc = self.tc
         env = tc.env
         max_heartbeat = env.max_heartbeat
         if max_heartbeat > 0 or env.count_heartbeats:
@@ -6468,7 +6677,7 @@ class Machine(object):
                 return self._traced_result(True)
             return True
         key = self._sym_pair_key(h1, h2)
-        if self._neq.size > 0 and key != 0 and self._neq.get(key, 0) != 0:
+        if self._neq.size > 0 and key != 0 and self._neq.contains(key):
             if tracing:
                 return self._traced_result(False)
             return False
@@ -6482,13 +6691,15 @@ class Machine(object):
                     tracer.eqv_hit()
                     return self._traced_result(True)
                 return True
-        if stack_almost_full():
-            raise W_DeepRecursion("def_eq")
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("def_eq")
         result = self._def_eq_uncached(h1, h2)
         if result:
             self._union(h1, h2)
         elif key != 0:
-            self._neq.set(key, 1)
+            self._neq.add(key)
         if tracing:
             return self._traced_result(result)
         return result
@@ -7073,12 +7284,12 @@ class Machine(object):
         if self._failed.size == 0:
             return False
         key = self._sym_pair_key(h1, h2)
-        return key != 0 and self._failed.get(key, 0) != 0
+        return key != 0 and self._failed.contains(key)
 
     def _cache_failure(self, h1, h2):
         key = self._sym_pair_key(h1, h2)
         if key != 0:
-            self._failed.set(key, 1)
+            self._failed.add(key)
 
     def _def_eq_core(self, h1, h2):
         store = self.store
@@ -7383,6 +7594,7 @@ def acquire(tc, allow_warm=False):
     _SPARE.machine = None
     machine.tc = tc
     machine.store.tc = tc
+    machine._def_eq_hooked = tc.def_eq_hooked
     if (allow_warm
             and machine._last_env is tc.env
             and not machine._is_clean
