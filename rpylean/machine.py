@@ -26,7 +26,6 @@ from rpython.rlib.rbigint import rbigint
 
 from rpylean._eval import eval_closed_scalar
 from rpylean.exceptions import (
-    HeartbeatExceeded,
     InvalidProjection,
     LooseBoundVariable,
 )
@@ -6921,12 +6920,6 @@ class Machine(object):
     @dont_inline
     def _def_eq_hooked_slow(self, h1, h2):
         tc = self.tc
-        env = tc.env
-        max_heartbeat = env.max_heartbeat
-        if max_heartbeat > 0 or env.count_heartbeats:
-            tc.heartbeat += 1
-            if max_heartbeat > 0 and tc.heartbeat > max_heartbeat:
-                raise HeartbeatExceeded(tc.decl, tc.heartbeat, max_heartbeat)
         if tc.has_limits:
             tc.tick_wall_time()
         tracer = tc.tracer

@@ -5,7 +5,7 @@ from rpylean._rlib.rcli import CLI, Args, UsageError
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
 from rpylean.cli import (
     Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_bytes,
-    _parse_threshold,
+    _parse_seconds,
 )
 from rpylean.environment import CheckResult, Environment
 from rpylean.objects import TYPE, Name
@@ -308,10 +308,10 @@ class TestPrinter(object):
     decl = Name.simple("Foo").axiom(type=TYPE)
     env = Environment.having([decl])
 
-    def _ok(self, heartbeats=0, elapsed=0.0):
+    def _ok(self, elapsed=0.0):
         return CheckResult(
             elapsed=elapsed, gc_elapsed=0.0, bytes_allocated=0,
-            live_memory=0, peak_growth=0, heartbeats=heartbeats, error=None,
+            live_memory=0, peak_growth=0, error=None,
         )
 
     def _run(self, mode, formatter, result=None):
@@ -330,7 +330,7 @@ class TestPrinter(object):
     def test_name_fail(self):
         result = CheckResult(
             elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
-            live_memory=0, peak_growth=0, heartbeats=0,
+            live_memory=0, peak_growth=0,
             error=object(),  # truthy non-None; printer only branches on `is None`
         )
         assert self._run("name", FORMAT_PLAIN, result=result) == "Foo ... FAIL\n"
@@ -342,14 +342,14 @@ class TestPrinter(object):
         assert len(glyphs) == len(_HEAT_LEVELS)
 
     def test_dots_all_heat_levels_distinguishable(self):
-        # End-to-end: one heartbeat value per bucket goes in, 5 distinct
+        # End-to-end: one elapsed value per bucket goes in, 5 distinct
         # plain-text glyphs come out. Catches regressions where someone
         # accidentally collapses two heat levels in `_HEAT_LEVELS` or
         # `_heat_level`.
-        per_bucket = [500, 5000, 50000, 500000, 5000000]
+        per_bucket = [0.0005, 0.005, 0.05, 0.5, 5.0]
         outs = [
-            self._run("dots", FORMAT_PLAIN, result=self._ok(heartbeats=hb))
-            for hb in per_bucket
+            self._run("dots", FORMAT_PLAIN, result=self._ok(elapsed=secs))
+            for secs in per_bucket
         ]
         assert len(set(outs)) == 5
 
@@ -357,26 +357,21 @@ class TestPrinter(object):
         assert self._run("dots", FORMAT_PLAIN) == "."
 
     def test_dots_color_hot(self):
-        out = self._run("dots", FORMAT_COLOR, result=self._ok(heartbeats=2000000))
+        out = self._run("dots", FORMAT_COLOR, result=self._ok(elapsed=5.0))
         assert "\033[" in out and "#" in out
 
     def test_timing(self):
-        out = self._run("timing", FORMAT_PLAIN, result=self._ok(heartbeats=42, elapsed=0.5))
-        assert out.startswith("Foo ... ") and "(42 hb)" in out and out.endswith("\n")
-
-    def test_timing_zero_heartbeats_still_reported(self):
-        # `wants_heartbeats=True` guarantees counting is on, so `0 hb` here
-        # means a real zero — surface it rather than hiding it.
-        out = self._run("timing", FORMAT_PLAIN, result=self._ok(elapsed=0.25))
-        assert "(0 hb)" in out
+        out = self._run("timing", FORMAT_PLAIN, result=self._ok(elapsed=0.5))
+        assert out.startswith("Foo ... ") and "0.5" in out and out.endswith("s\n")
 
     def test_jsonl(self):
-        out = self._run("jsonl", FORMAT_PLAIN, result=self._ok(heartbeats=7, elapsed=0.5))
+        out = self._run("jsonl", FORMAT_PLAIN, result=self._ok(elapsed=0.5))
         # Only `after` writes; `before` is a no-op, so output is exactly one line.
         # `ok` is positioned right after `name` so previews / `head -c` snippets
         # show success status first.
         assert out.startswith('{"name":"Foo","ok":true,')
-        assert '"heartbeats":7' in out
+        assert '"elapsed":0.5' in out
+        assert '"heartbeats"' not in out
         assert out.endswith("}\n")
 
     def test_jsonl_failure_status_before_metrics(self):
@@ -389,7 +384,7 @@ class TestPrinter(object):
 
         result = CheckResult(
             elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
-            live_memory=0, peak_growth=0, heartbeats=0, error=FakeError(),
+            live_memory=0, peak_growth=0, error=FakeError(),
         )
         out = self._run("jsonl", FORMAT_PLAIN, result=result)
         assert out.startswith('{"name":"Foo","ok":false,"error":"oops",')
@@ -402,7 +397,7 @@ class TestPrinter(object):
 
         result = CheckResult(
             elapsed=0.0, gc_elapsed=0.0, bytes_allocated=0,
-            live_memory=0, peak_growth=0, heartbeats=0, error=FakeError(),
+            live_memory=0, peak_growth=0, error=FakeError(),
         )
         out = self._run("jsonl", FORMAT_PLAIN, result=result)
         # `\n` in the error must be JSON-escaped (`\\n`), not raw, so the line stays parseable.
@@ -426,32 +421,26 @@ class TestPrinter(object):
         assert Printer.from_str(None, TokenWriter(StringIO(), FORMAT_PLAIN)) is None
         assert Printer.from_str("none", TokenWriter(StringIO(), FORMAT_PLAIN)) is None
 
-    def test_wants_heartbeats(self):
-        # The streaming-time printers opt into heartbeat counting so the
-        # env populates `result.heartbeats`; the rest don't pay the cost.
-        w = TokenWriter(StringIO(), FORMAT_PLAIN)
-        assert Printer.from_str("dots", w).wants_heartbeats
-        assert Printer.from_str("timing", w).wants_heartbeats
-        assert Printer.from_str("jsonl", w).wants_heartbeats
-        assert not Printer.from_str("name", w).wants_heartbeats
-        assert not Printer.from_str("all", w).wants_heartbeats
-
 
 class TestHeatLevel(object):
-    def test_uses_heartbeats_when_present(self):
-        assert _heat_level(elapsed=100.0, heartbeats=500) == 0
-        assert _heat_level(elapsed=0.0, heartbeats=2000000) == 4
-
-    def test_falls_back_to_elapsed(self):
-        assert _heat_level(elapsed=0.0005, heartbeats=0) == 0
-        assert _heat_level(elapsed=0.05, heartbeats=0) == 2
-        assert _heat_level(elapsed=5.0, heartbeats=0) == 4
+    def test_buckets(self):
+        assert _heat_level(0.0005) == 0
+        assert _heat_level(0.005) == 1
+        assert _heat_level(0.05) == 2
+        assert _heat_level(0.5) == 3
+        assert _heat_level(5.0) == 4
 
     def test_boundaries_are_strict_less(self):
-        # `< 1000` so exactly 1000 falls into the next bucket; lets us
+        # `< 0.001` so exactly 0.001 falls into the next bucket; lets us
         # change boundaries later without subtle off-by-one regressions.
-        assert _heat_level(elapsed=0.0, heartbeats=999) == 0
-        assert _heat_level(elapsed=0.0, heartbeats=1000) == 1
+        assert _heat_level(0.0009) == 0
+        assert _heat_level(0.001) == 1
+        assert _heat_level(0.009) == 1
+        assert _heat_level(0.01) == 2
+        assert _heat_level(0.09) == 2
+        assert _heat_level(0.1) == 3
+        assert _heat_level(0.9) == 3
+        assert _heat_level(1.0) == 4
 
 
 class TestJSONEscape(object):
@@ -471,34 +460,29 @@ class TestJSONEscape(object):
         assert _json_escape("\xe2\x89\xa4") == "\xe2\x89\xa4"
 
 
-class TestParseThreshold(object):
+class TestParseSeconds(object):
     def test_none(self):
-        assert _parse_threshold(None) == (-1.0, -1)
+        assert _parse_seconds(None) == 0.0
 
-    def test_bare_number_is_heartbeats(self):
-        assert _parse_threshold("100") == (-1.0, 100)
+    def test_bare_number_is_seconds(self):
+        assert _parse_seconds("100") == 100.0
 
     def test_seconds_suffix(self):
-        assert _parse_threshold("3s") == (3.0, -1)
+        assert _parse_seconds("3s") == 3.0
 
     def test_milliseconds(self):
-        assert _parse_threshold("500ms") == (0.5, -1)
+        assert _parse_seconds("500ms") == 0.5
 
     def test_minutes(self):
-        assert _parse_threshold("2m") == (120.0, -1)
+        assert _parse_seconds("2m") == 120.0
 
-    def test_heartbeats_suffix(self):
-        assert _parse_threshold("1000h") == (-1.0, 1000)
-
-    def test_zero_heartbeats(self):
-        assert _parse_threshold("0") == (-1.0, 0)
-
-    def test_zero_seconds(self):
-        assert _parse_threshold("0s") == (0.0, -1)
+    def test_zero(self):
+        assert _parse_seconds("0") == 0.0
+        assert _parse_seconds("0s") == 0.0
 
     def test_invalid(self):
         try:
-            _parse_threshold("nope")
+            _parse_seconds("nope")
         except UsageError as err:
             assert "Invalid threshold" in err.message
         else:
@@ -506,7 +490,15 @@ class TestParseThreshold(object):
 
     def test_invalid_unit_value(self):
         try:
-            _parse_threshold("xms")
+            _parse_seconds("xms")
+        except UsageError as err:
+            assert "Invalid threshold" in err.message
+        else:
+            assert False, "expected UsageError"
+
+    def test_negative(self):
+        try:
+            _parse_seconds("-1")
         except UsageError as err:
             assert "Invalid threshold" in err.message
         else:
@@ -542,7 +534,7 @@ class TestParseBytes(object):
 
     def test_negative(self):
         try:
-            _parse_threshold("-1")
+            _parse_bytes("-1")
         except UsageError as err:
             assert "Invalid threshold" in err.message
         else:

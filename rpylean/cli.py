@@ -95,10 +95,6 @@ CHECK_OPTIONS = [
         "only check declarations whose name contains this substring",
     ),
     (
-        "max-heartbeat",
-        "maximum number of def_eq calls per declaration before giving up",
-    ),
-    (
         "max-wall-time-per-decl",
         "maximum wall-clock seconds per declaration before giving up "
         "(suffixes: s/ms/m, default seconds; sampled every 1024 def_eq calls)",
@@ -118,11 +114,8 @@ CHECK_OPTIONS = [
     ),
     (
         "slower-than",
-        (
-            "print each declaration that exceeded this threshold "
-            "to check (bare numbers are heartbeats; suffixes: "
-            "s/ms/m for time, h for heartbeats)"
-        ),
+        "print each declaration that exceeded this wall-clock duration "
+        "to check (suffixes: s/ms/m, default seconds)",
     ),
     (
         "break-at",
@@ -192,10 +185,10 @@ class _StreamingChecker(DeclarationHook):
 
     _attrs_ = [
         'env', 'stdoutw', 'stderrw', 'printer',
-        'slow_secs', 'slow_hb',
+        'slow_secs',
         'filter_match', 'filter_names',
         'abort_at', 'failures', 'break_at',
-        'n_seen', 'n_checked', 'total_heartbeats',
+        'n_seen', 'n_checked',
     ]
 
     def __init__(
@@ -205,7 +198,6 @@ class _StreamingChecker(DeclarationHook):
         stderrw,
         printer,
         slow_secs,
-        slow_hb,
         filter_match,
         filter_names,
         abort_at,
@@ -216,7 +208,6 @@ class _StreamingChecker(DeclarationHook):
         self.stderrw = stderrw
         self.printer = printer
         self.slow_secs = slow_secs
-        self.slow_hb = slow_hb
         self.filter_match = filter_match
         self.filter_names = filter_names
         self.abort_at = abort_at
@@ -224,7 +215,6 @@ class _StreamingChecker(DeclarationHook):
         self.break_at = break_at
         self.n_seen = 0
         self.n_checked = 0
-        self.total_heartbeats = 0
 
     def on_declaration(self, decl):
         self.n_seen += 1
@@ -304,28 +294,20 @@ class _StreamingChecker(DeclarationHook):
             debug.debug_start("rpylean-decl")
             if debug.have_debug_prints():
                 debug.debug_print(decl.name.str())
-        measure = (
-            self.printer is not None
-            or self.slow_secs >= 0.0
-            or self.slow_hb >= 0
-        )
+        measure = self.printer is not None or self.slow_secs >= 0.0
         result = self.env.type_check_one(
             decl, printer=self.printer, measure=measure,
         )
         if we_are_translated():
             debug.debug_stop("rpylean-decl")
-        self.total_heartbeats += result.heartbeats
-        slow_by_time = self.slow_secs >= 0.0 and result.elapsed > self.slow_secs
-        slow_by_hb = self.slow_hb >= 0 and result.heartbeats > self.slow_hb
-        if slow_by_time or slow_by_hb:
+        if self.slow_secs >= 0.0 and result.elapsed > self.slow_secs:
             self.stdoutw.write_plain(
-                "%f\t%f\t%d\t%d\t%d\t%d\t" % (
+                "%f\t%f\t%d\t%d\t%d\t" % (
                     result.elapsed,
                     result.gc_elapsed,
                     result.bytes_allocated,
                     result.live_memory,
                     result.peak_growth,
-                    result.heartbeats,
                 ),
             )
             self.stdoutw.writeline(decl.name.tokens(self.env.declarations))
@@ -370,8 +352,8 @@ class _CheckRun(object):
 
     _attrs_ = [
         'stdoutw', 'stderrw',
-        'max_fail', 'max_heartbeat', 'max_wall_time', 'max_memory',
-        'printer', 'slow_secs', 'slow_hb',
+        'max_fail', 'max_wall_time', 'max_memory',
+        'printer', 'slow_secs',
         'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
     ]
 
@@ -380,14 +362,14 @@ class _CheckRun(object):
         self.stderrw = stderrw
 
         self.max_fail = int(args.options["max-fail"] or "0")
-        self.max_heartbeat = int(args.options["max-heartbeat"] or "0")
         self.max_wall_time = _parse_seconds(
             args.options["max-wall-time-per-decl"],
         )
         self.max_memory = _parse_bytes(args.options["max-memory-per-decl"])
         self.printer = Printer.from_str(args.options["print"], stdoutw)
-        self.slow_secs, self.slow_hb = _parse_threshold(
-            args.options["slower-than"],
+        slower_than = args.options["slower-than"]
+        self.slow_secs = (
+            _parse_seconds(slower_than) if slower_than is not None else -1.0
         )
 
         self.filter_match = args.options["filter-match"]
@@ -419,25 +401,16 @@ class _CheckRun(object):
         """
         builder = EnvironmentBuilder()
         env = builder.env
-        if self.max_heartbeat > 0:
-            env.max_heartbeat = self.max_heartbeat
         if self.max_wall_time > 0.0:
             env.max_wall_time = self.max_wall_time
         if self.max_memory > 0:
             env.max_memory = self.max_memory
-        if (
-            self.slow_secs >= 0.0
-            or self.slow_hb >= 0
-            or (self.printer is not None and self.printer.wants_heartbeats)
-        ):
-            env.count_heartbeats = True
         checker = _StreamingChecker(
             env=env,
             stdoutw=self.stdoutw,
             stderrw=self.stderrw,
             printer=self.printer,
             slow_secs=self.slow_secs,
-            slow_hb=self.slow_hb,
             filter_match=self.filter_match,
             filter_names=self.filter_names,
             abort_at=abort_at,
@@ -467,21 +440,18 @@ class _CheckRun(object):
         if we_are_translated():
             _MB = 1024 * 1024
             self.stderrw.write_plain(
-                "summary: %d/%d decls checked, peak %d MB, "
-                "allocated %d MB, heartbeats %d\n" % (
+                "summary: %d/%d decls checked, peak %d MB, allocated %d MB\n" % (
                     checker.n_checked,
                     checker.n_seen,
                     _peak_memory() // _MB,
                     (_bytes_allocated() - bytes_at_start) // _MB,
-                    checker.total_heartbeats,
                 )
             )
         else:
             self.stderrw.write_plain(
-                "summary: %d/%d decls checked, heartbeats %d\n" % (
+                "summary: %d/%d decls checked\n" % (
                     checker.n_checked,
                     checker.n_seen,
-                    checker.total_heartbeats,
                 )
             )
 
@@ -921,47 +891,14 @@ def environment_from(path, stdin):
             file.close()
 
 
-def _parse_threshold(s):
-    """Parse a ``--slower-than`` threshold into ``(seconds, heartbeats)``.
-
-    The non-active value of the pair is ``-1``. Bare numbers are heartbeats;
-    suffixes ``s``, ``ms``, ``m`` mean seconds; ``h`` means heartbeats.
-    Returns ``(-1.0, -1)`` for ``None``.
-    """
-    if s is None:
-        return -1.0, -1
-    length = len(s)
-    if s.endswith("ms"):
-        end = length - 2
-        assert end >= 0
-        return _pos_int(s, s[:end]) * 0.001, -1
-    if s.endswith("s"):
-        end = length - 1
-        assert end >= 0
-        return float(_pos_int(s, s[:end])), -1
-    if s.endswith("m"):
-        end = length - 1
-        assert end >= 0
-        return _pos_int(s, s[:end]) * 60.0, -1
-    if s.endswith("h"):
-        end = length - 1
-        assert end >= 0
-        return -1.0, _pos_int(s, s[:end])
-    return -1.0, _pos_int(s, s)
-
-
 def _parse_seconds(s):
     """Parse a wall-clock duration into seconds. Returns 0.0 for `None`.
 
     Bare numbers and `s` suffix are seconds; `ms` is milliseconds; `m` is
-    minutes. `h` (heartbeats) is rejected — this option is time-only.
+    minutes.
     """
     if s is None:
         return 0.0
-    if s.endswith("h"):
-        raise UsageError(
-            "Invalid wall-time threshold (use s/ms/m suffix, not h): %s" % (s,)
-        )
     length = len(s)
     if s.endswith("ms"):
         end = length - 2
@@ -1021,12 +958,9 @@ class Printer(object):
 
     Subclasses override `before` (called just before a decl is checked)
     and/or `after` (called with the `CheckResult` once the check returns).
-    `wants_heartbeats` lets a subclass opt the env into heartbeat counting
-    so `result.heartbeats` is populated when its output depends on it.
     """
 
     _attrs_ = ['writer']
-    wants_heartbeats = False
 
     def __init__(self, writer):
         self.writer = writer
@@ -1094,23 +1028,10 @@ _HEAT_LEVELS = [
 ]
 
 
-def _heat_level(elapsed, heartbeats):
+def _heat_level(elapsed):
     """
-    Pick an index into `_HEAT_LEVELS` from one decl's `CheckResult`.
-
-    Prefers heartbeats (deterministic across machines and JIT warmup);
-    falls back to wall-clock when heartbeats aren't being counted.
+    Pick an index into `_HEAT_LEVELS` from one decl's elapsed wall time.
     """
-    if heartbeats > 0:
-        if heartbeats < 1000:
-            return 0
-        elif heartbeats < 10000:
-            return 1
-        elif heartbeats < 100000:
-            return 2
-        elif heartbeats < 1000000:
-            return 3
-        return 4
     if elapsed < 0.001:
         return 0
     elif elapsed < 0.01:
@@ -1123,28 +1044,23 @@ def _heat_level(elapsed, heartbeats):
 
 
 class _DotPrinter(Printer):
-    """One glyph per decl, colored by heartbeats (or wall time)."""
+    """One glyph per decl, colored by wall time."""
 
     _attrs_ = []
-    wants_heartbeats = True
 
     def after(self, env, decl, result):
-        token, glyph = _HEAT_LEVELS[_heat_level(result.elapsed, result.heartbeats)]
+        token, glyph = _HEAT_LEVELS[_heat_level(result.elapsed)]
         self.writer.write([token.emit(glyph)])
         self.writer.flush()
 
 
 class _TimingPrinter(_NamePrinter):
-    """Stream `name ... elapsed (N hb)` per decl (extends `_NamePrinter`)."""
+    """Stream `name ... elapsed` per decl (extends `_NamePrinter`)."""
 
     _attrs_ = []
-    wants_heartbeats = True
 
     def after(self, env, decl, result):
-        # Heartbeat counting is unconditionally enabled (`wants_heartbeats`),
-        # so `0 hb` here means the decl genuinely needed no def_eq calls,
-        # not that the counter was off.
-        timing = "%fs (%d hb)" % (result.elapsed, result.heartbeats)
+        timing = "%fs" % (result.elapsed,)
         if result.error is None:
             self.writer.writeline([PLAIN.emit(timing)])
         else:
@@ -1184,7 +1100,6 @@ class _JSONLPrinter(Printer):
     """One JSON object per checked decl, newline delimited."""
 
     _attrs_ = []
-    wants_heartbeats = True
 
     def after(self, env, decl, result):
         if result.error is None:
@@ -1199,8 +1114,7 @@ class _JSONLPrinter(Printer):
             "\"gc_elapsed\":%f,"
             "\"bytes_allocated\":%d,"
             "\"live_memory\":%d,"
-            "\"peak_growth\":%d,"
-            "\"heartbeats\":%d}\n"
+            "\"peak_growth\":%d}\n"
         ) % (
             _json_escape(decl.name.str()),
             status,
@@ -1209,7 +1123,6 @@ class _JSONLPrinter(Printer):
             result.bytes_allocated,
             result.live_memory,
             result.peak_growth,
-            result.heartbeats,
         )
         self.writer.write([PLAIN.emit(line)])
         self.writer.flush()

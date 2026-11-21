@@ -421,29 +421,6 @@ class InvalidProjection(W_Error):
         return self._suffix
 
 
-class HeartbeatExceeded(W_Error):
-    """
-    The maximum number of def_eq steps was exceeded for a declaration.
-    """
-
-    _attrs_ = ['declaration', 'heartbeats', 'max_heartbeat']
-
-    def __init__(self, declaration, heartbeats, max_heartbeat):
-        self.declaration = declaration
-        self.heartbeats = heartbeats
-        self.max_heartbeat = max_heartbeat
-
-    def tokens(self):
-        return [
-            PLAIN.emit("in "),
-            DECL_NAME.emit(self.declaration.name.str()),
-            ERROR.emit(
-                "\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
-                % (self.heartbeats, self.max_heartbeat)
-            ),
-        ]
-
-
 class WallTimeExceeded(W_Error):
     """
     The maximum wall-clock time was exceeded for a declaration. Sampled

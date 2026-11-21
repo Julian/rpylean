@@ -560,30 +560,6 @@ class W_NotAFunction(W_CheckError):
         )
 
 
-class W_HeartbeatError(W_CheckError):
-    """
-    The heartbeat limit was exceeded while checking a declaration.
-    """
-
-    _attrs_ = ['heartbeats', 'max_heartbeat']
-
-    def __init__(self, name, heartbeats, max_heartbeat):
-        self.name = name
-        self.heartbeats = heartbeats
-        self.max_heartbeat = max_heartbeat
-
-    def as_diagnostic(self):
-        tokens = [
-            PLAIN.emit("in "),
-            DECL_NAME.emit(self.name.str()),
-        ]
-        message = [MESSAGE.emit(
-            ":\nheartbeat limit exceeded (%s def_eq calls, limit %s)"
-            % (self.heartbeats, self.max_heartbeat),
-        )]
-        return Diagnostic(tokens, NO_SPAN, message)
-
-
 class W_DeepRecursion(W_CheckError):
     """
     Checking the declaration nested deeper than the stack allows.

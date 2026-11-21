@@ -1377,8 +1377,6 @@ def test_printer():
     events = []
 
     class RecordingPrinter(object):
-        wants_heartbeats = False
-
         def before(self, env, decl):
             events.append(("before", env, decl))
 
@@ -1387,59 +1385,6 @@ def test_printer():
 
     list(env.type_check(env.all(), printer=RecordingPrinter()))
     assert events == [("before", env, good), ("after", env, good, None)]
-
-
-class TestHeartbeat(object):
-    def test_heartbeat_resets_per_declaration(self):
-        """Heartbeat counter resets before each declaration."""
-        a = Name.simple("A").definition(type=TYPE, value=PROP)
-        b = Name.simple("B").definition(type=TYPE, value=PROP)
-        env = Environment.having([a, b])
-        env.max_heartbeat = 100000
-
-        assert type_check(env=env) == []
-
-    def test_heartbeat_exceeded_is_an_error(self):
-        """Exceeding the heartbeat limit raises HeartbeatExceeded."""
-        from rpylean.exceptions import HeartbeatExceeded
-        from rpylean.environment import TypeChecker
-
-        env = Environment.having([])
-        env.max_heartbeat = 3
-        decl = Name.simple("Test").definition(type=TYPE, value=PROP)
-        tc = TypeChecker(env, decl)
-        try:
-            # First 3 calls succeed
-            tc.def_eq(PROP, PROP)
-            tc.def_eq(PROP, PROP)
-            tc.def_eq(PROP, PROP)
-            assert tc.heartbeat == 3
-
-            with pytest.raises(HeartbeatExceeded) as exc_info:
-                tc.def_eq(PROP, PROP)
-            error_str = str(exc_info.value)
-            assert "in Test" in error_str
-            assert "heartbeat limit exceeded" in error_str
-        finally:
-            tc.free()
-
-    def test_check_one_resets_heartbeat(self):
-        """`type_check_one` creates a fresh `TypeChecker` per decl, so
-        the heartbeat counter starts at 0 even if a previous run hit
-        the limit."""
-        decl = Name.simple("OK").definition(type=TYPE, value=PROP)
-        env = Environment.having([decl])
-        env.max_heartbeat = 100
-
-        assert type_check(env=env) == []
-
-    def test_heartbeat_zero_means_unlimited(self):
-        """A max_heartbeat of 0 (default) means no limit."""
-        good = Name.simple("Good").definition(type=TYPE, value=PROP)
-        env = Environment.having([good])
-        assert env.max_heartbeat == 0
-
-        assert type_check(env=env) == []
 
 
 class TestCheckResult(object):
@@ -1459,21 +1404,6 @@ class TestCheckResult(object):
 
         result = env.type_check_one(bad)
         assert result.error is not None
-
-    def test_heartbeats_populated_when_counting(self):
-        decl = Name.simple("Good").definition(type=TYPE, value=PROP)
-        env = Environment.having([decl])
-        env.count_heartbeats = True
-
-        result = env.type_check_one(decl)
-        assert result.heartbeats > 0
-
-    def test_heartbeats_zero_when_not_counting(self):
-        decl = Name.simple("Good").definition(type=TYPE, value=PROP)
-        env = Environment.having([decl])
-
-        result = env.type_check_one(decl)
-        assert result.heartbeats == 0
 
 
 class TestNotRPython:

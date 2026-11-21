@@ -20,7 +20,6 @@ from rpylean._rlib import r_dict_eq
 from rpylean.exceptions import (
     AlreadyDeclared,
     DuplicateLevels,
-    HeartbeatExceeded,
     MemoryExceeded,
     UndeclaredLevelParam,
     UnknownQuotient,
@@ -37,7 +36,6 @@ from rpylean.objects import (
     Name,
     StrName,
     W_Constructor,
-    W_HeartbeatError,
     W_MemoryError,
     W_NotYetDeclared,
     W_UnsafeReference,
@@ -773,20 +771,19 @@ class TypeChecker(object):
     """
     The checker for one declaration: the machine reducing, inferring
     and comparing that declaration's terms, plus the per-declaration
-    limits (heartbeats, wall time, memory) and the reference rules its
-    position and safety impose.
+    limits (wall time, memory) and the reference rules its position
+    and safety impose.
     """
 
     _attrs_ = [
-        'env', 'decl', 'heartbeat', 'machine',
+        'env', 'decl', 'machine',
         'declarations', 'tracer',
-        'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory', 'has_limits', 'def_eq_hooked', 'start_time', 'start_peak',
         '_whnf_tick', '_released', '_keep_warm', 'stage', 'allowed_levels',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
-        'max_heartbeat', 'count_heartbeats', 'max_wall_time', 'max_memory',
+        'max_wall_time', 'max_memory',
         'has_limits', 'def_eq_hooked', 'start_time', 'start_peak',
     ]
 
@@ -797,20 +794,12 @@ class TypeChecker(object):
     def __init__(self, env, decl, allow_warm=False):
         self.env = env
         self.decl = decl
-        self.heartbeat = 0
         self.declarations = env.declarations
         self.tracer = env.tracer
-        self.max_heartbeat = env.max_heartbeat
-        self.count_heartbeats = env.count_heartbeats
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
         self.has_limits = env.max_wall_time > 0.0 or env.max_memory > 0
-        self.def_eq_hooked = (
-            env.max_heartbeat > 0
-            or env.count_heartbeats
-            or self.has_limits
-            or self.tracer.recording
-        )
+        self.def_eq_hooked = self.has_limits or self.tracer.recording
         self.start_time = clock() if env.max_wall_time > 0.0 else 0.0
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
@@ -951,24 +940,20 @@ class CheckResult(object):
     `peak_growth` is how much this decl pushed the process-wide peak
     heap up: 0 means the decl fit within previously-seen high-water
     headroom; positive means the run needed *more* memory to clear it.
-    `heartbeats` is meaningful only when the environment has heartbeat
-    counting enabled (via `max_heartbeat` or `count_heartbeats`); it is
-    `0` otherwise.
     """
 
     _attrs_ = [
         'elapsed', 'gc_elapsed', 'bytes_allocated', 'live_memory',
-        'peak_growth', 'heartbeats', 'error',
+        'peak_growth', 'error',
     ]
 
     def __init__(self, elapsed, gc_elapsed, bytes_allocated, live_memory,
-                 peak_growth, heartbeats, error):
+                 peak_growth, error):
         self.elapsed = elapsed
         self.gc_elapsed = gc_elapsed
         self.bytes_allocated = bytes_allocated
         self.live_memory = live_memory
         self.peak_growth = peak_growth
-        self.heartbeats = heartbeats
         self.error = error
 
 
@@ -1084,7 +1069,6 @@ class Environment(object):
 
     _attrs_ = [
         'declarations', 'tracer',
-        'max_heartbeat', 'count_heartbeats',
         'max_wall_time', 'max_memory',
         '_code_cache',
     ]
@@ -1096,8 +1080,6 @@ class Environment(object):
     _immutable_fields_ = [
         'declarations',
         'tracer?',
-        'max_heartbeat?',
-        'count_heartbeats?',
         'max_wall_time?',
         'max_memory?',
         '_code_cache?',
@@ -1106,8 +1088,6 @@ class Environment(object):
     def __init__(self, declarations, tracer=Tracer(None)):
         self.declarations = declarations
         self.tracer = tracer
-        self.max_heartbeat = 0
-        self.count_heartbeats = False
         self.max_wall_time = 0.0
         self.max_memory = 0
         self._code_cache = None
@@ -1183,8 +1163,6 @@ class Environment(object):
             and decl.group < 0
             and decl.w_kind.allows_warm_cache()
             and not self.tracer.recording
-            and self.max_heartbeat == 0
-            and not self.count_heartbeats
             and self.max_memory == 0
         )
         result = self._run_type_check_one(
@@ -1210,12 +1188,6 @@ class Environment(object):
         error = None
         try:
             error = decl.type_check(tc)
-        except HeartbeatExceeded as err:
-            error = W_HeartbeatError(
-                decl.name,
-                err.heartbeats,
-                err.max_heartbeat,
-            )
         except WallTimeExceeded as err:
             error = W_WallTimeError(
                 decl.name,
@@ -1256,8 +1228,7 @@ class Environment(object):
             tc.free(error is not None)
         if (error is not None and recheck
                 and not isinstance(error, W_WallTimeError)
-                and not isinstance(error, W_MemoryError)
-                and not isinstance(error, W_HeartbeatError)):
+                and not isinstance(error, W_MemoryError)):
             # Re-check on a clean cold machine so error diagnostics keep exact
             # binder names and original W_Expr highlight spans.
             return self._run_type_check_one(decl, measure, False)
@@ -1274,7 +1245,7 @@ class Environment(object):
             peak_growth = 0
         return CheckResult(
             elapsed, gc_elapsed, bytes_allocated, live_memory,
-            peak_growth, tc.heartbeat, error,
+            peak_growth, error,
         )
 
     def all(self):
@@ -1310,8 +1281,8 @@ class Environment(object):
         Each call gets its own checker, outside any declaration, so
         nothing accumulates across calls: for tests and REPL paths that
         need a single comparison. A declaration's check constructs one
-        checker and uses it throughout, so its heartbeats and memos are
-        scoped to the declaration.
+        checker and uses it throughout, so its memos are scoped to the
+        declaration.
         """
         tc = TypeChecker(self, None)
         try:

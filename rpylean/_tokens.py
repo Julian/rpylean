@@ -54,8 +54,7 @@ ERROR = Token("error", default_color="cc0000")
 PROMPT = Token("prompt", default_color="908084")
 
 #: Heat tokens for `--print dots` color coding. Buckets are log-scale on
-#: heartbeats (or wall time when heartbeats aren't counted); see
-#: `_DotPrinter.show` in `cli.py`.
+#: elapsed wall time; see `_heat_level` in `cli.py`.
 HEAT_0 = Token("heat0", default_color="606060")            # dim grey
 HEAT_1 = Token("heat1")                                    # default
 HEAT_2 = Token("heat2", default_color="d7d75f")            # yellow
