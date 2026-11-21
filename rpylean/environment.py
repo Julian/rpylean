@@ -749,13 +749,13 @@ class TypeChecker(object):
         'env', 'decl', 'heartbeat', 'machine',
         'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats',
-        'max_wall_time', 'max_memory', 'has_limits', 'start_time', 'start_peak',
+        'max_wall_time', 'max_memory', 'has_limits', 'def_eq_hooked', 'start_time', 'start_peak',
         '_whnf_tick', '_released', '_keep_warm', 'stage', 'allowed_levels',
     ]
     _immutable_fields_ = [
         'env', 'decl', 'machine', 'declarations', 'tracer',
         'max_heartbeat', 'count_heartbeats', 'max_wall_time', 'max_memory',
-        'has_limits', 'start_time', 'start_peak',
+        'has_limits', 'def_eq_hooked', 'start_time', 'start_peak',
     ]
 
     # Mask for the wall-time sampling: `clock()` is read every 1024th
@@ -773,6 +773,12 @@ class TypeChecker(object):
         self.max_wall_time = env.max_wall_time
         self.max_memory = env.max_memory
         self.has_limits = env.max_wall_time > 0.0 or env.max_memory > 0
+        self.def_eq_hooked = (
+            env.max_heartbeat > 0
+            or env.count_heartbeats
+            or self.has_limits
+            or self.tracer.recording
+        )
         self.start_time = clock() if env.max_wall_time > 0.0 else 0.0
         self.start_peak = _peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0

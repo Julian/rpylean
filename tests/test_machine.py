@@ -396,8 +396,10 @@ class TestInstantiateMulti(object):
         assert multi == seq
         # Also verify `instantiate_multi_buf` matches `instantiate_multi`.
         app_e = f.const().app(y.const(), x.const())
-        _, mark, n = store.unapp_push(store.import_term(app_e))
+        mark = store._spine_top
+        store.unapp_push(store.import_term(app_e))
         try:
+            n = store._spine_top - mark
             assert n == 2
             buf_res = store.instantiate_multi_buf(h, mark, n, 0)
         finally:

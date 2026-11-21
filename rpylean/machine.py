@@ -528,6 +528,7 @@ class IntMap(object):
         self.size = 0
         self._dirty_count = 0
 
+    @always_inline
     def get(self, key, default):
         if not we_are_translated():
             assert key != 0
@@ -1920,12 +1921,21 @@ class TermStore(object):
             h = _s32(recs[base + F_A])
         return h, args
 
+    @dont_inline
+    def _grow_spine(self, top):
+        new_cap = self._spine_cap * 2
+        buf = _grow_u32(self._spine_buf, top, new_cap)
+        self._spine_buf = buf
+        self._spine_cap = new_cap
+        return buf
+
     def unapp_push(self, h):
-        """Push the application spine of ``h`` onto `_spine_buf` outermost-first.
-        Returns ``(head, mark, count)``. Caller must restore via `unapp_pop(mark)`."""
+        """Push the application spine of ``h`` onto `_spine_buf` outermost-first
+        and return the head handle. Caller captures ``mark = store._spine_top``
+        before calling, reads ``count = store._spine_top - mark``, and restores
+        via ``unapp_pop(mark)``."""
         recs = self.recs
-        mark = self._spine_top
-        top = mark
+        top = self._spine_top
         buf = self._spine_buf
         cap = self._spine_cap
         while (h & 1) == 0:
@@ -1933,16 +1943,13 @@ class TermStore(object):
             if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
                 break
             if top == cap:
-                new_cap = cap * 2
-                buf = _grow_u32(buf, top, new_cap)
-                self._spine_buf = buf
-                self._spine_cap = new_cap
-                cap = new_cap
+                buf = self._grow_spine(top)
+                cap = self._spine_cap
             buf[top] = recs[base + F_B]
             top += 1
             h = _s32(recs[base + F_A])
         self._spine_top = top
-        return h, mark, top - mark
+        return h
 
     @always_inline
     def unapp_pop(self, mark):
@@ -1954,12 +1961,11 @@ class TermStore(object):
 
     def spine_push(self, h):
         top = self._spine_top
-        cap = self._spine_cap
-        if top == cap:
-            new_cap = cap * 2
-            self._spine_buf = _grow_u32(self._spine_buf, top, new_cap)
-            self._spine_cap = new_cap
-        self._spine_buf[top] = _u32(h)
+        if top == self._spine_cap:
+            buf = self._grow_spine(top)
+        else:
+            buf = self._spine_buf
+        buf[top] = _u32(h)
         self._spine_top = top + 1
 
     def apply_buf_rev(self, fn, mark, hi):
@@ -4753,6 +4759,7 @@ class Machine(object):
         'tc', 'store', '_rule_memo', '_fvars', '_opened',
         '_open_memo', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
+        '_ld_h1', '_ld_h2', '_proj_rem',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
@@ -4775,6 +4782,10 @@ class Machine(object):
         self._neq = IntMap(1 << 10)
         #: pairs whose same-head argument comparison failed (symmetric)
         self._failed = IntMap(1 << 8)
+        #: Out-slots for `_try_lazy_delta` and `_proj_lazy_eq` (zero-tuple return)
+        self._ld_h1 = 0
+        self._ld_h2 = 0
+        self._proj_rem = 0
         #: Generation tag for `check=True` memos so warm cross-declaration
         #: caches re-verify reference ordering, safety, and universe params
         #: on every declaration while reusing pure whnf/infer/def_eq memos.
@@ -5044,31 +5055,36 @@ class Machine(object):
                     assert decl is not None
                     dkind = decl.w_kind
                     assert isinstance(dkind, W_Recursor)
-                    _, mark, n = store.unapp_push(h)
+                    mark = store._spine_top
+                    store.unapp_push(h)
                     try:
                         return self._try_iota_spine(
-                            head, const, decl, dkind, mark, n,
+                            head, const, decl, dkind, mark, store._spine_top - mark,
                         )
                     finally:
                         store.unapp_pop(mark)
-                _, mark, n = store.unapp_push(h)
+                mark = store._spine_top
+                store.unapp_push(h)
                 try:
-                    return self._try_quot_lift_spine(mark, n)
+                    return self._try_quot_lift_spine(mark, store._spine_top - mark)
                 finally:
                     store.unapp_pop(mark)
             hk = _s32(recs[rec_index(head) << 2]) & _KIND_MASK
             if hk == KIND_LAMBDA:
-                _, mark, n = store.unapp_push(h)
+                mark = store._spine_top
+                store.unapp_push(h)
                 try:
-                    return self._beta_spine_buf(head, mark, n)
+                    return self._beta_spine_buf(head, mark, store._spine_top - mark)
                 finally:
                     store.unapp_pop(mark)
             if hk == KIND_PROJ or hk == KIND_LET:
                 head_w = self.whnf_core(head, cheap_proj, False)
                 if head_w == head:
                     return 0
-                _, mark, n = store.unapp_push(h)
+                mark = store._spine_top
+                store.unapp_push(h)
                 try:
+                    n = store._spine_top - mark
                     if (store.kind(head_w) == KIND_LAMBDA
                             and not (self.tc.tracer.recording
                                      and self.tc.tracer.writes)):
@@ -5127,8 +5143,17 @@ class Machine(object):
             return 0
         if h == head:
             return val
-        _, mark, n = store.unapp_push(h)
+        if store.field_a(h) == head:
+            if (store.kind(val) == KIND_LAMBDA
+                    and not (self.tc.tracer.recording and self.tc.tracer.writes)):
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                return store.instantiate(store.field_b(val), store.field_b(h), 0)
+            return store.cons_app(val, store.field_b(h))
+        mark = store._spine_top
+        store.unapp_push(h)
         try:
+            n = store._spine_top - mark
             if (store.kind(val) == KIND_LAMBDA
                     and not (self.tc.tracer.recording and self.tc.tracer.writes)):
                 return self._beta_spine_buf(val, mark, n)
@@ -5323,7 +5348,10 @@ class Machine(object):
                 lit = e
         if lit is not None:
             struct = self.whnf(store.import_term(lit.build_str_expr()))
-        head, mark, n = store.unapp_push(struct)
+        if store.kind(struct) != KIND_APP:
+            return 0
+        mark = store._spine_top
+        head = store.unapp_push(struct)
         try:
             if (self._leaf_flags(head) & _LF_CTOR) == 0:
                 return 0
@@ -5331,6 +5359,7 @@ class Machine(object):
             assert decl is not None
             kind = decl.w_kind
             assert isinstance(kind, W_Constructor)
+            n = store._spine_top - mark
             idx = kind.num_params + store.proj_index(h)
             if idx < n:
                 # args are outermost-first: field i of a left-to-right list
@@ -5346,10 +5375,11 @@ class Machine(object):
         if n < 6:
             return 0
         mk = self.whnf(store.spine_arg(mark + n - 6))
-        mk_head, mk_mark, mk_n = store.unapp_push(mk)
+        mk_mark = store._spine_top
+        mk_head = store.unapp_push(mk)
         try:
             mk_const = store.const_leaf(mk_head)
-            if mk_const is None or mk_n != 3:
+            if mk_const is None or (store._spine_top - mk_mark) != 3:
                 return 0
             if not mk_const.name.syntactic_eq(W_App._QUOT_MK):
                 return 0
@@ -5413,8 +5443,10 @@ class Machine(object):
             if expanded != 0:
                 major = expanded
 
-        ctor_head, cmark, n_ctor = store.unapp_push(major)
+        cmark = store._spine_top
+        ctor_head = store.unapp_push(major)
         try:
+            n_ctor = store._spine_top - cmark
             if (self._leaf_flags(ctor_head) & _LF_CTOR) == 0:
                 return 0
             cj = leaf_index(ctor_head)
@@ -5619,16 +5651,19 @@ class Machine(object):
                     self._check_leaf(h)
                 return t
             return self._infer_leaf(h, check)
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
         if check:
-            if store.memo(h, M_CHECKED_GEN) == self.check_gen:
-                return store.memo(h, M_INFER)
+            if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+                return _s32(memos[mbase + M_INFER])
         else:
-            t = store.memo(h, M_INFER)
+            t = _s32(memos[mbase + M_INFER])
             if t != 0:
                 return t
         if stack_almost_full():
             raise W_DeepRecursion("infer")
-        kind = store.kind(h)
+        kind = _s32(store.recs[ri << 2]) & _KIND_MASK
         if kind == KIND_APP:
             t = self._infer_app(h, check)
         elif kind == KIND_LAMBDA:
@@ -5653,9 +5688,10 @@ class Machine(object):
             t = self._infer_proj(h, [], 0, check)
         else:
             raise RuntimeError("infer: internal pair record")
-        store.set_memo(h, M_INFER, t)
+        memos = store.memos
+        memos[mbase + M_INFER] = _u32(t)
         if check:
-            store.set_memo(h, M_CHECKED_GEN, self.check_gen)
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
 
     # Under the binders of a heavy term nothing is substituted into it:
@@ -5735,8 +5771,10 @@ class Machine(object):
     def _infer_open_app(self, h, ctx, chain, check):
         store = self.store
         tc = self.tc
-        head, mark, n = store.unapp_push(h)
+        mark = store._spine_top
+        head = store.unapp_push(h)
         try:
+            n = store._spine_top - mark
             fn_type = self._infer_open(head, ctx, chain, check)
             i = n - 1
             while i >= 0:
@@ -5950,8 +5988,10 @@ class Machine(object):
             if store.loose_bvar_range(body) == 0:
                 return body
             return store.instantiate(body, arg, 0)
-        head, mark, n = store.unapp_push(h)
+        mark = store._spine_top
+        head = store.unapp_push(h)
         try:
+            n = store._spine_top - mark
             fn_type = self.infer(head, check)
             if not check:
                 return self._infer_app_only_buf(head, mark, n, fn_type)
@@ -5961,9 +6001,14 @@ class Machine(object):
                 arg = store.spine_arg(mark + i)
                 if store.kind(fn_type) != KIND_FORALL:
                     if plen > 0:
-                        fn_type = store.instantiate_multi_buf(
-                            fn_type, mark + i + 1, plen, 0,
-                        )
+                        if plen == 1:
+                            fn_type = store.instantiate(
+                                fn_type, store.spine_arg(mark + i + 1), 0,
+                            )
+                        else:
+                            fn_type = store.instantiate_multi_buf(
+                                fn_type, mark + i + 1, plen, 0,
+                            )
                         plen = 0
                     fn_type = self.whnf(fn_type)
                     if store.kind(fn_type) != KIND_FORALL:
@@ -6003,7 +6048,10 @@ class Machine(object):
                     plen += 1
                 i -= 1
             if plen > 0:
-                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
+                if plen == 1:
+                    fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
+                else:
+                    fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
             return fn_type
         finally:
             store.unapp_pop(mark)
@@ -6019,9 +6067,14 @@ class Machine(object):
         while i >= 0:
             if store.kind(fn_type) != KIND_FORALL:
                 if plen > 0:
-                    fn_type = store.instantiate_multi_buf(
-                        fn_type, mark + i + 1, plen, 0,
-                    )
+                    if plen == 1:
+                        fn_type = store.instantiate(
+                            fn_type, store.spine_arg(mark + i + 1), 0,
+                        )
+                    else:
+                        fn_type = store.instantiate_multi_buf(
+                            fn_type, mark + i + 1, plen, 0,
+                        )
                     plen = 0
                 fn_type = self.whnf(fn_type)
                 if store.kind(fn_type) != KIND_FORALL:
@@ -6033,7 +6086,10 @@ class Machine(object):
                 plen += 1
             i -= 1
         if plen > 0:
-            fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
+            if plen == 1:
+                fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
+            else:
+                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
         return fn_type
 
     def _not_a_function_buf(self, head, mark, n, i, fn_type):
@@ -6145,8 +6201,10 @@ class Machine(object):
         head = store.head(h)
         if store.kind(head) != KIND_LAMBDA:
             return h
-        _, mark, n = store.unapp_push(h)
+        mark = store._spine_top
+        store.unapp_push(h)
         try:
+            n = store._spine_top - mark
             i = 0
             fn = head
             while store.kind(fn) == KIND_LAMBDA and i < n:
@@ -6187,8 +6245,10 @@ class Machine(object):
         field_index = store.proj_index(h)
         struct_name = store.name_of(h)
         struct_type = self.whnf(self._infer_open(struct, ctx, chain, check))
-        type_head, tmark, nt = store.unapp_push(struct_type)
+        tmark = store._spine_top
+        type_head = store.unapp_push(struct_type)
         try:
+            nt = store._spine_top - tmark
             head_const = store.const_leaf(type_head)
             if head_const is not None and head_const.is_named(struct_name):
                 struct_decl = self._leaf_decl(type_head, head_const)
@@ -6236,9 +6296,14 @@ class Machine(object):
             while i >= 0:
                 if store.kind(ctor_type) != KIND_FORALL:
                     if plen > 0:
-                        ctor_type = store.instantiate_multi_buf(
-                            ctor_type, tmark + i + 1, plen, 0,
-                        )
+                        if plen == 1:
+                            ctor_type = store.instantiate(
+                                ctor_type, store.spine_arg(tmark + i + 1), 0,
+                            )
+                        else:
+                            ctor_type = store.instantiate_multi_buf(
+                                ctor_type, tmark + i + 1, plen, 0,
+                            )
                         plen = 0
                     ctor_type = self.whnf(ctor_type)
                     if store.kind(ctor_type) != KIND_FORALL:
@@ -6253,7 +6318,10 @@ class Machine(object):
                     plen += 1
                 i -= 1
             if plen > 0:
-                ctor_type = store.instantiate_multi_buf(ctor_type, tmark, plen, 0)
+                if plen == 1:
+                    ctor_type = store.instantiate(ctor_type, store.spine_arg(tmark), 0)
+                else:
+                    ctor_type = store.instantiate_multi_buf(ctor_type, tmark, plen, 0)
         finally:
             store.unapp_pop(tmark)
         mat_struct = 0
@@ -6333,14 +6401,45 @@ class Machine(object):
             self._eqv_count += 1
 
     @staticmethod
+    @always_inline
     def _pair_key(h1, h2):
-        if h1 >= (1 << 31) or h2 >= (1 << 31):
+        if (h1 | h2) >= (1 << 31):
             return 0
         return (h1 << 31) | h2
+
+    @staticmethod
+    @always_inline
+    def _sym_pair_key(h1, h2):
+        if (h1 | h2) >= (1 << 31):
+            return 0
+        return ((h1 << 31) | h2) if h1 < h2 else ((h2 << 31) | h1)
 
     def def_eq(self, h1, h2):
         """Whether ``h1`` and ``h2`` are definitionally equal."""
         tc = self.tc
+        if not tc.def_eq_hooked:
+            if h1 == h2:
+                return True
+            if self._eqv_count > 0 and self._find(h1) == self._find(h2):
+                return True
+            key = self._sym_pair_key(h1, h2)
+            if self._neq.size > 0 and key != 0 and self._neq.get(key, 0) != 0:
+                return False
+            store = self.store
+            if (self._eqv_count > 0
+                    and store.kind(h1) == KIND_APP
+                    and store.kind(h2) == KIND_APP):
+                if self._spine_cheap_eq(h1, h2):
+                    self._union(h1, h2)
+                    return True
+            if stack_almost_full():
+                raise W_DeepRecursion("def_eq")
+            result = self._def_eq_uncached(h1, h2)
+            if result:
+                self._union(h1, h2)
+            elif key != 0:
+                self._neq.set(key, 1)
+            return result
         env = tc.env
         max_heartbeat = env.max_heartbeat
         if max_heartbeat > 0 or env.count_heartbeats:
@@ -6368,7 +6467,7 @@ class Machine(object):
                 tracer.eqv_hit()
                 return self._traced_result(True)
             return True
-        key = self._pair_key(h1, h2)
+        key = self._sym_pair_key(h1, h2)
         if self._neq.size > 0 and key != 0 and self._neq.get(key, 0) != 0:
             if tracing:
                 return self._traced_result(False)
@@ -6390,9 +6489,6 @@ class Machine(object):
             self._union(h1, h2)
         elif key != 0:
             self._neq.set(key, 1)
-            key2 = self._pair_key(h2, h1)
-            if key2 != 0:
-                self._neq.set(key2, 1)
         if tracing:
             return self._traced_result(result)
         return result
@@ -6517,9 +6613,11 @@ class Machine(object):
             if self.whnf(h2) == self.h_true:
                 return True
 
-        status, h1, h2 = self._try_lazy_delta(h1, h2)
+        status = self._try_lazy_delta(h1, h2)
         if status == _LD_TRUE:
             return True
+        h1 = self._ld_h1
+        h2 = self._ld_h2
         if h1 == h2:
             return True
         # Before evaluating projected structures in full, try matching two
@@ -6534,26 +6632,29 @@ class Machine(object):
             return self.def_eq(n1, n2)
         return self._def_eq_core(h1, h2)
 
-    def _proj_lazy_eq(self, h1, h2, rem, depth):
+    def _proj_lazy_eq(self, h1, h2, depth):
         """Bounded cheap definitional equality check for two projected
         structures (no full projection reduction, no unbounded recursion).
-        Uses a single shared step budget ``rem`` across all recursive calls
-        so wide Mathlib typeclass diamonds never branch exponentially.
-        Returns ``(ok, remaining_budget)``."""
+        Uses the shared step budget ``self._proj_rem`` across all recursive
+        calls so wide Mathlib typeclass diamonds never branch exponentially."""
         store = self.store
         while True:
             if h1 == h2 or (self._eqv_count > 0 and self._find(h1) == self._find(h2)):
-                return True, rem
+                return True
             h1 = self.whnf_core(h1, True)
             h2 = self.whnf_core(h2, True)
             if h1 == h2 or (self._eqv_count > 0 and self._find(h1) == self._find(h2)):
-                return True, rem
+                return True
             head1 = store.head(h1)
             head2 = store.head(h2)
             if depth > 0 and self._same_const(head1, head2):
-                _, m1, n1 = store.unapp_push(h1)
+                m1 = store._spine_top
+                store.unapp_push(h1)
                 try:
-                    _, m2, n2 = store.unapp_push(h2)
+                    n1 = store._spine_top - m1
+                    m2 = store._spine_top
+                    store.unapp_push(h2)
+                    n2 = store._spine_top - m2
                     if n1 == n2:
                         all_eq = True
                         j = n1 - 1
@@ -6561,36 +6662,33 @@ class Machine(object):
                             a1 = store.spine_arg(m1 + j)
                             a2 = store.spine_arg(m2 + j)
                             if a1 != a2:
-                                ok, rem = self._proj_lazy_eq(
-                                    a1, a2, rem, depth - 1,
-                                )
-                                if not ok:
+                                if not self._proj_lazy_eq(a1, a2, depth - 1):
                                     all_eq = False
                                     break
                             j -= 1
                         if all_eq:
                             self._union(h1, h2)
-                            return True, rem
+                            return True
                 finally:
                     store.unapp_pop(m1)
-            if rem <= 0:
-                return False, 0
+            if self._proj_rem <= 0:
+                return False
             f1 = self._leaf_flags(head1)
             f2 = self._leaf_flags(head2)
             d1 = (f1 & _LF_DELTA) != 0
             d2 = (f2 & _LF_DELTA) != 0
             if not d1 and not d2:
-                return False, rem
-            rem -= 1
+                return False
+            self._proj_rem -= 1
             if not d1:
                 new2 = self.try_unfold_head(h2)
                 if new2 == 0:
-                    return False, rem
+                    return False
                 h2 = new2
             elif not d2:
                 new1 = self.try_unfold_head(h1)
                 if new1 == 0:
-                    return False, rem
+                    return False
                 h1 = new1
             else:
                 e1 = f1 >> _LF_HINT_SHIFT
@@ -6600,18 +6698,18 @@ class Machine(object):
                 if (hint1 == HINT_ABBREV and hint2 != HINT_ABBREV) or hint1 > hint2:
                     new1 = self.try_unfold_head(h1)
                     if new1 == 0:
-                        return False, rem
+                        return False
                     h1 = new1
                 elif (hint2 == HINT_ABBREV and hint1 != HINT_ABBREV) or hint2 > hint1:
                     new2 = self.try_unfold_head(h2)
                     if new2 == 0:
-                        return False, rem
+                        return False
                     h2 = new2
                 else:
                     new1 = self.try_unfold_head(h1)
                     new2 = self.try_unfold_head(h2)
                     if new1 == 0 and new2 == 0:
-                        return False, rem
+                        return False
                     if new1 != 0:
                         h1 = new1
                     if new2 != 0:
@@ -6628,9 +6726,12 @@ class Machine(object):
             if store.field_b(h1) == store.field_b(h2):
                 if self._failed_before(h1, h2):
                     return False
-                ok, _ = self._proj_lazy_eq(
-                    store.field_a(h1), store.field_a(h2), 8, 3,
+                saved_rem = self._proj_rem
+                self._proj_rem = 8
+                ok = self._proj_lazy_eq(
+                    store.field_a(h1), store.field_a(h2), 3,
                 )
+                self._proj_rem = saved_rem
                 if ok:
                     return True
                 self._cache_failure(h1, h2)
@@ -6643,15 +6744,20 @@ class Machine(object):
                     and store.field_b(head1) == store.field_b(head2)):
                 if self._failed_before(h1, h2) or self._failed_before(head1, head2):
                     return False
-                _, m1, n1 = store.unapp_push(h1)
+                m1 = store._spine_top
+                store.unapp_push(h1)
+                saved_rem = self._proj_rem
                 try:
-                    _, m2, n2 = store.unapp_push(h2)
+                    n1 = store._spine_top - m1
+                    m2 = store._spine_top
+                    store.unapp_push(h2)
+                    n2 = store._spine_top - m2
                     if n1 != n2:
                         return False
-                    ok, rem = self._proj_lazy_eq(
-                        store.field_a(head1), store.field_a(head2), 8, 3,
-                    )
-                    if not ok:
+                    self._proj_rem = 8
+                    if not self._proj_lazy_eq(
+                        store.field_a(head1), store.field_a(head2), 3,
+                    ):
                         self._cache_failure(head1, head2)
                         return False
                     self._union(head1, head2)
@@ -6660,13 +6766,13 @@ class Machine(object):
                         a1 = store.spine_arg(m1 + j)
                         a2 = store.spine_arg(m2 + j)
                         if a1 != a2:
-                            ok, rem = self._proj_lazy_eq(a1, a2, rem, 2)
-                            if not ok:
+                            if not self._proj_lazy_eq(a1, a2, 2):
                                 self._cache_failure(h1, h2)
                                 return False
                         j -= 1
                     return True
                 finally:
+                    self._proj_rem = saved_rem
                     store.unapp_pop(m1)
         return False
 
@@ -6716,8 +6822,10 @@ class Machine(object):
         store = self.store
         if store.kind(h) != KIND_APP:
             return False
-        _, mark, n = store.unapp_push(h)
+        mark = store._spine_top
+        store.unapp_push(h)
         try:
+            n = store._spine_top - mark
             if n < 5:
                 return False
             inst_idx = n - 3
@@ -6739,14 +6847,14 @@ class Machine(object):
         store = self.store
         for _ in range(self._LAZY_DELTA_MAX_ITER):
             if h1 == h2:
-                return _LD_TRUE, h1, h2
+                return _LD_TRUE
             peeled = False
             while True:
                 lit1 = store.litnat_leaf(h1)
                 lit2 = store.litnat_leaf(h2)
                 if lit1 is not None and lit2 is not None:
                     if lit1.val.eq(lit2.val):
-                        return _LD_TRUE, h1, h2
+                        return _LD_TRUE
                     break
                 pred1 = self._nat_succ_pred(h1)
                 if pred1 == 0:
@@ -6763,7 +6871,7 @@ class Machine(object):
                 h1 = self.whnf_core(h1, True)
                 h2 = self.whnf_core(h2, True)
                 if h1 == h2:
-                    return _LD_TRUE, h1, h2
+                    return _LD_TRUE
 
             if not store.has_fvar(h1) and not store.has_fvar(h2):
                 if store.kind(h1) == KIND_APP:
@@ -6784,16 +6892,20 @@ class Machine(object):
             d1 = (f1 & _LF_DELTA) != 0
             d2 = (f2 & _LF_DELTA) != 0
             if not d1 and not d2:
-                return _LD_UNDEF, h1, h2
+                self._ld_h1 = h1
+                self._ld_h2 = h2
+                return _LD_UNDEF
 
             if not d1:
                 new2 = self._unfold_or_nat(h2)
                 if new2 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 if store.kind(head1) == KIND_PROJ:
                     c2 = self.whnf_core(new2, True)
                     if self._def_eq_proj_lazy(h1, c2):
-                        return _LD_TRUE, h1, c2
+                        return _LD_TRUE
                     h2 = self.whnf_core(c2)
                 else:
                     h2 = self.whnf_core(new2)
@@ -6801,11 +6913,13 @@ class Machine(object):
             if not d2:
                 new1 = self._unfold_or_nat(h1)
                 if new1 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 if store.kind(head2) == KIND_PROJ:
                     c1 = self.whnf_core(new1, True)
                     if self._def_eq_proj_lazy(c1, h2):
-                        return _LD_TRUE, c1, h2
+                        return _LD_TRUE
                     h1 = self.whnf_core(c1)
                 else:
                     h1 = self.whnf_core(new1)
@@ -6818,13 +6932,17 @@ class Machine(object):
             if hint1 == HINT_ABBREV and hint2 != HINT_ABBREV:
                 new1 = self._unfold_or_nat(h1)
                 if new1 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 h1 = self.whnf_core(new1)
                 continue
             if hint2 == HINT_ABBREV and hint1 != HINT_ABBREV:
                 new2 = self._unfold_or_nat(h2)
                 if new2 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 h2 = self.whnf_core(new2)
                 continue
 
@@ -6861,9 +6979,13 @@ class Machine(object):
                                  or self._bool_arg0_reducible(fn2))):
                         skip_same_head = True
                 if not skip_same_head:
-                    _, m1, n1 = store.unapp_push(h1)
+                    m1 = store._spine_top
+                    store.unapp_push(h1)
                     try:
-                        _, m2, n2 = store.unapp_push(h2)
+                        n1 = store._spine_top - m1
+                        m2 = store._spine_top
+                        store.unapp_push(h2)
+                        n2 = store._spine_top - m2
                         if n1 == n2:
                             if not self._failed_before(h1, h2):
                                 all_eq = True
@@ -6877,7 +6999,7 @@ class Machine(object):
                                         break
                                     j -= 1
                                 if all_eq:
-                                    return _LD_TRUE, h1, h2
+                                    return _LD_TRUE
                                 self._cache_failure(h1, h2)
                     finally:
                         store.unapp_pop(m1)
@@ -6901,32 +7023,40 @@ class Machine(object):
             if hint1 > hint2:
                 new1 = self._unfold_or_nat(h1)
                 if new1 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 h1 = self.whnf_core(new1)
                 continue
             if hint1 < hint2:
                 new2 = self._unfold_or_nat(h2)
                 if new2 == 0:
-                    return _LD_UNDEF, h1, h2
+                    self._ld_h1 = h1
+                    self._ld_h2 = h2
+                    return _LD_UNDEF
                 h2 = self.whnf_core(new2)
                 continue
 
             new1 = self._unfold_or_nat(h1)
             new2 = self._unfold_or_nat(h2)
             if new1 == 0 and new2 == 0:
-                return _LD_UNDEF, h1, h2
+                self._ld_h1 = h1
+                self._ld_h2 = h2
+                return _LD_UNDEF
             if new1 != 0 and new2 != 0:
                 c1 = self.whnf_core(new1, True)
                 c2 = self.whnf_core(new2, True)
                 if c1 == c2 or self._def_eq_proj_lazy(c1, c2):
-                    return _LD_TRUE, c1, c2
+                    return _LD_TRUE
                 h1 = self.whnf_core(c1)
                 h2 = self.whnf_core(c2)
             elif new1 != 0:
                 h1 = self.whnf_core(new1)
             elif new2 != 0:
                 h2 = self.whnf_core(new2)
-        return _LD_UNDEF, h1, h2
+        self._ld_h1 = h1
+        self._ld_h2 = h2
+        return _LD_UNDEF
 
     def _same_const(self, head1, head2):
         """Whether two constant heads name the same declaration at
@@ -6942,14 +7072,11 @@ class Machine(object):
     def _failed_before(self, h1, h2):
         if self._failed.size == 0:
             return False
-        key = self._pair_key(h1, h2)
+        key = self._sym_pair_key(h1, h2)
         return key != 0 and self._failed.get(key, 0) != 0
 
     def _cache_failure(self, h1, h2):
-        key = self._pair_key(h1, h2)
-        if key != 0:
-            self._failed.set(key, 1)
-        key = self._pair_key(h2, h1)
+        key = self._sym_pair_key(h1, h2)
         if key != 0:
             self._failed.set(key, 1)
 
@@ -7132,8 +7259,10 @@ class Machine(object):
         assert isinstance(ctor_kind, W_Constructor)
         num_params = ctor_kind.num_params
         num_fields = ctor_kind.num_fields
-        _, mark, n = store.unapp_push(ctor_side)
+        mark = store._spine_top
+        store.unapp_push(ctor_side)
         try:
+            n = store._spine_top - mark
             if n != num_params + num_fields:
                 return False
             ctor_ty = self.whnf(self.infer(ctor_side, False))
