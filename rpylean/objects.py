@@ -4247,30 +4247,40 @@ class W_App(W_Expr):
 
 
 class W_RecRule(_Item):
-    _attrs_ = ['ctor_name', 'num_fields', 'rhs', '_simple_minor']
+    _attrs_ = ['ctor_name', 'num_fields', 'rhs', '_simple_minor', '_rec_fields']
     _immutable_fields_ = ['ctor_name', 'num_fields', 'rhs']
 
     def __init__(self, ctor_name, num_fields, rhs):
         self.ctor_name = ctor_name
         self.num_fields = num_fields
         self.rhs = rhs
-        #: Cached 0-based minor index when `rhs` has the standard non-recursive
-        #: shape `λ params... motives... minors... fields... => minor_i f0..f{nf-1}`,
-        #: -2 = unchecked, -1 = general/recursive.
+        #: Cached 0-based minor index when `rhs` has the standard shape
+        #: `λ params... motives... minors... fields... =>
+        #:    minor_i f0..f{nf-1} (rec params... motives... minors... f_{r0})...`,
+        #: -2 = unchecked, -1 = general.
         self._simple_minor = -2
+        #: List of 0-based recursive field indices for standard non-indexed
+        #: recursive rules (e.g. `[1]` for `List.cons`, `[0]` for `Nat.succ`),
+        #: or `None` when non-recursive / general.
+        self._rec_fields = None
 
-    def simple_minor(self, num_params, num_motives, num_minors):
+    def simple_minor(self, rec_decl, num_params, num_motives, num_minors, num_indices):
         m = self._simple_minor
         if m != -2:
             return m
-        m = self._compute_simple_minor(num_params, num_motives, num_minors)
+        m = self._compute_simple_minor(
+            rec_decl, num_params, num_motives, num_minors, num_indices,
+        )
         self._simple_minor = m
         return m
 
     @dont_inline
-    def _compute_simple_minor(self, num_params, num_motives, num_minors):
+    def _compute_simple_minor(
+        self, rec_decl, num_params, num_motives, num_minors, num_indices,
+    ):
         nf = self.num_fields
-        expected = num_params + num_motives + num_minors + nf
+        total = num_params + num_motives + num_minors
+        expected = total + nf
         cur = self.rhs
         k = 0
         while k < expected:
@@ -4278,21 +4288,70 @@ class W_RecRule(_Item):
                 return -1
             cur = cur.body
             k += 1
-        j = 0
-        while j < nf:
-            if not isinstance(cur, W_App):
-                return -1
-            arg = cur.arg
-            if not isinstance(arg, W_BVar) or arg.id != j:
-                return -1
+        rev_args = []
+        while isinstance(cur, W_App):
+            rev_args.append(cur.arg)
             cur = cur.fn
-            j += 1
         if not isinstance(cur, W_BVar):
             return -1
         minor_bvar = cur.id
         if minor_bvar < nf or minor_bvar >= nf + num_minors:
             return -1
-        return (nf + num_minors - 1) - minor_bvar
+        n_app = len(rev_args)
+        if n_app < nf:
+            return -1
+        k = 0
+        while k < nf:
+            arg = rev_args[n_app - 1 - k]
+            if not isinstance(arg, W_BVar) or arg.id != nf - 1 - k:
+                return -1
+            k += 1
+        sminor = (nf + num_minors - 1) - minor_bvar
+        if n_app == nf:
+            self._rec_fields = None
+            return sminor
+        if num_indices != 0:
+            return -1
+        dlvls = rec_decl.levels
+        nlvls = len(dlvls)
+        rec_fields = []
+        idx = n_app - nf - 1
+        while idx >= 0:
+            rarg = rev_args[idx]
+            if not isinstance(rarg, W_App):
+                return -1
+            rfield = rarg.arg
+            if not isinstance(rfield, W_BVar):
+                return -1
+            fbvar = rfield.id
+            if fbvar < 0 or fbvar >= nf:
+                return -1
+            rcur = rarg.fn
+            t = 0
+            while t < total:
+                if not isinstance(rcur, W_App):
+                    return -1
+                ra = rcur.arg
+                if not isinstance(ra, W_BVar) or ra.id != nf + t:
+                    return -1
+                rcur = rcur.fn
+                t += 1
+            if not isinstance(rcur, W_Const):
+                return -1
+            if rcur.name is not rec_decl.name:
+                return -1
+            rlvls = rcur.levels
+            if len(rlvls) != nlvls:
+                return -1
+            u = 0
+            while u < nlvls:
+                if rlvls[u] is not dlvls[u].as_level_param():
+                    return -1
+                u += 1
+            rec_fields.append(nf - 1 - fbvar)
+            idx -= 1
+        self._rec_fields = rec_fields
+        return sminor
 
 
 #: How much of an inductive block is already in scope during a check.

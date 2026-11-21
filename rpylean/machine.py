@@ -5685,7 +5685,7 @@ class Machine(object):
                     store.unapp_push(h)
                     try:
                         return self._try_iota_spine(
-                            head, const, decl, dkind, mark, store._spine_top - mark,
+                            h, head, const, decl, dkind, mark, store._spine_top - mark,
                         )
                     finally:
                         store.unapp_pop(mark)
@@ -5875,6 +5875,8 @@ class Machine(object):
                             self.tc.tracer.beta()
                             k += 1
                     res = store.spine_arg(mark + n - m + b)
+                    if n > m and store.kind(res) == KIND_LAMBDA:
+                        return self._beta_spine_buf(res, mark, n - m)
                     return store.apply_buf_rev(res, mark, n - 1 - m)
                 val = self._delta_value(head, const)
                 if val == 0:
@@ -6208,7 +6210,7 @@ class Machine(object):
         res = store.cons_app(store.spine_arg(mark + n - 4), a)
         return store.apply_buf_rev(res, mark, n - 7)
 
-    def _try_iota_spine(self, target, const, decl, rec, mark, n_args):
+    def _try_iota_spine(self, h, target, const, decl, rec, mark, n_args):
         """One recursor iota step on ``target`` applied to
         `_spine_buf[mark .. mark + n_args)` (outermost-first), or 0."""
         store = self.store
@@ -6226,25 +6228,40 @@ class Machine(object):
                     tc.tracer.iota(const.name)
                 succ_case = store.spine_arg(mark + major_idx + 1)
                 zero_case = store.spine_arg(mark + major_idx + 2)
-                motive = store.spine_arg(mark + major_idx + 3)
                 if lit.val.eq(rbigint.fromint(0)):
-                    res = zero_case
-                else:
-                    pred = store.leaf_for(
-                        _mk_w_litnat(lit.val.sub(rbigint.fromint(1))),
-                    )
-                    rec_at_pred = store.cons_app(
-                        store.cons_app(
-                            store.cons_app(
-                                store.cons_app(target, motive), zero_case,
-                            ),
-                            succ_case,
-                        ),
-                        pred,
-                    )
-                    res = store.cons_app(
-                        store.cons_app(succ_case, pred), rec_at_pred,
-                    )
+                    if major_idx == 0:
+                        return zero_case
+                    if (store.kind(zero_case) == KIND_LAMBDA
+                            and not (tc.tracer.recording and tc.tracer.writes)):
+                        return self._beta_spine_buf(zero_case, mark, major_idx)
+                    return store.apply_buf_rev(zero_case, mark, major_idx - 1)
+                pred = store.leaf_for(
+                    _mk_w_litnat(lit.val.sub(rbigint.fromint(1))),
+                )
+                rec_prefix = store.field_a(h)
+                step = major_idx
+                while step > 0:
+                    rec_prefix = store.field_a(rec_prefix)
+                    step -= 1
+                rec_at_pred = store.cons_app(rec_prefix, pred)
+                if (store.kind(succ_case) == KIND_LAMBDA
+                        and not (tc.tracer.recording and tc.tracer.writes)):
+                    rmark = store._spine_top
+                    try:
+                        i = 0
+                        while i < major_idx:
+                            store.spine_push(store.spine_arg(mark + i))
+                            i += 1
+                        store.spine_push(rec_at_pred)
+                        store.spine_push(pred)
+                        return self._beta_spine_buf(
+                            succ_case, rmark, store._spine_top - rmark,
+                        )
+                    finally:
+                        store.unapp_pop(rmark)
+                res = store.cons_app(
+                    store.cons_app(succ_case, pred), rec_at_pred,
+                )
                 return store.apply_buf_rev(res, mark, major_idx - 1)
 
         major = self.whnf(store.spine_arg(mark + major_idx))
@@ -6285,7 +6302,7 @@ class Machine(object):
             lo = n_ctor - (ctor_kind.num_params + nf)
             hi = n_ctor - 1 - ctor_kind.num_params
             sminor = rule.simple_minor(
-                rec.num_params, rec.num_motives, rec.num_minors,
+                decl, rec.num_params, rec.num_motives, rec.num_minors, rec.num_indices,
             )
             if sminor >= 0 and lo >= 0:
                 if tc.tracer.recording:
@@ -6298,26 +6315,63 @@ class Machine(object):
                 minor = store.spine_arg(
                     mark + n_args - 1 - (rec.num_params + rec.num_motives + sminor),
                 )
-                if nf == 0:
-                    if major_idx == 0:
-                        return minor
+                rec_fields = rule._rec_fields
+                if rec_fields is None:
+                    if nf == 0:
+                        if major_idx == 0:
+                            return minor
+                        if (store.kind(minor) == KIND_LAMBDA
+                                and not (tc.tracer.recording and tc.tracer.writes)):
+                            return self._beta_spine_buf(minor, mark, major_idx)
+                        return store.apply_buf_rev(minor, mark, major_idx - 1)
                     if (store.kind(minor) == KIND_LAMBDA
                             and not (tc.tracer.recording and tc.tracer.writes)):
-                        return self._beta_spine_buf(minor, mark, major_idx)
-                    return store.apply_buf_rev(minor, mark, major_idx - 1)
+                        if nf == 1 and major_idx == 0:
+                            if tc.tracer.recording:
+                                tc.tracer.beta()
+                            return store.instantiate(
+                                store.field_b(minor), store.spine_arg(cmark + hi), 0,
+                            )
+                        rmark = store._spine_top
+                        i = 0
+                        while i < major_idx:
+                            store.spine_push(store.spine_arg(mark + i))
+                            i += 1
+                        i = lo
+                        while i <= hi:
+                            store.spine_push(store.spine_arg(cmark + i))
+                            i += 1
+                        return self._beta_spine_buf(
+                            minor, rmark, store._spine_top - rmark,
+                        )
+                    res = minor
+                    i = hi
+                    while i >= lo:
+                        res = store.cons_app(res, store.spine_arg(cmark + i))
+                        i -= 1
+                    return store.apply_buf_rev(res, mark, major_idx - 1)
+                # Standard non-indexed recursive rule (e.g. List.cons, Nat.succ,
+                # Poly.add, Expr.add): reuse `rec_prefix` directly from `h`!
+                rec_prefix = store.field_a(h)
+                step = major_idx
+                while step > 0:
+                    rec_prefix = store.field_a(rec_prefix)
+                    step -= 1
+                nr = len(rec_fields)
                 if (store.kind(minor) == KIND_LAMBDA
                         and not (tc.tracer.recording and tc.tracer.writes)):
-                    if nf == 1 and major_idx == 0:
-                        if tc.tracer.recording:
-                            tc.tracer.beta()
-                        return store.instantiate(
-                            store.field_b(minor), store.spine_arg(cmark + hi), 0,
-                        )
                     rmark = store._spine_top
                     i = 0
                     while i < major_idx:
                         store.spine_push(store.spine_arg(mark + i))
                         i += 1
+                    j = nr - 1
+                    while j >= 0:
+                        ih = store.cons_app(
+                            rec_prefix, store.spine_arg(cmark + hi - rec_fields[j]),
+                        )
+                        store.spine_push(ih)
+                        j -= 1
                     i = lo
                     while i <= hi:
                         store.spine_push(store.spine_arg(cmark + i))
@@ -6330,6 +6384,13 @@ class Machine(object):
                 while i >= lo:
                     res = store.cons_app(res, store.spine_arg(cmark + i))
                     i -= 1
+                j = 0
+                while j < nr:
+                    ih = store.cons_app(
+                        rec_prefix, store.spine_arg(cmark + hi - rec_fields[j]),
+                    )
+                    res = store.cons_app(res, ih)
+                    j += 1
                 return store.apply_buf_rev(res, mark, major_idx - 1)
 
             packed = self._rule_rhs_stripped(

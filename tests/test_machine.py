@@ -658,3 +658,46 @@ class TestU32Map(object):
                 store.unapp_pop(mark)
         finally:
             store.free()
+
+    def test_recursive_rec_rule_simple_minor(self):
+        from rpylean.objects import W_RecRule, W_BVar, W_Lambda, W_LEVEL_ZERO
+        u = Name.simple("u")
+        v = Name.simple("v")
+        rec_name = Name.from_str("MyList.rec")
+        rec_decl = rec_name.axiom(levels=[u, v], type=PROP)
+        b = x.binder(type=PROP)
+
+        def wrap_lams(n, body):
+            cur = body
+            for _ in range(n):
+                cur = W_Lambda(b, cur)
+            return cur
+
+        # Standard List.cons rule:
+        # λ (α:#5) (motive:#4) (nil:#3) (cons:#2) (hd:#1) (tl:#0) =>
+        #   cons hd tl (MyList.rec.{u,v} α motive nil cons tl)
+        rec_const = rec_name.const([u.as_level_param(), v.as_level_param()])
+        rec_call = (
+            rec_const.app(W_BVar(5)).app(W_BVar(4))
+            .app(W_BVar(3)).app(W_BVar(2)).app(W_BVar(0))
+        )
+        rhs = wrap_lams(6, W_BVar(2).app(W_BVar(1)).app(W_BVar(0)).app(rec_call))
+        rule = W_RecRule(Name.from_str("MyList.cons"), 2, rhs)
+        assert rule.simple_minor(rec_decl, 1, 1, 2, 0) == 1
+        assert rule._rec_fields == [1]
+
+        # Indexed recursor rejects recursive fast path
+        rule_idx = W_RecRule(Name.from_str("MyList.cons"), 2, rhs)
+        assert rule_idx.simple_minor(rec_decl, 1, 1, 2, 1) == -1
+        assert rule_idx._rec_fields is None
+
+        # Wrong universe levels on recursive call rejects fast path
+        bad_rec = rec_name.const([v.as_level_param(), u.as_level_param()])
+        bad_call = (
+            bad_rec.app(W_BVar(5)).app(W_BVar(4))
+            .app(W_BVar(3)).app(W_BVar(2)).app(W_BVar(0))
+        )
+        bad_rhs = wrap_lams(6, W_BVar(2).app(W_BVar(1)).app(W_BVar(0)).app(bad_call))
+        rule_bad = W_RecRule(Name.from_str("MyList.cons"), 2, bad_rhs)
+        assert rule_bad.simple_minor(rec_decl, 1, 1, 2, 0) == -1
+        assert rule_bad._rec_fields is None
