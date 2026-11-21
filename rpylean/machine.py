@@ -2931,6 +2931,272 @@ class TermStore(object):
             self._call_memo.set((h << 16) | depth, r)
         return r
 
+    @dont_inline
+    def inst_eq_buf(self, pat, start, n, target):
+        """Return True only when ``instantiate_multi_buf(pat, start, n, 0)``
+        would produce the exact handle ``target``, without allocating records
+        or probing consing tables. Bounded by a step budget so heavily shared
+        DAGs fall back cleanly to memoized instantiation."""
+        return self._inst_eq_d0(pat, self._spine_buf, start, n, target, 512) >= 0
+
+    def _inst_eq_d0(self, pat, buf, start, n, target, budget):
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        if is_leaf(pat):
+            pm = _s32(leaf_meta[leaf_index(pat)])
+            if pm <= 1:
+                return budget if pat == target else -1
+            bid = (pm >> 1) - 1
+            if bid < n:
+                return budget if _s32(buf[start + bid]) == target else -1
+            if (is_leaf(target)
+                    and _s32(leaf_meta[leaf_index(target)]) == ((bid - n + 1) << 1)):
+                return budget
+            return -1
+        pbase = rec_index(pat) << 2
+        phdr = _s32(recs[pbase])
+        if phdr < 16:
+            return budget if pat == target else -1
+        if is_leaf(target):
+            return -1
+        tbase = rec_index(target) << 2
+        thdr = _s32(recs[tbase])
+        pkind = phdr & _KIND_MASK
+        if pkind != (thdr & _KIND_MASK):
+            return -1
+        if pkind == KIND_APP:
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                pb = _s32(recs[pbase + F_B])
+                tb = _s32(recs[tbase + F_B])
+                if is_leaf(pb):
+                    pm = _s32(leaf_meta[leaf_index(pb)])
+                    if pm <= 1:
+                        if pb != tb:
+                            return -1
+                    else:
+                        bid = (pm >> 1) - 1
+                        if bid < n:
+                            if _s32(buf[start + bid]) != tb:
+                                return -1
+                        else:
+                            if (not is_leaf(tb)
+                                    or _s32(leaf_meta[leaf_index(tb)]) != ((bid - n + 1) << 1)):
+                                return -1
+                else:
+                    if _s32(recs[rec_index(pb) << 2]) < 16:
+                        if pb != tb:
+                            return -1
+                    else:
+                        budget = self._inst_eq_d0(pb, buf, start, n, tb, budget)
+                        if budget < 0:
+                            return -1
+                pa = _s32(recs[pbase + F_A])
+                ta = _s32(recs[tbase + F_A])
+                if is_leaf(pa):
+                    pm = _s32(leaf_meta[leaf_index(pa)])
+                    if pm <= 1:
+                        return budget if pa == ta else -1
+                    bid = (pm >> 1) - 1
+                    if bid < n:
+                        return budget if _s32(buf[start + bid]) == ta else -1
+                    if (is_leaf(ta)
+                            and _s32(leaf_meta[leaf_index(ta)]) == ((bid - n + 1) << 1)):
+                        return budget
+                    return -1
+                pbase = rec_index(pa) << 2
+                pahdr = _s32(recs[pbase])
+                if pahdr < 16:
+                    return budget if pa == ta else -1
+                if is_leaf(ta):
+                    return -1
+                tbase = rec_index(ta) << 2
+                tahdr = _s32(recs[tbase])
+                pk = pahdr & _KIND_MASK
+                if pk != (tahdr & _KIND_MASK):
+                    return -1
+                if pk == KIND_APP:
+                    continue
+                return self._inst_eq_d0(pa, buf, start, n, ta, budget)
+        if budget <= 0:
+            return -1
+        budget -= 1
+        if pkind == KIND_LAMBDA or pkind == KIND_FORALL:
+            budget = self._inst_eq_d0(
+                _s32(recs[pbase + F_A]), buf, start, n,
+                _s32(recs[tbase + F_A]), budget,
+            )
+            if budget < 0:
+                return -1
+            pb = _s32(recs[pbase + F_B])
+            tb = _s32(recs[tbase + F_B])
+            if self.loose_bvar_range(pb) <= 1:
+                return budget if pb == tb else -1
+            return self._inst_eq_depth(pb, buf, start, n, tb, 1, budget)
+        if pkind == KIND_PROJ:
+            if _s32(recs[pbase + F_B]) != _s32(recs[tbase + F_B]):
+                return -1
+            return self._inst_eq_d0(
+                _s32(recs[pbase + F_A]), buf, start, n,
+                _s32(recs[tbase + F_A]), budget,
+            )
+        assert pkind == KIND_LET
+        budget = self._inst_eq_d0(
+            _s32(recs[pbase + F_A]), buf, start, n,
+            _s32(recs[tbase + F_A]), budget,
+        )
+        if budget < 0:
+            return -1
+        ppair = _s32(recs[pbase + F_B])
+        tpair = _s32(recs[tbase + F_B])
+        budget = self._inst_eq_d0(
+            self.field_a(ppair), buf, start, n,
+            self.field_a(tpair), budget,
+        )
+        if budget < 0:
+            return -1
+        pbody = self.field_b(ppair)
+        tbody = self.field_b(tpair)
+        if self.loose_bvar_range(pbody) <= 1:
+            return budget if pbody == tbody else -1
+        return self._inst_eq_depth(pbody, buf, start, n, tbody, 1, budget)
+
+    def _inst_eq_depth(self, pat, buf, start, n, target, depth, budget):
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        if is_leaf(pat):
+            lo = _s32(leaf_meta[leaf_index(pat)]) >> 1
+            if lo <= depth:
+                return budget if pat == target else -1
+            id = lo - 1
+            rel = id - depth
+            if rel < n:
+                sub = _s32(buf[start + rel])
+                if sub == target and self.loose_bvar_range(sub) == 0:
+                    return budget
+                return -1
+            if (is_leaf(target)
+                    and _s32(leaf_meta[leaf_index(target)]) == ((id - n + 1) << 1)):
+                return budget
+            return -1
+        pbase = rec_index(pat) << 2
+        phdr = _s32(recs[pbase])
+        if (phdr >> 4) <= depth:
+            return budget if pat == target else -1
+        if is_leaf(target):
+            return -1
+        tbase = rec_index(target) << 2
+        thdr = _s32(recs[tbase])
+        pkind = phdr & _KIND_MASK
+        if pkind != (thdr & _KIND_MASK):
+            return -1
+        if pkind == KIND_APP:
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                pb = _s32(recs[pbase + F_B])
+                tb = _s32(recs[tbase + F_B])
+                if is_leaf(pb):
+                    lo = _s32(leaf_meta[leaf_index(pb)]) >> 1
+                    if lo <= depth:
+                        if pb != tb:
+                            return -1
+                    else:
+                        id = lo - 1
+                        rel = id - depth
+                        if rel < n:
+                            sub = _s32(buf[start + rel])
+                            if sub != tb or self.loose_bvar_range(sub) != 0:
+                                return -1
+                        else:
+                            if (not is_leaf(tb)
+                                    or _s32(leaf_meta[leaf_index(tb)]) != ((id - n + 1) << 1)):
+                                return -1
+                else:
+                    if (_s32(recs[rec_index(pb) << 2]) >> 4) <= depth:
+                        if pb != tb:
+                            return -1
+                    else:
+                        budget = self._inst_eq_depth(pb, buf, start, n, tb, depth, budget)
+                        if budget < 0:
+                            return -1
+                pa = _s32(recs[pbase + F_A])
+                ta = _s32(recs[tbase + F_A])
+                if is_leaf(pa):
+                    lo = _s32(leaf_meta[leaf_index(pa)]) >> 1
+                    if lo <= depth:
+                        return budget if pa == ta else -1
+                    id = lo - 1
+                    rel = id - depth
+                    if rel < n:
+                        sub = _s32(buf[start + rel])
+                        if sub == ta and self.loose_bvar_range(sub) == 0:
+                            return budget
+                        return -1
+                    if (is_leaf(ta)
+                            and _s32(leaf_meta[leaf_index(ta)]) == ((id - n + 1) << 1)):
+                        return budget
+                    return -1
+                pbase = rec_index(pa) << 2
+                pahdr = _s32(recs[pbase])
+                if (pahdr >> 4) <= depth:
+                    return budget if pa == ta else -1
+                if is_leaf(ta):
+                    return -1
+                tbase = rec_index(ta) << 2
+                tahdr = _s32(recs[tbase])
+                pk = pahdr & _KIND_MASK
+                if pk != (tahdr & _KIND_MASK):
+                    return -1
+                if pk == KIND_APP:
+                    continue
+                return self._inst_eq_depth(pa, buf, start, n, ta, depth, budget)
+        if budget <= 0:
+            return -1
+        budget -= 1
+        if pkind == KIND_LAMBDA or pkind == KIND_FORALL:
+            budget = self._inst_eq_depth(
+                _s32(recs[pbase + F_A]), buf, start, n,
+                _s32(recs[tbase + F_A]), depth, budget,
+            )
+            if budget < 0:
+                return -1
+            pb = _s32(recs[pbase + F_B])
+            tb = _s32(recs[tbase + F_B])
+            if self.loose_bvar_range(pb) <= depth + 1:
+                return budget if pb == tb else -1
+            return self._inst_eq_depth(pb, buf, start, n, tb, depth + 1, budget)
+        if pkind == KIND_PROJ:
+            if _s32(recs[pbase + F_B]) != _s32(recs[tbase + F_B]):
+                return -1
+            return self._inst_eq_depth(
+                _s32(recs[pbase + F_A]), buf, start, n,
+                _s32(recs[tbase + F_A]), depth, budget,
+            )
+        assert pkind == KIND_LET
+        budget = self._inst_eq_depth(
+            _s32(recs[pbase + F_A]), buf, start, n,
+            _s32(recs[tbase + F_A]), depth, budget,
+        )
+        if budget < 0:
+            return -1
+        ppair = _s32(recs[pbase + F_B])
+        tpair = _s32(recs[tbase + F_B])
+        budget = self._inst_eq_depth(
+            self.field_a(ppair), buf, start, n,
+            self.field_a(tpair), depth, budget,
+        )
+        if budget < 0:
+            return -1
+        pbody = self.field_b(ppair)
+        tbody = self.field_b(tpair)
+        if self.loose_bvar_range(pbody) <= depth + 1:
+            return budget if pbody == tbody else -1
+        return self._inst_eq_depth(pbody, buf, start, n, tbody, depth + 1, budget)
+
     def instantiate_multi_buf(self, h, start, count, depth=0):
         """
         Like `instantiate_multi`, reading ``count`` substitutes directly from
@@ -6651,6 +6917,16 @@ class Machine(object):
                             domain = store.spine_arg(mark + i + 1 + bid)
                         else:
                             domain = store.bvar(bid - plen)
+                    elif (not is_leaf(arg_type)
+                            and not self._def_eq_hooked
+                            and store.inst_eq_buf(domain, mark + i + 1, plen, arg_type)):
+                        fn_type = store.field_b(fn_type)
+                        if store.loose_bvar_range(fn_type) == 0:
+                            plen = 0
+                        else:
+                            plen += 1
+                        i -= 1
+                        continue
                     elif plen == 1:
                         domain = store.instantiate(
                             domain, store.spine_arg(mark + i + 1), 0,
@@ -7890,6 +8166,8 @@ class Machine(object):
         if store.kind(b1) != kind or store.kind(b2) != kind:
             if not self.def_eq(store.field_a(h1), store.field_a(h2)):
                 return False
+            if b1 == b2 and not self._def_eq_hooked:
+                return True
             if store.loose_bvar_range(b1) == 0 and store.loose_bvar_range(b2) == 0:
                 return self.def_eq(b1, b2)
             fvar = self.fvar_for(h1)
@@ -7901,17 +8179,23 @@ class Machine(object):
         while store.kind(h1) == kind and store.kind(h2) == kind:
             d1 = store.field_a(h1)
             d2 = store.field_a(h2)
+            same_d = (d1 == d2)
             nf = len(fvars)
             if nf > 0:
                 if store.loose_bvar_range(d1) > 0:
                     d1 = store.instantiate_multi_rev(d1, fvars, nf, 0)
-                if store.loose_bvar_range(d2) > 0:
+                if same_d:
+                    d2 = d1
+                elif store.loose_bvar_range(d2) > 0:
                     d2 = store.instantiate_multi_rev(d2, fvars, nf, 0)
-            if not self.def_eq(d1, d2):
-                return False
+            if not same_d or self._def_eq_hooked:
+                if not self.def_eq(d1, d2):
+                    return False
             fvars.append(self.fvar_for_domain(h1, d1))
             h1 = store.field_b(h1)
             h2 = store.field_b(h2)
+        if h1 == h2 and not self._def_eq_hooked:
+            return True
         nf = len(fvars)
         if store.loose_bvar_range(h1) > 0:
             h1 = store.instantiate_multi_rev(h1, fvars, nf, 0)

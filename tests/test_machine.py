@@ -581,3 +581,80 @@ class TestU32Map(object):
             )
         finally:
             store.free()
+
+    def test_inst_eq_buf_matches_instantiate_multi_buf(self):
+        from rpylean.machine import TermStore
+        store = TermStore(None, capacity=32)
+        try:
+            fh = store.import_term(f.const())
+            gh = store.import_term(g.const())
+            xh = store.import_term(x.const())
+            yh = store.import_term(y.const())
+            b0 = store.bvar(0)
+            b1 = store.bvar(1)
+            b2 = store.bvar(2)
+            # Spine buffer: subst[0] = yh, subst[1] = xh
+            mark = store._spine_top
+            store.spine_push(yh)
+            store.spine_push(xh)
+            try:
+                # App spine: f #1 #0 #2  ->  f x y #0
+                pat_app = store.cons_app(store.cons_app(store.cons_app(fh, b1), b0), b2)
+                expected_app = store.instantiate_multi_buf(pat_app, mark, 2, 0)
+                wrong_app = store.cons_app(store.cons_app(store.cons_app(fh, xh), xh), b0)
+                nrecs_before = store.nrecs
+                assert store.inst_eq_buf(pat_app, mark, 2, expected_app)
+                assert not store.inst_eq_buf(pat_app, mark, 2, wrong_app)
+                assert store.nrecs == nrecs_before
+
+                # Nested forall/lambda: forall (z : f #1), g #0 #2 -> forall (z : f x), g #0 y
+                binder = x.binder(type=NAT)
+                pat_pi = store.forall(
+                    binder,
+                    store.cons_app(fh, b1),
+                    store.cons_app(store.cons_app(gh, b0), b1),
+                )
+                expected_pi = store.instantiate_multi_buf(pat_pi, mark, 2, 0)
+                wrong_pi = store.forall(
+                    binder,
+                    store.cons_app(fh, xh),
+                    store.cons_app(store.cons_app(gh, b0), xh),
+                )
+                assert store.inst_eq_buf(pat_pi, mark, 2, expected_pi)
+                assert not store.inst_eq_buf(pat_pi, mark, 2, wrong_pi)
+
+                # Projection & Let
+                sname = Name.simple("S")
+                pat_proj = store.proj(sname, 1, store.cons_app(fh, b0))
+                expected_proj = store.instantiate_multi_buf(pat_proj, mark, 2, 0)
+                wrong_proj = store.proj(sname, 0, store.cons_app(fh, yh))
+                assert store.inst_eq_buf(pat_proj, mark, 2, expected_proj)
+                assert not store.inst_eq_buf(pat_proj, mark, 2, wrong_proj)
+
+                pat_let = store.let(
+                    x, store.cons_app(fh, b1), store.cons_app(gh, b0),
+                    store.cons_app(b0, b2),
+                )
+                expected_let = store.instantiate_multi_buf(pat_let, mark, 2, 0)
+                assert store.inst_eq_buf(pat_let, mark, 2, expected_let)
+
+                # Open substitute under a binder must safely return False (needs shift)
+                open_mark = store._spine_top
+                store.spine_push(store.cons_app(fh, b0))
+                try:
+                    pat_under = store.forall(binder, xh, store.cons_app(gh, b1))
+                    expected_under = store.instantiate_multi_buf(pat_under, open_mark, 1, 0)
+                    assert not store.inst_eq_buf(pat_under, open_mark, 1, expected_under)
+                finally:
+                    store.unapp_pop(open_mark)
+
+                # Shared deep DAG exceeding budget returns False cleanly without blowing up
+                dag = store.cons_app(fh, b0)
+                for _ in range(15):
+                    dag = store.cons_app(dag, dag)
+                expected_dag = store.instantiate_multi_buf(dag, mark, 2, 0)
+                assert not store.inst_eq_buf(dag, mark, 2, expected_dag)
+            finally:
+                store.unapp_pop(mark)
+        finally:
+            store.free()
