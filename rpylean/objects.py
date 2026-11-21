@@ -959,8 +959,10 @@ def _mk_w_litnat(val):
 
 # ---- Globally-interned content-keyed tables -----------------------------
 
-_INTERN_STR_NAME = {}      # int -> list[StrName]
-_INTERN_NUM_NAME = {}      # int -> list[NumName]
+_INTERN_STR_NAME = {}      # int -> StrName (intrusive `_intern_next` chain)
+_INTERN_NUM_NAME = {}      # int -> NumName (intrusive `_intern_next` chain)
+_EMPTY_LEVELS = []         # shared empty list[W_Level] for monomorphic W_Const
+_EMPTY_LEVEL_NAMES = []    # shared empty list[Name] for monomorphic W_Declaration
 # The expression tables map each content hash to a single node — on a
 # collision the newest node simply takes the slot. Losing the displaced
 # node only costs sharing (a future structurally-equal request allocates
@@ -1012,16 +1014,15 @@ def intern_stats():
 def _mk_str_name(parent, suffix):
     assert isinstance(parent, Name)
     h = _mix2(parent.hash(), compute_hash(suffix))
-    bucket = _INTERN_STR_NAME.get(h, None)
-    if bucket is None:
-        e = StrName(parent, suffix)
-        _INTERN_STR_NAME[h] = [e]
-        return e
-    for existing in bucket:
-        if existing.parent is parent and existing.suffix == suffix:
-            return existing
+    head = _INTERN_STR_NAME.get(h, None)
+    cur = head
+    while cur is not None:
+        if cur.parent is parent and cur.suffix == suffix:
+            return cur
+        cur = cur._intern_next
     e = StrName(parent, suffix)
-    bucket.append(e)
+    e._intern_next = head
+    _INTERN_STR_NAME[h] = e
     return e
 
 
@@ -1029,16 +1030,15 @@ def _mk_num_name(parent, idx):
     assert isinstance(parent, Name)
     # `idx.hash()` here is rbigint's content hash — cheap, no string alloc.
     h = _mix2(parent.hash(), idx.hash())
-    bucket = _INTERN_NUM_NAME.get(h, None)
-    if bucket is None:
-        e = NumName(parent, idx)
-        _INTERN_NUM_NAME[h] = [e]
-        return e
-    for existing in bucket:
-        if existing.parent is parent and existing.idx.eq(idx):
-            return existing
+    head = _INTERN_NUM_NAME.get(h, None)
+    cur = head
+    while cur is not None:
+        if cur.parent is parent and cur.idx.eq(idx):
+            return cur
+        cur = cur._intern_next
     e = NumName(parent, idx)
-    bucket.append(e)
+    e._intern_next = head
+    _INTERN_NUM_NAME[h] = e
     return e
 
 
@@ -1501,7 +1501,7 @@ class Name(_Item):
         """Construct the cached universe-monomorphic constant for this name."""
         c = self._empty_const
         if c is None:
-            c = _mk_w_const(self, [])
+            c = W_Const(name=self, levels=_EMPTY_LEVELS)
             self._empty_const = c
         return c
 
@@ -1521,7 +1521,7 @@ class Name(_Item):
         return W_Declaration(
             name=self,
             type=type,
-            levels=[] if levels is None else levels,
+            levels=_EMPTY_LEVEL_NAMES if (levels is None or len(levels) == 0) else levels,
             w_kind=w_kind,
             safety=safety,
         )
@@ -1744,13 +1744,14 @@ class _AnonymousName(Name):
 class StrName(Name):
     """Lean's ``Name.str p s``: a string-suffixed name nested in ``p``."""
 
-    _attrs_ = ['suffix']
+    _attrs_ = ['suffix', '_intern_next']
     _immutable_fields_ = ['suffix']
 
     def __init__(self, parent, suffix):
         Name.__init__(self)
         self.parent = parent
         self.suffix = suffix
+        self._intern_next = None
         self._hash = (
             (parent.hash() * 1000003) ^ compute_hash(suffix)
         ) & 0xFFFFFFFF
@@ -1784,17 +1785,18 @@ class NumName(Name):
     ``idx`` is an ``rbigint`` since Lean's ``Nat`` is unbounded.
     """
 
-    _attrs_ = ['idx']
+    _attrs_ = ['idx', '_intern_next']
     _immutable_fields_ = ['idx']
 
     def __init__(self, parent, idx):
         Name.__init__(self)
         self.parent = parent
         self.idx = idx
+        self._intern_next = None
         # XOR with a marker bit so a `Name.num n` and a `Name.str (str n)`
         # don't collide in the hash table; `syntactic_eq` also distinguishes
         # via subclass identity.
-        h = compute_hash(idx.str()) ^ 0x5A5A5A5A
+        h = idx.hash() ^ 0x5A5A5A5A
         self._hash = ((parent.hash() * 1000003) ^ h) & 0xFFFFFFFF
         # Lean's `isInternal` / private-name checks: num parts don't
         # trigger themselves but they don't block parent propagation.
@@ -2187,6 +2189,7 @@ class W_LevelZero(W_Level):
     def __init__(self):
         self._hash = 0x4C5A  # arbitrary distinct from other level kinds
         self.has_param = False
+        self._normal = self
 
     def __repr__(self):
         return "<Level 0>"
@@ -2234,6 +2237,10 @@ class W_LevelSucc(W_Level):
         self.parent = parent
         self.has_param = parent.has_param
         self._hash = ((parent.hash() * 1000003) ^ 0x53C7) & 0xFFFFFFFF
+        if (parent._normal is parent
+                and not isinstance(parent, W_LevelMax)
+                and not isinstance(parent, W_LevelIMax)):
+            self._normal = self
 
     def check_params(self, allowed):
         if not self.has_param:
@@ -2543,6 +2550,7 @@ class W_LevelParam(W_Level):
         self.name = name
         self.has_param = True
         self._hash = ((name.hash() * 1000003) ^ 0x5041) & 0xFFFFFFFF
+        self._normal = self
 
     def check_params(self, allowed):
         for each in allowed:

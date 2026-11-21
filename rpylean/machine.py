@@ -451,14 +451,18 @@ def _canonical_const(const):
     if c is not None:
         return c
     levels = const.levels
-    changed = False
-    normalized = []
-    for level in levels:
-        n = level.normalize()
-        if n is not level:
-            changed = True
-        normalized.append(n)
-    c = const if not changed else const.name.const(normalized)
+    n = len(levels)
+    normalized = None
+    i = 0
+    while i < n:
+        level = levels[i]
+        nl = level.normalize()
+        if nl is not level:
+            if normalized is None:
+                normalized = list(levels)
+            normalized[i] = nl
+        i += 1
+    c = const if normalized is None else const.name.const(normalized)
     const._canonical = c
     c._canonical = c
     return c
@@ -1059,7 +1063,7 @@ class TermStore(object):
         '_lgen1_p', '_lgen1_l', '_lgen1_g', '_lgen1_dirty',
         '_lgen2_p0', '_lgen2_p1', '_lgen2_l0', '_lgen2_l1', '_lgen2_g', '_lgen2_dirty',
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
-        'rec_node', 'nodes', 'record_nodes',
+        'rec_node', '_rec_node_dirty', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_call_memo',
         '_freed', 'initial_cap',
@@ -1140,9 +1144,10 @@ class TermStore(object):
         self.cap = cap
         self.recs = _alloc_u32(cap << 2)
         self.memos = _alloc_u32(cap * MEMO_SLOTS)
-        #: record index -> 1 + its index in `nodes`, or 0: the `W_Expr`
-        #: a record was imported from or exported to
-        self.rec_node = _alloc_u32(cap)
+        #: record index -> 1 + its index in `nodes`, or 0: lazily allocated
+        #: only when `record_nodes` or `export_term` actually records a node.
+        self.rec_node = lltype.nullptr(_U32_ARRAY)
+        self._rec_node_dirty = False
         #: Single-word generation-stamped scratch memo for one-shot
         #: substitutions: `(((epoch << 8) | depth) << 32) | handle`.
         self.call_slot = _alloc_words(cap)
@@ -1166,7 +1171,10 @@ class TermStore(object):
 
     def _free_records(self):
         _free_u32(self.recs)
-        _free_u32(self.rec_node)
+        if self.rec_node:
+            _free_u32(self.rec_node)
+            self.rec_node = lltype.nullptr(_U32_ARRAY)
+        self._rec_node_dirty = False
         _free_u32(self.memos)
         _free_words(self.call_slot)
         if self.app_table:
@@ -1181,11 +1189,12 @@ class TermStore(object):
         self.napps = 0
         self.nother = 0
         self.nleaves = 0
-        self.leaves = []
-        self.leaf_decl = []
+        lhint = self.leaf_cap if self.leaf_cap <= 8192 else 8192
+        self.leaves = newlist_hint(lhint)
+        self.leaf_decl = newlist_hint(lhint)
         #: Binder infos (`Binder`s, for the name and style) and
         #: `Name`s (for projections and lets), by `F_INFO` index.
-        self.infos = []
+        self.infos = newlist_hint(1024)
         self.names = []
         self._name_ids = name_dict()
         self._proj_overflow = []
@@ -1212,7 +1221,9 @@ class TermStore(object):
             self._clear_app_table(n)
             self._clear_table(n)
             _zero_u32(self.memos, n * MEMO_SLOTS)
-            _zero_u32(self.rec_node, n)
+            if self._rec_node_dirty:
+                _zero_u32(self.rec_node, n)
+                self._rec_node_dirty = False
             if self._call_epoch >= (1 << 22):
                 _zero_words(self.call_slot, self.cap)
                 self._call_epoch = 1
@@ -1816,7 +1827,12 @@ class TermStore(object):
         n = self.nrecs
         cap = self.cap * 2
         self.recs = _grow_u32(self.recs, n << 2, cap << 2)
-        self.rec_node = _grow_u32(self.rec_node, n, cap)
+        if self.rec_node:
+            if self._rec_node_dirty:
+                self.rec_node = _grow_u32(self.rec_node, n, cap)
+            else:
+                _free_u32(self.rec_node)
+                self.rec_node = lltype.nullptr(_U32_ARRAY)
         self.memos = _grow_u32(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
         self.call_slot = _grow_words(self.call_slot, n, cap)
         self.cap = cap
@@ -1869,11 +1885,48 @@ class TermStore(object):
     def app(self, fn, arg):
         return self.cons_app(fn, arg)
 
-    def lam(self, binder, type, body):
-        return self.cons(KIND_LAMBDA, type, body, self._info_index(binder))
+    def _cons_binder(self, kind, binder, a, b):
+        if (a | b) >= self._other_limit:
+            return self._cons_binder_wide(kind, binder, a, b)
+        key = (kind << 40) | (a << 20) | b
+        table = self.table
+        tmask = self.tmask
+        i = _spread(key) & tmask
+        while True:
+            entry = table[i]
+            if (entry >> 20) == key:
+                return (entry & _OTHER_SLOT_MASK) << 1
+            if entry == 0:
+                return self._cons_binder_miss(kind, binder, a, b, key, i)
+            i = (i + 1) & tmask
 
+    @dont_inline
+    def _cons_binder_wide(self, kind, binder, a, b):
+        return self._cons_general_wide(kind, a, b, self._info_index(binder))
+
+    @dont_inline
+    def _cons_binder_miss(self, kind, binder, a, b, key, i):
+        return self._cons_general_miss(
+            kind, a, b, self._info_index(binder), key, i,
+        )
+
+    @dont_inline
+    def _cons_let_wide(self, name, a, pair):
+        return self._cons_general_wide(KIND_LET, a, pair, self._name_index(name))
+
+    @dont_inline
+    def _cons_let_miss(self, name, a, pair, key, i):
+        return self._cons_general_miss(
+            KIND_LET, a, pair, self._name_index(name), key, i,
+        )
+
+    @always_inline
+    def lam(self, binder, type, body):
+        return self._cons_binder(KIND_LAMBDA, binder, type, body)
+
+    @always_inline
     def forall(self, binder, type, body):
-        return self.cons(KIND_FORALL, type, body, self._info_index(binder))
+        return self._cons_binder(KIND_FORALL, binder, type, body)
 
     def proj(self, struct_name, field_index, struct):
         name_id = self._name_index(struct_name)
@@ -1895,7 +1948,19 @@ class TermStore(object):
 
     def let(self, name, type, value, body):
         pair = self.cons(KIND_PAIR, value, body)
-        return self.cons(KIND_LET, type, pair, self._name_index(name))
+        if (type | pair) >= self._other_limit:
+            return self._cons_let_wide(name, type, pair)
+        key = (KIND_LET << 40) | (type << 20) | pair
+        table = self.table
+        tmask = self.tmask
+        i = _spread(key) & tmask
+        while True:
+            entry = table[i]
+            if (entry >> 20) == key:
+                return (entry & _OTHER_SLOT_MASK) << 1
+            if entry == 0:
+                return self._cons_let_miss(name, type, pair, key, i)
+            i = (i + 1) & tmask
 
     def _info_index(self, binder):
         i = len(self.infos)
@@ -2082,6 +2147,24 @@ class TermStore(object):
         self._spine_cap = new_cap
         return buf
 
+    @dont_inline
+    def _unapp_push_grow(self, h, top):
+        recs = self.recs
+        buf = self._grow_spine(top)
+        cap = self._spine_cap
+        while (h & 1) == 0:
+            base = rec_index(h) << 2
+            if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
+                break
+            if top == cap:
+                buf = self._grow_spine(top)
+                cap = self._spine_cap
+            buf[top] = recs[base + F_B]
+            top += 1
+            h = _s32(recs[base + F_A])
+        self._spine_top = top
+        return h
+
     def unapp_push(self, h):
         """Push the application spine of ``h`` onto `_spine_buf` outermost-first
         and return the head handle. Caller captures ``mark = store._spine_top``
@@ -2096,8 +2179,7 @@ class TermStore(object):
             if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
                 break
             if top == cap:
-                buf = self._grow_spine(top)
-                cap = self._spine_cap
+                return self._unapp_push_grow(h, top)
             buf[top] = recs[base + F_B]
             top += 1
             h = _s32(recs[base + F_A])
@@ -4326,12 +4408,17 @@ class TermStore(object):
     def node_of(self, h):
         """The `W_Expr` the record ``h`` was imported from or exported
         to, or ``None``."""
+        if not self._rec_node_dirty:
+            return None
         i = _s32(self.rec_node[rec_index(h)])
         if i == 0:
             return None
         return self.nodes[i - 1]
 
     def set_node(self, h, e):
+        if not self.rec_node:
+            self.rec_node = _alloc_u32(self.cap)
+        self._rec_node_dirty = True
         self.nodes.append(e)
         self.rec_node[rec_index(h)] = _u32(len(self.nodes))
 

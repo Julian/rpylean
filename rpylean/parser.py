@@ -751,7 +751,7 @@ def _try_parse_compact(cursor, builder):
         if cursor.match_lit('{"thm":{"levelParams":['):
             if cursor.pos < end and line[cursor.pos] == ']':
                 cursor.pos += 1
-                levels = []
+                levels = objects._EMPTY_LEVEL_NAMES
             else:
                 levels = []
                 while True:

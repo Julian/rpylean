@@ -678,3 +678,16 @@ class TestLevelOrderSoundness(object):
                 assert self._eval(normal, assignment) == value, (level, normal)
                 if never_zero:
                     assert value != 0, level
+
+    def test_succ_of_already_normalized_max(self):
+        """
+        `succ(max u (v + 1))` must still push `+ 1` into both branches
+        even when `max u (v + 1)` was already normalized beforehand.
+        """
+        a = Name.simple("u_norm_test").level()
+        b = Name.simple("v_norm_test").level()
+        m = a.max(b.succ())
+        assert m.normalize() is m
+        got = m.succ().normalize()
+        expected = a.succ().max(b.succ().succ()).normalize()
+        assert got == expected

@@ -345,18 +345,32 @@ class EnvironmentBuilder(object):
         derived from the declaration.
         """
         env_decls = self.env.declarations
-        if decl.name in env_decls:
-            raise AlreadyDeclared(decl.name, env_decls)
-        if len(decl.levels) > 1:
+        dname = decl.name
+        if dname._decl_dict is env_decls or dname in env_decls:
+            raise AlreadyDeclared(dname, env_decls)
+        dlevels = decl.levels
+        nl = len(dlevels)
+        if nl == 2:
+            if dlevels[0] is dlevels[1]:
+                raise DuplicateLevels(dname, dlevels, dlevels[1])
+        elif nl == 3:
+            l0, l1, l2 = dlevels[0], dlevels[1], dlevels[2]
+            if l0 is l1:
+                raise DuplicateLevels(dname, dlevels, l1)
+            if l0 is l2 or l1 is l2:
+                raise DuplicateLevels(dname, dlevels, l2)
+        elif nl > 3:
             seen = {}
-            for level in decl.levels:
+            for level in dlevels:
                 if level in seen:
-                    raise DuplicateLevels(decl.name, decl.levels, level)
+                    raise DuplicateLevels(dname, dlevels, level)
                 seen[level] = True
         if self.ordered:
             self._place(decl, group)
         self.declarations.append(decl)
-        env_decls[decl.name] = decl
+        env_decls[dname] = decl
+        dname._decl_dict = env_decls
+        dname._decl_cached = decl
 
     def _place(self, decl, group):
         index = len(self.declarations)
