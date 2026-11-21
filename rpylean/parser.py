@@ -290,13 +290,7 @@ def _match_binder_info_compact(cursor):
 
 @always_inline
 def _binder_from_code(name, code, type):
-    if code == 0:
-        return name.binder(type=type)
-    if code == 1:
-        return name.implicit_binder(type=type)
-    if code == 2:
-        return name.instance_binder(type=type)
-    return name.strict_implicit_binder(type=type)
+    return objects.Binder(name, type, style=code)
 
 
 def _try_parse_compact(cursor, builder):

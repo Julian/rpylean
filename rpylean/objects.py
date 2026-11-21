@@ -1193,19 +1193,19 @@ def _mk_w_const2(name, l0, l1):
 # even where the declared signature was `∀ p a, Eq p a`).
 
 def _mk_binder_default(name, type):
-    return Binder(name=name, type=type, left="(", right=")")
+    return Binder(name, type, style=_BINDER_DEFAULT)
 
 
 def _mk_binder_implicit(name, type):
-    return Binder(name=name, type=type, left="{", right="}")
+    return Binder(name, type, style=_BINDER_IMPLICIT)
 
 
 def _mk_binder_instance(name, type):
-    return Binder(name=name, type=type, left="[", right="]")
+    return Binder(name, type, style=_BINDER_INSTANCE)
 
 
 def _mk_binder_strict_implicit(name, type):
-    return Binder(name=name, type=type, left="\xe2\xa6\x83", right="\xe2\xa6\x84")
+    return Binder(name, type, style=_BINDER_STRICT_IMPLICIT)
 
 
 # W_App is hash-consed via `_INTERN_W_APP`. Its fields (`fn`, `arg`)
@@ -1798,6 +1798,15 @@ def names(*many):
 Name.ANONYMOUS = _AnonymousName()
 
 
+_BINDER_DEFAULT = 0
+_BINDER_IMPLICIT = 1
+_BINDER_INSTANCE = 2
+_BINDER_STRICT_IMPLICIT = 3
+_BINDER_LEFT = ["(", "{", "[", "\xe2\xa6\x83"]
+_BINDER_RIGHT = [")", "}", "]", "\xe2\xa6\x84"]
+_BINDER_INFO_NAMES = ["default", "implicit", "instImplicit", "strictImplicit"]
+
+
 class Binder(_Item):
     """
     A binder within a Lambda or ForAll.
@@ -1806,8 +1815,8 @@ class Binder(_Item):
     strictly for pretty printing.
     """
 
-    _attrs_ = ['name', 'type', 'left', 'right', '_position', '_fvar']
-    _immutable_fields_ = ['name', 'type', 'left', 'right']
+    _attrs_ = ['name', 'type', '_pos_style', '_fvar']
+    _immutable_fields_ = ['name', 'type']
 
     @staticmethod
     def default(name, type):
@@ -1837,21 +1846,36 @@ class Binder(_Item):
         """
         return _mk_binder_strict_implicit(name, type)
 
-    def __init__(self, name, type, left, right):
+    def __init__(self, name, type, left=None, right=None, style=_BINDER_DEFAULT):
+        if left is not None:
+            if left == "{":
+                style = _BINDER_IMPLICIT
+            elif left == "[":
+                style = _BINDER_INSTANCE
+            elif left == "\xe2\xa6\x83":
+                style = _BINDER_STRICT_IMPLICIT
+            else:
+                style = _BINDER_DEFAULT
         self.name = name
         self.type = type
-        self.left = left
-        self.right = right
-        #: The binding position this binder stands at, which a binder
-        #: rebuilt from it (with a substituted type, say) shares, and
-        #: which its free variable carries as its id.
-        self._position = next(W_FVar._counter)
+        #: Packs `(position << 2) | style`: the binding position this binder
+        #: stands at (shared by `with_type`, carried as its fvar's id) plus
+        #: its 2-bit binder style (`_BINDER_*`).
+        self._pos_style = (next(W_FVar._counter) << 2) | style
         self._fvar = None
+
+    def style(self):
+        return self._pos_style & 3
+
+    def left_bracket(self):
+        return _BINDER_LEFT[self._pos_style & 3]
+
+    def right_bracket(self):
+        return _BINDER_RIGHT[self._pos_style & 3]
 
     def hash(self):
         h = self.name.hash() ^ self.type.hash()
-        h = (h * 1000003) ^ compute_hash(self.left)
-        h = (h * 1000003) ^ compute_hash(self.right)
+        h = (h * 1000003) ^ (self._pos_style & 3)
         return h & 0xFFFFFFFF
 
     def __repr__(self):
@@ -1860,24 +1884,19 @@ class Binder(_Item):
     def export_info_name(self):
         """The `binderInfo` discriminator string used in `lean4export`'s
         NDJSON encoding of lambda/forall binders."""
-        if self.left == "{":
-            return "implicit"
-        if self.left == "[":
-            return "instImplicit"
-        if self.left == "⦃":
-            return "strictImplicit"
-        return "default"
+        return _BINDER_INFO_NAMES[self._pos_style & 3]
 
     def to_implicit(self):
         return Binder.implicit(name=self.name, type=self.type)
 
     def to_format(self, constants, marker):
+        s = self._pos_style & 3
         return _format.concat([
-            _format.text(PUNCT, self.left),
+            _format.text(PUNCT, _BINDER_LEFT[s]),
             _format.text(BINDER_NAME, self.name.user_name().str()),
             _format.text(PUNCT, " : "),
             _sub(marker, self.type, constants),
-            _format.text(PUNCT, self.right),
+            _format.text(PUNCT, _BINDER_RIGHT[s]),
         ])
 
     def tokens(self, constants, mark=None, span_holder=None):
@@ -1889,13 +1908,13 @@ class Binder(_Item):
         """
         Is this a default binder (i.e. not implicit, instance or strict)?
         """
-        return (self.left, self.right) == ("(", ")")
+        return (self._pos_style & 3) == _BINDER_DEFAULT
 
     def is_instance(self):
         """
         Is this a typeclass instance binder?
         """
-        return (self.left, self.right) == ("[", "]")
+        return (self._pos_style & 3) == _BINDER_INSTANCE
 
     def fvar(self):
         """
@@ -1906,7 +1925,7 @@ class Binder(_Item):
         """
         fvar = self._fvar
         if fvar is None:
-            fvar = W_FVar(self, self._position)
+            fvar = W_FVar(self, self._pos_style >> 2)
             self._fvar = fvar
         return fvar
 
@@ -1941,7 +1960,7 @@ class Binder(_Item):
         assert isinstance(other, Binder)
         # TODO - does syntactic equality really care about binder info/name?
         return (
-            self.left == other.left
+            (self._pos_style & 3) == (other._pos_style & 3)
             and syntactic_eq(self.name, other.name)
             and syntactic_eq(self.type, other.type)
         )
@@ -1950,15 +1969,8 @@ class Binder(_Item):
         """
         Create a new binder of the same name and kind but with a new type.
         """
-        if self.left == "(":
-            binder = _mk_binder_default(self.name, type)
-        elif self.left == "{":
-            binder = _mk_binder_implicit(self.name, type)
-        elif self.left == "[":
-            binder = _mk_binder_instance(self.name, type)
-        else:
-            binder = _mk_binder_strict_implicit(self.name, type)
-        binder._position = self._position
+        binder = Binder(self.name, type, style=self._pos_style & 3)
+        binder._pos_style = self._pos_style
         return binder
 
 
@@ -3698,7 +3710,7 @@ def group_to_str(group):
     if group[-1].is_default():
         return names
 
-    return "%s%s%s" % (group[-1].left, names, group[-1].right)
+    return "%s%s%s" % (group[-1].left_bracket(), names, group[-1].right_bracket())
 
 
 def _binder_group_format(group, constants):
@@ -3713,12 +3725,12 @@ def _binder_group_format(group, constants):
                 _format.text(BINDER_NAME, binder.name.user_name().str()),
             )
         return _format.concat(parts)
-    parts = [_format.text(PUNCT, group[-1].left)]
+    parts = [_format.text(PUNCT, group[-1].left_bracket())]
     for i, binder in enumerate(group):
         if i > 0:
             parts.append(_format.text(PLAIN, " "))
         parts.append(_format.text(BINDER_NAME, binder.name.user_name().str()))
-    parts.append(_format.text(PUNCT, group[-1].right))
+    parts.append(_format.text(PUNCT, group[-1].right_bracket()))
     return _format.concat(parts)
 
 
@@ -3763,10 +3775,10 @@ def _forall_binder_group_docs(binders, constants, marker):
     n = len(binders)
     while i < n:
         b = binders[i]
+        bstyle = b.style()
         j = i + 1
         while (j < n
-               and binders[j].left == b.left
-               and binders[j].right == b.right
+               and binders[j].style() == bstyle
                and syntactic_eq(binders[j].type, b.type)):
             j += 1
         # Inside the brackets the names soft-break between each other and the
@@ -3787,9 +3799,9 @@ def _forall_binder_group_docs(binders, constants, marker):
         inner.append(_format.LINE)
         inner.append(_sub(marker, b.type, constants))
         docs.append(_format.concat([
-            _format.text(PUNCT, b.left),
+            _format.text(PUNCT, b.left_bracket()),
             _format.fill(_format.nest(2, _format.concat(inner))),
-            _format.text(PUNCT, b.right),
+            _format.text(PUNCT, b.right_bracket()),
         ]))
         i = j
     return docs
@@ -3821,9 +3833,10 @@ class W_Lambda(W_FunBase):
         # One Format per emitted binder group / instance binder; joined with
         # soft breaks below so a long binder list fill-wraps (as Lean does).
         binder_docs = []
-        current_group, last_style = [], binders[0].left
+        current_group, last_style = [], binders[0].style()
 
         for i, binder in enumerate(binders):
+            bstyle = binder.style()
             if binder.is_instance():
                 if current_group:
                     binder_docs.append(
@@ -3838,15 +3851,15 @@ class W_Lambda(W_FunBase):
                         _sub(marker, binder.type, constants),
                         _format.text(PUNCT, "]"),
                     ]))
-                last_style = None
-            elif binder.left != last_style and current_group:
+                last_style = -1
+            elif bstyle != last_style and current_group:
                 binder_docs.append(
                     _binder_group_format(current_group, constants),
                 )
-                current_group, last_style = [binder], binder.left
+                current_group, last_style = [binder], bstyle
             else:
                 current_group.append(binder)
-                last_style = binder.left
+                last_style = bstyle
         if current_group:
             binder_docs.append(_binder_group_format(current_group, constants))
 
@@ -4460,31 +4473,45 @@ class W_Definition(W_DeclarationKind):
         return True
 
 
-class W_Opaque(W_Definition):
+class W_Opaque(W_DeclarationKind):
     """
     An Opaque definition.
 
-    This is like a definition with hint 'opaque', but even
-    stronger (we will never unfold it).
+    Like a definition with hint 'opaque', except the kernel will never unfold
+    it — so just like `W_Theorem`, its value is dead once checked and can be
+    dropped via `drop_checked_value`.
     """
 
-    _attrs_ = []
+    _attrs_ = ['value']
+    _immutable_fields_ = ['value?']
 
     def __init__(self, value):
         self.value = value
-        self.hint = HINT_OPAQUE
-        self.all = None
 
-    def group_key(self, name, safety):
-        return None
+    def drop_checked_value(self):
+        self.value = None
 
     def dump_to(self, exporter, decl):
+        value = self.value
+        assert value is not None
         exporter.begin_decl(decl)
-        exporter.dump_deps(self.value)
-        exporter.emit_opaque(decl, self.value)
+        exporter.dump_deps(value)
+        exporter.emit_opaque(decl, value)
 
-    def get_delta_reduce_target(self):
-        return None
+    def type_check(self, type, tc):
+        value = self.value
+        assert value is not None
+        return tc.machine.check_value(type, value, False)
+
+    def allows_warm_cache(self):
+        return True
+
+    def decl_format(self, name, levels, type, constants, marker):
+        value = self.value
+        assert value is not None
+        return _decl_with_value_format(
+            "def", name, levels, type, value, constants, marker,
+        )
 
 
 class W_Theorem(W_DeclarationKind):
