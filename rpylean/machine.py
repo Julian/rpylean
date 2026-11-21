@@ -127,8 +127,9 @@ F_A = 1
 F_B = 2
 F_INFO = 3
 _KIND_MASK = 7
-_PROJ_SHIFT = 32
+_PROJ_SHIFT = 16
 _PROJ_MASK = (1 << _PROJ_SHIFT) - 1
+_PROJ_OVF_NAME = _PROJ_MASK
 
 # Per-record memo slots (parallel to the records, 0 = not yet known).
 MEMO_SLOTS = 5
@@ -139,7 +140,60 @@ M_CHECKED_GEN = 3
 M_WHNF_CORE_CHEAP = 4
 
 _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
-_NO_INFO = -1
+_U32_ARRAY = rffi.CArray(rffi.UINT)
+_NO_INFO = 0
+
+
+@always_inline
+def _u32(x):
+    return rffi.cast(rffi.UINT, x)
+
+
+@always_inline
+def _s32(x):
+    return rffi.cast(lltype.Signed, x)
+
+
+def _alloc_u32(n):
+    return lltype.malloc(_U32_ARRAY, n, flavor='raw', zero=True)
+
+
+def _free_u32(arr):
+    lltype.free(arr, flavor='raw')
+
+
+def _zero_u32(arr, n):
+    """Zero ``arr``'s first ``n`` 32-bit entries."""
+    if n <= 0:
+        return
+    if we_are_translated():
+        rffi.c_memset(
+            rffi.cast(rffi.VOIDP, arr), 0, n * rffi.sizeof(rffi.UINT),
+        )
+    else:
+        z = _u32(0)
+        i = 0
+        while i < n:
+            arr[i] = z
+            i += 1
+
+
+def _grow_u32(arr, used, cap):
+    """A fresh 32-bit array of ``cap`` entries holding ``arr``'s first
+    ``used`` entries; ``arr`` is freed."""
+    new = _alloc_u32(cap)
+    if we_are_translated():
+        rffi.c_memcpy(
+            rffi.cast(rffi.VOIDP, new), rffi.cast(rffi.CONST_VOIDP, arr),
+            used * rffi.sizeof(rffi.UINT),
+        )
+    else:
+        i = 0
+        while i < used:
+            new[i] = arr[i]
+            i += 1
+    _free_u32(arr)
+    return new
 
 
 def _alloc_words(n):
@@ -596,10 +650,12 @@ class TermStore(object):
         'tc',
         'recs', 'memos', 'nrecs', 'cap',
         'table', 'tmask',
+        'call_gen', 'call_val', '_call_epoch',
+        '_spine_buf', '_spine_cap', '_spine_top',
         'leaves', 'leaf_meta', 'leaf_bvar', 'leaf_whnf', 'leaf_infer',
-        'leaf_checked', 'leaf_delta', 'nleaves', 'leaf_cap',
-        'infos', 'names', '_name_ids',
-        '_bvar_arr', '_bvar_max', '_bvar_leaves', '_leaf_uid', '_content_leaves',
+        'leaf_checked', 'leaf_delta', 'leaf_next', 'nleaves', 'leaf_cap',
+        'infos', 'names', '_name_ids', '_proj_overflow',
+        '_bvar_arr', '_bvar_max', '_bvar_leaves', '_leaf_uid', '_content_head',
         '_import_memo', '_import_spine', '_import_spine_len',
         'rec_node', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
@@ -613,7 +669,11 @@ class TermStore(object):
         while cap < capacity:
             cap <<= 1
         self.initial_cap = cap
+        self._call_epoch = 1
         self._alloc_records(cap)
+        self._spine_cap = 4096
+        self._spine_buf = _alloc_u32(self._spine_cap)
+        self._spine_top = 0
         #: Leaves by index; `leaf_meta` / `leaf_bvar` mirror the two
         #: facts the machine reads on hot paths so it need not touch the
         #: object: the packed meta word, and the de Bruijn index for a
@@ -629,11 +689,15 @@ class TermStore(object):
         self.leaf_checked = _alloc_words(self.leaf_cap)
         #: Delta-unfolded handle for a constant leaf (0 = uncached, -1 = none).
         self.leaf_delta = _alloc_words(self.leaf_cap)
+        #: Collision chain for unmanaged `_content_head` leaf interning.
+        self.leaf_next = _alloc_u32(self.leaf_cap)
         #: Flat array for small bound-variable leaf handles (`id < 256`).
         self._bvar_arr = _alloc_words(_BVAR_ARR_LEN)
         self._bvar_max = 0
         #: Per-declaration `W_Expr._uid + 1 -> leaf handle` fast cache.
         self._leaf_uid = IntMap(1 << 11, keep_cap=1 << 14)
+        #: `(e.hash() & 0xFFFFFFFF) + 1 -> first canonical leaf handle`.
+        self._content_head = IntMap(1 << 11, keep_cap=1 << 15)
         self._import_memo = IntMap(1 << 13)
         self._import_spine = []
         self._import_spine_len = 0
@@ -643,25 +707,32 @@ class TermStore(object):
         self._bind_memo = SubstMemo(1 << 10)
         self._multi_memo = SubstMemo(1 << 11)
         self._bindm_memo = SubstMemo(1 << 10)
-        #: L1-resident scratch memo cleared after each one-shot multi-subst.
+        #: Scratch memo for `_import_with_levels` and rare multi-depth
+        #: collisions in one-shot multi-substitution.
         self._call_memo = IntMap(1 << 11, keep_cap=1 << 14)
         self._freed = False
         self._forget()
 
     def _alloc_records(self, cap):
         self.cap = cap
-        self.recs = _alloc_words(cap << 2)
-        self.memos = _alloc_words(cap * MEMO_SLOTS)
+        self.recs = _alloc_u32(cap << 2)
+        self.memos = _alloc_u32(cap * MEMO_SLOTS)
         #: record index -> 1 + its index in `nodes`, or 0: the `W_Expr`
         #: a record was imported from or exported to
-        self.rec_node = _alloc_words(cap)
+        self.rec_node = _alloc_u32(cap)
+        #: Generation-stamped direct-indexed scratch memo for one-shot
+        #: multi-substitutions (`(epoch << 16) | depth` -> handle).
+        self.call_gen = _alloc_words(cap)
+        self.call_val = _alloc_u32(cap)
         self.table = _alloc_words(cap * 2)
         self.tmask = cap * 2 - 1
 
     def _free_records(self):
-        _free_words(self.recs)
-        _free_words(self.rec_node)
-        _free_words(self.memos)
+        _free_u32(self.recs)
+        _free_u32(self.rec_node)
+        _free_u32(self.memos)
+        _free_words(self.call_gen)
+        _free_u32(self.call_val)
         _free_words(self.table)
 
     def _forget(self):
@@ -674,8 +745,8 @@ class TermStore(object):
         self.infos = []
         self.names = []
         self._name_ids = name_dict()
+        self._proj_overflow = []
         self._bvar_leaves = {}
-        self._content_leaves = {}
         self.nodes = []
 
     def reset(self):
@@ -690,19 +761,28 @@ class TermStore(object):
         if self.cap > keep_cap and n * 8 < self.cap:
             self._free_records()
             self._alloc_records(keep_cap)
+            self._call_epoch = 1
         else:
             self._clear_table(n)
-            _zero_words(self.memos, n * MEMO_SLOTS)
-            _zero_words(self.rec_node, n)
+            _zero_u32(self.memos, n * MEMO_SLOTS)
+            _zero_u32(self.rec_node, n)
+            if self._call_epoch >= (1 << 44):
+                _zero_words(self.call_gen, self.cap)
+                self._call_epoch = 1
+            else:
+                self._call_epoch += 1
+        self._spine_top = 0
         leaves = self.nleaves
         _zero_words(self.leaf_whnf, leaves)
         _zero_words(self.leaf_infer, leaves)
         _zero_words(self.leaf_checked, leaves)
         _zero_words(self.leaf_delta, leaves)
+        _zero_u32(self.leaf_next, leaves)
         if self._bvar_max > 0:
             _zero_words(self._bvar_arr, self._bvar_max)
             self._bvar_max = 0
         self._leaf_uid.clear()
+        self._content_head.clear()
         self._import_memo.clear()
         self._inst_memo.clear()
         self._shift_memo.clear()
@@ -722,7 +802,11 @@ class TermStore(object):
         idx = n - 1
         while idx >= 0:
             base = idx << 2
-            hh = _hash_rec(recs[base] & _KIND_MASK, recs[base + F_A], recs[base + F_B])
+            hh = _hash_rec(
+                _s32(recs[base]) & _KIND_MASK,
+                _s32(recs[base + F_A]),
+                _s32(recs[base + F_B]),
+            )
             expected = (((hh >> 32) & _TABLE_TAG_MASK) << 32) | (idx + 1)
             i = hh & tmask
             while table[i] != expected:
@@ -737,14 +821,17 @@ class TermStore(object):
             return
         self._freed = True
         self._free_records()
+        _free_u32(self._spine_buf)
         _free_words(self.leaf_meta)
         _free_words(self.leaf_bvar)
         _free_words(self.leaf_whnf)
         _free_words(self.leaf_infer)
         _free_words(self.leaf_checked)
         _free_words(self.leaf_delta)
+        _free_u32(self.leaf_next)
         _free_words(self._bvar_arr)
         self._leaf_uid.free()
+        self._content_head.free()
         self._import_memo.free()
         self._inst_memo.free()
         self._shift_memo.free()
@@ -759,25 +846,28 @@ class TermStore(object):
     def kind(self, h):
         if is_leaf(h):
             return 0
-        return self.recs[rec_index(h) << 2] & _KIND_MASK
+        return _s32(self.recs[rec_index(h) << 2]) & _KIND_MASK
 
     @always_inline
     def field_a(self, h):
-        return self.recs[(rec_index(h) << 2) + F_A]
+        return _s32(self.recs[(rec_index(h) << 2) + F_A])
 
     @always_inline
     def field_b(self, h):
-        return self.recs[(rec_index(h) << 2) + F_B]
+        return _s32(self.recs[(rec_index(h) << 2) + F_B])
 
     @always_inline
     def proj_index(self, h):
-        return self.recs[(rec_index(h) << 2) + F_B] & _PROJ_MASK
+        packed = _s32(self.recs[(rec_index(h) << 2) + F_B])
+        if (packed >> _PROJ_SHIFT) == _PROJ_OVF_NAME:
+            return self._proj_overflow[packed & _PROJ_MASK][1]
+        return packed & _PROJ_MASK
 
     @always_inline
     def meta(self, h):
         if is_leaf(h):
             return self.leaf_meta[leaf_index(h)]
-        return self.recs[rec_index(h) << 2] >> 3
+        return _s32(self.recs[rec_index(h) << 2]) >> 3
 
     @always_inline
     def loose_bvar_range(self, h):
@@ -789,15 +879,15 @@ class TermStore(object):
 
     @always_inline
     def info(self, h):
-        return self.recs[(rec_index(h) << 2) + F_INFO]
+        return _s32(self.recs[(rec_index(h) << 2) + F_INFO])
 
     @always_inline
     def memo(self, h, slot):
-        return self.memos[rec_index(h) * MEMO_SLOTS + slot]
+        return _s32(self.memos[rec_index(h) * MEMO_SLOTS + slot])
 
     @always_inline
     def set_memo(self, h, slot, value):
-        self.memos[rec_index(h) * MEMO_SLOTS + slot] = value
+        self.memos[rec_index(h) * MEMO_SLOTS + slot] = _u32(value)
 
     def binder_of(self, h):
         """The `Binder` recorded for a lambda or forall record."""
@@ -865,8 +955,9 @@ class TermStore(object):
             if (entry >> 32) == tag:
                 slot = entry & _TABLE_SLOT_MASK
                 base = (slot - 1) << 2
-                if ((recs[base] & _KIND_MASK) == KIND_APP
-                        and recs[base + F_A] == fn and recs[base + F_B] == arg):
+                if ((_s32(recs[base]) & _KIND_MASK) == KIND_APP
+                        and _s32(recs[base + F_A]) == fn
+                        and _s32(recs[base + F_B]) == arg):
                     return rec_handle(slot - 1)
             i = (i + 1) & tmask
         idx = self.nrecs
@@ -879,10 +970,10 @@ class TermStore(object):
         lb = mb & ~1
         meta = (la if la > lb else lb) | ((ma | mb) & 1)
         base = idx << 2
-        recs[base] = (meta << 3) | KIND_APP
-        recs[base + F_A] = fn
-        recs[base + F_B] = arg
-        recs[base + F_INFO] = _NO_INFO
+        recs[base] = _u32((meta << 3) | KIND_APP)
+        recs[base + F_A] = _u32(fn)
+        recs[base + F_B] = _u32(arg)
+        recs[base + F_INFO] = _u32(_NO_INFO)
         self.nrecs = idx + 1
         if (idx + 1) * 2 > self.tmask + 1:
             self._rehash()
@@ -909,8 +1000,9 @@ class TermStore(object):
             if (entry >> 32) == tag:
                 slot = entry & _TABLE_SLOT_MASK
                 base = (slot - 1) << 2
-                if ((recs[base] & _KIND_MASK) == kind
-                        and recs[base + F_A] == a and recs[base + F_B] == b):
+                if ((_s32(recs[base]) & _KIND_MASK) == kind
+                        and _s32(recs[base + F_A]) == a
+                        and _s32(recs[base + F_B]) == b):
                     return rec_handle(slot - 1)
             i = (i + 1) & tmask
         idx = self.nrecs
@@ -919,10 +1011,10 @@ class TermStore(object):
             recs = self.recs
         meta = self._meta_for(kind, a, b)
         base = idx << 2
-        recs[base] = (meta << 3) | kind
-        recs[base + F_A] = a
-        recs[base + F_B] = b
-        recs[base + F_INFO] = info
+        recs[base] = _u32((meta << 3) | kind)
+        recs[base + F_A] = _u32(a)
+        recs[base + F_B] = _u32(b)
+        recs[base + F_INFO] = _u32(info)
         self.nrecs = idx + 1
         if (idx + 1) * 2 > self.tmask + 1:
             self._rehash()
@@ -933,9 +1025,11 @@ class TermStore(object):
     def _grow_records(self):
         n = self.nrecs
         cap = self.cap * 2
-        self.recs = _grow_words(self.recs, n << 2, cap << 2)
-        self.rec_node = _grow_words(self.rec_node, n, cap)
-        self.memos = _grow_words(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
+        self.recs = _grow_u32(self.recs, n << 2, cap << 2)
+        self.rec_node = _grow_u32(self.rec_node, n, cap)
+        self.memos = _grow_u32(self.memos, n * MEMO_SLOTS, cap * MEMO_SLOTS)
+        self.call_gen = _grow_words(self.call_gen, n, cap)
+        self.call_val = _grow_u32(self.call_val, n, cap)
         self.cap = cap
 
     def _rehash(self):
@@ -947,7 +1041,11 @@ class TermStore(object):
         idx = 0
         while idx < self.nrecs:
             base = idx << 2
-            hh = _hash_rec(recs[base] & _KIND_MASK, recs[base + F_A], recs[base + F_B])
+            hh = _hash_rec(
+                _s32(recs[base]) & _KIND_MASK,
+                _s32(recs[base + F_A]),
+                _s32(recs[base + F_B]),
+            )
             i = hh & tmask
             while table[i] != 0:
                 i = (i + 1) & tmask
@@ -967,7 +1065,20 @@ class TermStore(object):
 
     def proj(self, struct_name, field_index, struct):
         name_id = self._name_index(struct_name)
-        packed = (name_id << _PROJ_SHIFT) | (field_index & _PROJ_MASK)
+        if name_id < _PROJ_OVF_NAME and 0 <= field_index <= _PROJ_MASK:
+            packed = (name_id << _PROJ_SHIFT) | field_index
+        else:
+            ov = self._proj_overflow
+            ov_idx = -1
+            for k in range(len(ov)):
+                pair = ov[k]
+                if pair[0] == name_id and pair[1] == field_index:
+                    ov_idx = k
+                    break
+            if ov_idx < 0:
+                ov_idx = len(ov)
+                ov.append((name_id, field_index))
+            packed = (_PROJ_OVF_NAME << _PROJ_SHIFT) | ov_idx
         return self.cons(KIND_PROJ, struct, packed, name_id)
 
     def let(self, name, type, value, body):
@@ -1000,6 +1111,7 @@ class TermStore(object):
             self.leaf_infer = _grow_words(self.leaf_infer, j, cap)
             self.leaf_checked = _grow_words(self.leaf_checked, j, cap)
             self.leaf_delta = _grow_words(self.leaf_delta, j, cap)
+            self.leaf_next = _grow_u32(self.leaf_next, j, cap)
             self.leaf_cap = cap
         self.leaves.append(e)
         self.leaf_meta[j] = (e._packed >> 32) & 0x3FFFFFFF
@@ -1073,20 +1185,20 @@ class TermStore(object):
             if h != 0:
                 self._leaf_uid.set(uid_key, h)
                 return h
-        key = e.hash()
-        bucket = self._content_leaves.get(key, None)
-        if bucket is None:
-            bucket = []
-            self._content_leaves[key] = bucket
-        else:
-            for h in bucket:
-                if syntactic_eq(self.leaves[leaf_index(h)], e):
-                    self._leaf_uid.set(uid_key, h)
-                    if e is not orig:
-                        self._leaf_uid.set(e._uid + 1, h)
-                    return h
+        key = (e.hash() & 0xFFFFFFFF) + 1
+        head = self._content_head.get(key, 0)
+        cur = head
+        while cur != 0:
+            j = leaf_index(cur)
+            if syntactic_eq(self.leaves[j], e):
+                self._leaf_uid.set(uid_key, cur)
+                if e is not orig:
+                    self._leaf_uid.set(e._uid + 1, cur)
+                return cur
+            cur = _s32(self.leaf_next[j])
         h = self._new_leaf(e, -1)
-        bucket.append(h)
+        self.leaf_next[leaf_index(h)] = _u32(head)
+        self._content_head.set(key, h)
         self._leaf_uid.set(uid_key, h)
         if e is not orig:
             self._leaf_uid.set(e._uid + 1, h)
@@ -1099,9 +1211,9 @@ class TermStore(object):
         recs = self.recs
         while (h & 1) == 0:
             base = rec_index(h) << 2
-            if (recs[base] & _KIND_MASK) != KIND_APP:
+            if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
                 break
-            h = recs[base + F_A]
+            h = _s32(recs[base + F_A])
         return h
 
     def unapp(self, h):
@@ -1113,11 +1225,52 @@ class TermStore(object):
         recs = self.recs
         while (h & 1) == 0:
             base = rec_index(h) << 2
-            if (recs[base] & _KIND_MASK) != KIND_APP:
+            if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
                 break
-            args.append(recs[base + F_B])
-            h = recs[base + F_A]
+            args.append(_s32(recs[base + F_B]))
+            h = _s32(recs[base + F_A])
         return h, args
+
+    def unapp_push(self, h):
+        """Push the application spine of ``h`` onto `_spine_buf` outermost-first.
+        Returns ``(head, mark, count)``. Caller must restore via `unapp_pop(mark)`."""
+        recs = self.recs
+        mark = self._spine_top
+        top = mark
+        buf = self._spine_buf
+        cap = self._spine_cap
+        while (h & 1) == 0:
+            base = rec_index(h) << 2
+            if (_s32(recs[base]) & _KIND_MASK) != KIND_APP:
+                break
+            if top == cap:
+                new_cap = cap * 2
+                buf = _grow_u32(buf, top, new_cap)
+                self._spine_buf = buf
+                self._spine_cap = new_cap
+                cap = new_cap
+            buf[top] = recs[base + F_B]
+            top += 1
+            h = _s32(recs[base + F_A])
+        self._spine_top = top
+        return h, mark, top - mark
+
+    @always_inline
+    def unapp_pop(self, mark):
+        self._spine_top = mark
+
+    @always_inline
+    def spine_arg(self, idx):
+        return _s32(self._spine_buf[idx])
+
+    def apply_buf_rev(self, fn, mark, hi):
+        """``fn`` applied to `_spine_buf[mark + hi]`, …, `_spine_buf[mark]`."""
+        buf = self._spine_buf
+        i = hi
+        while i >= 0:
+            fn = self.cons_app(fn, _s32(buf[mark + i]))
+            i -= 1
+        return fn
 
     def apply(self, fn, args, start, stop):
         """``fn`` applied to ``args[start:stop]``, left to right."""
@@ -1182,10 +1335,10 @@ class TermStore(object):
             raise W_DeepRecursion("instantiate")
         recs = self.recs
         base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
             if self.loose_bvar_range(a) <= depth:
@@ -1243,15 +1396,20 @@ class TermStore(object):
             self._inst_memo.set_wide(h, sub, depth, r)
         return r
 
+    @always_inline
+    def _next_call_epoch(self):
+        gen = self._call_epoch + 1
+        if gen >= (1 << 46):
+            _zero_words(self.call_gen, self.cap)
+            gen = 1
+        self._call_epoch = gen
+        return gen
+
     def instantiate_multi(self, h, substs, depth=0):
         """
         ``h`` with ``substs[i]`` substituted for the bound variable
         ``depth + i`` for every ``i``, all at once, and every looser
         bound variable moved down by ``len(substs)``.
-
-        Uses the L1-resident one-shot `_call_memo` (cleared on return) so
-        no `KIND_PAIR` chain records are consed and no declaration-wide
-        multi-substitution table grows out of L1/L2 cache.
         """
         n = len(substs)
         if n == 1:
@@ -1264,13 +1422,14 @@ class TermStore(object):
             if rel < n:
                 return substs[rel] if depth == 0 else self.shift(substs[rel], depth, 0)
             return self.bvar(id - n)
-        memo = self._call_memo
+        gen = self._next_call_epoch()
         try:
-            return self._inst_multi_oneshot(h, substs, n, depth, memo, 0)
+            return self._inst_multi_oneshot(h, substs, n, depth, gen, 0)
         finally:
-            memo.clear()
+            if self._call_memo.size > 0:
+                self._call_memo.clear()
 
-    def _inst_multi_oneshot(self, h, substs, n, depth, memo, rdepth):
+    def _inst_multi_oneshot(self, h, substs, n, depth, gen, rdepth):
         if self.loose_bvar_range(h) <= depth:
             return h
         if is_leaf(h):
@@ -1279,21 +1438,26 @@ class TermStore(object):
             if rel < n:
                 return substs[rel] if depth == 0 else self.shift(substs[rel], depth, 0)
             return self.bvar(id - n)
-        if depth < (1 << 16) and h < (1 << 46):
-            key = (h << 16) | depth
-            r = memo.get(key, 0)
-            if r != 0:
-                return r
+        ri = rec_index(h)
+        if depth < (1 << 16):
+            tag = (gen << 16) | depth
+            g = self.call_gen[ri]
+            if g == tag:
+                return _s32(self.call_val[ri])
+            if (g >> 16) == gen:
+                r = self._call_memo.get((h << 16) | depth, 0)
+                if r != 0:
+                    return r
         else:
-            key = 0
+            tag = 0
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
         recs = self.recs
-        base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        base = ri << 2
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
             if self.loose_bvar_range(a) <= depth:
@@ -1306,7 +1470,7 @@ class TermStore(object):
                 else:
                     na = self.bvar(aid - n)
             else:
-                na = self._inst_multi_oneshot(a, substs, n, depth, memo, nr)
+                na = self._inst_multi_oneshot(a, substs, n, depth, gen, nr)
             if self.loose_bvar_range(b) <= depth:
                 nb = b
             elif is_leaf(b):
@@ -1317,14 +1481,14 @@ class TermStore(object):
                 else:
                     nb = self.bvar(bid - n)
             else:
-                nb = self._inst_multi_oneshot(b, substs, n, depth, memo, nr)
+                nb = self._inst_multi_oneshot(b, substs, n, depth, gen, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_oneshot(a, substs, n, depth, memo, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_oneshot(b, substs, n, depth + 1, memo, nr)
+            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_oneshot(a, substs, n, depth, gen, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_oneshot(b, substs, n, depth + 1, gen, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
-            na = self._inst_multi_oneshot(a, substs, n, depth, memo, nr)
+            na = self._inst_multi_oneshot(a, substs, n, depth, gen, nr)
             if na == a:
                 r = h
             else:
@@ -1333,16 +1497,133 @@ class TermStore(object):
             assert kind == KIND_LET
             value = self.field_a(b)
             body = self.field_b(b)
-            na = self._inst_multi_oneshot(a, substs, n, depth, memo, nr)
-            nv = self._inst_multi_oneshot(value, substs, n, depth, memo, nr)
-            nbody = self._inst_multi_oneshot(body, substs, n, depth + 1, memo, nr)
+            na = self._inst_multi_oneshot(a, substs, n, depth, gen, nr)
+            nv = self._inst_multi_oneshot(value, substs, n, depth, gen, nr)
+            nbody = self._inst_multi_oneshot(body, substs, n, depth + 1, gen, nr)
             if na == a and nv == value and nbody == body:
                 r = h
             else:
                 pair = self.cons(KIND_PAIR, nv, nbody)
                 r = self.cons(KIND_LET, na, pair, info)
-        if key != 0:
-            memo.set(key, r)
+        if tag != 0:
+            call_gen = self.call_gen
+            if (call_gen[ri] >> 16) != gen:
+                call_gen[ri] = tag
+                self.call_val[ri] = _u32(r)
+            else:
+                self._call_memo.set((h << 16) | depth, r)
+        return r
+
+    def instantiate_multi_buf(self, h, start, count, depth=0):
+        """
+        Like `instantiate_multi`, reading ``count`` substitutes directly from
+        ``self._spine_buf[start + rel]`` (zero list allocation or slice copy).
+        """
+        buf = self._spine_buf
+        if count == 1:
+            return self.instantiate(h, _s32(buf[start]), depth)
+        if count == 0 or self.loose_bvar_range(h) <= depth:
+            return h
+        if is_leaf(h):
+            id = self.leaf_bvar[leaf_index(h)]
+            rel = id - depth
+            if rel < count:
+                sub = _s32(buf[start + rel])
+                return sub if depth == 0 else self.shift(sub, depth, 0)
+            return self.bvar(id - count)
+        gen = self._next_call_epoch()
+        try:
+            return self._inst_multi_buf_oneshot(h, buf, start, count, depth, gen, 0)
+        finally:
+            if self._call_memo.size > 0:
+                self._call_memo.clear()
+
+    def _inst_multi_buf_oneshot(self, h, buf, start, n, depth, gen, rdepth):
+        if self.loose_bvar_range(h) <= depth:
+            return h
+        if is_leaf(h):
+            id = self.leaf_bvar[leaf_index(h)]
+            rel = id - depth
+            if rel < n:
+                sub = _s32(buf[start + rel])
+                return sub if depth == 0 else self.shift(sub, depth, 0)
+            return self.bvar(id - n)
+        ri = rec_index(h)
+        if depth < (1 << 16):
+            tag = (gen << 16) | depth
+            g = self.call_gen[ri]
+            if g == tag:
+                return _s32(self.call_val[ri])
+            if (g >> 16) == gen:
+                r = self._call_memo.get((h << 16) | depth, 0)
+                if r != 0:
+                    return r
+        else:
+            tag = 0
+        if (rdepth & 31) == 0 and stack_almost_full():
+            raise W_DeepRecursion("instantiate_multi")
+        recs = self.recs
+        base = ri << 2
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
+        nr = rdepth + 1
+        if kind == KIND_APP:
+            if self.loose_bvar_range(a) <= depth:
+                na = a
+            elif is_leaf(a):
+                aid = self.leaf_bvar[leaf_index(a)]
+                arel = aid - depth
+                if arel < n:
+                    asub = _s32(buf[start + arel])
+                    na = asub if depth == 0 else self.shift(asub, depth, 0)
+                else:
+                    na = self.bvar(aid - n)
+            else:
+                na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, nr)
+            if self.loose_bvar_range(b) <= depth:
+                nb = b
+            elif is_leaf(b):
+                bid = self.leaf_bvar[leaf_index(b)]
+                brel = bid - depth
+                if brel < n:
+                    bsub = _s32(buf[start + brel])
+                    nb = bsub if depth == 0 else self.shift(bsub, depth, 0)
+                else:
+                    nb = self.bvar(bid - n)
+            else:
+                nb = self._inst_multi_buf_oneshot(b, buf, start, n, depth, gen, nr)
+            r = h if (na == a and nb == b) else self.cons_app(na, nb)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_buf_oneshot(b, buf, start, n, depth + 1, gen, nr)
+            r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
+        elif kind == KIND_PROJ:
+            na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, nr)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, info)
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, nr)
+            nv = self._inst_multi_buf_oneshot(value, buf, start, n, depth, gen, nr)
+            nbody = self._inst_multi_buf_oneshot(body, buf, start, n, depth + 1, gen, nr)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody)
+                r = self.cons(KIND_LET, na, pair, info)
+        if tag != 0:
+            call_gen = self.call_gen
+            if (call_gen[ri] >> 16) != gen:
+                call_gen[ri] = tag
+                self.call_val[ri] = _u32(r)
+            else:
+                self._call_memo.set((h << 16) | depth, r)
         return r
 
     def instantiate_multi_rev(self, h, substs, count, depth=0):
@@ -1363,13 +1644,14 @@ class TermStore(object):
                 sub = substs[count - 1 - rel]
                 return sub if depth == 0 else self.shift(sub, depth, 0)
             return self.bvar(id - count)
-        memo = self._call_memo
+        gen = self._next_call_epoch()
         try:
-            return self._inst_multi_rev_oneshot(h, substs, count, depth, memo, 0)
+            return self._inst_multi_rev_oneshot(h, substs, count, depth, gen, 0)
         finally:
-            memo.clear()
+            if self._call_memo.size > 0:
+                self._call_memo.clear()
 
-    def _inst_multi_rev_oneshot(self, h, substs, n, depth, memo, rdepth):
+    def _inst_multi_rev_oneshot(self, h, substs, n, depth, gen, rdepth):
         if self.loose_bvar_range(h) <= depth:
             return h
         if is_leaf(h):
@@ -1379,21 +1661,26 @@ class TermStore(object):
                 sub = substs[n - 1 - rel]
                 return sub if depth == 0 else self.shift(sub, depth, 0)
             return self.bvar(id - n)
-        if depth < (1 << 16) and h < (1 << 46):
-            key = (h << 16) | depth
-            r = memo.get(key, 0)
-            if r != 0:
-                return r
+        ri = rec_index(h)
+        if depth < (1 << 16):
+            tag = (gen << 16) | depth
+            g = self.call_gen[ri]
+            if g == tag:
+                return _s32(self.call_val[ri])
+            if (g >> 16) == gen:
+                r = self._call_memo.get((h << 16) | depth, 0)
+                if r != 0:
+                    return r
         else:
-            key = 0
+            tag = 0
         if (rdepth & 31) == 0 and stack_almost_full():
             raise W_DeepRecursion("instantiate_multi")
         recs = self.recs
-        base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        base = ri << 2
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
             if self.loose_bvar_range(a) <= depth:
@@ -1407,7 +1694,7 @@ class TermStore(object):
                 else:
                     na = self.bvar(aid - n)
             else:
-                na = self._inst_multi_rev_oneshot(a, substs, n, depth, memo, nr)
+                na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, nr)
             if self.loose_bvar_range(b) <= depth:
                 nb = b
             elif is_leaf(b):
@@ -1419,14 +1706,14 @@ class TermStore(object):
                 else:
                     nb = self.bvar(bid - n)
             else:
-                nb = self._inst_multi_rev_oneshot(b, substs, n, depth, memo, nr)
+                nb = self._inst_multi_rev_oneshot(b, substs, n, depth, gen, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_rev_oneshot(a, substs, n, depth, memo, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_rev_oneshot(b, substs, n, depth + 1, memo, nr)
+            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_rev_oneshot(a, substs, n, depth, gen, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_rev_oneshot(b, substs, n, depth + 1, gen, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
-            na = self._inst_multi_rev_oneshot(a, substs, n, depth, memo, nr)
+            na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, nr)
             if na == a:
                 r = h
             else:
@@ -1435,16 +1722,21 @@ class TermStore(object):
             assert kind == KIND_LET
             value = self.field_a(b)
             body = self.field_b(b)
-            na = self._inst_multi_rev_oneshot(a, substs, n, depth, memo, nr)
-            nv = self._inst_multi_rev_oneshot(value, substs, n, depth, memo, nr)
-            nbody = self._inst_multi_rev_oneshot(body, substs, n, depth + 1, memo, nr)
+            na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, nr)
+            nv = self._inst_multi_rev_oneshot(value, substs, n, depth, gen, nr)
+            nbody = self._inst_multi_rev_oneshot(body, substs, n, depth + 1, gen, nr)
             if na == a and nv == value and nbody == body:
                 r = h
             else:
                 pair = self.cons(KIND_PAIR, nv, nbody)
                 r = self.cons(KIND_LET, na, pair, info)
-        if key != 0:
-            memo.set(key, r)
+        if tag != 0:
+            call_gen = self.call_gen
+            if (call_gen[ri] >> 16) != gen:
+                call_gen[ri] = tag
+                self.call_val[ri] = _u32(r)
+            else:
+                self._call_memo.set((h << 16) | depth, r)
         return r
 
     def _instantiate_multi(self, h, substs, chain, depth, rdepth=0):
@@ -1468,10 +1760,10 @@ class TermStore(object):
             raise W_DeepRecursion("instantiate_multi")
         recs = self.recs
         base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
             na = self._instantiate_multi(a, substs, chain, depth, nr)
@@ -1525,10 +1817,10 @@ class TermStore(object):
             raise W_DeepRecursion("shift")
         recs = self.recs
         base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
             na = a if self.loose_bvar_range(a) <= depth else self.shift(a, count, depth, nr)
@@ -1578,10 +1870,10 @@ class TermStore(object):
             raise W_DeepRecursion("bind_fvar")
         recs = self.recs
         base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         if kind == KIND_APP:
             na = self.bind_fvar(a, fvar, depth)
             nb = self.bind_fvar(b, fvar, depth)
@@ -1660,10 +1952,10 @@ class TermStore(object):
             raise W_DeepRecursion("bind_fvars")
         recs = self.recs
         base = rec_index(h) << 2
-        kind = recs[base] & _KIND_MASK
-        a = recs[base + F_A]
-        b = recs[base + F_B]
-        info = recs[base + F_INFO]
+        kind = _s32(recs[base]) & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        info = _s32(recs[base + F_INFO])
         if kind == KIND_APP:
             na = self._bind_fvars(a, fvars, chain, depth)
             nb = self._bind_fvars(b, fvars, chain, depth)
@@ -1710,14 +2002,14 @@ class TermStore(object):
     def node_of(self, h):
         """The `W_Expr` the record ``h`` was imported from or exported
         to, or ``None``."""
-        i = self.rec_node[rec_index(h)]
+        i = _s32(self.rec_node[rec_index(h)])
         if i == 0:
             return None
         return self.nodes[i - 1]
 
     def set_node(self, h, e):
         self.nodes.append(e)
-        self.rec_node[rec_index(h)] = len(self.nodes)
+        self.rec_node[rec_index(h)] = _u32(len(self.nodes))
 
     def import_term(self, e, rdepth=0):
         """The handle for the term ``e``, memoised per `W_Expr`."""
@@ -1950,18 +2242,33 @@ class TermStore(object):
             assert isinstance(e, W_Const)
             lvls = e.levels
             leaf_e = e
-            if lvls:
-                changed = False
-                new_lvls = []
-                for lvl in lvls:
-                    nl = (
-                        lvl.subst_levels_lists(params, clevels)
-                        if lvl.has_param else lvl
-                    )
-                    if nl is not lvl:
-                        changed = True
-                    new_lvls.append(nl)
-                if changed:
+            nlvls = len(lvls)
+            if nlvls == 1:
+                l0 = lvls[0]
+                if l0.has_param:
+                    nl0 = l0.subst_levels_lists(params, clevels)
+                    if nl0 is not l0:
+                        leaf_e = e.name.const([nl0])
+            elif nlvls == 2:
+                l0 = lvls[0]
+                l1 = lvls[1]
+                nl0 = l0.subst_levels_lists(params, clevels) if l0.has_param else l0
+                nl1 = l1.subst_levels_lists(params, clevels) if l1.has_param else l1
+                if nl0 is not l0 or nl1 is not l1:
+                    leaf_e = e.name.const([nl0, nl1])
+            elif nlvls > 2:
+                new_lvls = None
+                i = 0
+                while i < nlvls:
+                    lvl = lvls[i]
+                    if lvl.has_param:
+                        nl = lvl.subst_levels_lists(params, clevels)
+                        if nl is not lvl:
+                            if new_lvls is None:
+                                new_lvls = list(lvls)
+                            new_lvls[i] = nl
+                    i += 1
+                if new_lvls is not None:
                     leaf_e = e.name.const(new_lvls)
             h = self.leaf_for(leaf_e)
         elif cls is W_Sort:
@@ -2094,6 +2401,7 @@ class Machine(object):
             and self._eqv.size < _WARM_MAX_EQV
             and self._neq.size < _WARM_MAX_NEQ
             and self._failed.size < _WARM_MAX_FAILED
+            and self._heavy.size < _WARM_MAX_FAILED
         )
 
     def _forget(self):
@@ -2206,11 +2514,11 @@ class Machine(object):
         store.set_memo(start, slot, h)
         return h
 
-    def _beta_spine(self, head, args):
+    def _beta_spine_buf(self, head, mark, n):
         """Multi-arg beta-reduce a leading `KIND_LAMBDA` telescope ``head``
-        applied to ``args`` (outermost-first) in a single substitution pass."""
+        applied to `_spine_buf[mark .. mark + n)` (outermost-first) in a single
+        substitution pass without allocating argument lists."""
         store = self.store
-        n = len(args)
         k = 0
         body = head
         while k < n and store.kind(body) == KIND_LAMBDA:
@@ -2226,25 +2534,27 @@ class Machine(object):
         elif is_leaf(body):
             bid = store.leaf_bvar[leaf_index(body)]
             if bid < k:
-                res = args[n - k + bid]
+                res = store.spine_arg(mark + n - k + bid)
             else:
                 res = store.bvar(bid - k)
         elif k == 1:
-            res = store.instantiate(body, args[n - 1], 0)
-        elif k == n:
-            res = store.instantiate_multi(body, args, 0)
+            res = store.instantiate(body, store.spine_arg(mark + n - 1), 0)
         else:
-            start = n - k
-            assert start >= 0
-            res = store.instantiate_multi(body, args[start:n], 0)
-        return store.apply_rev(res, args, n - 1 - k)
+            res = store.instantiate_multi_buf(body, mark + n - k, k, 0)
+        return store.apply_buf_rev(res, mark, n - 1 - k)
 
     def _whnf_core_step(self, h, cheap_proj):
         """One whnf_core step of ``h``, or 0 when there is none."""
         store = self.store
         kind = store.kind(h)
         if kind == KIND_APP:
-            head = h
+            fn = store.field_a(h)
+            fk = store.kind(fn)
+            if fk == KIND_LAMBDA:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                return store.instantiate(store.field_b(fn), store.field_b(h), 0)
+            head = fn
             while store.kind(head) == KIND_APP:
                 head = store.field_a(head)
             hk = store.kind(head)
@@ -2265,18 +2575,24 @@ class Machine(object):
                     return self._try_quot_lift_spine(args)
                 return 0
             if hk == KIND_LAMBDA:
-                _, args = store.unapp(h)
-                return self._beta_spine(head, args)
+                _, mark, n = store.unapp_push(h)
+                try:
+                    return self._beta_spine_buf(head, mark, n)
+                finally:
+                    store.unapp_pop(mark)
             if hk == KIND_PROJ or hk == KIND_LET:
                 head_w = self.whnf_core(head, cheap_proj, False)
                 if head_w == head:
                     return 0
-                _, args = store.unapp(h)
-                if (store.kind(head_w) == KIND_LAMBDA
-                        and not (self.tc.tracer.recording
-                                 and self.tc.tracer.writes)):
-                    return self._beta_spine(head_w, args)
-                return store.apply_rev(head_w, args, len(args) - 1)
+                _, mark, n = store.unapp_push(h)
+                try:
+                    if (store.kind(head_w) == KIND_LAMBDA
+                            and not (self.tc.tracer.recording
+                                     and self.tc.tracer.writes)):
+                        return self._beta_spine_buf(head_w, mark, n)
+                    return store.apply_buf_rev(head_w, mark, n - 1)
+                finally:
+                    store.unapp_pop(mark)
             return 0
         if kind == KIND_LET:
             pair = store.field_b(h)
@@ -2326,11 +2642,14 @@ class Machine(object):
             return 0
         if h == head:
             return val
-        _, args = store.unapp(h)
-        if (store.kind(val) == KIND_LAMBDA
-                and not (self.tc.tracer.recording and self.tc.tracer.writes)):
-            return self._beta_spine(val, args)
-        return store.apply_rev(val, args, len(args) - 1)
+        _, mark, n = store.unapp_push(h)
+        try:
+            if (store.kind(val) == KIND_LAMBDA
+                    and not (self.tc.tracer.recording and self.tc.tracer.writes)):
+                return self._beta_spine_buf(val, mark, n)
+            return store.apply_buf_rev(val, mark, n - 1)
+        finally:
+            store.unapp_pop(mark)
 
     def _delta_kind(self, head):
         """The `W_Definition` a delta-reducible head names, or None."""
@@ -2534,23 +2853,25 @@ class Machine(object):
                 lit = e
         if lit is not None:
             struct = self.whnf(store.import_term(lit.build_str_expr()))
-        head, args = store.unapp(struct)
-        const = store.const_leaf(head)
-        if const is None:
+        head, mark, n = store.unapp_push(struct)
+        try:
+            const = store.const_leaf(head)
+            if const is None:
+                return 0
+            decl = self._decl(const)
+            if decl is None:
+                return 0
+            kind = decl.w_kind
+            if not isinstance(kind, W_Constructor):
+                return 0
+            idx = kind.num_params + store.proj_index(h)
+            if idx < n:
+                # args are outermost-first: field i of a left-to-right list
+                # sits at n - 1 - i.
+                return store.spine_arg(mark + n - 1 - idx)
             return 0
-        decl = self._decl(const)
-        if decl is None:
-            return 0
-        kind = decl.w_kind
-        if not isinstance(kind, W_Constructor):
-            return 0
-        idx = kind.num_params + store.proj_index(h)
-        n = len(args)
-        if idx < n:
-            # args are outermost-first: field i of a left-to-right list
-            # sits at n - 1 - i.
-            return args[n - 1 - idx]
-        return 0
+        finally:
+            store.unapp_pop(mark)
 
     def _try_quot_lift_spine(self, args):
         """``Quot.lift α r β f h (Quot.mk r a) extra... ⇒ f a extra...``, or 0."""
@@ -2867,17 +3188,17 @@ class Machine(object):
         if kind == KIND_APP:
             t = self._infer_app(h, check)
         elif kind == KIND_LAMBDA:
-            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy_memoised(h):
                 t = self._infer_open_lambda(h, [], 0, check)
             else:
                 t = self._infer_lambda(h, check)
         elif kind == KIND_FORALL:
-            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy_memoised(h):
                 t = self._infer_open_forall(h, [], 0, check)
             else:
                 t = self._infer_forall(h, check)
         elif kind == KIND_LET:
-            if store.nrecs >= _OPEN_RECORDS and self._is_heavy(h):
+            if store.nrecs >= _OPEN_RECORDS and self._is_heavy_memoised(h):
                 t = self._infer_open_let(h, [], 0, check)
             else:
                 t = self._infer_let(h, check)
@@ -3166,99 +3487,130 @@ class Machine(object):
     def _infer_app(self, h, check):
         store = self.store
         tc = self.tc
-        head, args = store.unapp(h)
-        fn_type = self.infer(head, check)
-        n = len(args)
-        if not check:
-            return self._infer_app_only(head, args, fn_type)
-        pending = []
-        i = n - 1
-        while i >= 0:
-            arg = args[i]
+        fn = store.field_a(h)
+        if store.kind(fn) != KIND_APP:
+            arg = store.field_b(h)
+            fn_type = self.infer(fn, check)
             if store.kind(fn_type) != KIND_FORALL:
-                if pending:
-                    fn_type = store.instantiate_multi_rev(
-                        fn_type, pending, len(pending), 0,
-                    )
-                    pending = []
                 fn_type = self.whnf(fn_type)
                 if store.kind(fn_type) != KIND_FORALL:
-                    self._not_a_function(head, args, i, fn_type)
-            arg_type = self.infer(arg, True)
-            domain = store.field_a(fn_type)
-            plen = len(pending)
-            if plen > 0 and store.loose_bvar_range(domain) > 0:
-                if is_leaf(domain):
-                    bid = store.leaf_bvar[leaf_index(domain)]
-                    if bid < plen:
-                        domain = pending[plen - 1 - bid]
-                    else:
-                        domain = store.bvar(bid - plen)
-                elif plen == 1:
-                    domain = store.instantiate(domain, pending[0], 0)
-                else:
-                    domain = store.instantiate_multi_rev(
-                        domain, pending, plen, 0,
+                    raise W_NotAFunction(
+                        tc, self.export(fn), inferred_type=self.export(fn_type),
                     )
-            tracing = tc.tracer.recording
-            if tracing:
-                tc.tracer.begin_argcheck()
-            ok = self.def_eq(domain, arg_type)
-            if tracing:
-                tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
-            if not ok:
-                raise W_TypeError(
-                    tc, self.export(arg), self.export(domain),
-                    inferred_type=self.export(arg_type),
-                )
-            fn_type = store.field_b(fn_type)
-            if store.loose_bvar_range(fn_type) == 0:
-                if pending:
-                    pending = []
-            else:
-                pending.append(arg)
-            i -= 1
-        if pending:
-            fn_type = store.instantiate_multi_rev(
-                fn_type, pending, len(pending), 0,
-            )
-        return fn_type
+            if check:
+                arg_type = self.infer(arg, True)
+                domain = store.field_a(fn_type)
+                tracing = tc.tracer.recording
+                if tracing:
+                    tc.tracer.begin_argcheck()
+                ok = self.def_eq(domain, arg_type)
+                if tracing:
+                    tc.tracer.end_argcheck(self._head_label(fn), 0)
+                if not ok:
+                    raise W_TypeError(
+                        tc, self.export(arg), self.export(domain),
+                        inferred_type=self.export(arg_type),
+                    )
+            body = store.field_b(fn_type)
+            if store.loose_bvar_range(body) == 0:
+                return body
+            return store.instantiate(body, arg, 0)
+        head, mark, n = store.unapp_push(h)
+        try:
+            fn_type = self.infer(head, check)
+            if not check:
+                return self._infer_app_only_buf(head, mark, n, fn_type)
+            plen = 0
+            i = n - 1
+            while i >= 0:
+                arg = store.spine_arg(mark + i)
+                if store.kind(fn_type) != KIND_FORALL:
+                    if plen > 0:
+                        fn_type = store.instantiate_multi_buf(
+                            fn_type, mark + i + 1, plen, 0,
+                        )
+                        plen = 0
+                    fn_type = self.whnf(fn_type)
+                    if store.kind(fn_type) != KIND_FORALL:
+                        self._not_a_function_buf(head, mark, n, i, fn_type)
+                arg_type = self.infer(arg, True)
+                domain = store.field_a(fn_type)
+                if plen > 0 and store.loose_bvar_range(domain) > 0:
+                    if is_leaf(domain):
+                        bid = store.leaf_bvar[leaf_index(domain)]
+                        if bid < plen:
+                            domain = store.spine_arg(mark + i + 1 + bid)
+                        else:
+                            domain = store.bvar(bid - plen)
+                    elif plen == 1:
+                        domain = store.instantiate(
+                            domain, store.spine_arg(mark + i + 1), 0,
+                        )
+                    else:
+                        domain = store.instantiate_multi_buf(
+                            domain, mark + i + 1, plen, 0,
+                        )
+                tracing = tc.tracer.recording
+                if tracing:
+                    tc.tracer.begin_argcheck()
+                ok = self.def_eq(domain, arg_type)
+                if tracing:
+                    tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
+                if not ok:
+                    raise W_TypeError(
+                        tc, self.export(arg), self.export(domain),
+                        inferred_type=self.export(arg_type),
+                    )
+                fn_type = store.field_b(fn_type)
+                if store.loose_bvar_range(fn_type) == 0:
+                    plen = 0
+                else:
+                    plen += 1
+                i -= 1
+            if plen > 0:
+                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
+            return fn_type
+        finally:
+            store.unapp_pop(mark)
 
-    def _infer_app_only(self, head, args, fn_type):
+    def _infer_app_only_buf(self, head, mark, n, fn_type):
         """
-        The type of ``head args`` given ``head``'s type, trusting the
-        arguments. Walks straight through a Pi telescope's bodies and
-        substitutes the pending arguments in one pass only when it has
-        to reduce, so a well-typed n-ary application costs one
-        substitution rather than n.
+        The type of ``head args`` (with ``args`` at `_spine_buf[mark:mark+n]`)
+        given ``head``'s type, trusting the arguments.
         """
         store = self.store
-        n = len(args)
-        pending = []
+        plen = 0
         i = n - 1
         while i >= 0:
-            arg = args[i]
             if store.kind(fn_type) != KIND_FORALL:
-                if pending:
-                    fn_type = store.instantiate_multi_rev(
-                        fn_type, pending, len(pending), 0,
+                if plen > 0:
+                    fn_type = store.instantiate_multi_buf(
+                        fn_type, mark + i + 1, plen, 0,
                     )
-                    pending = []
+                    plen = 0
                 fn_type = self.whnf(fn_type)
                 if store.kind(fn_type) != KIND_FORALL:
-                    self._not_a_function(head, args, i, fn_type)
+                    self._not_a_function_buf(head, mark, n, i, fn_type)
             fn_type = store.field_b(fn_type)
             if store.loose_bvar_range(fn_type) == 0:
-                if pending:
-                    pending = []
+                plen = 0
             else:
-                pending.append(arg)
+                plen += 1
             i -= 1
-        if pending:
-            fn_type = store.instantiate_multi_rev(
-                fn_type, pending, len(pending), 0,
-            )
+        if plen > 0:
+            fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
         return fn_type
+
+    def _not_a_function_buf(self, head, mark, n, i, fn_type):
+        store = self.store
+        spine = head
+        j = n - 1
+        while j > i:
+            spine = store.cons_app(spine, store.spine_arg(mark + j))
+            j -= 1
+        raise W_NotAFunction(
+            self.tc, self.export(spine), inferred_type=self.export(fn_type),
+        )
 
     def _not_a_function(self, head, args, i, fn_type):
         store = self.store
@@ -3335,24 +3687,27 @@ class Machine(object):
         store = self.store
         if store.kind(h) != KIND_APP:
             return h
-        head, args = store.unapp(h)
+        head = store.head(h)
         if store.kind(head) != KIND_LAMBDA:
             return h
-        n = len(args)
-        i = 0
-        fn = head
-        while store.kind(fn) == KIND_LAMBDA and i < n:
-            i += 1
-            fn = store.field_b(fn)
-        if store.loose_bvar_range(fn) == 0:
-            return store.apply_rev(fn, args, n - 1 - i)
-        idx = store.bvar_id(fn)
-        if idx >= 0 and idx < i:
-            # args are outermost-first: the j-th consumed argument (in
-            # application order) is args[n - 1 - j]; bvar idx names
-            # the (i - 1 - idx)-th consumed one.
-            return store.apply_rev(args[n - 1 - (i - 1 - idx)], args, n - 1 - i)
-        return h
+        _, mark, n = store.unapp_push(h)
+        try:
+            i = 0
+            fn = head
+            while store.kind(fn) == KIND_LAMBDA and i < n:
+                i += 1
+                fn = store.field_b(fn)
+            if store.loose_bvar_range(fn) == 0:
+                return store.apply_buf_rev(fn, mark, n - 1 - i)
+            idx = store.bvar_id(fn)
+            if idx >= 0 and idx < i:
+                return store.apply_buf_rev(
+                    store.spine_arg(mark + n - 1 - (i - 1 - idx)),
+                    mark, n - 1 - i,
+                )
+            return h
+        finally:
+            store.unapp_pop(mark)
 
     def _infer_let(self, h, check):
         store = self.store
@@ -3709,23 +4064,28 @@ class Machine(object):
             head1 = store.head(h1)
             head2 = store.head(h2)
             if depth > 0 and self._same_const(head1, head2):
-                _, args1 = store.unapp(h1)
-                _, args2 = store.unapp(h2)
-                if len(args1) == len(args2):
-                    all_eq = True
-                    j = len(args1) - 1
-                    while j >= 0:
-                        if args1[j] != args2[j]:
-                            ok, rem = self._proj_lazy_eq(
-                                args1[j], args2[j], rem, depth - 1,
-                            )
-                            if not ok:
-                                all_eq = False
-                                break
-                        j -= 1
-                    if all_eq:
-                        self._union(h1, h2)
-                        return True, rem
+                _, m1, n1 = store.unapp_push(h1)
+                try:
+                    _, m2, n2 = store.unapp_push(h2)
+                    if n1 == n2:
+                        all_eq = True
+                        j = n1 - 1
+                        while j >= 0:
+                            a1 = store.spine_arg(m1 + j)
+                            a2 = store.spine_arg(m2 + j)
+                            if a1 != a2:
+                                ok, rem = self._proj_lazy_eq(
+                                    a1, a2, rem, depth - 1,
+                                )
+                                if not ok:
+                                    all_eq = False
+                                    break
+                            j -= 1
+                        if all_eq:
+                            self._union(h1, h2)
+                            return True, rem
+                finally:
+                    store.unapp_pop(m1)
             if rem <= 0:
                 return False, 0
             kind1 = self._delta_kind(head1)
@@ -3792,26 +4152,31 @@ class Machine(object):
                     and store.field_b(head1) == store.field_b(head2)):
                 if self._failed_before(h1, h2) or self._failed_before(head1, head2):
                     return False
-                _, args1 = store.unapp(h1)
-                _, args2 = store.unapp(h2)
-                if len(args1) != len(args2):
-                    return False
-                ok, rem = self._proj_lazy_eq(
-                    store.field_a(head1), store.field_a(head2), 8, 3,
-                )
-                if not ok:
-                    self._cache_failure(head1, head2)
-                    return False
-                self._union(head1, head2)
-                j = len(args1) - 1
-                while j >= 0:
-                    if args1[j] != args2[j]:
-                        ok, rem = self._proj_lazy_eq(args1[j], args2[j], rem, 2)
-                        if not ok:
-                            self._cache_failure(h1, h2)
-                            return False
-                    j -= 1
-                return True
+                _, m1, n1 = store.unapp_push(h1)
+                try:
+                    _, m2, n2 = store.unapp_push(h2)
+                    if n1 != n2:
+                        return False
+                    ok, rem = self._proj_lazy_eq(
+                        store.field_a(head1), store.field_a(head2), 8, 3,
+                    )
+                    if not ok:
+                        self._cache_failure(head1, head2)
+                        return False
+                    self._union(head1, head2)
+                    j = n1 - 1
+                    while j >= 0:
+                        a1 = store.spine_arg(m1 + j)
+                        a2 = store.spine_arg(m2 + j)
+                        if a1 != a2:
+                            ok, rem = self._proj_lazy_eq(a1, a2, rem, 2)
+                            if not ok:
+                                self._cache_failure(h1, h2)
+                                return False
+                        j -= 1
+                    return True
+                finally:
+                    store.unapp_pop(m1)
         return False
 
     def _def_eq_offset(self, h1, h2):
@@ -3864,13 +4229,15 @@ class Machine(object):
         name = const.name
         if not (name.syntactic_eq(_ITE_NAME) or name.syntactic_eq(_DITE_NAME)):
             return False
-        _, args = store.unapp(h)
-        n = len(args)
-        if n < 5:
-            return False
-        inst_idx = n - 3
-        assert inst_idx >= 0
-        return not store.has_fvar(args[inst_idx])
+        _, mark, n = store.unapp_push(h)
+        try:
+            if n < 5:
+                return False
+            inst_idx = n - 3
+            assert inst_idx >= 0
+            return not store.has_fvar(store.spine_arg(mark + inst_idx))
+        finally:
+            store.unapp_pop(mark)
 
     def _is_short_circuit_bool(self, head):
         const = self.store.const_leaf(head)
@@ -4032,20 +4399,26 @@ class Machine(object):
                                  or self._bool_arg0_reducible(fn2))):
                         skip_same_head = True
                 if not skip_same_head:
-                    args1 = store.unapp(h1)[1]
-                    args2 = store.unapp(h2)[1]
-                    if len(args1) == len(args2):
-                        if not self._failed_before(h1, h2):
-                            all_eq = True
-                            j = len(args1) - 1
-                            while j >= 0:
-                                if not self.def_eq(args1[j], args2[j]):
-                                    all_eq = False
-                                    break
-                                j -= 1
-                            if all_eq:
-                                return _LD_TRUE, h1, h2
-                            self._cache_failure(h1, h2)
+                    _, m1, n1 = store.unapp_push(h1)
+                    try:
+                        _, m2, n2 = store.unapp_push(h2)
+                        if n1 == n2:
+                            if not self._failed_before(h1, h2):
+                                all_eq = True
+                                j = n1 - 1
+                                while j >= 0:
+                                    if not self.def_eq(
+                                        store.spine_arg(m1 + j),
+                                        store.spine_arg(m2 + j),
+                                    ):
+                                        all_eq = False
+                                        break
+                                    j -= 1
+                                if all_eq:
+                                    return _LD_TRUE, h1, h2
+                                self._cache_failure(h1, h2)
+                    finally:
+                        store.unapp_pop(m1)
 
             # Unfold a regular non-Nat-binop definition before forcing native
             # Nat reduction on the other side's potentially expensive args
@@ -4202,23 +4575,38 @@ class Machine(object):
         if store.kind(fn2) == KIND_LAMBDA:
             if self.def_eq(h1, store.instantiate(store.field_b(fn2), store.field_b(h2), 0)):
                 return True
-        args1 = []
-        args2 = []
-        while store.kind(h1) == KIND_APP and store.kind(h2) == KIND_APP:
-            args1.append(store.field_b(h1))
-            args2.append(store.field_b(h2))
-            h1 = store.field_a(h1)
-            h2 = store.field_a(h2)
-        if not self.def_eq(h1, h2):
-            return False
-        if len(args1) != len(args2):
-            return False
-        i = len(args1) - 1
-        while i >= 0:
-            if not self.def_eq(args1[i], args2[i]):
+        if store.kind(fn1) != KIND_APP or store.kind(fn2) != KIND_APP:
+            return self.def_eq(fn1, fn2) and self.def_eq(
+                store.field_b(h1), store.field_b(h2),
+            )
+        mark = store._spine_top
+        top = mark
+        buf = store._spine_buf
+        cap = store._spine_cap
+        try:
+            while store.kind(h1) == KIND_APP and store.kind(h2) == KIND_APP:
+                if top + 2 > cap:
+                    new_cap = cap * 2
+                    buf = _grow_u32(buf, top, new_cap)
+                    store._spine_buf = buf
+                    store._spine_cap = new_cap
+                    cap = new_cap
+                buf[top] = _u32(store.field_b(h1))
+                buf[top + 1] = _u32(store.field_b(h2))
+                top += 2
+                h1 = store.field_a(h1)
+                h2 = store.field_a(h2)
+            store._spine_top = top
+            if not self.def_eq(h1, h2):
                 return False
-            i -= 1
-        return True
+            i = top - 2
+            while i >= mark:
+                if not self.def_eq(store.spine_arg(i), store.spine_arg(i + 1)):
+                    return False
+                i -= 2
+            return True
+        finally:
+            store.unapp_pop(mark)
 
     def _def_eq_binders(self, h1, h2):
         store = self.store

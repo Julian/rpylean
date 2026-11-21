@@ -141,7 +141,8 @@ def _try_parse_compact(cursor, builder):
                     if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
                         builder.register_expr(
                             eidx,
-                            builder.ref_expr(fn_eidx).app(
+                            objects.W_App(
+                                builder.ref_expr(fn_eidx),
                                 builder.ref_expr(arg_eidx),
                             ),
                         )
@@ -154,23 +155,29 @@ def _try_parse_compact(cursor, builder):
             if nidx >= 0 and cursor.match_lit(',"us":['):
                 if cursor.pos < end and line[cursor.pos] == ']':
                     cursor.pos += 1
-                    levels = []
-                else:
-                    levels = []
-                    while True:
-                        lidx = cursor.read_uint_compact()
-                        if lidx < 0:
-                            return False
-                        levels.append(builder.levels[lidx])
-                        if cursor.pos >= end:
-                            return False
-                        ch = line[cursor.pos]
-                        if ch == ']':
-                            cursor.pos += 1
-                            break
-                        if ch != ',':
-                            return False
+                    if cursor.match_lit('},"ie":'):
+                        eidx = cursor.read_uint_compact()
+                        if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            builder.register_expr(
+                                eidx, builder.names[nidx].const_empty(),
+                            )
+                            return True
+                    return False
+                levels = []
+                while True:
+                    lidx = cursor.read_uint_compact()
+                    if lidx < 0:
+                        return False
+                    levels.append(builder.levels[lidx])
+                    if cursor.pos >= end:
+                        return False
+                    ch = line[cursor.pos]
+                    if ch == ']':
                         cursor.pos += 1
+                        break
+                    if ch != ',':
+                        return False
+                    cursor.pos += 1
                 if cursor.match_lit('},"ie":'):
                     eidx = cursor.read_uint_compact()
                     if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
@@ -182,7 +189,7 @@ def _try_parse_compact(cursor, builder):
     if c2 == 'i':
         c3 = line[p + 3]
         if c3 == 'e':
-            # {"ie":E,"lam":... | "sort":L | "proj":... | "letE":...}
+            # {"ie":E,"lam":... | "letE":... | "natVal":... | "sort":L | "proj":...}
             if cursor.match_lit('{"ie":'):
                 eidx = cursor.read_uint_compact()
                 if eidx < 0 or cursor.pos + 4 >= end or line[cursor.pos] != ',' or line[cursor.pos + 1] != '"':
@@ -205,7 +212,29 @@ def _try_parse_compact(cursor, builder):
                                         )
                                         builder.register_expr(
                                             eidx,
-                                            objects.fun(bound)(
+                                            objects.W_Lambda(
+                                                bound,
+                                                builder.ref_expr(body_eidx),
+                                            ),
+                                        )
+                                        return True
+                    elif cursor.match_lit(',"letE":{"body":'):
+                        body_eidx = cursor.read_uint_compact()
+                        if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                            name_idx = cursor.read_uint_compact()
+                            if name_idx >= 0 and (
+                                    cursor.match_lit(',"nondep":false,"type":')
+                                    or cursor.match_lit(',"nondep":true,"type":')):
+                                type_eidx = cursor.read_uint_compact()
+                                if type_eidx >= 0 and cursor.match_lit(',"value":'):
+                                    value_eidx = cursor.read_uint_compact()
+                                    if value_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                        builder.register_expr(
+                                            eidx,
+                                            objects.W_Let(
+                                                builder.names[name_idx],
+                                                builder.ref_expr(type_eidx),
+                                                builder.ref_expr(value_eidx),
                                                 builder.ref_expr(body_eidx),
                                             ),
                                         )
@@ -233,6 +262,16 @@ def _try_parse_compact(cursor, builder):
                                         ),
                                     )
                                     return True
+                elif d0 == 'n':
+                    if cursor.match_lit(',"natVal":"'):
+                        dstart = cursor.pos
+                        if end - dstart <= 20 and end - dstart >= 3:
+                            val = cursor.read_uint_compact()
+                            if val >= 0 and cursor.pos - dstart <= 18 and cursor.match_lit('"}') and cursor.pos == end:
+                                builder.register_expr(
+                                    eidx, objects._mk_w_litnat(rbigint.fromint(val)),
+                                )
+                                return True
             return False
         if c3 == 'n':
             # {"in":N,"str":{"pre":P,"str":"..."}} or {"in":N,"num":{"i":I,"pre":P}}
@@ -328,7 +367,8 @@ def _try_parse_compact(cursor, builder):
                                 )
                                 builder.register_expr(
                                     eidx,
-                                    objects.forall(bound)(
+                                    objects.W_ForAll(
+                                        bound,
                                         builder.ref_expr(body_eidx),
                                     ),
                                 )
@@ -343,6 +383,43 @@ def _try_parse_compact(cursor, builder):
                 if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
                     builder.register_expr(eidx, objects._mk_w_bvar(bidx))
                     return True
+        return False
+    if c2 == 't':
+        # {"thm":{"levelParams":[...],"name":N,"type":T,"value":V}}
+        if cursor.match_lit('{"thm":{"levelParams":['):
+            if cursor.pos < end and line[cursor.pos] == ']':
+                cursor.pos += 1
+                levels = []
+            else:
+                levels = []
+                while True:
+                    lidx = cursor.read_uint_compact()
+                    if lidx < 0:
+                        return False
+                    levels.append(builder.names[lidx])
+                    if cursor.pos >= end:
+                        return False
+                    ch = line[cursor.pos]
+                    if ch == ']':
+                        cursor.pos += 1
+                        break
+                    if ch != ',':
+                        return False
+                    cursor.pos += 1
+            if cursor.match_lit(',"name":'):
+                name_idx = cursor.read_uint_compact()
+                if name_idx >= 0 and cursor.match_lit(',"type":'):
+                    type_eidx = cursor.read_uint_compact()
+                    if type_eidx >= 0 and cursor.match_lit(',"value":'):
+                        value_eidx = cursor.read_uint_compact()
+                        if value_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                            decl = builder.names[name_idx].theorem(
+                                levels=levels,
+                                type=builder.ref_expr(type_eidx),
+                                value=builder.ref_expr(value_eidx),
+                            )
+                            builder.register_declaration(decl)
+                            return True
         return False
     return False
 

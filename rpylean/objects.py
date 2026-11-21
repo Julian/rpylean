@@ -1255,7 +1255,8 @@ class Name(_Item):
     """
 
     _attrs_ = [
-        '_level_cache', 'parent', '_hash', 'is_internal', 'is_private',
+        '_level_cache', '_empty_const', 'parent', '_hash',
+        'is_internal', 'is_private',
         '_decl_dict', '_decl_cached',
     ]
     _immutable_fields_ = ['parent', '_hash', 'is_internal', 'is_private']
@@ -1265,6 +1266,8 @@ class Name(_Item):
         # Subclasses set their own `parent` / `_hash` / `is_internal` /
         # `is_private` fields after calling this.
         self._level_cache = None
+        # Lazy cache for `const()` with no universe levels.
+        self._empty_const = None
         # Inline cache for `get_decl`: the declarations dict this name
         # was last resolved in, and the declaration it resolved to.
         # Names are interned, so this turns the hot Name-keyed r_dict
@@ -1460,12 +1463,22 @@ class Name(_Item):
         """
         return Binder.strict_implicit(name=self, type=type)
 
+    def const_empty(self):
+        """Construct the cached universe-monomorphic constant for this name."""
+        c = self._empty_const
+        if c is None:
+            c = _mk_w_const(self, [])
+            self._empty_const = c
+        return c
+
     @unroll_safe
     def const(self, levels=None):
         """
         Construct a constant expression for this name.
         """
-        return _mk_w_const(self, [] if levels is None else levels)
+        if levels is None or len(levels) == 0:
+            return self.const_empty()
+        return _mk_w_const(self, levels)
 
     def declaration(self, type, w_kind, levels=None, safety=SAFETY_SAFE):
         """

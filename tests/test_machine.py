@@ -358,6 +358,16 @@ class TestProjectionIdentity(object):
         q2 = store.import_term(T.proj(0, store.export_term(fv)))
         assert store.bind_fvar(q1, fv, 0) != store.bind_fvar(q2, fv, 0)
 
+    def test_large_proj_index_overflow_roundtrip(self, store):
+        p1 = S.proj(100000, x.const())
+        p2 = S.proj(100001, x.const())
+        h1 = roundtrip(store, p1)
+        h2 = roundtrip(store, p2)
+        assert h1 != h2
+        assert store.proj_index(h1) == 100000
+        assert store.proj_index(h2) == 100001
+        assert store.import_term(S.proj(100000, x.const())) == h1
+
 
 class TestInstantiateMulti(object):
     def test_matches_sequential(self, store):
@@ -372,6 +382,27 @@ class TestInstantiateMulti(object):
         assert multi == seq
         assert store.instantiate_multi(h, [s0], 0) == store.instantiate(h, s0, 0)
         assert store.instantiate_multi(h, [], 0) == h
+
+    def test_shared_subterm_at_multiple_depths(self, store):
+        # Same subterm `shared` appears at depth 0 and depth 1 in one call,
+        # exercising the multi-depth collision fallback of `call_gen`.
+        shared = g.const().app(b0, b1)
+        e = f.const().app(shared, fun(x.binder(type=NAT))(shared))
+        h = store.import_term(e)
+        s0 = store.import_term(x.const())
+        s1 = store.import_term(y.const())
+        multi = store.instantiate_multi(h, [s0, s1], 0)
+        seq = store.instantiate(store.instantiate(h, s0, 0), s1, 0)
+        assert multi == seq
+        # Also verify `instantiate_multi_buf` matches `instantiate_multi`.
+        app_e = f.const().app(y.const(), x.const())
+        _, mark, n = store.unapp_push(store.import_term(app_e))
+        try:
+            assert n == 2
+            buf_res = store.instantiate_multi_buf(h, mark, n, 0)
+        finally:
+            store.unapp_pop(mark)
+        assert buf_res == multi
 
 
 class TestImportConstTerm(object):
