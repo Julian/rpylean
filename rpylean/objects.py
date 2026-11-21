@@ -997,8 +997,8 @@ _EXPR_UID = count()
 
 @always_inline
 def _next_uid():
-    uid = _EXPR_UID.count
-    _EXPR_UID.count = uid + 1
+    uid = _EXPR_UID.count + 1
+    _EXPR_UID.count = uid
     return uid
 
 

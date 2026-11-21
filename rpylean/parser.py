@@ -1557,8 +1557,8 @@ def _bump_refcount_slot(counts, idx):
 
 def _try_prescan_compact(cursor, counts):
     """Fast raw-byte prescan for compact canonical lean4export lines.
-    Returns True if handled; otherwise the caller falls back to the general
-    structural prescanner."""
+    Returns True if handled (advancing ``cursor.pos`` past EOL in chunk mode);
+    otherwise the caller falls back to the general structural prescanner."""
     line = cursor.line
     p = cursor.pos
     end = cursor.length
@@ -1573,7 +1573,7 @@ def _try_prescan_compact(cursor, counts):
                 fn_eidx = cursor.read_uint_compact()
                 if fn_eidx >= 0 and cursor.match_lit('},"ie":'):
                     eidx = cursor.read_uint_compact()
-                    if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                    if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                         _ensure_refcount_slot(counts, eidx)
                         _bump_refcount_slot(counts, fn_eidx)
                         _bump_refcount_slot(counts, arg_eidx)
@@ -1581,14 +1581,11 @@ def _try_prescan_compact(cursor, counts):
         return False
     if c2 == 'i':
         c3 = line[p + 3]
-        if c3 == 'n':
-            # Name lines have zero expr definitions and zero expr refs.
+        if c3 == 'n' or c3 == 'l':
+            # Name / Level lines have zero expr definitions and zero expr refs.
             if line[p + 4] == '"' and line[p + 5] == ':':
-                return True
-            return False
-        if c3 == 'l':
-            # Level lines have zero expr definitions and zero expr refs.
-            if line[p + 4] == '"' and line[p + 5] == ':':
+                nl = line.find('\n', p + 6)
+                cursor.pos = (nl + 1) if (nl >= 0 and nl < end) else end
                 return True
             return False
         if c3 == 'e':
@@ -1604,6 +1601,8 @@ def _try_prescan_compact(cursor, counts):
                             or cursor.match_lit(',"natVal":')
                             or cursor.match_lit(',"bvar":')
                             or cursor.match_lit(',"const":')):
+                        nl = line.find('\n', cursor.pos)
+                        cursor.pos = (nl + 1) if (nl >= 0 and nl < end) else end
                         _ensure_refcount_slot(counts, eidx)
                         return True
                 elif d0 == 'l':
@@ -1614,9 +1613,25 @@ def _try_prescan_compact(cursor, counts):
                                 name_idx = cursor.read_uint_compact()
                                 if name_idx >= 0 and cursor.match_lit(',"type":'):
                                     type_eidx = cursor.read_uint_compact()
-                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                    if type_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                         _ensure_refcount_slot(counts, eidx)
                                         _bump_refcount_slot(counts, type_eidx)
+                                        _bump_refcount_slot(counts, body_eidx)
+                                        return True
+                    elif cursor.match_lit(',"letE":{"body":'):
+                        body_eidx = cursor.read_uint_compact()
+                        if body_eidx >= 0 and cursor.match_lit(',"name":'):
+                            name_idx = cursor.read_uint_compact()
+                            if name_idx >= 0 and (
+                                    cursor.match_lit(',"nondep":false,"type":')
+                                    or cursor.match_lit(',"nondep":true,"type":')):
+                                type_eidx = cursor.read_uint_compact()
+                                if type_eidx >= 0 and cursor.match_lit(',"value":'):
+                                    value_eidx = cursor.read_uint_compact()
+                                    if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
+                                        _ensure_refcount_slot(counts, eidx)
+                                        _bump_refcount_slot(counts, type_eidx)
+                                        _bump_refcount_slot(counts, value_eidx)
                                         _bump_refcount_slot(counts, body_eidx)
                                         return True
                 elif d0 == 'p':
@@ -1626,7 +1641,7 @@ def _try_prescan_compact(cursor, counts):
                             struct_eidx = cursor.read_uint_compact()
                             if struct_eidx >= 0 and cursor.match_lit(',"typeName":'):
                                 tname_idx = cursor.read_uint_compact()
-                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.pos == end:
+                                if tname_idx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
                                     _ensure_refcount_slot(counts, eidx)
                                     _bump_refcount_slot(counts, struct_eidx)
                                     return True
@@ -1634,21 +1649,16 @@ def _try_prescan_compact(cursor, counts):
         return False
     if c2 == 'c':
         # {"const":{"name":N,"us":[...]},"ie":E} -> zero expr refs, just need E!
-        if cursor.match_lit('{"const":{'):
-            # Walk back from the end `},"ie":E}` — const has no string values.
-            j = end - 1
-            if j > cursor.pos and line[j] == '}':
-                j -= 1
-                num_end = j + 1
-                while j >= cursor.pos and '0' <= line[j] <= '9':
-                    j -= 1
-                if j + 1 < num_end and j >= 6:
-                    k = j - 6
-                    assert k >= 0
-                    cursor.pos = k
+        if cursor.match_lit('{"const":{"name":'):
+            if cursor.read_uint_compact() >= 0 and cursor.match_lit(',"us":['):
+                q = cursor.pos
+                while q < end and line[q] != ']':
+                    q += 1
+                if q < end:
+                    cursor.pos = q + 1
                     if cursor.match_lit('},"ie":'):
                         eidx = cursor.read_uint_compact()
-                        if eidx >= 0 and cursor.pos == end - 1:
+                        if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                             _ensure_refcount_slot(counts, eidx)
                             return True
         return False
@@ -1663,7 +1673,7 @@ def _try_prescan_compact(cursor, counts):
                         type_eidx = cursor.read_uint_compact()
                         if type_eidx >= 0 and cursor.match_lit('},"ie":'):
                             eidx = cursor.read_uint_compact()
-                            if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                            if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                                 _ensure_refcount_slot(counts, eidx)
                                 _bump_refcount_slot(counts, type_eidx)
                                 _bump_refcount_slot(counts, body_eidx)
@@ -1675,9 +1685,27 @@ def _try_prescan_compact(cursor, counts):
             bidx = cursor.read_uint_compact()
             if bidx >= 0 and cursor.match_lit(',"ie":'):
                 eidx = cursor.read_uint_compact()
-                if eidx >= 0 and cursor.match_lit('}') and cursor.pos == end:
+                if eidx >= 0 and cursor.match_lit('}') and cursor.at_eol():
                     _ensure_refcount_slot(counts, eidx)
                     return True
+        return False
+    if c2 == 't':
+        # {"thm":{"levelParams":[...],"name":N,"type":T,"value":V}}
+        if cursor.match_lit('{"thm":{"levelParams":['):
+            q = cursor.pos
+            while q < end and line[q] != ']':
+                q += 1
+            if q < end:
+                cursor.pos = q + 1
+                if cursor.match_lit(',"name":') and cursor.read_uint_compact() >= 0:
+                    if cursor.match_lit(',"type":'):
+                        type_eidx = cursor.read_uint_compact()
+                        if type_eidx >= 0 and cursor.match_lit(',"value":'):
+                            value_eidx = cursor.read_uint_compact()
+                            if value_eidx >= 0 and cursor.match_lit('}}') and cursor.at_eol():
+                                _bump_refcount_slot(counts, type_eidx)
+                                _bump_refcount_slot(counts, value_eidx)
+                                return True
         return False
     return False
 
@@ -1931,6 +1959,10 @@ def _prescan_line(cursor, counts):
     if _try_prescan_compact(cursor, counts):
         return
     cursor.pos = start
+    _prescan_line_general(cursor, counts)
+
+
+def _prescan_line_general(cursor, counts):
     cursor.expect('{')
     ks, ke = cursor.read_key_span()
     if cursor.span_eq(ks, ke, "in") or cursor.span_eq(ks, ke, "il"):
@@ -1984,18 +2016,29 @@ def prescan_refcounts(stream):
             buf = buf + chunk
         else:
             buf = chunk
+        last_nl = buf.rfind('\n')
+        if last_nl < 0:
+            continue
+        limit = last_nl + 1
+        cursor.line = buf
+        cursor.length = limit
         pos = 0
+        while pos <= last_nl:
+            cursor.pos = pos
+            if _try_prescan_compact(cursor, counts):
+                pos = cursor.pos
+            else:
+                nl = buf.find('\n', pos)
+                assert nl >= 0
+                end = nl
+                if end > pos and buf[end - 1] == '\r':
+                    end -= 1
+                cursor.pos = pos
+                cursor.length = end
+                _prescan_line_general(cursor, counts)
+                cursor.length = limit
+                pos = nl + 1
         blen = len(buf)
-        while pos < blen:
-            nl = buf.find('\n', pos)
-            if nl < 0:
-                break
-            end = nl
-            if end > pos and buf[end - 1] == '\r':
-                end -= 1
-            cursor.reset(buf, pos, end)
-            _prescan_line(cursor, counts)
-            pos = nl + 1
         if pos < blen:
             assert pos >= 0
             buf = buf[pos:]

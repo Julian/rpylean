@@ -423,3 +423,36 @@ class TestImportConstTerm(object):
             f.const([u_lvl]).app(PROP, f.const([PROP.level])),
         )
         assert syntactic_eq(store.export_term(h), expected)
+
+
+class TestU32Map(object):
+    def test_basic_grow_clear_and_overflow(self):
+        from rpylean.machine import U32Map
+        m = U32Map(capacity=4, keep_cap=8)
+        try:
+            for k in range(1, 100):
+                m.set(k, k * 3)
+            for k in range(1, 100):
+                assert m.get(k, 0) == k * 3
+            assert m.get(999, -1) == -1
+            # Update existing key
+            m.set(42, 123456)
+            assert m.get(42, 0) == 123456
+            # Overflow key >= 2^31
+            big_k = (1 << 31) + 7
+            m.set(big_k, 777)
+            assert m.get(big_k, 0) == 777
+            assert m.get(big_k + 1, -1) == -1
+            # Clear resets both primary table and overflow
+            m.clear()
+            assert m.size == 0
+            assert m.get(42, -1) == -1
+            assert m.get(big_k, -1) == -1
+            # Small population sparse clear path
+            m.set(10, 20)
+            m.set(11, 22)
+            assert m.get(10, 0) == 20
+            m.clear()
+            assert m.get(10, -1) == -1
+        finally:
+            m.free()
