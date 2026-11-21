@@ -1058,8 +1058,8 @@ class TermStore(object):
         '_spine_buf', '_spine_cap', '_spine_top',
         '_subst_stack', '_subst_cap', '_subst_top',
         'leaves', 'leaf_decl', 'leaf_meta', 'leaf_whnf', 'leaf_infer',
-        'leaf_checked', 'leaf_delta', 'leaf_next', 'leaf_eqv', 'leaf_head_kind',
-        'leaf_prop_mask',
+        'leaf_checked', 'leaf_delta', 'leaf_delta_body',
+        'leaf_next', 'leaf_eqv', 'leaf_head_kind', 'leaf_prop_mask',
         'nleaves', 'leaf_cap',
         'infos', 'names', '_name_ids', '_proj_overflow',
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
@@ -1099,6 +1099,10 @@ class TermStore(object):
         self.leaf_checked = _alloc_u32(self.leaf_cap)
         #: Delta-unfolded handle for a constant leaf (0 = uncached, -1 = none).
         self.leaf_delta = _alloc_i32(self.leaf_cap)
+        #: Stripped delta-unfold body for an applied constant leaf:
+        #: 0 = uncached, -1 = none, else `(arity << 32) | body_handle` after
+        #: peeling all leading `W_Lambda` binders without importing their types.
+        self.leaf_delta_body = _alloc_words(self.leaf_cap)
         #: Collision chain for unmanaged `_content_head` leaf interning.
         self.leaf_next = _alloc_u32(self.leaf_cap)
         #: Union-find parent handle for proven-def-eq leaves (0 = root).
@@ -1243,6 +1247,7 @@ class TermStore(object):
         _zero_u32(self.leaf_infer, leaves)
         _zero_u32(self.leaf_checked, leaves)
         _zero_i32(self.leaf_delta, leaves)
+        _zero_words(self.leaf_delta_body, leaves)
         _zero_u32(self.leaf_next, leaves)
         _zero_u32(self.leaf_eqv, leaves)
         _zero_u32(self.leaf_head_kind, leaves)
@@ -1348,6 +1353,7 @@ class TermStore(object):
         _free_u32(self.leaf_infer)
         _free_u32(self.leaf_checked)
         _free_i32(self.leaf_delta)
+        _free_words(self.leaf_delta_body)
         _free_u32(self.leaf_next)
         _free_u32(self.leaf_eqv)
         _free_u32(self.leaf_head_kind)
@@ -1716,10 +1722,12 @@ class TermStore(object):
             i = (i + 1) & tmask
 
     @dont_inline
-    def _cons_general_miss(self, kind, a, b, info, key, i):
+    def _cons_general_miss(self, kind, a, b, info, key, i, binder=None):
         idx = self.nrecs
         if idx + 1 >= _OTHER_PACK_LIMIT:
-            return self._cons_general_wide(kind, a, b, info)
+            return self._cons_general_wide(kind, a, b, info, binder)
+        if binder is not None:
+            info = self._info_index(binder)
         if idx == self.cap:
             self._grow_records()
         meta = self._meta_for(kind, a, b)
@@ -1791,7 +1799,7 @@ class TermStore(object):
         self.tmask = tmask
 
     @dont_inline
-    def _cons_general_wide(self, kind, a, b, info):
+    def _cons_general_wide(self, kind, a, b, info, binder=None):
         if self._other_limit != 0:
             self._promote_other_to_wide()
         recs = self.recs
@@ -1812,6 +1820,8 @@ class TermStore(object):
                         and _s32(recs[base + F_B]) == b):
                     return rec_handle(slot - 1)
             i = (i + 1) & tmask
+        if binder is not None:
+            info = self._info_index(binder)
         idx = self.nrecs
         if idx == self.cap:
             self._grow_records()
@@ -1896,7 +1906,7 @@ class TermStore(object):
 
     def _cons_binder(self, kind, binder, a, b):
         if (a | b) >= self._other_limit:
-            return self._cons_binder_wide(kind, binder, a, b)
+            return self._cons_general_wide(kind, a, b, 0, binder)
         key = (kind << 40) | (a << 20) | b
         table = self.table
         tmask = self.tmask
@@ -1906,18 +1916,8 @@ class TermStore(object):
             if (entry >> 20) == key:
                 return (entry & _OTHER_SLOT_MASK) << 1
             if entry == 0:
-                return self._cons_binder_miss(kind, binder, a, b, key, i)
+                return self._cons_general_miss(kind, a, b, 0, key, i, binder)
             i = (i + 1) & tmask
-
-    @dont_inline
-    def _cons_binder_wide(self, kind, binder, a, b):
-        return self._cons_general_wide(kind, a, b, self._info_index(binder))
-
-    @dont_inline
-    def _cons_binder_miss(self, kind, binder, a, b, key, i):
-        return self._cons_general_miss(
-            kind, a, b, self._info_index(binder), key, i,
-        )
 
     @dont_inline
     def _cons_let_wide(self, name, a, pair):
@@ -1996,6 +1996,7 @@ class TermStore(object):
             self.leaf_infer = _grow_u32(self.leaf_infer, j, cap)
             self.leaf_checked = _grow_u32(self.leaf_checked, j, cap)
             self.leaf_delta = _grow_i32(self.leaf_delta, j, cap)
+            self.leaf_delta_body = _grow_words(self.leaf_delta_body, j, cap)
             self.leaf_next = _grow_u32(self.leaf_next, j, cap)
             self.leaf_eqv = _grow_u32(self.leaf_eqv, j, cap)
             self.leaf_head_kind = _grow_u32(self.leaf_head_kind, j, cap)
@@ -5481,6 +5482,35 @@ class Machine(object):
             store.set_memo(start, M_WHNF, h)
         return h
 
+    def _apply_stripped_body(self, body, k, mark, n):
+        """Substitute ``k`` already-stripped leading lambdas (plus any further
+        leading `KIND_LAMBDA`s on ``body`` up to ``n``) with `_spine_buf[mark .. mark + n)`
+        (outermost-first) and apply any leftover arguments."""
+        store = self.store
+        while k < n and store.kind(body) == KIND_LAMBDA:
+            body = store.field_b(body)
+            k += 1
+        if k == 0:
+            return store.apply_buf_rev(body, mark, n - 1)
+        if self.tc.tracer.recording:
+            j = 0
+            while j < k:
+                self.tc.tracer.beta()
+                j += 1
+        if store.loose_bvar_range(body) == 0:
+            res = body
+        elif is_leaf(body):
+            bid = (_s32(store.leaf_meta[leaf_index(body)]) >> 1) - 1
+            if bid < k:
+                res = store.spine_arg(mark + n - k + bid)
+            else:
+                res = store.bvar(bid - k)
+        elif k == 1:
+            res = store.instantiate(body, store.spine_arg(mark + n - 1), 0)
+        else:
+            res = store.instantiate_multi_buf(body, mark + n - k, k, 0)
+        return store.apply_buf_rev(res, mark, n - 1 - k)
+
     def try_unfold_head(self, h):
         """``h`` with its head constant unfolded one definition layer and
         the spine re-applied (beta-reducing leading lambdas when not writing
@@ -5492,28 +5522,88 @@ class Machine(object):
         j = leaf_index(head)
         const = store.leaves[j]
         assert isinstance(const, W_Const)
-        val = self._delta_value(head, const)
-        if val == 0:
+        if h == head or (self.tc.tracer.recording and self.tc.tracer.writes):
+            val = self._delta_value(head, const)
+            if val == 0 or h == head:
+                return val
+            if store.field_a(h) == head:
+                return store.cons_app(val, store.field_b(h))
+            mark = store._spine_top
+            store.unapp_push(h)
+            try:
+                return store.apply_buf_rev(val, mark, store._spine_top - mark - 1)
+            finally:
+                store.unapp_pop(mark)
+        packed = store.leaf_delta_body[j]
+        if packed == 0:
+            packed = self._delta_body(head, const, j)
+        if packed < 0:
             return 0
-        if h == head:
-            return val
+        m = packed >> 32
+        body_h = packed & 0xFFFFFFFF
         if store.field_a(h) == head:
-            if (store.kind(val) == KIND_LAMBDA
-                    and not (self.tc.tracer.recording and self.tc.tracer.writes)):
+            if m == 0:
+                return store.cons_app(body_h, store.field_b(h))
+            if m == 1:
                 if self.tc.tracer.recording:
                     self.tc.tracer.beta()
-                return store.instantiate(store.field_b(val), store.field_b(h), 0)
-            return store.cons_app(val, store.field_b(h))
+                return store.instantiate(body_h, store.field_b(h), 0)
+            val = self._delta_value(head, const)
+            if val == 0:
+                return 0
+            if self.tc.tracer.recording:
+                self.tc.tracer.beta()
+            return store.instantiate(store.field_b(val), store.field_b(h), 0)
         mark = store._spine_top
         store.unapp_push(h)
         try:
             n = store._spine_top - mark
-            if (store.kind(val) == KIND_LAMBDA
-                    and not (self.tc.tracer.recording and self.tc.tracer.writes)):
-                return self._beta_spine_buf(val, mark, n)
-            return store.apply_buf_rev(val, mark, n - 1)
+            if n >= m:
+                return self._apply_stripped_body(body_h, m, mark, n)
+            val = self._delta_value(head, const)
+            if val == 0:
+                return 0
+            return self._beta_spine_buf(val, mark, n)
         finally:
             store.unapp_pop(mark)
+
+    @dont_inline
+    def _delta_body(self, head, const, j):
+        """Peel leading `W_Lambda` binders from a definition's value before
+        importing so fully-applied delta unfolds never import discarded binder
+        domain types."""
+        store = self.store
+        cached_val = _si32(store.leaf_delta[j])
+        if cached_val > 0:
+            m = 0
+            cur_h = cached_val
+            while store.kind(cur_h) == KIND_LAMBDA:
+                cur_h = store.field_b(cur_h)
+                m += 1
+            packed = (m << 32) | cur_h
+            store.leaf_delta_body[j] = packed
+            return packed
+        decl = self._leaf_decl(head, const)
+        if decl is None or not isinstance(decl.w_kind, W_Definition):
+            store.leaf_delta_body[j] = -1
+            return -1
+        target = decl.w_kind.get_delta_reduce_target()
+        if target is None:
+            store.leaf_delta_body[j] = -1
+            return -1
+        if self.tc.tracer.recording:
+            self.tc.tracer.delta(const.name)
+        m = 0
+        cur = target
+        while isinstance(cur, W_Lambda):
+            cur = cur.body
+            m += 1
+        body_h = store.import_const_term(const, decl, cur)
+        if m == 0:
+            store.leaf_delta[j] = _i32(body_h)
+        packed = (m << 32) | body_h
+        store.leaf_delta_body[j] = packed
+        return packed
 
     def _delta_kind(self, head):
         """The `W_Definition` a delta-reducible head names, or None."""
@@ -5536,7 +5626,7 @@ class Machine(object):
         if decl is not None and isinstance(decl.w_kind, W_Definition):
             target = decl.w_kind.get_delta_reduce_target()
             if target is not None:
-                if self.tc.tracer.recording:
+                if self.tc.tracer.recording and store.leaf_delta_body[j] == 0:
                     self.tc.tracer.delta(const.name)
                 val = store.import_const_term(const, decl, target)
         store.leaf_delta[j] = _i32(val if val > 0 else -1)
@@ -5814,15 +5904,17 @@ class Machine(object):
             ctor_kind = ctor_decl.w_kind
             assert isinstance(ctor_kind, W_Constructor)
 
-            rhs = self._rule_rhs(target, const, ctor_head, rule)
+            total = rec.num_params + rec.num_motives + rec.num_minors
+            assert total >= 0
+            packed = self._rule_rhs_stripped(
+                target, const, ctor_head, rule, total + rule.num_fields,
+            )
             if tc.tracer.recording:
                 tc.tracer.iota(const.name)
 
             # Push rhs args onto `_spine_buf` outermost-first (extra args,
-            # ctor fields, then params/motives/minors) so `_beta_spine_buf`
-            # reduces leading lambdas in one zero-allocation pass.
-            total = rec.num_params + rec.num_motives + rec.num_minors
-            assert total >= 0
+            # ctor fields, then params/motives/minors) so `_apply_stripped_body`
+            # substitutes the stripped lambdas in one zero-allocation pass.
             rmark = store._spine_top
             i = 0
             while i < major_idx:
@@ -5841,21 +5933,35 @@ class Machine(object):
                 store.spine_push(store.spine_arg(mark + i))
                 i += 1
             m = store._spine_top - rmark
+            k = packed >> 32
+            body_h = packed & 0xFFFFFFFF
+            if m >= k:
+                return self._apply_stripped_body(body_h, k, rmark, m)
+            decl = self._leaf_decl(target, const)
+            if decl is None:
+                decl = get_decl(tc.declarations, const.name)
+            rhs = store.import_const_term(const, decl, rule.rhs)
             return self._beta_spine_buf(rhs, rmark, m)
         finally:
             store.unapp_pop(cmark)
 
-    def _rule_rhs(self, target, const, ctor_head, rule):
+    def _rule_rhs_stripped(self, target, const, ctor_head, rule, max_strip):
         key = ((leaf_index(target) + 1) << 30) | leaf_index(ctor_head)
-        rhs = self._rule_memo.get(key, 0)
-        if rhs != 0:
-            return rhs
+        packed = self._rule_memo.get(key, 0)
+        if packed != 0:
+            return packed
         decl = self._leaf_decl(target, const)
         if decl is None:
             decl = get_decl(self.tc.declarations, const.name)
-        rhs = self.store.import_const_term(const, decl, rule.rhs)
-        self._rule_memo.set(key, rhs)
-        return rhs
+        k = 0
+        cur = rule.rhs
+        while k < max_strip and isinstance(cur, W_Lambda):
+            cur = cur.body
+            k += 1
+        body_h = self.store.import_const_term(const, decl, cur)
+        packed = (k << 32) | body_h
+        self._rule_memo.set(key, packed)
+        return packed
 
     def _to_cnstr_when_k(self, rec, mark, n, major):
         """
