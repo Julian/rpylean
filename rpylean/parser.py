@@ -14,13 +14,115 @@ from __future__ import print_function
 from StringIO import StringIO
 from textwrap import dedent
 
-from rpython.rlib.objectmodel import always_inline, newlist_hint
+from rpython.rlib.objectmodel import always_inline, dont_inline, newlist_hint, we_are_translated
 from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rbigint import rbigint
+from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
 from rpylean.exceptions import ExportError, MalformedLine, ReflexiveKError
+
+
+_RC_U32_ARRAY = rffi.CArray(rffi.UINT)
+
+
+class RefCountTable(object):
+    """
+    Unmanaged 32-bit expression reference-count table (4 bytes/slot, zero GC
+    pressure). Pre-sized from file length to avoid resize/memmove churn on
+    large exports, and explicitly freed after streaming completes.
+    """
+
+    _attrs_ = ['data', 'length', 'cap', '_freed']
+
+    def __init__(self, initial_cap=4096):
+        cap = initial_cap if initial_cap >= 64 else 64
+        self.data = lltype.malloc(_RC_U32_ARRAY, cap, flavor='raw', zero=True)
+        self.length = 0
+        self.cap = cap
+        self._freed = False
+
+    @dont_inline
+    def _grow(self, min_cap):
+        cap = self.cap
+        while cap < min_cap:
+            cap *= 2
+        new_data = lltype.malloc(_RC_U32_ARRAY, cap, flavor='raw', zero=True)
+        used = self.length
+        if used > 0:
+            if we_are_translated():
+                rffi.c_memcpy(
+                    rffi.cast(rffi.VOIDP, new_data),
+                    rffi.cast(rffi.CONST_VOIDP, self.data),
+                    used * rffi.sizeof(rffi.UINT),
+                )
+            else:
+                i = 0
+                while i < used:
+                    new_data[i] = self.data[i]
+                    i += 1
+        lltype.free(self.data, flavor='raw')
+        self.data = new_data
+        self.cap = cap
+
+    @always_inline
+    def ensure(self, idx):
+        if idx < 0:
+            raise MalformedLine("negative expr index")
+        if idx >= self.length:
+            if idx >= self.cap:
+                self._grow(idx + 1)
+            self.length = idx + 1
+
+    @always_inline
+    def bump(self, idx):
+        if idx < 0:
+            raise MalformedLine("negative expr index")
+        if idx >= self.length:
+            if idx >= self.cap:
+                self._grow(idx + 1)
+            self.length = idx + 1
+        self.data[idx] = rffi.cast(
+            rffi.UINT, rffi.cast(lltype.Signed, self.data[idx]) + 1,
+        )
+
+    @always_inline
+    def set_zero(self, idx):
+        self.ensure(idx)
+        self.data[idx] = rffi.cast(rffi.UINT, 0)
+
+    @always_inline
+    def dec(self, idx):
+        c = rffi.cast(lltype.Signed, self.data[idx])
+        assert c > 0
+        c -= 1
+        self.data[idx] = rffi.cast(rffi.UINT, c)
+        return c
+
+    def free(self):
+        if not self._freed:
+            lltype.free(self.data, flavor='raw')
+            self._freed = True
+
+    def __eq__(self, other):
+        if not isinstance(other, RefCountTable):
+            return NotImplemented
+        if self.length != other.length:
+            return False
+        i = 0
+        n = self.length
+        while i < n:
+            if (rffi.cast(lltype.Signed, self.data[i])
+                    != rffi.cast(lltype.Signed, other.data[i])):
+                return False
+            i += 1
+        return True
+
+    def __ne__(self, other):
+        if not isinstance(other, RefCountTable):
+            return NotImplemented
+        return not (self == other)
 
 
 EXPORT_VERSION = "3.1.0"
@@ -169,13 +271,9 @@ def _ref_expr_fast(builder, eidx):
         return e
     if builder._scanning:
         return builder.ref_expr(eidx)
-    c = counts[eidx]
-    assert c > 0
     e = builder.exprs[eidx]
     assert e is not None
-    c -= 1
-    counts[eidx] = c
-    if c == 0:
+    if counts.dec(eidx) == 0:
         builder.exprs[eidx] = None
     return e
 
@@ -1743,28 +1841,14 @@ def _parse_format_inner(cursor):
 
 # ---- Raw-byte expression refcount pre-scanner ----------------------------
 
+@always_inline
 def _ensure_refcount_slot(counts, idx):
-    if idx < 0:
-        raise MalformedLine("negative expr index")
-    n = len(counts)
-    if idx >= n:
-        if idx == n:
-            counts.append(0)
-        else:
-            delta = idx - n + 1
-            assert delta > 0
-            counts.extend([0] * delta)
+    counts.ensure(idx)
 
 
+@always_inline
 def _bump_refcount_slot(counts, idx):
-    if idx < 0:
-        raise MalformedLine("negative expr index")
-    n = len(counts)
-    if idx >= n:
-        delta = idx - n + 1
-        assert delta > 0
-        counts.extend([0] * delta)
-    counts[idx] += 1
+    counts.bump(idx)
 
 
 def _try_prescan_compact(cursor, counts):
@@ -2315,51 +2399,67 @@ def _prescan_line_general(cursor, counts):
     _ensure_refcount_slot(counts, eidx)
 
 
-def prescan_refcounts(stream):
+def prescan_refcounts(stream, size_hint=65536):
     """Scan an export stream (positioned after its metadata line) at raw-byte
-    level and return a ``list[int]`` of parse-time expression reference counts."""
-    counts = newlist_hint(65536)
-    cursor = LineCursor("")
-    buf = ""
-    while True:
-        chunk = stream.read(262144)
-        if not chunk:
-            if buf:
-                end = len(buf)
-                if end > 0 and buf[end - 1] == '\r':
-                    end -= 1
-                cursor.reset(buf, 0, end)
+    level and return a ``RefCountTable`` of parse-time expression reference
+    counts."""
+    counts = RefCountTable(size_hint)
+    try:
+        cursor = LineCursor("")
+        tail = ""
+        while True:
+            chunk = stream.read(262144)
+            if not chunk:
+                if tail:
+                    end = len(tail)
+                    if end > 0 and tail[end - 1] == '\r':
+                        end -= 1
+                    cursor.reset(tail, 0, end)
+                    _prescan_line(cursor, counts)
+                return counts
+            clen = len(chunk)
+            pos = 0
+            if tail:
+                nl = chunk.find('\n')
+                if nl < 0:
+                    tail = tail + chunk
+                    continue
+                line = tail + chunk[:nl]
+                tail = ""
+                llen = len(line)
+                if llen > 0 and line[llen - 1] == '\r':
+                    llen -= 1
+                cursor.reset(line, 0, llen)
                 _prescan_line(cursor, counts)
-            return counts
-        if buf:
-            buf = buf + chunk
-        else:
-            buf = chunk
-        last_nl = buf.rfind('\n')
-        if last_nl < 0:
-            continue
-        limit = last_nl + 1
-        cursor.line = buf
-        cursor.length = limit
-        pos = 0
-        while pos <= last_nl:
-            cursor.pos = pos
-            if _try_prescan_compact(cursor, counts):
-                pos = cursor.pos
-            else:
-                nl = buf.find('\n', pos)
-                assert nl >= 0
-                end = nl
-                if end > pos and buf[end - 1] == '\r':
-                    end -= 1
-                cursor.pos = pos
-                cursor.length = end
-                _prescan_line_general(cursor, counts)
-                cursor.length = limit
                 pos = nl + 1
-        blen = len(buf)
-        if pos < blen:
-            assert pos >= 0
-            buf = buf[pos:]
-        else:
-            buf = ""
+                if pos >= clen:
+                    continue
+            last_nl = chunk.rfind('\n', pos)
+            if last_nl < 0:
+                assert pos >= 0
+                tail = chunk[pos:]
+                continue
+            limit = last_nl + 1
+            cursor.line = chunk
+            cursor.length = limit
+            while pos <= last_nl:
+                cursor.pos = pos
+                if _try_prescan_compact(cursor, counts):
+                    pos = cursor.pos
+                else:
+                    nl = chunk.find('\n', pos)
+                    assert nl >= 0
+                    end = nl
+                    if end > pos and chunk[end - 1] == '\r':
+                        end -= 1
+                    cursor.pos = pos
+                    cursor.length = end
+                    _prescan_line_general(cursor, counts)
+                    cursor.length = limit
+                    pos = nl + 1
+            if pos < clen:
+                assert pos >= 0
+                tail = chunk[pos:]
+    except:
+        counts.free()
+        raise

@@ -10,6 +10,7 @@ import os
 
 from rpython.rlib import debug, rgc
 from rpython.rlib.objectmodel import we_are_translated
+from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
 from rpylean import _format, _progress, parser
@@ -490,15 +491,29 @@ def _prescan_refcounts(path, stdin):
     Scan ``path`` once at raw-byte level to tally, per expression index,
     how many times the real parse will reference it.
 
-    Returns the count list, or ``None`` if the metadata line or any record
-    is malformed (the real pass will report the error).
+    Returns the ``RefCountTable``, or ``None`` if the metadata line or any
+    record is malformed (the real pass will report the error).
     """
     scan_file = _open_export(path, stdin)
+    counts = None
     try:
         try:
+            size_hint = 65536
+            try:
+                scan_file.seek(0, 2)
+                file_size = scan_file.tell()
+                scan_file.seek(0, 0)
+                est = intmask(file_size // 50) + 1024
+                if est > 4096:
+                    size_hint = est
+            except OSError:
+                pass
             parser.validate_export_metadata(scan_file)
-            return parser.prescan_refcounts(scan_file)
+            counts = parser.prescan_refcounts(scan_file, size_hint)
+            return counts
         except ExportError:
+            if counts is not None:
+                counts.free()
             # Any malformed line makes the scan's counts unusable; fall
             # back to the unpruned path and let the real parse surface the
             # error (it is the authority on both checking and reporting).
@@ -541,6 +556,9 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
             stderr.write("Unexpected error during type checking\n")
             raise
     finally:
+        if refcount is not None:
+            builder._refcount = None
+            refcount.free()
         if path != "-":
             file.close()
         run.summarize(checker, tracer, bytes_at_start)
@@ -885,9 +903,9 @@ class _FFIResolver(Resolver):
 
 def _open_export(path, stdin):
     if path == "-":
-        return fdopen_as_stream(stdin.fileno(), "r")
+        return fdopen_as_stream(stdin.fileno(), "r", 0)
     try:
-        return open_file_as_stream(path, "r", 262144)
+        return open_file_as_stream(path, "r", 0)
     except OSError as err:
         if err.errno != errno.ENOENT:
             raise

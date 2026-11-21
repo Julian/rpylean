@@ -233,3 +233,37 @@ def test_prescan_refcounts_matches_scan_builder():
     expected.consume(StringIO(body))
     got = parser.prescan_refcounts(StringIO(body))
     assert got == expected._refcount
+    got.free()
+    expected._refcount.free()
+
+
+class _TinyChunkStream(object):
+    def __init__(self, data, step):
+        self._data = data
+        self._pos = 0
+        self._step = step
+
+    def read(self, n):
+        end = self._pos + self._step
+        if end > len(self._data):
+            end = len(self._data)
+        chunk = self._data[self._pos:end]
+        self._pos = end
+        return chunk
+
+
+def test_chunked_consume_and_prescan_boundary_splits():
+    body = (
+        '{"in":1,"str":{"pre":0,"str":"P"}}\r\n'
+        '{"ie":0,"sort":0}\r\n'
+        '{"const":{"name":1,"us":[]},"ie":1}\n'
+        '{"axiom":{"levelParams":[],"name":1,"type":0}}'
+    )
+    for step in (1, 2, 7, 19, 37, 4096):
+        rc = parser.prescan_refcounts(_TinyChunkStream(body, step))
+        b = EnvironmentBuilder()
+        b.set_refcount(rc)
+        b.consume(_TinyChunkStream(body, step))
+        assert len(b.declarations) == 1
+        assert b.declarations[0].name == Name.simple("P")
+        rc.free()

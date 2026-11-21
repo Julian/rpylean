@@ -130,13 +130,19 @@ class EnvironmentBuilder(object):
     def start_scan(self):
         """Configure this builder as the reference-counting pre-pass."""
         self._scanning = True
-        self._refcount = []
+        self._refcount = parser.RefCountTable(4096)
 
     def set_refcount(self, counts):
-        """Attach pre-scanned reference counts and pre-size the expr pool."""
+        """Attach pre-scanned reference counts and pre-size the expr/name pools."""
         self._refcount = counts
-        if not self.exprs and len(counts) > 0:
-            self.exprs = newlist_hint(len(counts))
+        n = counts.length
+        if not self.exprs and n > 0:
+            self.exprs = newlist_hint(n)
+        if len(self.names) == 1 and n > 16384:
+            nhint = n >> 4
+            names = newlist_hint(nhint if nhint >= 1024 else 1024)
+            names.append(Name.ANONYMOUS)
+            self.names = names
 
     def ref_expr(self, eidx):
         """
@@ -162,19 +168,15 @@ class EnvironmentBuilder(object):
             assert e is not None
             return e
         if self._scanning:
-            counts[eidx] += 1
+            counts.bump(eidx)
             return _SCAN_SCAFFOLD
         # A slot the parser still references must have a positive count and
         # a live expr. Either assertion failing means the pre-pass under-
         # counted this index and its expr was freed too early: fail loudly
         # rather than splice a released slot into a later expression.
-        c = counts[eidx]
-        assert c > 0
         e = self.exprs[eidx]
         assert e is not None
-        c -= 1
-        counts[eidx] = c
-        if c == 0:
+        if counts.dec(eidx) == 0:
             self.exprs[eidx] = None
         return e
 
@@ -208,16 +210,16 @@ class EnvironmentBuilder(object):
         Returns self.
         """
         cursor = parser.LineCursor("")
-        buf = ""
+        tail = ""
         n = 0
         while True:
             chunk = stream.read(262144)
             if not chunk:
-                if buf:
-                    end = len(buf)
-                    if end > 0 and buf[end - 1] == '\r':
+                if tail:
+                    end = len(tail)
+                    if end > 0 and tail[end - 1] == '\r':
                         end -= 1
-                    cursor.reset(buf, 0, end)
+                    cursor.reset(tail, 0, end)
                     parser.parse_cursor(cursor, self)
                     if hook is not None:
                         while n < len(self.declarations):
@@ -225,26 +227,45 @@ class EnvironmentBuilder(object):
                                 return self
                             n += 1
                 return self
-            if buf:
-                buf = buf + chunk
-            else:
-                buf = chunk
-            last_nl = buf.rfind('\n')
+            clen = len(chunk)
+            pos = 0
+            if tail:
+                nl = chunk.find('\n')
+                if nl < 0:
+                    tail = tail + chunk
+                    continue
+                line = tail + chunk[:nl]
+                tail = ""
+                llen = len(line)
+                if llen > 0 and line[llen - 1] == '\r':
+                    llen -= 1
+                cursor.reset(line, 0, llen)
+                parser.parse_cursor(cursor, self)
+                if hook is not None:
+                    while n < len(self.declarations):
+                        if hook.on_declaration(self.declarations[n]):
+                            return self
+                        n += 1
+                pos = nl + 1
+                if pos >= clen:
+                    continue
+            last_nl = chunk.rfind('\n', pos)
             if last_nl < 0:
+                assert pos >= 0
+                tail = chunk[pos:]
                 continue
             limit = last_nl + 1
-            cursor.line = buf
+            cursor.line = chunk
             cursor.length = limit
-            pos = 0
             while pos <= last_nl:
                 cursor.pos = pos
                 if parser._try_parse_compact(cursor, self):
                     pos = cursor.pos
                 else:
-                    nl = buf.find('\n', pos)
+                    nl = chunk.find('\n', pos)
                     assert nl >= 0
                     end = nl
-                    if end > pos and buf[end - 1] == '\r':
+                    if end > pos and chunk[end - 1] == '\r':
                         end -= 1
                     cursor.pos = pos
                     cursor.length = end
@@ -256,12 +277,9 @@ class EnvironmentBuilder(object):
                         if hook.on_declaration(self.declarations[n]):
                             return self
                         n += 1
-            blen = len(buf)
-            if pos < blen:
+            if pos < clen:
                 assert pos >= 0
-                buf = buf[pos:]
-            else:
-                buf = ""
+                tail = chunk[pos:]
 
     # The export format only requires `in`/`ie`/`il` references to be integers,
     # so an index may skip values or fill a previously-skipped one even though
@@ -275,7 +293,7 @@ class EnvironmentBuilder(object):
         if self._scanning:
             # The counting pre-pass keeps only the per-slot reference
             # tally; the scaffolding-built expr itself is discarded.
-            _register_at(self._refcount, eidx, 0, 0)
+            self._refcount.set_zero(eidx)
             return
         exprs = self.exprs
         if eidx == len(exprs):
