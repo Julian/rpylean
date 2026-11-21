@@ -17,7 +17,7 @@ A store is per declaration: the working set of one check, emptied
 for the next when the check ends.
 """
 
-from rpython.rlib.objectmodel import always_inline, newlist_hint, we_are_translated
+from rpython.rlib.objectmodel import always_inline, dont_inline, newlist_hint, we_are_translated
 from rpython.rlib.rarithmetic import intmask, r_uint
 from rpython.rlib.rstack import stack_almost_full
 from rpython.rtyper.lltypesystem import lltype, rffi
@@ -415,7 +415,8 @@ class IntMap(object):
         self._dirty_count = 0
 
     def get(self, key, default):
-        assert key != 0
+        if not we_are_translated():
+            assert key != 0
         mask = self.mask
         entries = self.entries
         i = _spread(key) & mask
@@ -429,7 +430,8 @@ class IntMap(object):
             i = (i + 1) & mask
 
     def set(self, key, val):
-        assert key != 0
+        if not we_are_translated():
+            assert key != 0
         if (self.size + 1) * 2 > self.mask + 1:
             self._grow()
         mask = self.mask
@@ -546,12 +548,18 @@ class U32Map(object):
         self.size = 0
         self._dirty_count = 0
 
+    @dont_inline
+    def _get_overflow(self, key, default):
+        if self.overflow is not None:
+            return self.overflow.get(key, default)
+        return default
+
+    @always_inline
     def get(self, key, default):
-        assert key > 0
+        if not we_are_translated():
+            assert key > 0
         if key >= _U32_KEY_LIMIT:
-            if self.overflow is not None:
-                return self.overflow.get(key, default)
-            return default
+            return self._get_overflow(key, default)
         mask = self.mask
         entries = self.entries
         i = _spread(key) & mask
@@ -563,14 +571,19 @@ class U32Map(object):
                 return default
             i = (i + 1) & mask
 
+    @dont_inline
+    def _set_overflow(self, key, val):
+        ov = self.overflow
+        if ov is None:
+            ov = self.overflow = IntMap(1 << 8)
+        ov.set(key, val)
+
     def set(self, key, val):
-        assert key > 0
-        assert 0 <= val <= _U32_VAL_MASK
+        if not we_are_translated():
+            assert key > 0
+            assert 0 <= val <= _U32_VAL_MASK
         if key >= _U32_KEY_LIMIT:
-            ov = self.overflow
-            if ov is None:
-                ov = self.overflow = IntMap(1 << 8)
-            ov.set(key, val)
+            self._set_overflow(key, val)
             return
         if (self.size + 1) * 2 > self.mask + 1:
             self._grow()
@@ -794,7 +807,7 @@ class TermStore(object):
     _attrs_ = [
         'tc',
         'recs', 'memos', 'nrecs', 'cap',
-        'app_table', 'app_mask', 'napps', '_app_overflow',
+        'app_table', 'app_mask', 'napps', '_app_limit', 'app_wide', 'app_wide_mask',
         'table', 'tmask', 'nother',
         'call_slot', '_call_epoch',
         '_spine_buf', '_spine_cap', '_spine_top',
@@ -878,12 +891,15 @@ class TermStore(object):
         #: substitutions: `(((epoch << 8) | depth) << 32) | handle`.
         self.call_slot = _alloc_words(cap)
         #: Dedicated single-word `(fn:21 | arg:21 | slot:21)` hash table for
-        #: `KIND_APP` records (8 bytes/slot, zero `recs[]` loads on hit).
+        #: `KIND_APP` records (8 bytes/slot, zero `recs[]` loads on hit),
+        #: promoted to interleaved 16-byte `app_wide` if handles exceed 2^21.
         app_cap = cap * 2
         self.app_table = _alloc_words(app_cap)
         self.app_mask = app_cap - 1
-        self._app_overflow = False
-        #: Hash table for non-`KIND_APP` (and >2^21 overflow) records.
+        self._app_limit = _APP_PACK_LIMIT
+        self.app_wide = lltype.nullptr(_SIGNED_ARRAY)
+        self.app_wide_mask = 0
+        #: Hash table for non-`KIND_APP` records (lambda/forall/proj/let/pair).
         other_cap = cap >> 1
         if other_cap < 64:
             other_cap = 64
@@ -895,7 +911,10 @@ class TermStore(object):
         _free_u32(self.rec_node)
         _free_u32(self.memos)
         _free_words(self.call_slot)
-        _free_words(self.app_table)
+        if self.app_table:
+            _free_words(self.app_table)
+        if self.app_wide:
+            _free_words(self.app_wide)
         _free_words(self.table)
 
     def _forget(self):
@@ -924,8 +943,9 @@ class TermStore(object):
         """
         n = self.nrecs
         keep_cap = _STORE_KEEP_CAP if _STORE_KEEP_CAP >= self.initial_cap else self.initial_cap
-        if (self.cap > keep_cap and n * 8 < self.cap) or (
-                self.app_mask + 1 > keep_cap * 2 and self.napps * 8 < self.app_mask + 1):
+        if (self._app_limit == 0
+                or (self.cap > keep_cap and n * 8 < self.cap)
+                or (self.app_mask + 1 > keep_cap * 2 and self.napps * 8 < self.app_mask + 1)):
             self._free_records()
             self._alloc_records(keep_cap)
             self._call_epoch = 1
@@ -934,7 +954,6 @@ class TermStore(object):
             self._clear_table(n)
             _zero_u32(self.memos, n * MEMO_SLOTS)
             _zero_u32(self.rec_node, n)
-            self._app_overflow = False
             if self._call_epoch >= (1 << 22):
                 _zero_words(self.call_slot, self.cap)
                 self._call_epoch = 1
@@ -971,20 +990,16 @@ class TermStore(object):
             _zero_words(app_table, amask + 1)
             return
         recs = self.recs
-        limit = n if n < _APP_PACK_LIMIT - 1 else (_APP_PACK_LIMIT - 1)
-        idx = limit - 1
+        idx = n - 1
         while idx >= 0:
             base = idx << 2
             if (_s32(recs[base]) & _KIND_MASK) == KIND_APP:
-                a = _s32(recs[base + F_A])
-                b = _s32(recs[base + F_B])
-                if (a | b) < _APP_PACK_LIMIT:
-                    pair = (a << 21) | b
-                    expected = (pair << 21) | (idx + 1)
-                    i = _spread(pair) & amask
-                    while app_table[i] != expected:
-                        i = (i + 1) & amask
-                    app_table[i] = 0
+                pair = (_s32(recs[base + F_A]) << 21) | _s32(recs[base + F_B])
+                expected = (pair << 21) | (idx + 1)
+                i = _spread(pair) & amask
+                while app_table[i] != expected:
+                    i = (i + 1) & amask
+                app_table[i] = 0
             idx -= 1
 
     def _clear_table(self, n):
@@ -998,11 +1013,10 @@ class TermStore(object):
         while idx >= 0:
             base = idx << 2
             kind = _s32(recs[base]) & _KIND_MASK
-            a = _s32(recs[base + F_A])
-            b = _s32(recs[base + F_B])
-            if (kind != KIND_APP or idx + 1 >= _APP_PACK_LIMIT
-                    or (a | b) >= _APP_PACK_LIMIT):
-                hh = _hash_rec(kind, a, b)
+            if kind != KIND_APP:
+                hh = _hash_rec(
+                    kind, _s32(recs[base + F_A]), _s32(recs[base + F_B]),
+                )
                 expected = (((hh >> 32) & _TABLE_TAG_MASK) << 32) | (idx + 1)
                 i = hh & tmask
                 while table[i] != expected:
@@ -1156,9 +1170,9 @@ class TermStore(object):
     def cons_app(self, fn, arg):
         """Dedicated fast path for `KIND_APP` records with single-word packed
         `(fn:21 | arg:21 | slot:21)` lookup (8 bytes/slot, zero `recs[]` load
-        on hit), falling back losslessly to `table` above 2^21 records/handles."""
-        if (fn | arg) >= _APP_PACK_LIMIT:
-            return self._cons_general(KIND_APP, fn, arg, _NO_INFO)
+        on hit), promoting losslessly to 16-byte `app_wide` above 2^21."""
+        if (fn | arg) >= self._app_limit:
+            return self._cons_app_wide(fn, arg)
         pair = (fn << 21) | arg
         app_table = self.app_table
         amask = self.app_mask
@@ -1170,12 +1184,9 @@ class TermStore(object):
             if entry == 0:
                 break
             i = (i + 1) & amask
-        if self._app_overflow:
-            return self._cons_general(KIND_APP, fn, arg, _NO_INFO)
         idx = self.nrecs
         if idx + 1 >= _APP_PACK_LIMIT:
-            self._app_overflow = True
-            return self._cons_general(KIND_APP, fn, arg, _NO_INFO)
+            return self._cons_app_wide(fn, arg)
         if idx == self.cap:
             self._grow_records()
         ma = self.meta(fn)
@@ -1197,6 +1208,99 @@ class TermStore(object):
         else:
             app_table[i] = (pair << 21) | (idx + 1)
         return rec_handle(idx)
+
+    @dont_inline
+    def _promote_apps_to_wide(self):
+        wcap = self.app_mask + 1
+        while wcap < self.napps * 2 + 2:
+            wcap *= 2
+        app_wide = _alloc_words(wcap << 1)
+        wmask = wcap - 1
+        recs = self.recs
+        idx = 0
+        n = self.nrecs
+        while idx < n:
+            base = idx << 2
+            if (_s32(recs[base]) & _KIND_MASK) == KIND_APP:
+                key = (_s32(recs[base + F_A]) << 32) | _s32(recs[base + F_B])
+                i = _spread(key) & wmask
+                while app_wide[i << 1] != 0:
+                    i = (i + 1) & wmask
+                p = i << 1
+                app_wide[p] = key
+                app_wide[p + 1] = rec_handle(idx)
+            idx += 1
+        _free_words(self.app_table)
+        self.app_table = lltype.nullptr(_SIGNED_ARRAY)
+        self.app_mask = 0
+        self._app_limit = 0
+        self.app_wide = app_wide
+        self.app_wide_mask = wmask
+
+    @dont_inline
+    def _rehash_app_wide(self):
+        _free_words(self.app_wide)
+        wcap = (self.app_wide_mask + 1) * 2
+        app_wide = _alloc_words(wcap << 1)
+        wmask = wcap - 1
+        recs = self.recs
+        idx = 0
+        n = self.nrecs
+        while idx < n:
+            base = idx << 2
+            if (_s32(recs[base]) & _KIND_MASK) == KIND_APP:
+                key = (_s32(recs[base + F_A]) << 32) | _s32(recs[base + F_B])
+                i = _spread(key) & wmask
+                while app_wide[i << 1] != 0:
+                    i = (i + 1) & wmask
+                p = i << 1
+                app_wide[p] = key
+                app_wide[p + 1] = rec_handle(idx)
+            idx += 1
+        self.app_wide = app_wide
+        self.app_wide_mask = wmask
+
+    @dont_inline
+    def _cons_app_wide(self, fn, arg):
+        if self._app_limit != 0:
+            self._promote_apps_to_wide()
+        key = (fn << 32) | arg
+        app_wide = self.app_wide
+        wmask = self.app_wide_mask
+        i = _spread(key) & wmask
+        while True:
+            p = i << 1
+            k = app_wide[p]
+            if k == key:
+                return app_wide[p + 1]
+            if k == 0:
+                break
+            i = (i + 1) & wmask
+        idx = self.nrecs
+        if idx == self.cap:
+            self._grow_records()
+        ma = self.meta(fn)
+        mb = self.meta(arg)
+        la = ma & ~1
+        lb = mb & ~1
+        meta = (la if la > lb else lb) | ((ma | mb) & 1)
+        base = idx << 2
+        recs = self.recs
+        recs[base] = _u32((meta << 3) | KIND_APP)
+        recs[base + F_A] = _u32(fn)
+        recs[base + F_B] = _u32(arg)
+        recs[base + F_INFO] = _u32(_NO_INFO)
+        self.nrecs = idx + 1
+        h = rec_handle(idx)
+        napps = self.napps + 1
+        self.napps = napps
+        if napps * 2 > wmask + 1:
+            self._rehash_app_wide()
+        else:
+            p = i << 1
+            app_wide[p] = key
+            app_wide[p + 1] = h
+        return h
 
     @always_inline
     def cons(self, kind, a, b, info=_NO_INFO):
@@ -1263,20 +1367,15 @@ class TermStore(object):
         amask = cap - 1
         recs = self.recs
         idx = 0
-        limit = self.nrecs
-        if limit >= _APP_PACK_LIMIT:
-            limit = _APP_PACK_LIMIT - 1
-        while idx < limit:
+        n = self.nrecs
+        while idx < n:
             base = idx << 2
             if (_s32(recs[base]) & _KIND_MASK) == KIND_APP:
-                a = _s32(recs[base + F_A])
-                b = _s32(recs[base + F_B])
-                if (a | b) < _APP_PACK_LIMIT:
-                    pair = (a << 21) | b
-                    i = _spread(pair) & amask
-                    while app_table[i] != 0:
-                        i = (i + 1) & amask
-                    app_table[i] = (pair << 21) | (idx + 1)
+                pair = (_s32(recs[base + F_A]) << 21) | _s32(recs[base + F_B])
+                i = _spread(pair) & amask
+                while app_table[i] != 0:
+                    i = (i + 1) & amask
+                app_table[i] = (pair << 21) | (idx + 1)
             idx += 1
         self.app_table = app_table
         self.app_mask = amask
@@ -1292,11 +1391,10 @@ class TermStore(object):
         while idx < n:
             base = idx << 2
             kind = _s32(recs[base]) & _KIND_MASK
-            a = _s32(recs[base + F_A])
-            b = _s32(recs[base + F_B])
-            if (kind != KIND_APP or idx + 1 >= _APP_PACK_LIMIT
-                    or (a | b) >= _APP_PACK_LIMIT):
-                hh = _hash_rec(kind, a, b)
+            if kind != KIND_APP:
+                hh = _hash_rec(
+                    kind, _s32(recs[base + F_A]), _s32(recs[base + F_B]),
+                )
                 i = hh & tmask
                 while table[i] != 0:
                     i = (i + 1) & tmask
@@ -2406,12 +2504,32 @@ class TermStore(object):
         info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
-            na = self._instantiate_multi(a, substs, chain, depth, nr)
-            nb = self._instantiate_multi(b, substs, chain, depth, nr)
+            if self.loose_bvar_range(a) <= depth:
+                na = a
+            elif is_leaf(a):
+                aid = self.leaf_bvar[leaf_index(a)]
+                arel = aid - depth
+                if arel < n:
+                    na = substs[arel] if depth == 0 else self.shift(substs[arel], depth, 0)
+                else:
+                    na = self.bvar(aid - n)
+            else:
+                na = self._instantiate_multi(a, substs, chain, depth, nr)
+            if self.loose_bvar_range(b) <= depth:
+                nb = b
+            elif is_leaf(b):
+                bid = self.leaf_bvar[leaf_index(b)]
+                brel = bid - depth
+                if brel < n:
+                    nb = substs[brel] if depth == 0 else self.shift(substs[brel], depth, 0)
+                else:
+                    nb = self.bvar(bid - n)
+            else:
+                nb = self._instantiate_multi(b, substs, chain, depth, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = self._instantiate_multi(a, substs, chain, depth, nr)
-            nb = self._instantiate_multi(b, substs, chain, depth + 1, nr)
+            na = a if self.loose_bvar_range(a) <= depth else self._instantiate_multi(a, substs, chain, depth, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._instantiate_multi(b, substs, chain, depth + 1, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
             na = self._instantiate_multi(a, substs, chain, depth, nr)
@@ -2463,25 +2581,36 @@ class TermStore(object):
         info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
-            na = a if self.loose_bvar_range(a) <= depth else self.shift(a, count, depth, nr)
-            nb = b if self.loose_bvar_range(b) <= depth else self.shift(b, count, depth, nr)
+            if self.loose_bvar_range(a) <= depth:
+                na = a
+            elif is_leaf(a):
+                na = self.bvar(self.leaf_bvar[leaf_index(a)] + count)
+            else:
+                na = self.shift(a, count, depth, nr)
+            if self.loose_bvar_range(b) <= depth:
+                nb = b
+            elif is_leaf(b):
+                nb = self.bvar(self.leaf_bvar[leaf_index(b)] + count)
+            else:
+                nb = self.shift(b, count, depth, nr)
             r = self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            r = self.cons(
-                kind, self.shift(a, count, depth, nr),
-                self.shift(b, count, depth + 1, nr), info,
-            )
+            na = a if self.loose_bvar_range(a) <= depth else self.shift(a, count, depth, nr)
+            nb = b if self.loose_bvar_range(b) <= depth + 1 else self.shift(b, count, depth + 1, nr)
+            r = self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
             r = self.cons(
                 KIND_PROJ, self.shift(a, count, depth, nr), b, info,
             )
         else:
             assert kind == KIND_LET
-            pair = self.cons(
-                KIND_PAIR, self.shift(self.field_a(b), count, depth, nr),
-                self.shift(self.field_b(b), count, depth + 1, nr),
-            )
-            r = self.cons(KIND_LET, self.shift(a, count, depth, nr), pair, info)
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = a if self.loose_bvar_range(a) <= depth else self.shift(a, count, depth, nr)
+            nv = value if self.loose_bvar_range(value) <= depth else self.shift(value, count, depth, nr)
+            nbody = body if self.loose_bvar_range(body) <= depth + 1 else self.shift(body, count, depth + 1, nr)
+            pair = self.cons(KIND_PAIR, nv, nbody)
+            r = self.cons(KIND_LET, na, pair, info)
         if key != 0:
             self._shift_memo.set(key, r)
         else:
@@ -2510,6 +2639,7 @@ class TermStore(object):
         try:
             r = self._bind_fvar_oneshot(h, fvar, depth, gen, 0)
         finally:
+            self._subst_top = 0
             if self._call_memo.size > 0:
                 self._call_memo.clear()
         if key != 0:
@@ -2549,16 +2679,83 @@ class TermStore(object):
         info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
-            if not self.has_fvar(a):
-                na = a
-            elif is_leaf(a):
+            if is_leaf(a):
                 na = self.bvar(depth) if a == fvar else a
             else:
-                na = self._bind_fvar_oneshot(a, fvar, depth, gen, nr)
-            if not self.has_fvar(b):
-                nb = b
-            elif is_leaf(b):
+                ahdr = _s32(recs[rec_index(a) << 2])
+                if (ahdr & 8) == 0:
+                    na = a
+                elif (ahdr & _KIND_MASK) != KIND_APP:
+                    na = self._bind_fvar_oneshot(a, fvar, depth, gen, nr)
+                else:
+                    smark = self._subst_top
+                    stop = smark
+                    cur = a
+                    call_slot = self.call_slot
+                    while True:
+                        if is_leaf(cur):
+                            na = self.bvar(depth) if cur == fvar else cur
+                            break
+                        cri = rec_index(cur)
+                        chdr = _s32(recs[cri << 2])
+                        if (chdr & 8) == 0:
+                            na = cur
+                            break
+                        if tag != 0:
+                            centry = call_slot[cri]
+                            if (centry >> 32) == tag:
+                                na = centry & _TABLE_SLOT_MASK
+                                break
+                            if (centry >> 40) == gen:
+                                cr = self._call_memo.get((cur << 16) | depth, 0)
+                                if cr != 0:
+                                    na = cr
+                                    break
+                        elif depth < (1 << 16):
+                            cr = self._call_memo.get((cur << 16) | depth, 0)
+                            if cr != 0:
+                                na = cr
+                                break
+                        if (chdr & _KIND_MASK) != KIND_APP:
+                            self._subst_top = stop
+                            na = self._bind_fvar_oneshot(cur, fvar, depth, gen, nr)
+                            break
+                        if stop == self._subst_cap:
+                            ncap = self._subst_cap * 2
+                            self._subst_stack = _grow_u32(self._subst_stack, stop, ncap)
+                            self._subst_cap = ncap
+                        self._subst_stack[stop] = _u32(cur)
+                        stop += 1
+                        cur = _s32(recs[(cri << 2) + F_A])
+                    self._subst_top = stop
+                    while stop > smark:
+                        stop -= 1
+                        node = _s32(self._subst_stack[stop])
+                        self._subst_top = stop
+                        nri = rec_index(node)
+                        recs = self.recs
+                        nbase = nri << 2
+                        old_a = _s32(recs[nbase + F_A])
+                        old_b = _s32(recs[nbase + F_B])
+                        if is_leaf(old_b):
+                            nb2 = self.bvar(depth) if old_b == fvar else old_b
+                        elif (_s32(recs[rec_index(old_b) << 2]) & 8) == 0:
+                            nb2 = old_b
+                        else:
+                            nb2 = self._bind_fvar_oneshot(old_b, fvar, depth, gen, nr)
+                        na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
+                        if tag != 0:
+                            call_slot = self.call_slot
+                            if (call_slot[nri] >> 40) != gen:
+                                call_slot[nri] = (tag << 32) | na
+                            else:
+                                self._call_memo.set((node << 16) | depth, na)
+                        elif depth < (1 << 16):
+                            self._call_memo.set((node << 16) | depth, na)
+            if is_leaf(b):
                 nb = self.bvar(depth) if b == fvar else b
+            elif not self.has_fvar(b):
+                nb = b
             else:
                 nb = self._bind_fvar_oneshot(b, fvar, depth, gen, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
@@ -2624,6 +2821,7 @@ class TermStore(object):
         try:
             return self._bind_fvars_oneshot(h, fvars, n, depth, gen, 0)
         finally:
+            self._subst_top = 0
             if self._call_memo.size > 0:
                 self._call_memo.clear()
 
@@ -2663,8 +2861,115 @@ class TermStore(object):
         info = _s32(recs[base + F_INFO])
         nr = rdepth + 1
         if kind == KIND_APP:
-            na = a if not self.has_fvar(a) else self._bind_fvars_oneshot(a, fvars, n, depth, gen, nr)
-            nb = b if not self.has_fvar(b) else self._bind_fvars_oneshot(b, fvars, n, depth, gen, nr)
+            if is_leaf(a):
+                if (self.leaf_meta[leaf_index(a)] & 1) == 0:
+                    na = a
+                else:
+                    na = a
+                    j = 0
+                    while j < n:
+                        if fvars[j] == a:
+                            na = self.bvar(depth + n - 1 - j)
+                            break
+                        j += 1
+            else:
+                ahdr = _s32(recs[rec_index(a) << 2])
+                if (ahdr & 8) == 0:
+                    na = a
+                elif (ahdr & _KIND_MASK) != KIND_APP:
+                    na = self._bind_fvars_oneshot(a, fvars, n, depth, gen, nr)
+                else:
+                    smark = self._subst_top
+                    stop = smark
+                    cur = a
+                    call_slot = self.call_slot
+                    while True:
+                        if is_leaf(cur):
+                            na = cur
+                            if (self.leaf_meta[leaf_index(cur)] & 1) != 0:
+                                j = 0
+                                while j < n:
+                                    if fvars[j] == cur:
+                                        na = self.bvar(depth + n - 1 - j)
+                                        break
+                                    j += 1
+                            break
+                        cri = rec_index(cur)
+                        chdr = _s32(recs[cri << 2])
+                        if (chdr & 8) == 0:
+                            na = cur
+                            break
+                        if tag != 0:
+                            centry = call_slot[cri]
+                            if (centry >> 32) == tag:
+                                na = centry & _TABLE_SLOT_MASK
+                                break
+                            if (centry >> 40) == gen:
+                                cr = self._call_memo.get((cur << 16) | depth, 0)
+                                if cr != 0:
+                                    na = cr
+                                    break
+                        elif depth < (1 << 16):
+                            cr = self._call_memo.get((cur << 16) | depth, 0)
+                            if cr != 0:
+                                na = cr
+                                break
+                        if (chdr & _KIND_MASK) != KIND_APP:
+                            self._subst_top = stop
+                            na = self._bind_fvars_oneshot(cur, fvars, n, depth, gen, nr)
+                            break
+                        if stop == self._subst_cap:
+                            ncap = self._subst_cap * 2
+                            self._subst_stack = _grow_u32(self._subst_stack, stop, ncap)
+                            self._subst_cap = ncap
+                        self._subst_stack[stop] = _u32(cur)
+                        stop += 1
+                        cur = _s32(recs[(cri << 2) + F_A])
+                    self._subst_top = stop
+                    while stop > smark:
+                        stop -= 1
+                        node = _s32(self._subst_stack[stop])
+                        self._subst_top = stop
+                        nri = rec_index(node)
+                        recs = self.recs
+                        nbase = nri << 2
+                        old_a = _s32(recs[nbase + F_A])
+                        old_b = _s32(recs[nbase + F_B])
+                        if is_leaf(old_b):
+                            nb2 = old_b
+                            if (self.leaf_meta[leaf_index(old_b)] & 1) != 0:
+                                j = 0
+                                while j < n:
+                                    if fvars[j] == old_b:
+                                        nb2 = self.bvar(depth + n - 1 - j)
+                                        break
+                                    j += 1
+                        elif (_s32(recs[rec_index(old_b) << 2]) & 8) == 0:
+                            nb2 = old_b
+                        else:
+                            nb2 = self._bind_fvars_oneshot(old_b, fvars, n, depth, gen, nr)
+                        na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
+                        if tag != 0:
+                            call_slot = self.call_slot
+                            if (call_slot[nri] >> 40) != gen:
+                                call_slot[nri] = (tag << 32) | na
+                            else:
+                                self._call_memo.set((node << 16) | depth, na)
+                        elif depth < (1 << 16):
+                            self._call_memo.set((node << 16) | depth, na)
+            if is_leaf(b):
+                nb = b
+                if (self.leaf_meta[leaf_index(b)] & 1) != 0:
+                    j = 0
+                    while j < n:
+                        if fvars[j] == b:
+                            nb = self.bvar(depth + n - 1 - j)
+                            break
+                        j += 1
+            elif not self.has_fvar(b):
+                nb = b
+            else:
+                nb = self._bind_fvars_oneshot(b, fvars, n, depth, gen, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
             na = a if not self.has_fvar(a) else self._bind_fvars_oneshot(a, fvars, n, depth, gen, nr)
@@ -3103,7 +3408,7 @@ class Machine(object):
 
     _attrs_ = [
         'tc', 'store', '_rule_memo', '_fvars', '_opened',
-        '_open_memo', '_heavy', '_budget', '_decl_start_recs',
+        '_open_memo', '_heavy', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
@@ -3118,7 +3423,6 @@ class Machine(object):
         self._open_memo = PairMap(1 << 8)
         #: open record -> 1 if light, 2 if heavy
         self._heavy = U32Map(1 << 8)
-        self._budget = 0
         self._decl_start_recs = 0
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = IntMap(1 << 8, keep_cap=1 << 12)
@@ -3735,7 +4039,7 @@ class Machine(object):
         rule = rec.rule_for_ctor(ctor.name)
         if rule is None:
             return 0
-        ctor_decl = find_decl(tc.declarations, rule.ctor_name)
+        ctor_decl = self._leaf_decl(ctor_head, ctor)
         if ctor_decl is None or not ctor_decl.w_kind.is_constructor():
             return 0
         ctor_kind = ctor_decl.w_kind
@@ -3805,9 +4109,10 @@ class Machine(object):
         rhs = self._rule_memo.get(key, 0)
         if rhs != 0:
             return rhs
-        rhs = self.store.import_const_term(
-            const, get_decl(self.tc.declarations, const.name), rule.rhs,
-        )
+        decl = self._leaf_decl(target, const)
+        if decl is None:
+            decl = get_decl(self.tc.declarations, const.name)
+        rhs = self.store.import_const_term(const, decl, rule.rhs)
         self._rule_memo.set(key, rhs)
         return rhs
 
@@ -4011,18 +4316,55 @@ class Machine(object):
 
     def _is_heavy(self, h):
         """Whether ``h`` has `_HEAVY` nodes or more, as a tree."""
-        self._budget = _HEAVY
-        self._spend(h)
-        return self._budget <= 0
-
-    def _spend(self, h):
-        self._budget -= 1
-        if self._budget <= 0 or is_leaf(h):
-            return
         store = self.store
-        self._spend(store.field_a(h))
-        if self._budget > 0 and store.kind(h) != KIND_PROJ:
-            self._spend(store.field_b(h))
+        recs = store.recs
+        heavy = self._heavy
+        check_memo = heavy.size > 0
+        budget = _HEAVY
+        smark = store._subst_top
+        stop = smark
+        sstack = store._subst_stack
+        scap = store._subst_cap
+        cur = h
+        while True:
+            budget -= 1
+            if budget <= 0:
+                store._subst_top = smark
+                return True
+            if not is_leaf(cur):
+                if check_memo and (budget & 7) == 0 and heavy.get(cur, 0) == 2:
+                    store._subst_top = smark
+                    return True
+                base = rec_index(cur) << 2
+                kind = _s32(recs[base]) & _KIND_MASK
+                a = _s32(recs[base + F_A])
+                if kind != KIND_PROJ:
+                    b = _s32(recs[base + F_B])
+                    if is_leaf(b):
+                        budget -= 1
+                        if budget <= 0:
+                            store._subst_top = smark
+                            return True
+                    else:
+                        if stop == scap:
+                            scap *= 2
+                            sstack = _grow_u32(sstack, stop, scap)
+                            store._subst_stack = sstack
+                            store._subst_cap = scap
+                        sstack[stop] = _u32(b)
+                        stop += 1
+                if not is_leaf(a):
+                    cur = a
+                    continue
+                budget -= 1
+                if budget <= 0:
+                    store._subst_top = smark
+                    return True
+            if stop == smark:
+                store._subst_top = smark
+                return False
+            stop -= 1
+            cur = _s32(sstack[stop])
 
     def _is_heavy_memoised(self, h):
         known = self._heavy.get(h, 0)
@@ -4096,48 +4438,51 @@ class Machine(object):
     def _infer_open_app(self, h, ctx, chain, check):
         store = self.store
         tc = self.tc
-        head, args = store.unapp(h)
-        fn_type = self._infer_open(head, ctx, chain, check)
-        n = len(args)
-        i = n - 1
-        while i >= 0:
-            arg = args[i]
-            if store.kind(fn_type) != KIND_FORALL:
-                fn_type_whnf = self.whnf(fn_type)
-                if store.kind(fn_type_whnf) != KIND_FORALL:
-                    closed = [
-                        self._materialize(each, ctx, chain) for each in args
-                    ]
-                    self._not_a_function(
-                        self._materialize(head, ctx, chain), closed, i,
-                        fn_type,
+        head, mark, n = store.unapp_push(h)
+        try:
+            fn_type = self._infer_open(head, ctx, chain, check)
+            i = n - 1
+            while i >= 0:
+                arg = store.spine_arg(mark + i)
+                if store.kind(fn_type) != KIND_FORALL:
+                    fn_type_whnf = self.whnf(fn_type)
+                    if store.kind(fn_type_whnf) != KIND_FORALL:
+                        closed = [
+                            self._materialize(store.spine_arg(mark + j), ctx, chain)
+                            for j in range(n)
+                        ]
+                        self._not_a_function(
+                            self._materialize(head, ctx, chain), closed, i,
+                            fn_type,
+                        )
+                    fn_type = fn_type_whnf
+                if check:
+                    arg_type = self._infer_open(arg, ctx, chain, True)
+                    domain = store.field_a(fn_type)
+                    tracing = tc.tracer.recording
+                    if tracing:
+                        tc.tracer.begin_argcheck()
+                    ok = self.def_eq(domain, arg_type)
+                    if tracing:
+                        tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
+                    if not ok:
+                        raise W_TypeError(
+                            tc,
+                            self.export(self._materialize(arg, ctx, chain)),
+                            self.export(domain),
+                            inferred_type=self.export(arg_type),
+                        )
+                body = store.field_b(fn_type)
+                if store.loose_bvar_range(body) > 0:
+                    fn_type = store.instantiate(
+                        body, self._materialize(arg, ctx, chain), 0,
                     )
-                fn_type = fn_type_whnf
-            if check:
-                arg_type = self._infer_open(arg, ctx, chain, True)
-                domain = store.field_a(fn_type)
-                tracing = tc.tracer.recording
-                if tracing:
-                    tc.tracer.begin_argcheck()
-                ok = self.def_eq(domain, arg_type)
-                if tracing:
-                    tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
-                if not ok:
-                    raise W_TypeError(
-                        tc,
-                        self.export(self._materialize(arg, ctx, chain)),
-                        self.export(domain),
-                        inferred_type=self.export(arg_type),
-                    )
-            body = store.field_b(fn_type)
-            if store.loose_bvar_range(body) > 0:
-                fn_type = store.instantiate(
-                    body, self._materialize(arg, ctx, chain), 0,
-                )
-            else:
-                fn_type = body
-            i -= 1
-        return fn_type
+                else:
+                    fn_type = body
+                i -= 1
+            return fn_type
+        finally:
+            store.unapp_pop(mark)
 
     def _infer_open_lambda(self, h, ctx, chain, check):
         store = self.store

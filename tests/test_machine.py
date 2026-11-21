@@ -456,3 +456,31 @@ class TestU32Map(object):
             assert m.get(10, -1) == -1
         finally:
             m.free()
+
+    def test_app_table_promote_wide_and_reset(self, store):
+        fh = store.import_term(f.const())
+        xh = store.import_term(x.const())
+        yh = store.import_term(y.const())
+        h1 = store.cons_app(fh, xh)
+        h2 = store.cons_app(h1, yh)
+        # Force promotion to wide 16-byte app_wide table and verify hash-consing.
+        store._promote_apps_to_wide()
+        assert store._app_limit == 0
+        assert store.cons_app(fh, xh) == h1
+        assert store.cons_app(h1, yh) == h2
+        # Insert enough new apps in wide mode to exercise _rehash_app_wide.
+        cur = h2
+        seen = []
+        for _ in range(100):
+            cur = store.cons_app(cur, xh)
+            seen.append(cur)
+        cur2 = h2
+        for expected in seen:
+            cur2 = store.cons_app(cur2, xh)
+            assert cur2 == expected
+        # Reset restores compact packed app_table cleanly.
+        store.reset()
+        assert store._app_limit > 0
+        fh2 = store.import_term(f.const())
+        xh2 = store.import_term(x.const())
+        assert store.cons_app(fh2, xh2) == store.cons_app(fh2, xh2)
