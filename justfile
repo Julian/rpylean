@@ -69,3 +69,7 @@ test-translated *ARGS=translated_tests:
 # Run soundness checks and sequential A/B benchmarks (baseline vs candidate).
 bench *ARGS:
     "{{ justfile_directory() }}/scripts/bench_ab.py" {{ ARGS }}
+
+# Run diagnostic profiler (native sampling, PyPy alloc attribution, GC nursery).
+xray *ARGS:
+    "{{ justfile_directory() }}/scripts/xray.py" {{ ARGS }}

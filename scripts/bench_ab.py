@@ -85,10 +85,10 @@ STATS_KEYS = (
     "delta unfolds:",
 )
 
-_term = shutil.get_terminal_size((136, 25))
+_term = shutil.get_terminal_size((160, 25))
 console = Console(
     highlight=False,
-    width=max(136, _term.columns),
+    width=max(160, _term.columns),
     height=_term.lines or 25,
 )
 
