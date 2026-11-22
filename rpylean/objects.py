@@ -4761,8 +4761,27 @@ HINT_OPAQUE = -2
 HINT_ABBREV = -1
 
 
+class _CtorBody(object):
+    """Pre-stripped constructor body for a `W_Definition` of the form
+    `λ... => let... => Ctor p_0 ... p_{np-1} f_0 ...`, allowing `try_proj`
+    to import and instantiate only the projected field."""
+
+    _attrs_ = ['m', 'num_params', 'let_vals', 'args', 'uses_lets']
+    _immutable_fields_ = ['m', 'num_params', 'let_vals', 'args', 'uses_lets']
+
+    def __init__(self, m, num_params, let_vals, args, uses_lets):
+        self.m = m
+        self.num_params = num_params
+        self.let_vals = let_vals
+        self.args = args
+        self.uses_lets = uses_lets
+
+
+_NO_CTOR_BODY = _CtorBody(-1, 0, None, [], None)
+
+
 class W_Definition(W_DeclarationKind):
-    _attrs_ = ['value', 'hint', 'all']
+    _attrs_ = ['value', 'hint', 'all', '_ctor_body']
     _immutable_fields_ = ['value', 'hint', 'all']
 
     def __init__(self, value, hint, all=None):
@@ -4771,6 +4790,66 @@ class W_Definition(W_DeclarationKind):
         #: The members of this definition's mutual block (`DefinitionVal.
         #: all`), or ``None`` when it stands alone.
         self.all = all
+        self._ctor_body = None
+
+    @dont_inline
+    def init_ctor_body(self, declarations):
+        """Inspect `self.value` once and cache a `_CtorBody` when it peels via
+        leading lambdas (and up to 8 leading lets) to a constructor application."""
+        target = self.get_delta_reduce_target()
+        if target is None:
+            self._ctor_body = _NO_CTOR_BODY
+            return _NO_CTOR_BODY
+        cur = target
+        m = 0
+        while isinstance(cur, W_Lambda):
+            cur = cur.body
+            m += 1
+        let_vals = None
+        while isinstance(cur, W_Let):
+            if let_vals is None:
+                let_vals = []
+            elif len(let_vals) >= 8:
+                self._ctor_body = _NO_CTOR_BODY
+                return _NO_CTOR_BODY
+            let_vals.append(cur.value)
+            cur = cur.body
+        if not isinstance(cur, W_App):
+            self._ctor_body = _NO_CTOR_BODY
+            return _NO_CTOR_BODY
+        rev_args = []
+        node = cur
+        while isinstance(node, W_App):
+            rev_args.append(node.arg)
+            node = node.fn
+        if not isinstance(node, W_Const):
+            self._ctor_body = _NO_CTOR_BODY
+            return _NO_CTOR_BODY
+        ctor_decl = find_decl(declarations, node.name)
+        if ctor_decl is None:
+            self._ctor_body = _NO_CTOR_BODY
+            return _NO_CTOR_BODY
+        ctor_kind = ctor_decl.w_kind
+        if not isinstance(ctor_kind, W_Constructor):
+            self._ctor_body = _NO_CTOR_BODY
+            return _NO_CTOR_BODY
+        args = []
+        i = len(rev_args) - 1
+        while i >= 0:
+            args.append(rev_args[i])
+            i -= 1
+        uses_lets = None
+        if let_vals is not None:
+            nlets = len(let_vals)
+            uses_lets = []
+            i = 0
+            nargs = len(args)
+            while i < nargs:
+                uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
+                i += 1
+        cb = _CtorBody(m, ctor_kind.num_params, let_vals, args, uses_lets)
+        self._ctor_body = cb
+        return cb
 
     def group_key(self, name, safety):
         # An unsafe definition enters the environment before its value is

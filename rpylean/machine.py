@@ -6792,13 +6792,221 @@ class Machine(object):
                 return store.field_b(h)
         return 0
 
+    def _try_lazy_ctor_proj(self, cur, fidx):
+        """When ``cur`` is an application (or nullary leaf) of a `W_Definition`
+        whose stripped body is a constructor application `λ... => let... => Ctor ...`,
+        import and instantiate only the projected field ``fidx``, avoiding
+        materializing all sibling fields (such as large typeclass proofs)."""
+        store = self.store
+        if is_leaf(cur):
+            if (self._leaf_flags(cur) & _LF_DELTA) == 0:
+                return 0
+            j = leaf_index(cur)
+            const = store.leaves[j]
+            assert isinstance(const, W_Const)
+            decl = self._leaf_decl(cur, const)
+            if decl is None or len(const.levels) != len(decl.levels):
+                return 0
+            w_kind = decl.w_kind
+            if not isinstance(w_kind, W_Definition):
+                return 0
+            cb = w_kind._ctor_body
+            if cb is None:
+                cb = w_kind.init_ctor_body(self.tc.declarations)
+            if cb.m != 0:
+                return 0
+            idx = cb.num_params + fidx
+            if idx >= len(cb.args):
+                return 0
+            raw_field = cb.args[idx]
+            let_vals = cb.let_vals
+            if let_vals is None:
+                return store.import_const_term(const, decl, raw_field)
+            nlets = len(let_vals)
+            uses = cb.uses_lets
+            assert uses is not None
+            if not uses[idx] and raw_field.loose_bvar_range() == 0:
+                return store.import_const_term(const, decl, raw_field)
+            smark = store._spine_top
+            store.ensure_spine_room(nlets)
+            store._spine_top = smark + nlets
+            try:
+                li = 0
+                while li < nlets:
+                    vh = store.import_const_term(const, decl, let_vals[li])
+                    if li > 0 and store.loose_bvar_range(vh) > 0:
+                        if li == 1:
+                            vh = store.instantiate(
+                                vh, store.spine_arg(smark + nlets - 1), 0,
+                            )
+                        else:
+                            vh = store.instantiate_multi_buf(
+                                vh, smark + nlets - li, li, 0,
+                            )
+                    store._spine_buf[smark + nlets - 1 - li] = _u32(vh)
+                    li += 1
+                fh = store.import_const_term(const, decl, raw_field)
+                if store.loose_bvar_range(fh) == 0:
+                    return fh
+                if is_leaf(fh):
+                    bid = (_s32(store.leaf_meta[leaf_index(fh)]) >> 1) - 1
+                    return (
+                        store.spine_arg(smark + bid)
+                        if bid < nlets
+                        else store.bvar(bid - nlets)
+                    )
+                if nlets == 1:
+                    return store.instantiate(fh, store.spine_arg(smark), 0)
+                return store.instantiate_multi_buf(fh, smark, nlets, 0)
+            finally:
+                store.unapp_pop(smark)
+        if store.kind(cur) != KIND_APP:
+            return 0
+        head = store.head(cur)
+        if (self._leaf_flags(head) & _LF_DELTA) == 0:
+            return 0
+        j = leaf_index(head)
+        const = store.leaves[j]
+        assert isinstance(const, W_Const)
+        decl = self._leaf_decl(head, const)
+        if decl is None or len(const.levels) != len(decl.levels):
+            return 0
+        w_kind = decl.w_kind
+        if not isinstance(w_kind, W_Definition):
+            return 0
+        cb = w_kind._ctor_body
+        if cb is None:
+            cb = w_kind.init_ctor_body(self.tc.declarations)
+        m = cb.m
+        if m < 0:
+            return 0
+        mark = store._spine_top
+        store.unapp_push(cur)
+        try:
+            n = store._spine_top - mark
+            if n < m:
+                return 0
+            idx = cb.num_params + fidx
+            nargs = len(cb.args)
+            if idx >= nargs + (n - m):
+                return 0
+            if idx >= nargs:
+                return store.spine_arg(mark + (nargs + n - m - 1 - idx))
+            raw_field = cb.args[idx]
+            let_vals = cb.let_vals
+            if let_vals is None:
+                if isinstance(raw_field, W_BVar):
+                    bid = raw_field.id
+                    if 0 <= bid < m:
+                        return store.spine_arg(mark + n - m + bid)
+                fh = store.import_const_term(const, decl, raw_field)
+                if m == 0 or store.loose_bvar_range(fh) == 0:
+                    return fh
+                if m == 1:
+                    return store.instantiate(fh, store.spine_arg(mark + n - 1), 0)
+                return store.instantiate_multi_buf(fh, mark + n - m, m, 0)
+            nlets = len(let_vals)
+            if isinstance(raw_field, W_BVar):
+                bid = raw_field.id
+                if nlets <= bid < nlets + m:
+                    return store.spine_arg(mark + n - m + (bid - nlets))
+            smark = store._spine_top
+            total = nlets + m
+            store.ensure_spine_room(total)
+            buf = store._spine_buf
+            arg_base = mark + n - m
+            k = 0
+            while k < m:
+                buf[smark + nlets + k] = buf[arg_base + k]
+                k += 1
+            uses = cb.uses_lets
+            assert uses is not None
+            if not uses[idx]:
+                li = 0
+                while li < nlets:
+                    buf[smark + li] = _u32(self.h_prop)
+                    li += 1
+                store._spine_top = smark + total
+            else:
+                store._spine_top = smark + total
+                li = 0
+                while li < nlets:
+                    vh = store.import_const_term(const, decl, let_vals[li])
+                    cnt = li + m
+                    if cnt > 0 and store.loose_bvar_range(vh) > 0:
+                        if cnt == 1:
+                            vh = store.instantiate(
+                                vh, store.spine_arg(smark + nlets - li), 0,
+                            )
+                        else:
+                            vh = store.instantiate_multi_buf(
+                                vh, smark + nlets - li, cnt, 0,
+                            )
+                    store._spine_buf[smark + nlets - 1 - li] = _u32(vh)
+                    li += 1
+            fh = store.import_const_term(const, decl, raw_field)
+            if total == 0 or store.loose_bvar_range(fh) == 0:
+                return fh
+            if is_leaf(fh):
+                bid = (_s32(store.leaf_meta[leaf_index(fh)]) >> 1) - 1
+                return (
+                    store.spine_arg(smark + bid)
+                    if bid < total
+                    else store.bvar(bid - total)
+                )
+            if total == 1:
+                return store.instantiate(fh, store.spine_arg(smark), 0)
+            return store.instantiate_multi_buf(fh, smark, total, 0)
+        finally:
+            store.unapp_pop(mark)
+
     def try_proj(self, h, cheap_proj=False):
         """Projection of a constructor application, or 0."""
         store = self.store
-        if cheap_proj:
-            struct = self.whnf_core(store.field_a(h), True)
+        raw = store.field_a(h)
+        if cheap_proj or self.tc.tracer.recording:
+            if cheap_proj:
+                struct = self.whnf_core(raw, True)
+            else:
+                struct = self.whnf(raw)
         else:
-            struct = self.whnf(store.field_a(h))
+            if is_leaf(raw):
+                struct = _s32(store.leaf_whnf[leaf_index(raw)])
+            else:
+                struct = store.memo(raw, M_WHNF)
+            if struct == 0:
+                fidx = store.proj_index(h)
+                cur = raw
+                while True:
+                    if self.tc.has_limits:
+                        self.tc.tick_wall_time()
+                    cur = self.whnf_core(cur)
+                    if cur != raw:
+                        cached = (
+                            _s32(store.leaf_whnf[leaf_index(cur)])
+                            if is_leaf(cur)
+                            else store.memo(cur, M_WHNF)
+                        )
+                        if cached != 0:
+                            cur = cached
+                            break
+                    if store.kind(cur) == KIND_APP:
+                        reduced = self.try_reduce_nat(cur)
+                        if reduced != 0:
+                            cur = reduced
+                            continue
+                    fld = self._try_lazy_ctor_proj(cur, fidx)
+                    if fld != 0:
+                        return fld
+                    unfolded = self.try_unfold_head(cur)
+                    if unfolded == 0:
+                        break
+                    cur = unfolded
+                if is_leaf(raw):
+                    store.leaf_whnf[leaf_index(raw)] = _u32(cur)
+                else:
+                    store.set_memo(raw, M_WHNF, cur)
+                struct = cur
         lit = None
         if is_leaf(struct):
             e = store.leaf(struct)

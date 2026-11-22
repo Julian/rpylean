@@ -1242,3 +1242,145 @@ class TestJointCheckAndInferExpected(object):
                 m.infer(bad_app, True)
         finally:
             tc.free()
+
+    def test_try_proj_lazy_ctor_body_skips_sibling_fields(self):
+        from rpylean.environment import Environment, TypeChecker
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        dead_fn = Name.simple("deadFn").axiom(
+            type=forall(x.binder(type=NAT))(NAT),
+        )
+        # Structure `Pair2 (α : Type) := mk (fst : α) (snd : α)`
+        pair_s = Name.simple("Pair2")
+        pair_mk = pair_s.child("mk")
+        pair_mk_decl = pair_mk.constructor(
+            type=forall(
+                x.binder(type=TYPE), y.binder(type=b0), Name.simple("z").binder(type=b1),
+            )(pair_s.const().app(b2)),
+            num_params=1,
+            num_fields=2,
+        )
+        pair_decl = pair_s.inductive(
+            type=forall(x.binder(type=TYPE))(TYPE),
+            num_params=1,
+            constructors=[pair_mk_decl],
+        )
+        # Huge unused sibling expression for field 1
+        big_sibling = dead_fn.name.const().app(
+            dead_fn.name.const().app(dead_fn.name.const().app(b0)),
+        )
+        # 1. Parametric def `mkPair α x := Pair2.mk α x (deadFn (deadFn (deadFn x)))`
+        mkpair_name = Name.simple("mkPair")
+        mkpair_decl = mkpair_name.definition(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0))(
+                pair_s.const().app(b1),
+            ),
+            value=fun(x.binder(type=TYPE), y.binder(type=b0))(
+                pair_mk.const().app(b1, b0, big_sibling),
+            ),
+        )
+        # 2. Nullary leaf def `instPair := Pair2.mk Nat a (deadFn (deadFn (deadFn b)))`
+        inst_name = Name.simple("instPair")
+        inst_decl = inst_name.definition(
+            type=pair_s.const().app(NAT),
+            value=pair_mk.const().app(
+                NAT,
+                a_decl.name.const(),
+                dead_fn.name.const().app(
+                    dead_fn.name.const().app(b_decl.name.const()),
+                ),
+            ),
+        )
+        # 3. Let-wrapped ctor def `mkLetPair x := let h := deadFn x; Pair2.mk Nat x h`
+        mklet_name = Name.simple("mkLetPair")
+        mklet_decl = mklet_name.definition(
+            type=forall(x.binder(type=NAT))(pair_s.const().app(NAT)),
+            value=fun(x.binder(type=NAT))(
+                y.let(
+                    type=NAT,
+                    value=dead_fn.name.const().app(b0),
+                    body=pair_mk.const().app(NAT, b1, b0),
+                ),
+            ),
+        )
+        # 4. Eta-contracted (over-applied) def `mkEta α := Pair2.mk α`
+        mketa_name = Name.simple("mkEta")
+        mketa_decl = mketa_name.definition(
+            type=forall(
+                x.binder(type=TYPE), y.binder(type=b0), Name.simple("z").binder(type=b1),
+            )(pair_s.const().app(b2)),
+            value=fun(x.binder(type=TYPE))(pair_mk.const().app(b0)),
+        )
+        # 5. Chained wrapper `wrapPair α x := mkPair α x`
+        wrap_name = Name.simple("wrapPair")
+        wrap_decl = wrap_name.definition(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0))(
+                pair_s.const().app(b1),
+            ),
+            value=fun(x.binder(type=TYPE), y.binder(type=b0))(
+                mkpair_name.const().app(b1, b0),
+            ),
+        )
+
+        env = Environment.having([
+            nat_decl, a_decl, b_decl, dead_fn,
+            pair_decl, pair_mk_decl,
+            mkpair_decl, inst_decl, mklet_decl, mketa_decl, wrap_decl,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            h_a = store.import_term(a_decl.name.const())
+            h_b = store.import_term(b_decl.name.const())
+
+            # 1. Projecting field 0 of `mkPair Nat a` returns `a` and NEVER imports `deadFn`!
+            p0 = store.import_term(
+                pair_s.proj(0, mkpair_name.const().app(NAT, a_decl.name.const())),
+            )
+            nrecs_before = store.nrecs
+            assert m.try_proj(p0, False) == h_a
+            assert store.nrecs == nrecs_before
+            # cheap_proj=True MUST still return 0 (no delta unfold!)
+            assert m.try_proj(p0, True) == 0
+
+            # 2. Nullary leaf `instPair` projects field 0 directly without importing `deadFn`.
+            p_leaf = store.import_term(pair_s.proj(0, inst_name.const()))
+            nrecs_before = store.nrecs
+            assert m.try_proj(p_leaf, False) == h_a
+            assert store.nrecs == nrecs_before
+
+            # 3. Let-wrapped `mkLetPair a`: field 0 ignores let, field 1 evaluates let!
+            p_let0 = store.import_term(
+                pair_s.proj(0, mklet_name.const().app(a_decl.name.const())),
+            )
+            nrecs_before = store.nrecs
+            assert m.try_proj(p_let0, False) == h_a
+            assert store.nrecs == nrecs_before
+
+            p_let1 = store.import_term(
+                pair_s.proj(1, mklet_name.const().app(a_decl.name.const())),
+            )
+            assert m.try_proj(p_let1, False) == store.import_term(
+                dead_fn.name.const().app(a_decl.name.const()),
+            )
+
+            # 4. Over-applied `mkEta Nat a b` projects both field 0 (`a`) and field 1 (`b`).
+            p_eta0 = store.import_term(
+                pair_s.proj(0, mketa_name.const().app(NAT, a_decl.name.const(), b_decl.name.const())),
+            )
+            p_eta1 = store.import_term(
+                pair_s.proj(1, mketa_name.const().app(NAT, a_decl.name.const(), b_decl.name.const())),
+            )
+            assert m.try_proj(p_eta0, False) == h_a
+            assert m.try_proj(p_eta1, False) == h_b
+
+            # 5. Chained `wrapPair Nat a` unfolds 1 layer to `mkPair Nat a` then projects lazily.
+            p_wrap = store.import_term(
+                pair_s.proj(0, wrap_name.const().app(NAT, a_decl.name.const())),
+            )
+            assert m.try_proj(p_wrap, False) == h_a
+        finally:
+            tc.free()
