@@ -428,3 +428,47 @@ def test_compact_fast_paths_all_record_kinds():
     rc_fast.free()
     got_rc.free()
     expected._refcount.free()
+
+
+def test_prescan_malformed_const_does_not_cross_newline():
+    """Regression: malformed compact `const` missing `]` must fall back cleanly
+    instead of scanning past `\\n` into the next line."""
+    from rpylean.exceptions import MalformedLine
+
+    bad = (
+        '{"const":{"name":1,"us":[1}\n'
+        '{"const":{"name":2,"us":[]},"ie":0}\n'
+    )
+    with pytest.raises(MalformedLine):
+        parser.prescan_refcounts(StringIO(bad))
+
+
+def test_mutual_inductive_wires_recursors():
+    """Regression: mutual inductive block members must wire both constructors
+    and recursors back onto each `W_Inductive`."""
+    builder = parse(
+        """
+        {"in":1,"str":{"pre":0,"str":"Even"}}
+        {"in":2,"str":{"pre":0,"str":"Odd"}}
+        {"in":3,"str":{"pre":1,"str":"zero"}}
+        {"in":4,"str":{"pre":2,"str":"succ"}}
+        {"in":5,"str":{"pre":1,"str":"rec"}}
+        {"ie":0,"sort":0}
+        {"const":{"name":1,"us":[]},"ie":1}
+        {"const":{"name":2,"us":[]},"ie":2}
+        {"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":3,"numFields":0,"numParams":0,"type":1},{"cidx":0,"induct":2,"isUnsafe":false,"levelParams":[],"name":4,"numFields":0,"numParams":0,"type":2}],"recs":[{"all":[1,2],"isUnsafe":false,"k":false,"levelParams":[],"name":5,"numIndices":0,"numMinors":0,"numMotives":2,"numParams":0,"rules":[],"type":0}],"types":[{"all":[1,2],"ctors":[3],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0},{"all":[1,2],"ctors":[4],"isRec":true,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":2,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}
+        """,
+    )
+    env = builder.env
+    even = env["Even"].w_kind
+    odd = env["Odd"].w_kind
+    rec = env["Even.rec"]
+    assert [c.name for c in even.constructors] == [Name.from_str("Even.zero")]
+    assert [c.name for c in odd.constructors] == [Name.from_str("Odd.succ")]
+    assert even.recursors == [rec]
+    assert odd.recursors == [rec]
+
+
+def test_disc_first_expr_with_spaces_around_colon():
+    builder = parse(' { "bvar" : 3 , "ie" : 0 } ')
+    assert builder.exprs == [W_BVar(id=3)]
