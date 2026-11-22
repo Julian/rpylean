@@ -82,14 +82,9 @@ from rpylean.objects import (
     SAFETY_SAFE,
     SAFETY_UNSAFE,
     Name,
-    W_Constructor,
-    W_Declaration,
-    W_Inductive,
     W_LEVEL_ZERO,
     W_RecRule,
-    W_Recursor,
     _mk_w_bvar,
-    _safety_of,
     _mk_w_forall,
     _mk_w_lambda,
     _mk_w_litnat,
@@ -111,25 +106,17 @@ from rpylean.objects import (
 # globals at runtime — `.clear()` on dict attributes is fine.
 
 class _WalkState(object):
-    _attrs_ = ['exprs', 'levels', 'names', 'bvars']
+    _attrs_ = ['exprs', 'levels', 'names']
 
     def __init__(self):
-        self.exprs = {}    # int (ptr addr) → W_Expr
-        self.levels = {}   # int (ptr addr) → W_Level
-        self.names = {}    # int (ptr addr) → Name
-        # bvars are content-keyed by de Bruijn index, not by Lean
-        # pointer — Lean's `Expr.bvar` ctors aren't hash-consed by
-        # pointer so the same bvar index appears at many distinct
-        # addresses across an export. Sharing them here lets the
-        # exporter emit one `{"bvar":N,"ie":I}` record per index
-        # (matching lean4export, which sees bvars as cheap value types).
-        self.bvars = {}    # int (de Bruijn index) → W_BVar
+        self.exprs = {}    # int (ptr addr) -> W_Expr
+        self.levels = {}   # int (ptr addr) -> W_Level
+        self.names = {}    # int (ptr addr) -> Name
 
     def reset(self):
         self.exprs.clear()
         self.levels.clear()
         self.names.clear()
-        self.bvars.clear()
 
 
 _WALK = _WalkState()
@@ -287,27 +274,6 @@ def _make_binder(scalar_byte, name, ty):
     return Binder.default(name, ty)
 
 
-def _ctor_byte(o, num_objs, byte_offset):
-    """Read one byte from a ctor's trailing scalar area.
-
-    `byte_offset` is relative to the start of the scalar area, which sits
-    immediately after the 8 * num_objs object-pointer bytes. The first 8
-    scalar bytes are typically Lean's cached `data` hash; user-level
-    scalar fields (binderInfo, nondep) start at offset 8.
-    """
-    return rffi.cast(lltype.Signed, rffi.cast(rffi.UCHARP,
-        rffi.ptradd(rffi.cast(rffi.CCHARP, o),
-                    _lean.OBJ_HDR_SIZE + 8 * num_objs))[byte_offset])
-
-
-def _ctor_uint32(o, num_objs, byte_offset):
-    """Read a 4-byte little-endian uint32 from a ctor's scalar area."""
-    p = rffi.cast(rffi.UINTP,
-                  rffi.ptradd(rffi.cast(rffi.CCHARP, o),
-                              _lean.OBJ_HDR_SIZE + 8 * num_objs + byte_offset))
-    return intmask(p[0])
-
-
 def read_expr(o):
     if _lean.is_scalar(o):
         raise RuntimeError("read_expr: unexpected scalar")
@@ -323,13 +289,7 @@ def read_expr(o):
 def _read_expr_uncached(o):
     tag = _lean.ptr_tag(o)
     if tag == 0:  # bvar(deBruijnIndex)
-        idx_int = read_nat(_lean.ctor_get(o, 0)).toint()
-        cached = _WALK.bvars.get(idx_int, None)
-        if cached is not None:
-            return cached
-        bv = _mk_w_bvar(idx_int)
-        _WALK.bvars[idx_int] = bv
-        return bv
+        return _mk_w_bvar(read_nat(_lean.ctor_get(o, 0)).toint())
     if tag == 3:  # sort(u)
         return read_level(_lean.ctor_get(o, 0)).sort()
     if tag == 4:  # const(name, us : List Level)
@@ -343,7 +303,7 @@ def _read_expr_uncached(o):
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))
         body = read_expr(_lean.ctor_get(o, 2))
-        binder = _make_binder(_ctor_byte(o, 3, 8), name, ty)
+        binder = _make_binder(_lean.ctor_get_byte(o, 3, 8), name, ty)
         if tag == 6:
             return _mk_w_lambda(binder, body)
         return _mk_w_forall(binder, body)
@@ -371,9 +331,9 @@ def _read_expr_uncached(o):
 
 
 def _read_hints(o):
-    """Lean.ReducibilityHints → rpylean's int-encoded hint."""
+    """Lean.ReducibilityHints -> rpylean's int-encoded hint."""
     if _lean.is_scalar(o):
-        # 0=opaque, 1=abbrev are nullary ctors → boxed scalars.
+        # 0=opaque, 1=abbrev are nullary ctors -> boxed scalars.
         u = _lean.unbox(o)
         if u == 0:
             return HINT_OPAQUE
@@ -382,7 +342,7 @@ def _read_hints(o):
         return HINT_OPAQUE
     # tag 2 = regular(_ : UInt32). The UInt32 lives in the ctor's scalar
     # area at offset 0 (no obj fields, no `data` prefix on non-Expr ctors).
-    return _ctor_uint32(o, 0, 0)
+    return _lean.ctor_get_uint32(o, 0, 0)
 
 
 def _read_constant_val(cval):
@@ -416,7 +376,7 @@ def read_constant_info(ci):
     if tag == 0:  # axiomInfo
         # AxiomVal: scalar byte 0 = isUnsafe (no obj fields beyond
         # `toConstantVal`, so num_objs = 1).
-        is_unsafe = _ctor_byte(val, 1, 0) != 0
+        is_unsafe = _lean.ctor_get_byte(val, 1, 0) != 0
         return name.axiom(type=type_expr, levels=levels, is_unsafe=is_unsafe)
     if tag == 1:  # defnInfo
         value = read_expr(_lean.ctor_get(val, 1))
@@ -424,7 +384,7 @@ def read_constant_info(ci):
         # DefinitionVal: obj field 3 = `all`; scalar byte 0 = safety
         # enum (0=unsafe, 1=safe, 2=partial). 4 obj fields preceding.
         all_names = _read_name_list(_lean.ctor_get(val, 3))
-        safety = _SAFETY_FROM_LEAN[_ctor_byte(val, 4, 0)]
+        safety = _SAFETY_FROM_LEAN[_lean.ctor_get_byte(val, 4, 0)]
         return name.definition(
             type=type_expr, value=value, hint=hint, levels=levels,
             safety=safety, all=all_names if len(all_names) > 1 else None,
@@ -435,14 +395,14 @@ def read_constant_info(ci):
     if tag == 3:  # opaqueInfo
         value = read_expr(_lean.ctor_get(val, 1))
         # OpaqueVal: scalar byte 0 = isUnsafe. 3 obj fields.
-        is_unsafe = _ctor_byte(val, 3, 0) != 0
+        is_unsafe = _lean.ctor_get_byte(val, 3, 0) != 0
         return name.opaque(type=type_expr, value=value, levels=levels,
                            is_unsafe=is_unsafe)
     if tag == 4:  # quotInfo
         # QuotVal: extends ConstantVal (1 obj ref) + `kind` byte. The byte
         # value matches Lean's `QuotKind` ctor tags 0..3, which is also
         # what `W_Quotient.KIND_*` uses.
-        kind = _ctor_byte(val, 1, 0)
+        kind = _lean.ctor_get_byte(val, 1, 0)
         return name.quotient(type=type_expr, kind=kind, levels=levels)
     if tag == 5:  # inductInfo
         all_names = _read_name_list(_lean.ctor_get(val, 3))
@@ -453,23 +413,21 @@ def read_constant_info(ci):
         num_params = read_nat(_lean.ctor_get(val, 1)).toint()
         num_indices = read_nat(_lean.ctor_get(val, 2)).toint()
         num_nested = read_nat(_lean.ctor_get(val, 5)).toint()
-        is_rec = _ctor_byte(val, 6, 0) != 0
-        is_unsafe = _ctor_byte(val, 6, 1) != 0
-        is_reflexive = _ctor_byte(val, 6, 2) != 0
-        kind = W_Inductive(
-            name=name,
-            all=all_names if all_names else [name],
-            constructors=[],
-            recursors=[],
+        is_rec = _lean.ctor_get_byte(val, 6, 0) != 0
+        is_unsafe = _lean.ctor_get_byte(val, 6, 1) != 0
+        is_reflexive = _lean.ctor_get_byte(val, 6, 2) != 0
+        return name.inductive(
+            type=type_expr,
+            all=all_names if all_names else None,
             num_params=num_params,
             num_indices=num_indices,
             num_nested=num_nested,
             is_recursive=is_rec,
             is_reflexive=is_reflexive,
             ctor_names=ctor_names,
+            levels=levels,
+            is_unsafe=is_unsafe,
         )
-        return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, safety=_safety_of(is_unsafe))
     if tag == 6:  # ctorInfo
         # ConstructorVal layout (nested ConstantVal at field 0):
         #   1: induct : Name
@@ -481,11 +439,16 @@ def read_constant_info(ci):
         cidx = read_nat(_lean.ctor_get(val, 2)).toint()
         num_params = read_nat(_lean.ctor_get(val, 3)).toint()
         num_fields = read_nat(_lean.ctor_get(val, 4)).toint()
-        is_unsafe = _ctor_byte(val, 5, 0) != 0
-        kind = W_Constructor(num_params=num_params, num_fields=num_fields,
-                             cidx=cidx, induct=induct)
-        return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, safety=_safety_of(is_unsafe))
+        is_unsafe = _lean.ctor_get_byte(val, 5, 0) != 0
+        return name.constructor(
+            type=type_expr,
+            num_params=num_params,
+            num_fields=num_fields,
+            cidx=cidx,
+            levels=levels,
+            is_unsafe=is_unsafe,
+            induct=induct,
+        )
     if tag == 7:  # recInfo
         all_names = _read_name_list(_lean.ctor_get(val, 1))
         num_params = read_nat(_lean.ctor_get(val, 2)).toint()
@@ -504,21 +467,18 @@ def read_constant_info(ci):
                 rhs=read_expr(_lean.ctor_get(rule, 2)),
             ))
             rules_obj = _lean.ctor_get(rules_obj, 1)
-        k = _ctor_byte(val, 7, 0) != 0
-        is_unsafe = _ctor_byte(val, 7, 1) != 0
-        kind = W_Recursor(
-            # `RecursorVal.all` lists the inductives this recursor is
-            # for; fall back to the recursor's parent (`Foo.rec` → `Foo`)
-            # if Lean's list is empty. Matches `Name.recursor`'s default.
-            all=all_names if all_names else [name.parent],
+        k = _lean.ctor_get_byte(val, 7, 0) != 0
+        is_unsafe = _lean.ctor_get_byte(val, 7, 1) != 0
+        return name.recursor(
+            type=type_expr,
+            all=all_names if all_names else None,
             rules=rules,
             k=k,
             num_params=num_params,
             num_indices=num_indices,
             num_motives=num_motives,
             num_minors=num_minors,
+            levels=levels,
+            is_unsafe=is_unsafe,
         )
-        return W_Declaration(name=name, type=type_expr, w_kind=kind,
-                             levels=levels, safety=_safety_of(is_unsafe))
     raise RuntimeError("read_constant_info: unexpected tag")
-    raise RuntimeError("read_constant_info: variant not yet supported")

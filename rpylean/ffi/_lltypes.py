@@ -48,23 +48,17 @@ walk and points at its Lean source.
 """
 from __future__ import print_function
 
+from rpython.rlib.rarithmetic import intmask
 from rpython.rtyper.lltypesystem.lltype import FuncType, Ptr, Struct, Void
 from rpython.rtyper.lltypesystem import rffi, lltype
 
 
 Object = Ptr(Struct('lean_object'))
 
-initialize = Ptr(FuncType([], Void))
 initialize_runtime_module = Ptr(FuncType([], Void))
 io_mark_end_initialization = Ptr(FuncType([], Void))
-
-io_result_show_error = Ptr(FuncType([Object], Void))
 mk_string = Ptr(FuncType([rffi.CCHARP], Object))
-utf8_strlen = Ptr(FuncType([rffi.CONST_CCHARP], rffi.SIZE_T))
-
 initialize_module = Ptr(FuncType([rffi.UINT, Object], Object))
-
-is_private_name = Ptr(FuncType([Object], rffi.INT))
 
 # Allocator and helpers we resolve inside leanffi.
 alloc_object = Ptr(FuncType([rffi.SIZE_T], Object))
@@ -131,6 +125,38 @@ def ctor_set_obj(o, i, v):
     base[i] = v
 
 
+def ctor_get_byte(o, num_objs, byte_offset):
+    """Read one scalar byte from a ctor's trailing scalar area.
+
+    `byte_offset` is relative to the start of the scalar area, which sits
+    immediately after the 8 * num_objs object-pointer bytes. For `Expr`
+    ctors, the first 8 scalar bytes hold Lean's cached `data` hash so
+    user-level scalar fields (`binderInfo`, `nondep`) start at offset 8.
+    """
+    return rffi.cast(
+        lltype.Signed,
+        rffi.cast(
+            rffi.UCHARP,
+            rffi.ptradd(
+                rffi.cast(rffi.CCHARP, o),
+                OBJ_HDR_SIZE + 8 * num_objs,
+            ),
+        )[byte_offset],
+    )
+
+
+def ctor_get_uint32(o, num_objs, byte_offset):
+    """Read a 4-byte little-endian uint32 from a ctor's scalar area."""
+    p = rffi.cast(
+        rffi.UINTP,
+        rffi.ptradd(
+            rffi.cast(rffi.CCHARP, o),
+            OBJ_HDR_SIZE + 8 * num_objs + byte_offset,
+        ),
+    )
+    return intmask(p[0])
+
+
 def ctor_set_byte(o, num_objs, byte_offset, value):
     """Store one scalar byte in the trailing scalar area of a ctor."""
     p = rffi.cast(rffi.UCHARP,
@@ -166,10 +192,13 @@ def inc(o):
 
     Lean's @[export]'d functions consume their arguments by default. When
     we want to keep a borrowed reference alive across such a call, we must
-    bump m_rc before passing it.
+    bump m_rc before passing it. Persistent objects (`m_rc == 0`) are
+    immortal and left untouched.
     """
     p = rffi.cast(rffi.INTP, o)
-    p[0] = rffi.cast(rffi.INT, rffi.cast(lltype.Signed, p[0]) + 1)
+    rc = rffi.cast(lltype.Signed, p[0])
+    if rc > 0:
+        p[0] = rffi.cast(rffi.INT, rc + 1)
 
 
 # Function pointer type for `lean_dec_ref_cold`, the cold-path runtime
