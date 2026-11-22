@@ -9151,7 +9151,13 @@ class Machine(object):
         fn = store.field_a(h)
         if store.kind(fn) != KIND_APP:
             arg = store.field_b(h)
-            fn_type = self.infer(fn, check)
+            if not check and is_leaf(fn):
+                j = leaf_index(fn)
+                fn_type = _s32(store.leaf_infer[j])
+                if fn_type == 0:
+                    return self._infer_app1_only_leaf(fn, j, arg)
+            else:
+                fn_type = self.infer(fn, check)
             if store.kind(fn_type) != KIND_FORALL:
                 fn_type = self.whnf(fn_type)
                 if store.kind(fn_type) != KIND_FORALL:
@@ -9201,9 +9207,16 @@ class Machine(object):
         head = store.unapp_push(h)
         try:
             n = store._spine_top - mark
-            fn_type = self.infer(head, check)
             if not check:
-                return self._infer_app_only_buf(head, mark, n, fn_type)
+                if is_leaf(head):
+                    j = leaf_index(head)
+                    fn_type = _s32(store.leaf_infer[j])
+                    if fn_type == 0:
+                        return self._infer_app_only_leaf_buf(head, j, mark, n)
+                    return self._infer_app_only_buf(head, mark, n, fn_type, n)
+                fn_type = self.infer(head, False)
+                return self._infer_app_only_buf(head, mark, n, fn_type, n)
+            fn_type = self.infer(head, True)
             plen = 0
             i = n - 1
             while i >= 0:
@@ -9314,14 +9327,109 @@ class Machine(object):
         finally:
             store.unapp_pop(mark)
 
-    def _infer_app_only_buf(self, head, mark, n, fn_type):
+    @dont_inline
+    def _infer_app1_only_leaf(self, fn, j, arg):
+        """Infer the type of ``fn arg`` in ``check=False`` mode when ``fn`` is
+        a leaf with ``leaf_infer[j] == 0``. Peels a leading ``W_ForAll`` on
+        ``decl.type`` before importing so its unused domain is never imported."""
+        store = self.store
+        e = store.leaves[j]
+        if isinstance(e, W_Const):
+            decl = self._leaf_decl(fn, e)
+            if decl is None:
+                decl = get_decl(self.tc.declarations, e.name)
+            dt = decl.type
+            if isinstance(dt, W_ForAll):
+                cur = dt.body
+                if isinstance(cur, W_BVar):
+                    bid = cur.id
+                    return arg if bid == 0 else store.bvar(bid - 1)
+                body = store.import_const_term(e, decl, cur)
+                if store.loose_bvar_range(body) == 0:
+                    return body
+                return store.instantiate(body, arg, 0)
+        fn_type = self._infer_leaf(fn, False)
+        if store.kind(fn_type) != KIND_FORALL:
+            fn_type = self.whnf(fn_type)
+            if store.kind(fn_type) != KIND_FORALL:
+                raise W_NotAFunction(
+                    self.tc, self.export(fn), inferred_type=self.export(fn_type),
+                )
+        body = store.field_b(fn_type)
+        if store.loose_bvar_range(body) == 0:
+            return body
+        if is_leaf(body):
+            bid = (_s32(store.leaf_meta[leaf_index(body)]) >> 1) - 1
+            return arg if bid == 0 else store.bvar(bid - 1)
+        return store.instantiate(body, arg, 0)
+
+    @dont_inline
+    def _infer_app_only_leaf_buf(self, head, j, mark, n):
+        """Infer the type of ``head args`` (with ``args`` at
+        `_spine_buf[mark:mark+n]`) in ``check=False`` mode when ``head`` is a
+        leaf with ``leaf_infer[j] == 0``. Strips up to ``n`` leading
+        ``W_ForAll`` binders on ``decl.type`` before importing so unused binder
+        domains are never imported into the store."""
+        store = self.store
+        e = store.leaves[j]
+        if isinstance(e, W_Const):
+            decl = self._leaf_decl(head, e)
+            if decl is None:
+                decl = get_decl(self.tc.declarations, e.name)
+            cur = decl.type
+            k = 0
+            while k < n and isinstance(cur, W_ForAll):
+                cur = cur.body
+                k += 1
+            if k > 0:
+                if k == n:
+                    if isinstance(cur, W_BVar):
+                        bid = cur.id
+                        return (
+                            store.spine_arg(mark + bid)
+                            if bid < n
+                            else store.bvar(bid - n)
+                        )
+                    fn_type = store.import_const_term(e, decl, cur)
+                    if store.loose_bvar_range(fn_type) == 0:
+                        return fn_type
+                    if n == 1:
+                        return store.instantiate(
+                            fn_type, store.spine_arg(mark), 0,
+                        )
+                    return store.instantiate_multi_buf(fn_type, mark, n, 0)
+                rem = n - k
+                if isinstance(cur, W_BVar):
+                    bid = cur.id
+                    fn_type = (
+                        store.spine_arg(mark + rem + bid)
+                        if bid < k
+                        else store.bvar(bid - k)
+                    )
+                else:
+                    fn_type = store.import_const_term(e, decl, cur)
+                    if store.loose_bvar_range(fn_type) > 0:
+                        if k == 1:
+                            fn_type = store.instantiate(
+                                fn_type, store.spine_arg(mark + rem), 0,
+                            )
+                        else:
+                            fn_type = store.instantiate_multi_buf(
+                                fn_type, mark + rem, k, 0,
+                            )
+                return self._infer_app_only_buf(head, mark, n, fn_type, rem)
+        fn_type = self._infer_leaf(head, False)
+        return self._infer_app_only_buf(head, mark, n, fn_type, n)
+
+    def _infer_app_only_buf(self, head, mark, n, fn_type, rem):
         """
         The type of ``head args`` (with ``args`` at `_spine_buf[mark:mark+n]`)
-        given ``head``'s type, trusting the arguments.
+        given ``head``'s type after stripping the first ``n - rem`` arguments,
+        trusting the arguments.
         """
         store = self.store
         plen = 0
-        i = n - 1
+        i = rem - 1
         while i >= 0:
             if store.kind(fn_type) != KIND_FORALL:
                 if plen > 0:

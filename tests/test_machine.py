@@ -1703,3 +1703,145 @@ class TestJointCheckAndInferExpected(object):
             assert m.try_proj(p_stuck, False) == 0
         finally:
             tc.free()
+
+    def test_infer_app_unchecked_strips_forall_domains(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import _s32, leaf_index
+        from rpylean.objects import W_Const, W_NotAFunction, W_TypeError
+
+        u_n = Name.simple("u")
+        u_l = u_n.as_level_param()
+        v_l = Name.simple("v").as_level_param()
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        # Marker type constructors that appear ONLY inside binder domains.
+        dead1 = Name.simple("DeadDom1").axiom(type=TYPE)
+        dead2 = Name.simple("DeadDom2").axiom(type=forall(x.binder(type=TYPE))(TYPE))
+        dead_poly = Name.simple("DeadPoly").axiom(
+            levels=[u_n], type=forall(x.binder(type=u_l.succ().sort()))(TYPE),
+        )
+        res_decl = Name.simple("Res").axiom(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(TYPE),
+        )
+        res1_decl = Name.simple("Res1").axiom(type=forall(x.binder(type=NAT))(TYPE))
+        res_poly = Name.simple("ResPoly").axiom(
+            levels=[u_n], type=forall(x.binder(type=u_l.succ().sort()))(u_l.succ().sort()),
+        )
+        # 1. Multi-arg constant with unused binder domains (k == n)
+        f2 = Name.simple("f2").axiom(
+            type=forall(
+                x.binder(type=dead1.name.const()),
+                y.binder(type=dead2.name.const().app(NAT)),
+            )(res_decl.name.const().app(b1, b0)),
+        )
+        # 2. Single-arg constant with unused binder domain
+        f1 = Name.simple("f1").axiom(
+            type=forall(x.binder(type=dead1.name.const()))(
+                res1_decl.name.const().app(b0),
+            ),
+        )
+        # 3. BVar-returning constant (zero record allocation)
+        ret_bvar = Name.simple("retBVar").axiom(
+            type=forall(
+                x.binder(type=TYPE),
+                y.binder(type=dead2.name.const().app(b0)),
+            )(b1),
+        )
+        # 4. Alias-headed constant (0 < k < n) where body unfolds to W_ForAll
+        alias_ty = Name.simple("AliasTy").definition(
+            type=forall(x.binder(type=NAT))(TYPE),
+            value=fun(x.binder(type=NAT))(
+                forall(y.binder(type=NAT))(res_decl.name.const().app(b1, b0)),
+            ),
+        )
+        f_alias = Name.simple("fAlias").axiom(
+            type=forall(x.binder(type=dead1.name.const()))(
+                alias_ty.name.const().app(b0),
+            ),
+        )
+        # 5. Partially applied 3-arg constant (k == n < total binders)
+        f3 = Name.simple("f3").axiom(
+            type=forall(
+                x.binder(type=dead1.name.const()),
+                y.binder(type=dead2.name.const().app(NAT)),
+                Name.simple("z").binder(type=NAT),
+            )(res_decl.name.const().app(b2, b1)),
+        )
+        # 6. Universe-polymorphic constant
+        f_poly = Name.simple("fPoly").axiom(
+            levels=[u_n],
+            type=forall(
+                x.binder(type=u_l.succ().sort()),
+                y.binder(type=dead_poly.name.const([u_l]).app(b0)),
+            )(res_poly.name.const([u_l]).app(b1)),
+        )
+        # 7. Non-function alias (for W_NotAFunction check on 0 < k < n)
+        f_nonfn = Name.simple("fNonFn").axiom(
+            type=forall(x.binder(type=dead1.name.const()))(NAT),
+        )
+
+        env = Environment.having([
+            nat_decl, a_decl, b_decl,
+            dead1, dead2, dead_poly,
+            res_decl, res1_decl, res_poly,
+            f2, f1, ret_bvar, alias_ty, f_alias, f3, f_poly, f_nonfn,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            B = b_decl.name.const()
+            h_nat = store.import_term(NAT)
+
+            # Multi-arg (k == n)
+            h_f2_head = store.import_term(f2.name.const())
+            h_f2 = store.import_term(f2.name.const().app(A, B))
+            assert m.infer(h_f2, False) == store.import_term(res_decl.name.const().app(A, B))
+            assert _s32(store.leaf_infer[leaf_index(h_f2_head)]) == 0
+
+            # Single-arg (k == 1)
+            h_f1 = store.import_term(f1.name.const().app(A))
+            assert m.infer(h_f1, False) == store.import_term(res1_decl.name.const().app(A))
+
+            # Direct W_BVar return allocates zero records
+            h_rb = store.import_term(ret_bvar.name.const().app(NAT, A))
+            nrecs_before = store.nrecs
+            assert m.infer(h_rb, False) == h_nat
+            assert store.nrecs == nrecs_before
+
+            # Alias-headed (0 < k < n)
+            h_fa = store.import_term(f_alias.name.const().app(A, B))
+            assert m.infer(h_fa, False) == store.import_term(res_decl.name.const().app(A, B))
+
+            # Partial application (k == n < total binders)
+            h_f3 = store.import_term(f3.name.const().app(A, B))
+            assert m.infer(h_f3, False) == store.import_term(
+                forall(Name.simple("z").binder(type=NAT))(res_decl.name.const().app(A, B)),
+            )
+
+            # Universe-polymorphic instantiation
+            h_fp = store.import_term(f_poly.name.const([v_l]).app(v_l.sort(), A))
+            assert m.infer(h_fp, False) == store.import_term(
+                res_poly.name.const([v_l]).app(v_l.sort()),
+            )
+
+            # None of the dead binder-domain constants were ever imported!
+            dead_names = {dead1.name, dead2.name, dead_poly.name}
+            assert all(
+                not (isinstance(le, W_Const) and any(le.name.syntactic_eq(d) for d in dead_names))
+                for le in store.leaves
+            )
+
+            # W_NotAFunction when 0 < k < n and remaining target is not a Pi
+            h_nonfn = store.import_term(f_nonfn.name.const().app(A, B))
+            with pytest.raises(W_NotAFunction):
+                m.infer(h_nonfn, False)
+
+            # Soundness: check=True on f2 a b MUST check binder domain DeadDom1 != Nat and fail!
+            with pytest.raises(W_TypeError):
+                m.infer(h_f2, True)
+        finally:
+            tc.free()
