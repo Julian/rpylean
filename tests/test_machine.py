@@ -2466,5 +2466,19 @@ class TestJointCheckAndInferExpected(object):
             assert not store.ast_inst_eq_buf(lit0, [], [], 0, 0, h_lits)
             assert store.ast_inst_eq_buf(lit0, [], [], 0, 0, h_lit0)
             assert store.ast_inst_eq_buf(lits, [], [], 0, 0, h_lits)
+
+            # 5. TermStore.reset() clears GC side tables in place without reallocating.
+            leaves_id = id(store.leaves)
+            decl_id = id(store.leaf_decl)
+            infos_id = id(store.infos)
+            names_id = id(store.names)
+            m.reset()
+            assert id(store.leaves) == leaves_id
+            assert id(store.leaf_decl) == decl_id
+            assert id(store.infos) == infos_id
+            assert id(store.names) == names_id
+            assert store.ninfos == 0
+            assert store.nnames == 0
+            assert store.leaf_decl[pd_j] is None
         finally:
             tc.free()

@@ -1130,7 +1130,7 @@ class TermStore(object):
         'leaf_checked', 'leaf_delta', 'leaf_delta_body',
         'leaf_next', 'leaf_eqv', 'leaf_head_kind', 'leaf_prop_mask',
         'nleaves', 'leaf_cap',
-        'infos', 'names', '_name_ids', '_proj_overflow',
+        'infos', 'ninfos', 'names', 'nnames', '_name_ids', '_proj_overflow',
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
         '_store_gen', '_import_spine', '_import_spine_len',
         '_fvar_gens', '_fvar_gens_len', '_fvar_base_gen', '_fvar_multi',
@@ -1240,7 +1240,22 @@ class TermStore(object):
         #: Scratch memo for rare multi-depth collisions in one-shot substitutions.
         self._call_memo = IntMap(1 << 11, keep_cap=1 << 14)
         self._freed = False
-        self._forget()
+        self.nrecs = 0
+        self.napps = 0
+        self.nother = 0
+        self.nleaves = 0
+        self.leaves = [PROP] * self.leaf_cap
+        self.leaf_decl = [None] * self.leaf_cap
+        #: Binder infos (`Binder`s, for the name and style) and
+        #: `Name`s (for projections and lets), by `F_INFO` index.
+        self.infos = [None] * 1024
+        self.ninfos = 0
+        self.names = [Name.ANONYMOUS] * 64
+        self.nnames = 0
+        self._name_ids = name_dict()
+        self._proj_overflow = []
+        self._bvar_leaves = {}
+        self.nodes = []
 
     def _alloc_records(self, cap):
         self.cap = cap
@@ -1286,22 +1301,48 @@ class TermStore(object):
         _free_words(self.table)
 
     def _forget(self):
-        """Start over on everything the garbage collector looks after."""
+        """Clear used slots in GC-managed side tables in place, avoiding
+        re-allocating `leaves`/`leaf_decl`/`infos`/`names` on every epoch reset."""
+        leaves = self.leaves
+        leaf_decl = self.leaf_decl
+        nleaves = self.nleaves
+        i = 0
+        while i < nleaves:
+            leaves[i] = PROP
+            leaf_decl[i] = None
+            i += 1
+        infos = self.infos
+        ninfos = self.ninfos
+        if len(infos) > 16384 and ninfos * 8 < len(infos):
+            self.infos = [None] * 2048
+        else:
+            i = 0
+            while i < ninfos:
+                infos[i] = None
+                i += 1
+        self.ninfos = 0
+        nnames = self.nnames
+        if nnames > 0:
+            names = self.names
+            if len(names) > 4096 and nnames * 8 < len(names):
+                self.names = [Name.ANONYMOUS] * 256
+            else:
+                i = 0
+                while i < nnames:
+                    names[i] = Name.ANONYMOUS
+                    i += 1
+            self.nnames = 0
+            self._name_ids.clear()
+        if self._proj_overflow:
+            self._proj_overflow = []
+        if self._bvar_leaves:
+            self._bvar_leaves.clear()
+        if self.nodes:
+            self.nodes = []
         self.nrecs = 0
         self.napps = 0
         self.nother = 0
         self.nleaves = 0
-        lhint = self.leaf_cap if self.leaf_cap <= 8192 else 8192
-        self.leaves = newlist_hint(lhint)
-        self.leaf_decl = newlist_hint(lhint)
-        #: Binder infos (`Binder`s, for the name and style) and
-        #: `Name`s (for projections and lets), by `F_INFO` index.
-        self.infos = newlist_hint(1024)
-        self.names = []
-        self._name_ids = name_dict()
-        self._proj_overflow = []
-        self._bvar_leaves = {}
-        self.nodes = []
 
     def reset(self):
         """
@@ -1534,7 +1575,9 @@ class TermStore(object):
 
     def binder_of(self, h):
         """The `Binder` recorded for a lambda or forall record."""
-        return self.infos[self.info(h)]
+        b = self.infos[self.info(h)]
+        assert b is not None
+        return b
 
     def name_of(self, h):
         """The `Name` recorded for a projection or let record."""
@@ -2066,39 +2109,82 @@ class TermStore(object):
                 return self._cons_let_miss(name, type, pair, key, i)
             i = (i + 1) & tmask
 
+    @dont_inline
+    def _grow_infos(self):
+        old = self.infos
+        n = len(old)
+        new = [None] * (n * 2)
+        i = 0
+        while i < n:
+            new[i] = old[i]
+            i += 1
+        self.infos = new
+
     def _info_index(self, binder):
-        i = len(self.infos)
-        self.infos.append(binder)
+        i = self.ninfos
+        if i == len(self.infos):
+            self._grow_infos()
+        self.infos[i] = binder
+        self.ninfos = i + 1
         return i
+
+    @dont_inline
+    def _grow_names(self):
+        old = self.names
+        n = len(old)
+        new = [Name.ANONYMOUS] * (n * 2)
+        i = 0
+        while i < n:
+            new[i] = old[i]
+            i += 1
+        self.names = new
 
     def _name_index(self, name):
         i = self._name_ids.get(name, -1)
         if i >= 0:
             return i
-        i = len(self.names)
-        self.names.append(name)
+        i = self.nnames
+        if i == len(self.names):
+            self._grow_names()
+        self.names[i] = name
+        self.nnames = i + 1
         self._name_ids[name] = i
         return i
 
     # ---- leaves ----------------------------------------------------------
 
+    @dont_inline
+    def _grow_leaves(self):
+        j = self.leaf_cap
+        cap = j * 2
+        self.leaf_meta = _grow_u32_uninit(self.leaf_meta, j, cap)
+        self.leaf_whnf = _grow_u32(self.leaf_whnf, j, cap)
+        self.leaf_infer = _grow_u32(self.leaf_infer, j, cap)
+        self.leaf_checked = _grow_u32(self.leaf_checked, j, cap)
+        self.leaf_delta = _grow_i32(self.leaf_delta, j, cap)
+        self.leaf_delta_body = _grow_words(self.leaf_delta_body, j, cap)
+        self.leaf_next = _grow_u32(self.leaf_next, j, cap)
+        self.leaf_eqv = _grow_u32(self.leaf_eqv, j, cap)
+        self.leaf_head_kind = _grow_u32(self.leaf_head_kind, j, cap)
+        self.leaf_prop_mask = _grow_words(self.leaf_prop_mask, j, cap)
+        old_leaves = self.leaves
+        old_decl = self.leaf_decl
+        new_leaves = [PROP] * cap
+        new_decl = [None] * cap
+        k = 0
+        while k < j:
+            new_leaves[k] = old_leaves[k]
+            new_decl[k] = old_decl[k]
+            k += 1
+        self.leaves = new_leaves
+        self.leaf_decl = new_decl
+        self.leaf_cap = cap
+
     def _new_leaf(self, e):
         j = self.nleaves
         if j == self.leaf_cap:
-            cap = self.leaf_cap * 2
-            self.leaf_meta = _grow_u32_uninit(self.leaf_meta, j, cap)
-            self.leaf_whnf = _grow_u32(self.leaf_whnf, j, cap)
-            self.leaf_infer = _grow_u32(self.leaf_infer, j, cap)
-            self.leaf_checked = _grow_u32(self.leaf_checked, j, cap)
-            self.leaf_delta = _grow_i32(self.leaf_delta, j, cap)
-            self.leaf_delta_body = _grow_words(self.leaf_delta_body, j, cap)
-            self.leaf_next = _grow_u32(self.leaf_next, j, cap)
-            self.leaf_eqv = _grow_u32(self.leaf_eqv, j, cap)
-            self.leaf_head_kind = _grow_u32(self.leaf_head_kind, j, cap)
-            self.leaf_prop_mask = _grow_words(self.leaf_prop_mask, j, cap)
-            self.leaf_cap = cap
-        self.leaves.append(e)
-        self.leaf_decl.append(None)
+            self._grow_leaves()
+        self.leaves[j] = e
         self.leaf_meta[j] = _u32((e._packed >> 32) & 0x3FFFFFFF)
         self.leaf_head_kind[j] = _u32(
             0 if e.__class__ is W_Const else _LF_CLASSIFIED,
