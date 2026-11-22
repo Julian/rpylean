@@ -13,27 +13,19 @@ from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
-from rpylean import _format, _progress, parser
+from rpylean import _format, _gcstats, _progress, parser
 from rpylean._rlib.rcli import CLI, UsageError
 from rpylean._rlib.rterminal import terminal_width
 from rpylean._tokens import (
     ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3, HEAT_4,
     PLAIN, writer_from_arg,
 )
+from rpylean._tracer import StreamTracer
+from rpylean.environment import Environment
 from rpylean.exceptions import ExportError
 from rpylean.exporter import Exporter, json_escape as _json_escape
 from rpylean.ffi import FFI, detect_prefix, read_constant_info
-from rpylean.environment import (
-    DeclarationHook,
-    EnvironmentBuilder,
-    StreamTracer,
-    _arena_memory,
-    _bytes_allocated,
-    _live_memory,
-    _peak_memory,
-    _rawmalloced_memory,
-    from_export,
-)
+from rpylean.parser import DeclarationHook, EnvironmentBuilder, from_export
 from rpylean.objects import (
     Name, Resolver, name_dict, set_resolver,
 )
@@ -293,9 +285,9 @@ class _StreamingChecker(DeclarationHook):
                 "live=%dMB arena=%dMB rawmalloc=%dMB "
                 "cur=%s\n" % (
                     self.n_seen, self.n_checked, self.failures,
-                    _live_memory() // _MB,
-                    _arena_memory() // _MB,
-                    _rawmalloced_memory() // _MB,
+                    _gcstats.live_memory() // _MB,
+                    _gcstats.arena_memory() // _MB,
+                    _gcstats.rawmalloced_memory() // _MB,
                     decl.name.str(),
                 ),
             )
@@ -436,14 +428,12 @@ class _CheckRun(object):
 
     def start(self, abort_at):
         """
-        A fresh ``(builder, checker, tracer)`` wired with the parsed
-        limits.
+        A fresh ``(env, checker, tracer)`` wired with the parsed limits.
 
         ``abort_at`` is the failure count at which to stop (0 means
         unlimited).
         """
-        builder = EnvironmentBuilder()
-        env = builder.env
+        env = Environment(declarations=name_dict())
         if self.max_wall_time > 0.0:
             env.max_wall_time = self.max_wall_time
         if self.max_memory > 0:
@@ -468,7 +458,7 @@ class _CheckRun(object):
         if self.trace or self.stats:
             tracer = StreamTracer(self.stderrw if self.trace else None)
             env.tracer = tracer
-        return builder, checker, tracer
+        return env, checker, tracer
 
     def summarize(self, checker, tracer, bytes_at_start):
         if self.stats and tracer is not None:
@@ -477,17 +467,16 @@ class _CheckRun(object):
         # without grepping `--slower-than` output. RPython's `%`
         # formatter doesn't accept `%.1f`, so the MB figures are
         # rounded to whole megabytes via integer division.
-        # `_bytes_allocated()` and `_peak_memory()` are no-ops
-        # untranslated (return 0), so we skip the memory fields in
-        # that mode rather than emit three misleading zeros.
+        # `_gcstats` counters return 0 untranslated, so skip the memory
+        # fields in that mode rather than emitting misleading zeros.
         if we_are_translated():
             _MB = 1024 * 1024
             self.stderrw.write_plain(
                 "summary: %d/%d decls checked, peak %d MB, allocated %d MB\n" % (
                     checker.n_checked,
                     checker.n_seen,
-                    _peak_memory() // _MB,
-                    (_bytes_allocated() - bytes_at_start) // _MB,
+                    _gcstats.peak_memory() // _MB,
+                    (_gcstats.bytes_allocated() - bytes_at_start) // _MB,
                 )
             )
         else:
@@ -562,10 +551,11 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
                     "Could not read `%s`: %s" % (path, os.strerror(err.errno))
                 )
 
-        builder, checker, tracer = run.start(abort_at)
+        env, checker, tracer = run.start(abort_at)
+        builder = EnvironmentBuilder(env=env)
         if refcount is not None:
             builder.set_refcount(refcount)
-        bytes_at_start = _bytes_allocated()
+        bytes_at_start = _gcstats.bytes_allocated()
         try:
             try:
                 parser.validate_export_metadata(file)
@@ -735,16 +725,13 @@ def ffi_check(self, args, stdin, stdout, stderr):
     run = _CheckRun(args, stdoutw, stderrw)
     start = time()
     abort_at = run.max_fail if run.max_fail > 0 else 0
-    builder, checker, tracer = run.start(abort_at)
-    # Declarations arrive as the walk (and the resolver) reach them, not
-    # in declaration order; Lean already checked that order.
-    builder.ordered = False
-    collector = _FFICollector(builder, checker)
-    bytes_at_start = _bytes_allocated()
+    env, checker, tracer = run.start(abort_at)
+    collector = _FFICollector(env, checker)
+    bytes_at_start = _gcstats.bytes_allocated()
     try:
         with FFI.from_prefix(prefix) as ffi_obj:
             env_obj = ffi_obj.import_modules(modules)
-            set_resolver(_FFIResolver(ffi_obj, env_obj, builder))
+            set_resolver(_FFIResolver(ffi_obj, env_obj, env))
             try:
                 if run.filter_names is not None:
                     # Fast path: look up each filtered name individually
@@ -778,14 +765,13 @@ def ffi_repl(self, args, stdin, stdout, stderr):
     if prefix is None:
         return 1
 
-    builder = EnvironmentBuilder()
-    builder.ordered = False
-    collector = _FFILoader(builder)
+    env = Environment(declarations=name_dict())
+    collector = _FFILoader(env)
     with FFI.from_prefix(prefix) as ffi_obj:
         env_obj = ffi_obj.import_modules(modules)
         ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
-    return _run_repl(builder.env, args, stdin, stdout, stderr)
+    return _run_repl(env, args, stdin, stdout, stderr)
 
 
 @ffi.subcommand(
@@ -854,16 +840,16 @@ class _ExportCollector(_FFICollectorBase):
 
 
 class _FFILoader(_FFICollectorBase):
-    """Register every walked constant into a builder; used by `ffi
+    """Register every walked constant into an environment; used by `ffi
     repl` to populate the env before dropping into interactive mode."""
 
-    _attrs_ = ['builder']
+    _attrs_ = ['env']
 
-    def __init__(self, builder):
-        self.builder = builder
+    def __init__(self, env):
+        self.env = env
 
     def _handle(self, decl):
-        self.builder.register_declaration(decl)
+        self.env.register_declaration(decl, ordered=False)
         return False
 
 
@@ -872,21 +858,21 @@ class _FFICollector(_FFICollectorBase):
     `True` when the checker has signalled an early-abort (e.g.
     `--max-fail` reached)."""
 
-    _attrs_ = ['builder', 'checker']
+    _attrs_ = ['env', 'checker']
 
-    def __init__(self, builder, checker):
-        self.builder = builder
+    def __init__(self, env, checker):
+        self.env = env
         self.checker = checker
 
     def _handle(self, decl):
-        declarations = self.builder.env.declarations
+        declarations = self.env.declarations
         if decl.name in declarations:
             # Already demand-loaded by the `_FFIResolver` as a
             # dependency of an earlier-walked decl; check the registered
             # instance — it's the one other decls resolved against.
             decl = declarations[decl.name]
         else:
-            self.builder.register_declaration(decl)
+            self.env.register_declaration(decl, ordered=False)
         return self.checker.on_declaration(decl)
 
 
@@ -901,17 +887,17 @@ class _FFIResolver(Resolver):
     which still visits every constant exactly once.
     """
 
-    _attrs_ = ['ffi', 'env_obj', 'builder']
+    _attrs_ = ['ffi', 'env_obj', 'env']
 
-    def __init__(self, ffi, env_obj, builder):
+    def __init__(self, ffi, env_obj, env):
         self.ffi = ffi
         self.env_obj = env_obj
-        self.builder = builder
+        self.env = env
 
     def resolve(self, name):
         decl = self.ffi.read_constant_named(self.env_obj, name)
         if decl is not None:
-            self.builder.register_declaration(decl)
+            self.env.register_declaration(decl, ordered=False)
 
 
 def _open_export(path, stdin):

@@ -1678,23 +1678,22 @@ class TestResolver(object):
     """
 
     def test_missing_decl_is_demand_loaded(self):
-        from rpylean.environment import EnvironmentBuilder
-        from rpylean.objects import Resolver, set_resolver
+        from rpylean.objects import Resolver, name_dict, set_resolver
 
         A = Name.simple("A")
-        builder = EnvironmentBuilder()
+        env = Environment(declarations=name_dict())
 
         class DemandLoad(Resolver):
             requested = ()
 
             def resolve(self, name):
                 self.requested += (name,)
-                builder.register_declaration(A.axiom(type=TYPE))
+                env.register_declaration(A.axiom(type=TYPE), ordered=False)
 
         resolver = DemandLoad()
         set_resolver(resolver)
         try:
-            error = builder.env.check_decl(
+            error = env.check_decl(
                 Name.simple("b").axiom(type=A.const()),
             )
         finally:
@@ -1702,7 +1701,7 @@ class TestResolver(object):
 
         assert error is None
         assert resolver.requested == (A,)
-        assert A in builder.env.declarations
+        assert A in env.declarations
 
     def test_resolver_which_cannot_provide_the_decl(self):
         from rpylean.objects import Resolver, set_resolver
@@ -2147,3 +2146,68 @@ class TestQuotientValidation(object):
         env = Environment.having([quot_d, fake_mk, ind_d])
         err = env.check_decl(ind_d)
         assert isinstance(err, W_InvalidQuotient)
+
+
+class TestPublicDeclarations(object):
+    def test_empty_env_terminates(self):
+        assert list(Environment.EMPTY.public()) == []
+
+    def test_filters_private_and_terminates(self):
+        pub = Name.simple("pub").axiom(type=PROP)
+        priv = Name.from_str("Foo._private.bar.0.secret").axiom(type=PROP)
+        env = Environment.having([priv, pub])
+        assert list(env.public()) == [pub]
+
+    def test_all_private_terminates(self):
+        priv = Name.from_str("Foo._private.bar.0.secret").axiom(type=PROP)
+        env = Environment.having([priv])
+        assert list(env.public()) == []
+
+
+class TestInvalidDeclarationBudget(object):
+    def test_tokens_renders_diagnostic_once_and_resets_budget(self):
+        from rpylean.objects import _RENDER_BUDGET
+
+        bad = Name.simple("bad").axiom(type=Name.simple("Missing").const())
+        calls = []
+
+        class CountingInvalid(W_InvalidDeclaration):
+            def as_diagnostic(self):
+                calls.append(_RENDER_BUDGET.remaining)
+                return W_InvalidDeclaration.as_diagnostic(self)
+
+        err = CountingInvalid(bad, UnknownDeclaration(Name.simple("Missing")), {})
+        tokens = err.tokens()
+        assert len(calls) == 1
+        assert calls[0] > 0
+        assert _RENDER_BUDGET.remaining == -1
+        assert "Missing" in FORMAT_PLAIN(tokens)
+
+    def test_budget_resets_on_exception(self):
+        from rpylean.objects import _RENDER_BUDGET
+
+        bad = Name.simple("bad").axiom(type=PROP)
+
+        class FailingInvalid(W_InvalidDeclaration):
+            def as_diagnostic(self):
+                raise RuntimeError("boom")
+
+        err = FailingInvalid(bad, UnknownDeclaration(Name.simple("Missing")), {})
+        with pytest.raises(RuntimeError):
+            err.tokens()
+        assert _RENDER_BUDGET.remaining == -1
+
+
+class TestRegisterDeclaration(object):
+    def test_ordered_vs_unordered_registration(self):
+        from rpylean.objects import name_dict
+
+        env = Environment(declarations=name_dict())
+        a_decl = Name.simple("a").axiom(type=PROP)
+        b_decl = Name.simple("b").axiom(type=PROP)
+        env.register_declaration(a_decl, ordered=False)
+        assert a_decl.index == -1
+        env.register_declaration(b_decl, ordered=True)
+        assert b_decl.index == 1
+        with pytest.raises(AlreadyDeclared):
+            env.register_declaration(a_decl, ordered=False)

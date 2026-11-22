@@ -1,28 +1,21 @@
 from __future__ import print_function
 
+import os
 from sys import stderr
 from time import clock
 from traceback import print_exc
-import pdb
 
 from rpython.rlib import rgc
-from rpython.rlib.jit import dont_look_inside
-from rpython.rlib.objectmodel import (
-    newlist_hint,
-    not_rpython,
-    specialize,
-    we_are_translated,
-)
+from rpython.rlib.objectmodel import not_rpython, we_are_translated
 
-from rpylean import parser
-from rpylean._tokens import TRACE, TokenWriter
+from rpylean import _gcstats
 from rpylean._rlib import r_dict_eq
+from rpylean._tracer import StreamTracer, Tracer  # noqa: F401 (re-exported)
 from rpylean.exceptions import (
     AlreadyDeclared,
     DuplicateLevels,
     MemoryExceeded,
     UndeclaredLevelParam,
-    UnknownQuotient,
     W_Error,
     W_InvalidDeclaration,
     WallTimeExceeded,
@@ -32,746 +25,61 @@ from rpylean.objects import (
     STAGE_ALL,
     STAGE_IND_ONLY,
     STAGE_PRE_BLOCK,
-    W_CheckError,
     Name,
-    StrName,
+    W_CheckError,
     W_Constructor,
+    W_Inductive,
     W_MemoryError,
     W_NotYetDeclared,
     W_UnsafeReference,
     W_WallTimeError,
-    W_Inductive,
-    W_LEVEL_ZERO,
-    PROP,
-    fun,
-    _mk_w_bvar,
-    find_decl,
-    get_decl,
     name_dict,
 )
 
 
-_OFFSET_UNDEF = 0
-_OFFSET_TRUE = 1
-_OFFSET_FALSE = 2
-
-#: Fed to the reused parser during the reference-counting pre-pass wherever
-#: it would otherwise splice in a real sub-expression. That pass builds
-#: exprs only to discard them (it keeps just the counts), so the operand it
-#: hands to each `.app()` / binder / `.proj()` is pure write-only scaffolding
-#: — never stored in the pool, never compared, never read as data. It must
-#: still be *some* valid `W_Expr` (you cannot call `.app()` on `None`), so a
-#: loose de Bruijn `#0` is used: syntactically incomplete on its own, so it
-#: reads as filler rather than a meaningful value like `PROP` would.
-#:
-#: This is the opposite situation to the two "this slot is dead" markers —
-#: a freed pool slot and a dropped theorem value — which ARE read back and
-#: so must be `None`, the one value no real expr can take (see `ref_expr`
-#: and `W_Theorem.drop_checked_value`).
-_SCAN_SCAFFOLD = _mk_w_bvar(0)
-
-#: `_try_lazy_delta` outcomes: proved equal, or undecided (with both
-#: sides advanced to whnf_core'd, delta-exhausted forms).
-_LD_TRUE = 1
-_LD_UNDEF = 0
+def _check_duplicate_levels(name, levels):
+    nl = len(levels)
+    if nl == 2:
+        if levels[0] is levels[1]:
+            raise DuplicateLevels(name, levels, levels[1])
+    elif nl == 3:
+        l0, l1, l2 = levels[0], levels[1], levels[2]
+        if l0 is l1:
+            raise DuplicateLevels(name, levels, l1)
+        if l0 is l2 or l1 is l2:
+            raise DuplicateLevels(name, levels, l2)
+    elif nl > 3:
+        seen = {}
+        for level in levels:
+            if level in seen:
+                raise DuplicateLevels(name, levels, level)
+            seen[level] = True
 
 
-@specialize.call_location()
-def _register_at(table, idx, value, placeholder):
-    n = len(table)
-    if idx == n:
-        table.append(value)
-    elif idx < n:
-        table[idx] = value
-    else:
-        while len(table) < idx:
-            table.append(placeholder)
-        table.append(value)
-
-
-class EnvironmentBuilder(object):
+def _link_inductive_groups(env, declarations):
     """
-    A mutable environment builder.
-
-    Incrementally builds up an environment as we parse an export file.
+    Place each inductive's constructors and recursors in its block when
+    constructed programmatically via `Environment.having` (where members
+    are passed as separate declarations without an explicit `group=`).
     """
-
-    _attrs_ = [
-        'levels', 'exprs', 'names', 'declarations', 'env',
-        '_refcount', '_scanning', '_groups', 'ordered',
-    ]
-
-    def __init__(self, levels=None, exprs=None, names=[]):
-        self.levels = [W_LEVEL_ZERO] if levels is None else levels
-        self.exprs = [] if exprs is None else exprs
-        self.names = [Name.ANONYMOUS] + names
-        self.declarations = []
-        self.env = Environment(declarations=name_dict())
-        # Whether registration order is declaration order. It is for an
-        # export, which lists each declaration after everything it uses;
-        # it is not for declarations pulled in on demand, which arrive in
-        # the order the checker happens to need them.
-        self.ordered = True
-        # Block name (see `W_Declaration.group_key`) -> group id, so the
-        # members of a mutual block registered as separate records still
-        # end up in one group.
-        self._groups = name_dict()
-        # Expr-pool pruning (see `ref_expr`). `_refcount` is `None` on the
-        # default path (no pruning — REPL, tests, stdin); a `list[int]`
-        # of parse-time reference counts when a pre-scan has run. While
-        # `_scanning` is True this builder IS that counting pre-pass:
-        # `ref_expr` tallies references and hands back a dummy instead of
-        # a real expr, so no deep expr DAG is retained.
-        self._refcount = None
-        self._scanning = False
-
-    def start_scan(self):
-        """Configure this builder as the reference-counting pre-pass."""
-        self._scanning = True
-        self._refcount = parser.RefCountTable(4096)
-
-    def set_refcount(self, counts):
-        """Attach pre-scanned reference counts and pre-size the expr/name pools."""
-        self._refcount = counts
-        n = counts.length
-        if not self.exprs and n > 0:
-            self.exprs = newlist_hint(n)
-        if len(self.names) == 1 and n > 16384:
-            nhint = n >> 4
-            names = newlist_hint(nhint if nhint >= 1024 else 1024)
-            names.append(Name.ANONYMOUS)
-            self.names = names
-
-    def ref_expr(self, eidx):
-        """
-        Resolve one parse-time reference to expression index ``eidx``.
-
-        Every ``builder.exprs[...]`` read in the parser goes through here,
-        which is what makes expr-pool pruning possible in three modes:
-
-        * No pruning (``_refcount is None`` — REPL, tests, streamed stdin):
-          just return the pooled expr.
-        * Counting pre-pass (``_scanning``): tally this reference and hand
-          back scaffolding. Because it is the *same* parser walking the
-          *same* file, its tallies are exactly the reference counts the
-          real pass will make — no separate, drift-prone scanner.
-        * Real pass (counts present, not scanning): return the expr and
-          decrement its count; when the last reference is consumed, drop
-          the pool's hold so the sub-tree can be reclaimed once the owning
-          declaration lets go too.
-        """
-        counts = self._refcount
-        if counts is None:
-            e = self.exprs[eidx]
-            assert e is not None
-            return e
-        if self._scanning:
-            counts.bump(eidx)
-            return _SCAN_SCAFFOLD
-        # A slot the parser still references must have a positive count and
-        # a live expr. Either assertion failing means the pre-pass under-
-        # counted this index and its expr was freed too early: fail loudly
-        # rather than splice a released slot into a later expression.
-        e = self.exprs[eidx]
-        assert e is not None
-        if counts.dec(eidx) == 0:
-            self.exprs[eidx] = None
-        return e
-
-    def __eq__(self, other):
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return (
-            self.levels == other.levels
-            and self.exprs == other.exprs
-            and self.names == other.names
-            and self.declarations == other.declarations
-        )
-
-    def __ne__(self, other):
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return not self == other
-
-    def __repr__(self):
-        return "<EnvironmentBuilder with %s declarations>" % (len(self.declarations),)
-
-    def consume(self, stream, hook=None):
-        """
-        Parse NDJSON lines from ``stream`` directly into this builder.
-
-        If ``hook`` is given, its ``on_declaration`` is invoked for each
-        declaration as it is registered, with the partially-built environment
-        available at ``self.env`` for streaming type-checking. Returning a
-        truthy value from ``on_declaration`` aborts the loop early.
-
-        Returns self.
-        """
-        cursor = parser.LineCursor("")
-        tail = ""
-        n = 0
-        while True:
-            chunk = stream.read(262144)
-            if not chunk:
-                if tail:
-                    end = len(tail)
-                    if end > 0 and tail[end - 1] == '\r':
-                        end -= 1
-                    cursor.reset(tail, 0, end)
-                    parser.parse_cursor(cursor, self)
-                    if hook is not None:
-                        while n < len(self.declarations):
-                            if hook.on_declaration(self.declarations[n]):
-                                return self
-                            n += 1
-                return self
-            clen = len(chunk)
-            pos = 0
-            if tail:
-                nl = chunk.find('\n')
-                if nl < 0:
-                    tail = tail + chunk
-                    continue
-                line = tail + chunk[:nl]
-                tail = ""
-                llen = len(line)
-                if llen > 0 and line[llen - 1] == '\r':
-                    llen -= 1
-                cursor.reset(line, 0, llen)
-                parser.parse_cursor(cursor, self)
-                if hook is not None:
-                    while n < len(self.declarations):
-                        if hook.on_declaration(self.declarations[n]):
-                            return self
-                        n += 1
-                pos = nl + 1
-                if pos >= clen:
-                    continue
-            last_nl = chunk.rfind('\n', pos)
-            if last_nl < 0:
-                assert pos >= 0
-                tail = chunk[pos:]
-                continue
-            limit = last_nl + 1
-            cursor.line = chunk
-            cursor.length = limit
-            stop_on_decl = hook is not None
-            while pos <= last_nl:
-                res = parser._parse_chunk_fast(
-                    chunk, pos, limit, self, stop_on_decl,
-                )
-                if res >= 0:
-                    pos = res
-                else:
-                    pos = ~res
-                    assert pos >= 0
-                    nl = chunk.find('\n', pos)
-                    assert nl >= 0
-                    end = nl
-                    if end > pos and chunk[end - 1] == '\r':
-                        end -= 1
-                    cursor.pos = pos
-                    cursor.length = end
-                    parser.parse_cursor_general(cursor, self)
-                    cursor.length = limit
-                    pos = nl + 1
-                if hook is not None:
-                    while n < len(self.declarations):
-                        if hook.on_declaration(self.declarations[n]):
-                            return self
-                        n += 1
-            if pos < clen:
-                assert pos >= 0
-                tail = chunk[pos:]
-
-    # The export format only requires `in`/`ie`/`il` references to be integers,
-    # so an index may skip values or fill a previously-skipped one even though
-    # lean4export emits them densely and in order. Skipped slots are padded
-    # with a same-typed placeholder (never referenced by a valid export) so the
-    # tables stay homogeneous lists rather than `Optional` ones.
-    def register_name(self, nidx, name):
-        _register_at(self.names, nidx, name, Name.ANONYMOUS)
-
-    def register_expr(self, eidx, w_expr):
-        if self._scanning:
-            # The counting pre-pass keeps only the per-slot reference
-            # tally; the scaffolding-built expr itself is discarded.
-            self._refcount.set_zero(eidx)
-            return
-        exprs = self.exprs
-        if eidx == len(exprs):
-            exprs.append(w_expr)
-        else:
-            _register_at(exprs, eidx, w_expr, PROP)
-
-    def register_level(self, uidx, level):
-        _register_at(self.levels, uidx, level, W_LEVEL_ZERO)
-
-    def register_quotient(self, name, type, levels, kind):
-        # Allowed: Quot, Quot.mk, Quot.ind, Quot.lift (all `Name.str` chains
-        # rooted at the anonymous name).
-        if not isinstance(name, StrName):
-            raise UnknownQuotient(name, type)
-        parent = name.parent
-        if parent.is_anonymous():
-            if name.suffix != "Quot":
-                raise UnknownQuotient(name, type)
-        elif (
-            isinstance(parent, StrName)
-            and parent.parent.is_anonymous()
-            and parent.suffix == "Quot"
-            and name.suffix in ("mk", "ind", "lift")
-        ):
-            pass
-        else:
-            raise UnknownQuotient(name, type)
-        self.register_declaration(
-            name.quotient(type=type, kind=kind, levels=levels),
-        )
-
-    def check_name(self, name):
-        """
-        Lean's ``environment.check_name``: nothing may already be
-        declared under ``name``.
-        """
-        env_decls = self.env.declarations
-        if name in env_decls:
-            raise AlreadyDeclared(name, env_decls)
-
-    def register_declaration(self, decl, group=-1):
-        """
-        Register ``decl`` as the next declaration.
-
-        ``group`` names the block ``decl`` belongs to when the record
-        being parsed is itself the block (an inductive record with its
-        constructors and recursors); otherwise the block, if any, is
-        derived from the declaration.
-        """
-        env_decls = self.env.declarations
-        dname = decl.name
-        cached_dict = dname._decl_dict
-        if cached_dict is not None:
-            if cached_dict is env_decls or dname in env_decls:
-                raise AlreadyDeclared(dname, env_decls)
-        dlevels = decl.levels
-        nl = len(dlevels)
-        if nl == 2:
-            if dlevels[0] is dlevels[1]:
-                raise DuplicateLevels(dname, dlevels, dlevels[1])
-        elif nl == 3:
-            l0, l1, l2 = dlevels[0], dlevels[1], dlevels[2]
-            if l0 is l1:
-                raise DuplicateLevels(dname, dlevels, l1)
-            if l0 is l2 or l1 is l2:
-                raise DuplicateLevels(dname, dlevels, l2)
-        elif nl > 3:
-            seen = {}
-            for level in dlevels:
-                if level in seen:
-                    raise DuplicateLevels(dname, dlevels, level)
-                seen[level] = True
-        if self.ordered:
-            self._place(decl, group)
-        self.declarations.append(decl)
-        env_decls[dname] = decl
-        dname._decl_dict = env_decls
-        dname._decl_cached = decl
-
-    def _place(self, decl, group):
-        index = len(self.declarations)
-        decl.index = index
-        key = decl.group_key()
-        if group < 0:
-            if key is None:
-                return
-            group = self._groups.get(key, -1)
-            if group < 0:
-                group = index
-        if key is not None and key not in self._groups:
-            self._groups[key] = group
-        decl.group = group
-
-    def finish(self):
-        """
-        Finish building, returning the live environment.
-        """
-        return self.env
-
-
-class DeclarationHook(object):
-    """
-    Base class for streaming hooks invoked on each newly-registered declaration.
-    """
-
-    _attrs_ = []
-
-    def on_declaration(self, decl):
-        """Return a truthy value to abort the consume loop early."""
-        return False
-
-
-def from_export(export):
-    """
-    Load an environment out of some lean4export-formatted export.
-    """
-    parser.validate_export_metadata(export)
-    return EnvironmentBuilder().consume(export).finish()
-
-
-def from_str(text):
-    """
-    Load an environment out of a lean4export-formatted string.
-    """
-    return parser.from_str(text)
-
-
-class Tracer(object):
-    """
-    No-op tracer.
-
-    Override any hook to observe the reduction loop. The bodies here
-    are intentionally empty so RPython inlines them away on the default
-    path; hot call sites in `objects.py` invoke these unconditionally
-    on `env.tracer` rather than gating on the tracer's identity.
-    """
-
-    _attrs_ = ['_writer', '_depth', 'recording', 'writes']
-
-    def __init__(self, writer):
-        self._writer = writer
-        self._depth = 0
-        # Whether this tracer renders terms (a stream is attached).
-        # A counting-only tracer must not be handed rendered terms: the
-        # machine would have to export both sides of every comparison
-        # just to be counted.
-        self.writes = False
-        # Whether this tracer records anything. The hottest call sites
-        # (arena probes, whnf steps, the def_eq prologue) fire billions
-        # of times per heavy declaration; a virtual call into an empty
-        # method is not free at that volume, so they gate on this flag
-        # instead of relying on the empty bodies being inlined away.
-        self.recording = False
-
-
-    def census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
-        """Called as a `Machine` is freed, with the sizes its tables
-        reached for that declaration."""
-
-    def phase(self, phase):
-        """Called by the `Machine` as a phase of a declaration's check
-        ends; a counting tracer attributes the def_eq calls since the
-        previous phase to it."""
-
-    def begin_argcheck(self):
-        """Called before an argument check, to bracket its def_eq calls."""
-
-    def end_argcheck(self, head, index):
-        """Called after the check of argument ``index`` of an application
-        of ``head``, closing the bracket `begin_argcheck` opened."""
-
-    def counted_enter(self):
-        """`enter` without the terms, for a tracer that only counts."""
-
-    def counted_result(self, result):
-        """`result` without rendering, for a tracer that only counts."""
-        return result
-
-    def enter(self, expr1, expr2, declarations):
-        """Called when entering a def_eq comparison."""
-
-    def result(self, value):
-        """Called when leaving a def_eq comparison. Returns the value."""
-        return value
-
-    def whnf_step(self, expr, declarations):
-        """Called for each form encountered during WHNF reduction.
-
-        Invoked once per iteration of the reduction loop, including for the
-        initial expression and the final form returned as the WHNF.
-        """
-
-
-    def iota(self, recursor_name):
-        """Called when a recursor's iota rule fires on a constructor.
-
-        ``recursor_name`` is the recursor's ``Name`` (e.g. `Nat.rec`).
-        """
-
-    def beta(self):
-        """Called when a beta-redex `(fun ... ↦ ...) arg` is reduced."""
-
-    def delta(self, const_name):
-        """Called when a constant `c` is delta-unfolded to its definition."""
-
-    def nat_reduce(self, op_name):
-        """Called when the native nat reducer fires on a binary op.
-
-        ``op_name`` is the kernel-op ``Name`` (e.g. `Nat.add`).
-        """
-
-    def eqv_hit(self):
-        """Called when def_eq resolves via the equivalence union-find."""
-
-
-    def pi_hit(self):
-        """Called when def_eq resolves via proof irrelevance."""
-
-    def identity_hit(self):
-        """Called when def_eq resolves via `expr1 is expr2` at entry."""
-
-
-    def klike_fired(self):
-        """Called when K-like reduction replaces a stuck major."""
-
-    def klike_bail_head(self):
-        """Called when K-like bails: major's type head is not a const."""
-
-    def klike_bail_mutual(self):
-        """Called when K-like bails: recursor belongs to a mutual block."""
-
-    def klike_bail_ctors(self):
-        """Called when K-like bails: inductive is not single-ctor."""
-
-    def klike_bail_defeq(self):
-        """Called when K-like bails: ctor type is not def-eq to the
-        major's type."""
-
-    def print_summary(self, writer):
-        """Called by the progress signal handler (and end-of-run with
-        ``--stats``) to dump whatever rolling counters the tracer holds.
-        No-op by default; `StreamTracer` overrides to dump iota / beta /
-        delta / whnf-cache counts.
-        """
-
-
-class StreamTracer(Tracer):
-    """
-    Tracer that counts everything and (when ``writer`` is non-None) writes
-    indented def_eq comparisons to that stream.
-
-    Pass ``writer=None`` to suppress stream output and just collect stats.
-    The counters are always live so callers can read them out via
-    `print_summary` at the end of a run.
-    """
-
-    _attrs_ = [
-        '_pending_newline',
-        'def_eq_count', 'whnf_step_count', 'beta_count',
-        'iota_by_name', 'delta_by_name', 'nat_reduce_by_name',
-        'eqv_hit_count', 'pi_hit_count', 'false_count',
-        'identity_hit_count',
-        'klike_fired_count', 'klike_bail_head_count',
-        'klike_bail_mutual_count', 'klike_bail_ctors_count',
-        'klike_bail_defeq_count',
-        'table_max', 'phases', '_phase_mark',
-        'argchecks', '_arg_mark',
-    ]
-
-    def __init__(self, writer):
-        self._writer = writer
-        self._depth = 0
-        self.recording = True
-        self.writes = writer is not None
-        self._pending_newline = False
-        # Largest per-declaration table sizes seen: records, leaves,
-        # instantiate / shift / bind memos, eqv, neq, failed.
-        self.table_max = [0] * 8
-        self.phases = {}
-        self._phase_mark = 0
-        self.argchecks = {}
-        self._arg_mark = 0
-        self.def_eq_count = 0
-        self.whnf_step_count = 0
-        self.beta_count = 0
-        self.iota_by_name = name_dict()
-        self.delta_by_name = name_dict()
-        self.nat_reduce_by_name = name_dict()
-        self.eqv_hit_count = 0
-        self.pi_hit_count = 0
-        self.false_count = 0
-        self.identity_hit_count = 0
-        self.klike_fired_count = 0
-        self.klike_bail_head_count = 0
-        self.klike_bail_mutual_count = 0
-        self.klike_bail_ctors_count = 0
-        self.klike_bail_defeq_count = 0
-
-    def _flush_pending(self):
-        if self._pending_newline:
-            self._writer.write_plain("\n")
-            self._pending_newline = False
-
-    def enter(self, expr1, expr2, declarations):
-        self.def_eq_count += 1
-        if self._writer is None:
-            return
-        self._flush_pending()
-        indent = "  " * self._depth
-        self._writer.write_plain(indent)
-        self._writer.write([TRACE.emit("def_eq")])
-        self._writer.write_plain(" ")
-        self._writer.write(expr1.tokens(declarations))
-        self._writer.write_plain(" ≟ ")
-        self._writer.write(expr2.tokens(declarations))
-        self._pending_newline = True
-        self._depth += 1
-
-    def counted_enter(self):
-        self.def_eq_count += 1
-
-    def counted_result(self, value):
-        if not value:
-            self.false_count += 1
-        return value
-
-    def result(self, value):
-        if not value:
-            self.false_count += 1
-        if self._writer is None:
-            return value
-        self._depth -= 1
-        mark = " ✓" if value else " ✗"
-        if self._pending_newline:
-            self._writer.write_plain(mark + "\n")
-            self._pending_newline = False
-        else:
-            indent = "  " * self._depth
-            self._writer.write_plain("%s%s\n" % (indent, mark.lstrip()))
-        return value
-
-    def whnf_step(self, expr, declarations):
-        self.whnf_step_count += 1
-        if self._writer is None:
-            return
-        self._flush_pending()
-        indent = "  " * self._depth
-        self._writer.write_plain(indent)
-        self._writer.write([TRACE.emit("whnf")])
-        self._writer.write_plain(" ")
-        self._writer.write(expr.tokens(declarations))
-        self._writer.write_plain("\n")
-
-
-    def iota(self, recursor_name):
-        self.iota_by_name[recursor_name] = (
-            self.iota_by_name.get(recursor_name, 0) + 1
-        )
-
-    def beta(self):
-        self.beta_count += 1
-
-    def delta(self, const_name):
-        self.delta_by_name[const_name] = (
-            self.delta_by_name.get(const_name, 0) + 1
-        )
-
-    def nat_reduce(self, op_name):
-        self.nat_reduce_by_name[op_name] = (
-            self.nat_reduce_by_name.get(op_name, 0) + 1
-        )
-
-    def eqv_hit(self):
-        self.eqv_hit_count += 1
-
-
-    def pi_hit(self):
-        self.pi_hit_count += 1
-
-    def identity_hit(self):
-        self.identity_hit_count += 1
-
-
-    def klike_fired(self):
-        self.klike_fired_count += 1
-
-    def klike_bail_head(self):
-        self.klike_bail_head_count += 1
-
-    def klike_bail_mutual(self):
-        self.klike_bail_mutual_count += 1
-
-    def klike_bail_ctors(self):
-        self.klike_bail_ctors_count += 1
-
-    def klike_bail_defeq(self):
-        self.klike_bail_defeq_count += 1
-
-
-    def census(self, nrecs, nleaves, inst, shift, bind, eqv, neq, failed):
-        sizes = [nrecs, nleaves, inst, shift, bind, eqv, neq, failed]
-        for i in range(8):
-            if sizes[i] > self.table_max[i]:
-                self.table_max[i] = sizes[i]
-
-    def begin_argcheck(self):
-        self._arg_mark = self.def_eq_count
-
-    def end_argcheck(self, head, index):
-        key = "%s #%d" % (head, index)
-        self.argchecks[key] = (
-            self.argchecks.get(key, 0) + self.def_eq_count - self._arg_mark
-        )
-
-    def phase(self, phase):
-        calls = self.def_eq_count - self._phase_mark
-        self._phase_mark = self.def_eq_count
-        self.phases[phase] = self.phases.get(phase, 0) + calls
-
-
-    def print_summary(self, writer):
-        """Write a human-readable summary of collected counts to ``writer``.
-
-        ``writer`` is a `TokenWriter` (uses `write_plain`).
-        """
-        writer.write_plain("\n--- tracer stats ---\n")
-        writer.write_plain("def_eq calls:   %d\n" % self.def_eq_count)
-        writer.write_plain("def_eq false:   %d\n" % self.false_count)
-        writer.write_plain("def_eq eqv hits: %d\n" % self.eqv_hit_count)
-        writer.write_plain("def_eq proof-irrelevance hits: %d\n"
-                           % self.pi_hit_count)
-        writer.write_plain("def_eq identity hits: %d\n"
-                           % self.identity_hit_count)
-        m = self.table_max
-        writer.write_plain(
-            "max per decl: records %d, leaves %d, inst memo %d, "
-            "shift memo %d, bind memo %d, eqv %d, neq %d, failed %d\n"
-            % (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]),
-        )
-        for phase, count in self.phases.iteritems():
-            writer.write_plain("def_eq calls in %s: %d\n" % (phase, count))
-        writer.write_plain("def_eq calls by argument check:\n")
-        for key, count in self.argchecks.iteritems():
-            if count > 0:
-                writer.write_plain("  %d\t%s\n" % (count, key))
-        writer.write_plain(
-            "k-like fired/bail head/mutual/ctors/defeq: %d/%d/%d/%d/%d\n" % (
-                self.klike_fired_count,
-                self.klike_bail_head_count,
-                self.klike_bail_mutual_count,
-                self.klike_bail_ctors_count,
-                self.klike_bail_defeq_count,
-            ),
-        )
-        writer.write_plain("whnf steps:     %d\n" % self.whnf_step_count)
-        writer.write_plain("beta reductions: %d\n" % self.beta_count)
-        _write_by_name(writer, "iota fires", self.iota_by_name)
-        _write_by_name(writer, "delta unfolds", self.delta_by_name)
-        _write_by_name(writer, "native nat reductions", self.nat_reduce_by_name)
-
-
-def _write_by_name(writer, label, counts):
-    # Dump unsorted (matching `--slower-than`'s output style) so callers
-    # can pipe through `sort -k1 -rn` if they want a ranked summary —
-    # avoids needing an RPython-friendly sort key here.
-    if not counts:
-        writer.write_plain("%s: 0\n" % label)
-        return
-    total = 0
-    for name, count in counts.iteritems():
-        total += count
-    writer.write_plain("%s: %d total\n" % (label, total))
-    for name, count in counts.iteritems():
-        writer.write_plain("  %d\t%s\n" % (count, name.str()))
+    groups = env._groups
+    if groups is None:
+        groups = name_dict()
+        env._groups = groups
+    for each in declarations:
+        kind = each.w_kind
+        if isinstance(kind, W_Inductive):
+            groups[each.name] = each.group
+            for member in kind.constructors:
+                member.group = each.group
+            for member in kind.recursors:
+                member.group = each.group
+    for each in declarations:
+        kind = each.w_kind
+        if isinstance(kind, W_Constructor):
+            group = groups.get(kind.induct, -1)
+            if group >= 0:
+                each.group = group
 
 
 class TypeChecker(object):
@@ -808,7 +116,7 @@ class TypeChecker(object):
         self.has_limits = env.max_wall_time > 0.0 or env.max_memory > 0
         self.def_eq_hooked = self.has_limits or self.tracer.recording
         self.start_time = clock() if env.max_wall_time > 0.0 else 0.0
-        self.start_peak = _peak_memory() if env.max_memory > 0 else 0
+        self.start_peak = _gcstats.peak_memory() if env.max_memory > 0 else 0
         self._whnf_tick = 0
         self._keep_warm = allow_warm
         self.machine = acquire(self, allow_warm)
@@ -860,12 +168,12 @@ class TypeChecker(object):
             # than the cap (`TOTAL_MEMORY` oscillates with the major
             # collection cycle, so it alone misses footprint spikes —
             # the thing that actually drives the machine into swap).
-            live = _live_memory()
+            live = _gcstats.live_memory()
             if live > max_memory:
                 raise MemoryExceeded(
                     self.decl, live, max_memory,
                 )
-            growth = _peak_memory() - self.start_peak
+            growth = _gcstats.peak_memory() - self.start_peak
             if growth > max_memory:
                 raise MemoryExceeded(
                     self.decl, growth, max_memory,
@@ -902,15 +210,6 @@ class TypeChecker(object):
         machine = self.machine
         h = machine.store.import_term(expr)
         result = machine.whnf(h)
-        if result == h:
-            return expr
-        return machine.export(result)
-
-    def whnf_core(self, expr):
-        """``expr`` reduced without unfolding definitions."""
-        machine = self.machine
-        h = machine.store.import_term(expr)
-        result = machine.whnf_core(h)
         if result == h:
             return expr
         return machine.export(result)
@@ -964,111 +263,6 @@ class CheckResult(object):
         self.error = error
 
 
-def _gc_time_seconds():
-    """
-    Total GC time so far in seconds. Returns 0.0 in untranslated mode
-    where `rgc.get_stats` is unavailable.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.TOTAL_GC_TIME) * 0.001
-    return 0.0
-
-
-def _bytes_allocated():
-    """
-    Cumulative bytes allocated so far. Returns 0 in untranslated mode.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.TOTAL_ALLOCATED_MEMORY)
-    return 0
-
-
-@dont_look_inside
-def _live_memory():
-    """
-    Current live heap size in bytes. Returns 0 in untranslated mode.
-
-    Unlike `_bytes_allocated` (a monotonically-increasing cumulative
-    counter), this reflects what the GC has not yet reclaimed — useful
-    for spotting per-decl working-set growth. `dont_look_inside`
-    because `gc_get_stats` has no JIT equivalent and this is reached
-    from traced code via `tick_wall_time`.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.TOTAL_MEMORY)
-    return 0
-
-
-@dont_look_inside
-def _arena_memory():
-    """
-    Live GC-arena bytes (small objects). Returns 0 untranslated.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.TOTAL_ARENA_MEMORY)
-    return 0
-
-
-@dont_look_inside
-def _rawmalloced_memory():
-    """
-    Live raw-malloced bytes (large objects: big lists/dicts/strings).
-    Returns 0 untranslated.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.TOTAL_RAWMALLOCED_MEMORY)
-    return 0
-
-
-@dont_look_inside
-def _peak_memory():
-    """
-    Process-wide peak heap size so far in bytes. Returns 0 in
-    untranslated mode. Monotonically non-decreasing across a run — a
-    *delta* across one decl tells you how much that decl raised the
-    high-water mark. `dont_look_inside` because `gc_get_stats` has no
-    JIT equivalent and this is reached from traced code via
-    `tick_wall_time`.
-    """
-    if we_are_translated():
-        return rgc.get_stats(rgc.PEAK_MEMORY)
-    return 0
-
-
-def _place_all(declarations):
-    """
-    Give ``declarations`` their positions in declaration order and their
-    blocks, the way `EnvironmentBuilder` does one at a time. An
-    inductive's constructors and recursors join its block.
-    """
-    groups = name_dict()
-    index = 0
-    for each in declarations:
-        each.index = index
-        key = each.group_key()
-        if key is not None:
-            group = groups.get(key, -1)
-            if group < 0:
-                group = index
-                groups[key] = group
-            each.group = group
-        index += 1
-    for each in declarations:
-        kind = each.w_kind
-        if isinstance(kind, W_Inductive):
-            groups[each.name] = each.group
-            for member in kind.constructors:
-                member.group = each.group
-            for member in kind.recursors:
-                member.group = each.group
-    for each in declarations:
-        kind = each.w_kind
-        if isinstance(kind, W_Constructor):
-            group = groups.get(kind.induct, -1)
-            if group >= 0:
-                each.group = group
-
-
 class Environment(object):
     """
     A Lean environment with its declarations.
@@ -1077,7 +271,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_wall_time', 'max_memory',
-        '_code_cache',
+        '_code_cache', '_groups',
     ]
     # `declarations` is fully immutable: the reference is set in
     # `__init__` and never reassigned (the dict's *contents* are
@@ -1098,6 +292,9 @@ class Environment(object):
         self.max_wall_time = 0.0
         self.max_memory = 0
         self._code_cache = None
+        # Block name (see `W_Declaration.group_key`) -> group id, created
+        # lazily when ordered registration encounters a block member.
+        self._groups = None
 
     @not_rpython
     def __getitem__(self, value):
@@ -1115,25 +312,72 @@ class Environment(object):
     def __repr__(self):
         return "<Environment with %s declarations>" % (len(self.declarations),)
 
+    def check_name(self, name):
+        """
+        Lean's ``environment.check_name``: nothing may already be
+        declared under ``name``.
+        """
+        if name in self.declarations:
+            raise AlreadyDeclared(name, self.declarations)
+
+    def register_declaration(self, decl, group=-1, ordered=True):
+        """
+        Validate and register ``decl`` in this environment.
+
+        When ``ordered`` is True (export streams and `Environment.having`),
+        records declaration order (`decl.index`) and block membership
+        (`decl.group`), using ``group`` when the caller is registering a
+        whole inductive block. Pass ``ordered=False`` when declarations
+        arrive out of dependency order (e.g. demand-loaded via FFI).
+        """
+        env_decls = self.declarations
+        dname = decl.name
+        cached_dict = dname._decl_dict
+        if cached_dict is not None:
+            if cached_dict is env_decls or dname in env_decls:
+                raise AlreadyDeclared(dname, env_decls)
+        elif dname in env_decls:
+            raise AlreadyDeclared(dname, env_decls)
+        _check_duplicate_levels(dname, decl.levels)
+        if ordered:
+            self._place(decl, group)
+        env_decls[dname] = decl
+        dname._decl_dict = env_decls
+        dname._decl_cached = decl
+
+    def _place(self, decl, group):
+        index = len(self.declarations)
+        decl.index = index
+        key = decl.group_key()
+        if group < 0:
+            if key is None:
+                return
+            if self._groups is None:
+                self._groups = name_dict()
+            group = self._groups.get(key, -1)
+            if group < 0:
+                group = index
+        if key is not None:
+            if self._groups is None:
+                self._groups = name_dict()
+            if key not in self._groups:
+                self._groups[key] = group
+        decl.group = group
+
     @staticmethod
     def having(declarations):
         """
         Construct an environment with the given declarations.
         """
-        by_name = name_dict()
+        env = Environment(declarations=name_dict())
+        has_inductive = False
         for each in declarations:
-            if each.name in by_name:
-                raise AlreadyDeclared(each.name, by_name)
-
-            levels = {}
-            for level in each.levels:
-                if level in levels:
-                    raise DuplicateLevels(each.name, each.levels, level)
-                levels[level] = True
-
-            by_name[each.name] = each
-        _place_all(declarations)
-        return Environment(declarations=by_name)
+            env.register_declaration(each)
+            if isinstance(each.w_kind, W_Inductive):
+                has_inductive = True
+        if has_inductive:
+            _link_inductive_groups(env, declarations)
+        return env
 
     def type_check(self, declarations, printer=None):
         """
@@ -1181,9 +425,9 @@ class Environment(object):
 
     def _run_type_check_one(self, decl, measure, allow_warm):
         if measure:
-            gc_start = _gc_time_seconds()
-            bytes_start = _bytes_allocated()
-            peak_start = _peak_memory()
+            gc_start = _gcstats.gc_time_seconds()
+            bytes_start = _gcstats.bytes_allocated()
+            peak_start = _gcstats.peak_memory()
             start = clock()
         else:
             gc_start = 0.0
@@ -1219,14 +463,16 @@ class Environment(object):
                 stderr.write("\nwhile checking ")
                 stderr.write(decl.name.str())
                 stderr.write("\n\n")
-                pdb.post_mortem()
+                if os.environ.get("RPYLEAN_PDB"):
+                    import pdb
+                    pdb.post_mortem()
             tc.free(True)
             raise
         finally:
             if measure:
                 elapsed = clock() - start
-                gc_elapsed = _gc_time_seconds() - gc_start
-                bytes_allocated = _bytes_allocated() - bytes_start
+                gc_elapsed = _gcstats.gc_time_seconds() - gc_start
+                bytes_allocated = _gcstats.bytes_allocated() - bytes_start
             else:
                 elapsed = 0.0
                 gc_elapsed = 0.0
@@ -1245,8 +491,8 @@ class Environment(object):
             # high-water mark into swap.
             rgc.collect()
         if measure:
-            live_memory = _live_memory()
-            peak_growth = _peak_memory() - peak_start
+            live_memory = _gcstats.live_memory()
+            peak_growth = _gcstats.peak_memory() - peak_start
         else:
             live_memory = 0
             peak_growth = 0
@@ -1268,12 +514,6 @@ class Environment(object):
         if not names:
             return self.all()
         return _NamedDeclarations(self.declarations, names)
-
-    def match(self, substring):
-        """
-        Yield declarations whose name contains the given substring.
-        """
-        return _MatchingDeclarations(self.declarations, substring)
 
     def public(self):
         """
@@ -1318,17 +558,6 @@ class Environment(object):
         finally:
             tc.free()
 
-    def whnf_core(self, expr):
-        """
-        Reduction without unfolding definitions, with a transient
-        `TypeChecker`. See `def_eq`.
-        """
-        tc = TypeChecker(self, None)
-        try:
-            return tc.whnf_core(expr)
-        finally:
-            tc.free()
-
 
 #: The empty environment.
 Environment.EMPTY = Environment.having([])
@@ -1353,20 +582,6 @@ class _AllDeclarations(_Declarations):
 
     def next(self):
         return next(self.iter)
-
-
-class _MatchingDeclarations(_Declarations):
-    _attrs_ = ['declarations', 'substring', 'iter']
-
-    def __init__(self, declarations, substring):
-        self.declarations = declarations
-        self.substring = substring
-        self.iter = iter(self.declarations.itervalues())
-
-    def next(self):
-        for decl in self.iter:
-            if self.substring in decl.name.str():
-                return decl
 
 
 class _NamedDeclarations(_Declarations):
@@ -1394,3 +609,4 @@ class _PublicDeclarations(_Declarations):
             if declaration.name.is_private:
                 continue
             return declaration
+        raise StopIteration

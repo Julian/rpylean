@@ -5,8 +5,9 @@ Tests from https://github.com/leanprover/lean4export/blob/master/Test.lean
 import pytest
 from textwrap import dedent
 
+from rpylean.environment import Environment
 from rpylean.exceptions import ReflexiveKError, UnknownQuotient
-from rpylean.environment import EnvironmentBuilder, Environment, from_str
+from rpylean.parser import EnvironmentBuilder, from_str
 from rpylean.objects import (
     W_LEVEL_ZERO,
     TYPE,

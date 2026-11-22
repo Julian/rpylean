@@ -12,7 +12,7 @@ from rpython.rlib.rbigint import rbigint
 import pytest
 
 from rpylean import parser
-from rpylean.environment import EnvironmentBuilder
+from rpylean.parser import EnvironmentBuilder
 from rpylean.objects import (
     Name, W_LEVEL_ZERO, W_BVar, W_LitNat, W_LitStr,
     SAFETY_PARTIAL, SAFETY_SAFE, SAFETY_UNSAFE,

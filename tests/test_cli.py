@@ -761,7 +761,8 @@ class TestFFICollector(object):
         instance — the one other declarations resolved against.
         """
         from rpylean.cli import _FFICollector
-        from rpylean.environment import DeclarationHook, EnvironmentBuilder
+        from rpylean.objects import name_dict
+        from rpylean.parser import DeclarationHook
 
         class Record(DeclarationHook):
             seen = ()
@@ -771,13 +772,13 @@ class TestFFICollector(object):
                 return False
 
         A = Name.simple("A")
-        builder = EnvironmentBuilder()
+        env = Environment(declarations=name_dict())
         registered = A.axiom(type=TYPE)
-        builder.register_declaration(registered)
+        env.register_declaration(registered, ordered=False)
 
         hook = Record()
-        aborted = _FFICollector(builder, hook)._handle(A.axiom(type=TYPE))
+        aborted = _FFICollector(env, hook)._handle(A.axiom(type=TYPE))
 
         assert not aborted
         assert hook.seen == (registered,)
-        assert builder.env.declarations[A] is registered
+        assert env.declarations[A] is registered

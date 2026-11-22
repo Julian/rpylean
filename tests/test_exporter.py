@@ -4,8 +4,9 @@ Tests for `rpylean.exporter` (lean4export 3.1.0 NDJSON emission).
 
 from StringIO import StringIO
 
-from rpylean.environment import Environment, from_export
+from rpylean.environment import Environment
 from rpylean.exporter import Exporter, json_escape, json_string
+from rpylean.parser import from_export
 from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,

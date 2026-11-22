@@ -17,8 +17,8 @@ from __future__ import print_function
 
 import pytest
 
-from rpylean.environment import from_export
 from rpylean.exceptions import ExportError
+from rpylean.parser import from_export
 from tests import lka_arena
 
 

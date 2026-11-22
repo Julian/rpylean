@@ -114,3 +114,31 @@ class TestDispatch(object):
             whnf a
             """,
         )
+
+    def test_dump_skips_private_and_terminates(self):
+        pub = Name.simple("pub").axiom(type=NAT)
+        priv = Name.from_str("Foo._private.bar.0.secret").axiom(type=NAT)
+        env = Environment.having([priv, pub])
+
+        out, err, stdoutw, stderrw = _writers()
+        assert dispatch(env, "dump", BytesIO(), stdoutw, stderrw) == 0
+        assert out.getvalue().decode("utf-8") == "axiom pub : Nat\n"
+        assert err.getvalue() == ""
+
+    def test_check_single_decl_reports_w_error(self):
+        bad = Name.simple("bad").axiom(type=Name.simple("Missing").const())
+        env = Environment.having([bad])
+
+        out, err, stdoutw, stderrw = _writers()
+        assert dispatch(env, "check bad", BytesIO(), stdoutw, stderrw) == 0
+        assert "unknown declaration Missing" in out.getvalue().decode("utf-8")
+        assert err.getvalue() == ""
+
+    def test_first_reports_w_error_as_diagnostic(self):
+        bad = Name.simple("bad").axiom(type=Name.simple("Missing").const())
+        env = Environment.having([bad])
+
+        out, err, stdoutw, stderrw = _writers()
+        assert dispatch(env, "first", BytesIO(), stdoutw, stderrw) == 0
+        assert "unknown declaration Missing" in out.getvalue().decode("utf-8")
+        assert err.getvalue() == ""

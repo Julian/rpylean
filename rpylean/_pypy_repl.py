@@ -9,8 +9,8 @@ from pprint import pprint as pp  # noqa: F401
 import os
 
 from rpylean import objects as o  # noqa: F401
-from rpylean.environment import from_export
 from rpylean.ffi import FFI  # noqa: F401
+from rpylean.parser import from_export
 
 Name = o.Name
 n = names = o.names

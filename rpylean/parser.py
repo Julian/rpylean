@@ -16,7 +16,7 @@ import sys
 from textwrap import dedent
 
 from rpython.rlib.objectmodel import (
-    always_inline, dont_inline, specialize, we_are_translated,
+    always_inline, dont_inline, newlist_hint, specialize, we_are_translated,
 )
 from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rbigint import rbigint
@@ -27,7 +27,10 @@ from rpython.rtyper.lltypesystem.rstr import STR
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
-from rpylean.exceptions import ExportError, MalformedLine, ReflexiveKError
+from rpylean.environment import Environment
+from rpylean.exceptions import (
+    ExportError, MalformedLine, ReflexiveKError, UnknownQuotient,
+)
 
 
 _RC_U32_ARRAY = rffi.CArray(rffi.UINT)
@@ -169,15 +172,209 @@ class ExportVersionError(ExportError):
         ]
 
 
-# ---- Public entry points -------------------------------------------------
+# ---- EnvironmentBuilder & public entry points ----------------------------
+
+#: Write-only placeholder handed back by `EnvironmentBuilder.ref_expr` during
+#: the counting pre-pass (`start_scan`), where sub-expressions are built only
+#: to tally references and immediately discarded.
+_SCAN_SCAFFOLD = objects._mk_w_bvar(0)
+
+
+@specialize.call_location()
+def _register_at(table, idx, value, placeholder):
+    n = len(table)
+    if idx == n:
+        table.append(value)
+    elif idx < n:
+        table[idx] = value
+    else:
+        while len(table) < idx:
+            table.append(placeholder)
+        table.append(value)
+
+
+class DeclarationHook(object):
+    """
+    Base class for streaming hooks invoked on each newly-registered declaration.
+    """
+
+    _attrs_ = []
+
+    def on_declaration(self, decl):
+        """Return a truthy value to abort the consume loop early."""
+        return False
+
+
+class EnvironmentBuilder(object):
+    """
+    A mutable environment builder.
+
+    Incrementally builds up an environment as we parse an export file.
+    """
+
+    _attrs_ = [
+        'levels', 'exprs', 'names', 'declarations', 'env',
+        '_refcount', '_scanning', 'ordered',
+    ]
+
+    def __init__(self, levels=None, exprs=None, names=[], env=None):
+        self.levels = [objects.W_LEVEL_ZERO] if levels is None else levels
+        self.exprs = [] if exprs is None else exprs
+        self.names = [objects.Name.ANONYMOUS] + names
+        self.declarations = []
+        self.env = (
+            Environment(declarations=objects.name_dict())
+            if env is None else env
+        )
+        # Whether registration order is declaration order. True for exports,
+        # which list each declaration after everything it uses.
+        self.ordered = True
+        # Expr-pool pruning (see `ref_expr`). `_refcount` is `None` on the
+        # default path (no pruning — REPL, tests, stdin); a `RefCountTable`
+        # when a pre-scan has run. While `_scanning` is True this builder IS
+        # that counting pre-pass (used as a test oracle for `prescan_refcounts`).
+        self._refcount = None
+        self._scanning = False
+
+    def start_scan(self):
+        """Configure this builder as the reference-counting pre-pass."""
+        self._scanning = True
+        self._refcount = RefCountTable(4096)
+
+    def set_refcount(self, counts):
+        """Attach pre-scanned reference counts and pre-size the expr/name pools."""
+        self._refcount = counts
+        n = counts.length
+        if not self.exprs and n > 0:
+            self.exprs = newlist_hint(n)
+        if len(self.names) == 1 and n > 16384:
+            nhint = n >> 4
+            names = newlist_hint(nhint if nhint >= 1024 else 1024)
+            names.append(objects.Name.ANONYMOUS)
+            self.names = names
+
+    def ref_expr(self, eidx):
+        """
+        Resolve one parse-time reference to expression index ``eidx``.
+
+        Every ``builder.exprs[...]`` read in the parser goes through here,
+        enabling expr-pool pruning when `_refcount` is attached: once a
+        slot's count hits 0, the pool drops its hold so checked proof terms
+        can be reclaimed.
+        """
+        counts = self._refcount
+        if counts is None:
+            e = self.exprs[eidx]
+            assert e is not None
+            return e
+        if self._scanning:
+            counts.bump(eidx)
+            return _SCAN_SCAFFOLD
+        e = self.exprs[eidx]
+        assert e is not None
+        if counts.dec(eidx) == 0:
+            self.exprs[eidx] = None
+        return e
+
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return (
+            self.levels == other.levels
+            and self.exprs == other.exprs
+            and self.names == other.names
+            and self.declarations == other.declarations
+        )
+
+    def __ne__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return not self == other
+
+    def __repr__(self):
+        return "<EnvironmentBuilder with %s declarations>" % (len(self.declarations),)
+
+    def consume(self, stream, hook=None):
+        """
+        Parse NDJSON lines from ``stream`` directly into this builder.
+
+        If ``hook`` is given, its ``on_declaration`` is invoked for each
+        declaration as it is registered, with the partially-built environment
+        available at ``self.env`` for streaming type-checking. Returning a
+        truthy value from ``on_declaration`` aborts the loop early.
+
+        Returns self.
+        """
+        _consume_stream(stream, self, hook)
+        return self
+
+    # Skipped `in`/`ie`/`il` indices are padded with a same-typed placeholder
+    # so the tables stay homogeneous lists rather than `Optional` ones.
+    def register_name(self, nidx, name):
+        _register_at(self.names, nidx, name, objects.Name.ANONYMOUS)
+
+    def register_expr(self, eidx, w_expr):
+        if self._scanning:
+            self._refcount.set_zero(eidx)
+            return
+        exprs = self.exprs
+        if eidx == len(exprs):
+            exprs.append(w_expr)
+        else:
+            _register_at(exprs, eidx, w_expr, objects.PROP)
+
+    def register_level(self, uidx, level):
+        _register_at(self.levels, uidx, level, objects.W_LEVEL_ZERO)
+
+    def register_quotient(self, name, type, levels, kind):
+        # Allowed: Quot, Quot.mk, Quot.ind, Quot.lift (all `Name.str` chains
+        # rooted at the anonymous name).
+        if not isinstance(name, objects.StrName):
+            raise UnknownQuotient(name, type)
+        parent = name.parent
+        if parent.is_anonymous():
+            if name.suffix != "Quot":
+                raise UnknownQuotient(name, type)
+        elif (
+            isinstance(parent, objects.StrName)
+            and parent.parent.is_anonymous()
+            and parent.suffix == "Quot"
+            and name.suffix in ("mk", "ind", "lift")
+        ):
+            pass
+        else:
+            raise UnknownQuotient(name, type)
+        self.register_declaration(
+            name.quotient(type=type, kind=kind, levels=levels),
+        )
+
+    def check_name(self, name):
+        self.env.check_name(name)
+
+    def register_declaration(self, decl, group=-1):
+        self.env.register_declaration(decl, group=group, ordered=self.ordered)
+        self.declarations.append(decl)
+
+    def finish(self):
+        """
+        Finish building, returning the live environment.
+        """
+        return self.env
+
+
+def from_export(export):
+    """
+    Load an environment out of some lean4export-formatted export.
+    """
+    validate_export_metadata(export)
+    return EnvironmentBuilder().consume(export).finish()
+
 
 def from_str(text):
     """
     Parse a lean4export-formatted string (no metadata header) into a fresh
     ``EnvironmentBuilder`` and return it.
     """
-    from rpylean.environment import EnvironmentBuilder
-
     return EnvironmentBuilder().consume(StringIO(dedent(text).strip()))
 
 
@@ -2522,14 +2719,15 @@ def _prescan_line_general(cursor, counts):
     counts.ensure(eidx)
 
 
-def prescan_refcounts(stream, size_hint=65536):
-    """Scan an export stream (positioned after its metadata line) at raw-byte
-    level and return a ``RefCountTable`` of parse-time expression reference
-    counts."""
-    counts = RefCountTable(size_hint)
-    try:
+def _make_stream_driver(prescan):
+    """Import-time factory generating both 256KB chunk-streaming loops
+    (``_consume_stream`` for `EnvironmentBuilder.consume`, ``_prescan_stream``
+    for `prescan_refcounts`) with zero runtime dispatch overhead."""
+
+    def _stream_lines(stream, target, hook=None):
         cursor = LineCursor("")
         tail = ""
+        n = 0
         while True:
             chunk = stream.read(262144)
             if not chunk:
@@ -2538,8 +2736,16 @@ def prescan_refcounts(stream, size_hint=65536):
                     if end > 0 and tail[end - 1] == '\r':
                         end -= 1
                     cursor.reset(tail, 0, end)
-                    _prescan_line(cursor, counts)
-                return counts
+                    if prescan:
+                        _prescan_line(cursor, target)
+                    else:
+                        parse_cursor(cursor, target)
+                        if hook is not None:
+                            while n < len(target.declarations):
+                                if hook.on_declaration(target.declarations[n]):
+                                    return
+                                n += 1
+                return
             clen = len(chunk)
             pos = 0
             if tail:
@@ -2553,7 +2759,15 @@ def prescan_refcounts(stream, size_hint=65536):
                 if llen > 0 and line[llen - 1] == '\r':
                     llen -= 1
                 cursor.reset(line, 0, llen)
-                _prescan_line(cursor, counts)
+                if prescan:
+                    _prescan_line(cursor, target)
+                else:
+                    parse_cursor(cursor, target)
+                    if hook is not None:
+                        while n < len(target.declarations):
+                            if hook.on_declaration(target.declarations[n]):
+                                return
+                            n += 1
                 pos = nl + 1
                 if pos >= clen:
                     continue
@@ -2565,8 +2779,14 @@ def prescan_refcounts(stream, size_hint=65536):
             limit = last_nl + 1
             cursor.line = chunk
             cursor.length = limit
+            stop_on_decl = (not prescan) and (hook is not None)
             while pos <= last_nl:
-                res = _prescan_chunk_fast(chunk, pos, limit, counts)
+                if prescan:
+                    res = _prescan_chunk_fast(chunk, pos, limit, target)
+                else:
+                    res = _parse_chunk_fast(
+                        chunk, pos, limit, target, stop_on_decl,
+                    )
                 if res >= 0:
                     pos = res
                 else:
@@ -2579,12 +2799,39 @@ def prescan_refcounts(stream, size_hint=65536):
                         end -= 1
                     cursor.pos = pos
                     cursor.length = end
-                    _prescan_line_general(cursor, counts)
+                    if prescan:
+                        _prescan_line_general(cursor, target)
+                    else:
+                        parse_cursor_general(cursor, target)
                     cursor.length = limit
                     pos = nl + 1
+                if not prescan and hook is not None:
+                    while n < len(target.declarations):
+                        if hook.on_declaration(target.declarations[n]):
+                            return
+                        n += 1
             if pos < clen:
                 assert pos >= 0
                 tail = chunk[pos:]
+
+    _stream_lines.__name__ = (
+        "_prescan_stream" if prescan else "_consume_stream"
+    )
+    return _stream_lines
+
+
+_consume_stream = _make_stream_driver(False)
+_prescan_stream = _make_stream_driver(True)
+
+
+def prescan_refcounts(stream, size_hint=65536):
+    """Scan an export stream (positioned after its metadata line) at raw-byte
+    level and return a ``RefCountTable`` of parse-time expression reference
+    counts."""
+    counts = RefCountTable(size_hint)
+    try:
+        _prescan_stream(stream, counts)
+        return counts
     except:
         counts.free()
         raise

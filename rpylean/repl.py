@@ -14,7 +14,8 @@ from rpylean._tokens import (
     TokenWriter,
     _ANSI_RESET,
 )
-from rpylean.environment import StreamTracer, TypeChecker
+from rpylean._tracer import StreamTracer
+from rpylean.environment import TypeChecker
 from rpylean.objects import Name
 
 
@@ -119,7 +120,7 @@ def check(env, args, _, stdoutw, stderrw):
     if declaration is None:
         return
 
-    error = env.check_decl(declaration)
+    error = env.type_check_one(declaration, measure=False).error
     if error is None:
         stdoutw.write_plain("%s correctly type checks.\n" % declaration.name.str())
     else:
@@ -133,7 +134,7 @@ def check(env, args, _, stdoutw, stderrw):
 def first(env, _, __, stdoutw, stderrw):
     for each in env.declarations.values():
         try:
-            error = env.check_decl(each)
+            error = env.type_check_one(each, measure=False).error
         except Exception as error:
             stderrw.write_plain(
                 "Unexpected error when checking %s: %s\n"
