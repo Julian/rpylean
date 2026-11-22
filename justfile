@@ -66,10 +66,6 @@ test *ARGS=tests:
 test-translated *ARGS=translated_tests:
     @just pypy "{{ pypy_checkout }}/pytest.py" {{ ARGS }}
 
-# Benchmark rpylean against a given export file.
-bench file:
-    hyperfine \
-        --command-name untranslated \
-        --command-name translated \
-        "PYTHONPATH='{{ pypy_checkout }}/' '{{ pypy }}' -m rpylean check '{{ file }}'" \
-        "'{{ translated }}' check '{{ file }}'"
+# Run soundness checks and sequential A/B benchmarks (baseline vs candidate).
+bench *ARGS:
+    "{{ justfile_directory() }}/scripts/bench_ab.py" {{ ARGS }}
