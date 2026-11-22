@@ -7645,7 +7645,7 @@ class Machine(object):
                 if cb2 is None:
                     cb2 = c2_kind.init_ctor_body(decls)
                 m2 = cb2.m
-                if m2 < 0 or cb2.let_vals is not None or n_app < m2:
+                if m2 < 0 or cb2.let_vals is not None or cb2.delegate_const is not None or n_app < m2:
                     break
                 idx2 = cb2.num_params + fidxs[rem - 1]
                 nargs2 = len(cb2.args)
@@ -7759,149 +7759,53 @@ class Machine(object):
         finally:
             store.unapp_pop(mark)
 
-    def _try_lazy_ctor_proj(self, cur, head, pbase, ptop):
-        """When ``cur`` is an application (or nullary leaf) of a `_LF_DELTA`
-        `W_Definition` ``head`` whose stripped body is a constructor application
-        `λ... => let... => Ctor ...`, peel one or more pending projection layers
-        directly on the AST and import and instantiate only the final projected
-        field, avoiding materializing dead sibling fields and intermediate
-        structures."""
+    def _eval_raw_field(self, j, const, decl, cb, raw_idx, raw_field,
+                        popped, arg_base, m, ptop):
+        """Import and instantiate ``raw_field`` (originally ``cb.args[raw_idx]``,
+        after ``popped`` projection peels) in ``cb``'s environment with ``m``
+        lambda arguments at `_spine_buf[arg_base:arg_base+m]`."""
         store = self.store
         fidxs = self._proj_fidxs
-        fidx = fidxs[ptop - 1]
-        j = leaf_index(head)
-        const = store.leaves[j]
-        assert isinstance(const, W_Const)
-        decl = self._leaf_decl(head, const)
-        if decl is None or len(const.levels) != len(decl.levels):
-            return 0
-        w_kind = decl.w_kind
-        if not isinstance(w_kind, W_Definition):
-            return 0
-        cb = w_kind._ctor_body
-        if cb is None:
-            cb = w_kind.init_ctor_body(self.tc.declarations)
-        if is_leaf(cur):
-            if cb.m != 0:
-                return 0
-            idx = cb.num_params + fidx
-            if idx >= len(cb.args):
-                return 0
-            raw_field = self._peel_nested_ctor_field(
-                cb.args[idx], fidxs, pbase, ptop,
-            )
-            popped = self._proj_popped
-            let_vals = cb.let_vals
-            if let_vals is None:
-                return self._import_proj_field(
-                    j, popped, fidxs, ptop, const, decl, raw_field,
-                )
-            nlets = len(let_vals)
-            uses = cb.uses_lets
-            assert uses is not None
-            uses_let = uses[idx]
-            if uses_let and popped > 1:
-                uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
-            if not uses_let and raw_field.loose_bvar_range() == 0:
-                return self._import_proj_field(
-                    j, popped, fidxs, ptop, const, decl, raw_field,
-                )
-            smark = store._spine_top
-            store.ensure_spine_room(nlets)
-            store._spine_top = smark + nlets
-            try:
-                li = 0
-                while li < nlets:
-                    vh = store.import_const_term(const, decl, let_vals[li])
-                    if li > 0 and store.loose_bvar_range(vh) > 0:
-                        if li == 1:
-                            vh = store.instantiate(
-                                vh, store.spine_arg(smark + nlets - 1), 0,
-                            )
-                        else:
-                            vh = store.instantiate_multi_buf(
-                                vh, smark + nlets - li, li, 0,
-                            )
-                    store._spine_buf[smark + nlets - 1 - li] = _u32(vh)
-                    li += 1
-                fh = self._import_proj_field(
-                    j, popped, fidxs, ptop, const, decl, raw_field,
-                )
-                if store.loose_bvar_range(fh) == 0:
-                    return fh
-                if is_leaf(fh):
-                    bid = (_s32(store.leaf_meta[leaf_index(fh)]) >> 1) - 1
-                    return (
-                        store.spine_arg(smark + bid)
-                        if bid < nlets
-                        else store.bvar(bid - nlets)
-                    )
-                if nlets == 1:
-                    return store.instantiate(fh, store.spine_arg(smark), 0)
-                return store.instantiate_multi_buf(fh, smark, nlets, 0)
-            finally:
-                store.unapp_pop(smark)
-        m = cb.m
-        if m < 0:
-            return 0
-        mark = store._spine_top
-        store.unapp_push(cur)
-        try:
-            n = store._spine_top - mark
-            if n < m:
-                return 0
-            idx = cb.num_params + fidx
-            nargs = len(cb.args)
-            if idx >= nargs + (n - m):
-                return 0
-            if idx >= nargs:
-                self._proj_popped = 1
-                return store.spine_arg(mark + (nargs + n - m - 1 - idx))
-            raw_field = self._peel_nested_ctor_field(
-                cb.args[idx], fidxs, pbase, ptop,
-            )
-            popped = self._proj_popped
-            let_vals = cb.let_vals
-            if let_vals is None:
-                if isinstance(raw_field, W_BVar):
-                    bid = raw_field.id
-                    if 0 <= bid < m:
-                        return store.spine_arg(mark + n - m + bid)
-                fh = self._import_proj_field(
-                    j, popped, fidxs, ptop, const, decl, raw_field,
-                )
-                if m == 0 or store.loose_bvar_range(fh) == 0:
-                    return fh
-                if m == 1:
-                    return store.instantiate(fh, store.spine_arg(mark + n - 1), 0)
-                return store.instantiate_multi_buf(fh, mark + n - m, m, 0)
-            nlets = len(let_vals)
+        let_vals = cb.let_vals
+        if let_vals is None:
             if isinstance(raw_field, W_BVar):
                 bid = raw_field.id
-                if nlets <= bid < nlets + m:
-                    return store.spine_arg(mark + n - m + (bid - nlets))
-            smark = store._spine_top
-            total = nlets + m
-            store.ensure_spine_room(total)
-            buf = store._spine_buf
-            arg_base = mark + n - m
-            k = 0
-            while k < m:
-                buf[smark + nlets + k] = buf[arg_base + k]
-                k += 1
-            uses = cb.uses_lets
-            assert uses is not None
-            uses_let = uses[idx]
-            if uses_let and popped > 1:
-                uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
+                if 0 <= bid < m:
+                    return store.spine_arg(arg_base + bid)
+            fh = self._import_proj_field(
+                j, popped, fidxs, ptop, const, decl, raw_field,
+            )
+            if m == 0 or store.loose_bvar_range(fh) == 0:
+                return fh
+            if m == 1:
+                return store.instantiate(fh, store.spine_arg(arg_base), 0)
+            return store.instantiate_multi_buf(fh, arg_base, m, 0)
+        nlets = len(let_vals)
+        if isinstance(raw_field, W_BVar):
+            bid = raw_field.id
+            if nlets <= bid < nlets + m:
+                return store.spine_arg(arg_base + (bid - nlets))
+        smark = store._spine_top
+        total = nlets + m
+        store.ensure_spine_room(total)
+        buf = store._spine_buf
+        k = 0
+        while k < m:
+            buf[smark + nlets + k] = buf[arg_base + k]
+            k += 1
+        uses = cb.uses_lets
+        assert uses is not None
+        uses_let = uses[raw_idx]
+        if uses_let and popped > 1:
+            uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
+        store._spine_top = smark + total
+        try:
             if not uses_let:
                 li = 0
                 while li < nlets:
-                    buf[smark + li] = _u32(self.h_prop)
+                    store._spine_buf[smark + li] = _u32(self.h_prop)
                     li += 1
-                store._spine_top = smark + total
             else:
-                store._spine_top = smark + total
                 li = 0
                 while li < nlets:
                     vh = store.import_const_term(const, decl, let_vals[li])
@@ -7932,6 +7836,229 @@ class Machine(object):
             if total == 1:
                 return store.instantiate(fh, store.spine_arg(smark), 0)
             return store.instantiate_multi_buf(fh, smark, total, 0)
+        finally:
+            store.unapp_pop(smark)
+
+    def _eval_direct_ctor_proj(self, j, const, decl, cb, arg_base, m, pbase, ptop):
+        """Evaluate a direct `_CtorBody` (``cb.delegate_const is None``) with
+        its ``m`` lambda arguments sitting at `_spine_buf[arg_base:arg_base+m]`."""
+        fidxs = self._proj_fidxs
+        fidx = fidxs[ptop - 1]
+        idx = cb.num_params + fidx
+        if idx >= len(cb.args):
+            return 0
+        raw_field = self._peel_nested_ctor_field(
+            cb.args[idx], fidxs, pbase, ptop,
+        )
+        return self._eval_raw_field(
+            j, const, decl, cb, idx, raw_field,
+            self._proj_popped, arg_base, m, ptop,
+        )
+
+    def _eval_delegate_ctor_proj(self, j, const, decl, cb, arg_base, m, pbase, ptop):
+        """Evaluate a delegating `_CtorBody` (`Outer := Inner a_0 ... a_{k-1}`):
+        if ``Inner``'s field ``fidx`` selects a single BVar, jump directly to
+        that AST argument and peel any pending outer projections through it;
+        otherwise materialize ONLY the proper subset of ``Inner``'s arguments
+        actually referenced by field ``fidx`` (returning 0 when all arguments
+        are needed so normal DAG-shared unfolding wins)."""
+        store = self.store
+        fidxs = self._proj_fidxs
+        fidx = fidxs[ptop - 1]
+        inner_decl = cb.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        inner_m = inner_cb.m
+        # Fast path: Inner selects a single lambda argument `BVar(ibid)` for
+        # field `fidx` — peel pending outer projections directly on the AST
+        # argument `cb.args[inner_m - 1 - ibid]` without materializing Inner!
+        ibid = inner_cb.bvar_field(fidx)
+        if ibid >= 0:
+            arg_idx = inner_m - 1 - ibid
+            raw_field = self._peel_nested_ctor_field(
+                cb.args[arg_idx], fidxs, pbase, ptop,
+            )
+            return self._eval_raw_field(
+                j, const, decl, cb, arg_idx, raw_field,
+                self._proj_popped, arg_base, m, ptop,
+            )
+        inner_mask = inner_cb.field_mask(fidx)
+        if inner_mask < 0:
+            return 0
+        # If every argument of Inner is needed (0 skipped), fall back so normal
+        # unfolding does a single DAG-shared instantiation and caches `M_WHNF`.
+        if inner_m <= 62 and inner_mask == ((1 << inner_m) - 1):
+            return 0
+        dkey = ((j + 1) << 22) | 1023
+        inner_head = self._proj_field_cache.get(dkey, 0)
+        if inner_head == 0:
+            del_const = cb.delegate_const
+            assert del_const is not None
+            inner_head = store.import_const_term(const, decl, del_const)
+            self._proj_field_cache.set(dkey, inner_head)
+        inner_j = leaf_index(inner_head)
+        inner_const = store.leaves[inner_j]
+        assert isinstance(inner_const, W_Const)
+        save_top = store._spine_top
+        try:
+            let_vals = cb.let_vals
+            if let_vals is None:
+                env_base = arg_base
+                env_total = m
+            else:
+                nlets = len(let_vals)
+                env_total = nlets + m
+                uses = cb.uses_lets
+                assert uses is not None
+                need_lets = False
+                bid = 0
+                while bid < inner_m:
+                    if inner_mask < 0 or (inner_mask & (1 << bid)) != 0:
+                        if uses[inner_m - 1 - bid]:
+                            need_lets = True
+                            break
+                    bid += 1
+                env_base = store._spine_top
+                store.ensure_spine_room(env_total)
+                buf = store._spine_buf
+                k = 0
+                while k < m:
+                    buf[env_base + nlets + k] = buf[arg_base + k]
+                    k += 1
+                store._spine_top = env_base + env_total
+                if not need_lets:
+                    li = 0
+                    while li < nlets:
+                        store._spine_buf[env_base + li] = _u32(self.h_prop)
+                        li += 1
+                else:
+                    li = 0
+                    while li < nlets:
+                        vh = store.import_const_term(const, decl, let_vals[li])
+                        cnt = li + m
+                        if cnt > 0 and store.loose_bvar_range(vh) > 0:
+                            if cnt == 1:
+                                vh = store.instantiate(
+                                    vh, store.spine_arg(env_base + nlets - li), 0,
+                                )
+                            else:
+                                vh = store.instantiate_multi_buf(
+                                    vh, env_base + nlets - li, cnt, 0,
+                                )
+                        store._spine_buf[env_base + nlets - 1 - li] = _u32(vh)
+                        li += 1
+            imark = store._spine_top
+            store.ensure_spine_room(inner_m)
+            buf = store._spine_buf
+            k = 0
+            while k < inner_m:
+                buf[imark + k] = _u32(self.h_prop)
+                k += 1
+            store._spine_top = imark + inner_m
+            args = cb.args
+            bid = 0
+            while bid < inner_m:
+                if inner_mask >= 0 and (inner_mask & (1 << bid)) == 0:
+                    bid += 1
+                    continue
+                arg_ast = args[inner_m - 1 - bid]
+                if isinstance(arg_ast, W_BVar):
+                    obid = arg_ast.id
+                    if 0 <= obid < env_total:
+                        ah = store.spine_arg(env_base + obid)
+                    else:
+                        ah = store.bvar(obid - env_total)
+                else:
+                    if bid < 1023:
+                        akey = ((j + 1) << 22) | bid
+                        ah = self._proj_field_cache.get(akey, 0)
+                        if ah == 0:
+                            ah = store.import_const_term(const, decl, arg_ast)
+                            self._proj_field_cache.set(akey, ah)
+                    else:
+                        ah = store.import_const_term(const, decl, arg_ast)
+                    if env_total > 0 and store.loose_bvar_range(ah) > 0:
+                        if env_total == 1:
+                            ah = store.instantiate(
+                                ah, store.spine_arg(env_base), 0,
+                            )
+                        else:
+                            ah = store.instantiate_multi_buf(
+                                ah, env_base, env_total, 0,
+                            )
+                store._spine_buf[imark + bid] = _u32(ah)
+                bid += 1
+            if inner_cb.delegate_const is not None:
+                return self._eval_delegate_ctor_proj(
+                    inner_j, inner_const, inner_decl, inner_cb,
+                    imark, inner_m, pbase, ptop,
+                )
+            return self._eval_direct_ctor_proj(
+                inner_j, inner_const, inner_decl, inner_cb,
+                imark, inner_m, pbase, ptop,
+            )
+        finally:
+            store.unapp_pop(save_top)
+
+    def _try_lazy_ctor_proj(self, cur, head, pbase, ptop):
+        """When ``cur`` is an application (or nullary leaf) of a `_LF_DELTA`
+        `W_Definition` ``head`` whose stripped body is a constructor application
+        (directly or via delegating `_CtorBody` wrappers), peel pending
+        projection layers on the AST and import/instantiate only the final
+        projected field and the arguments it actually depends on."""
+        store = self.store
+        fidxs = self._proj_fidxs
+        fidx = fidxs[ptop - 1]
+        j = leaf_index(head)
+        const = store.leaves[j]
+        assert isinstance(const, W_Const)
+        decl = self._leaf_decl(head, const)
+        if decl is None or len(const.levels) != len(decl.levels):
+            return 0
+        w_kind = decl.w_kind
+        if not isinstance(w_kind, W_Definition):
+            return 0
+        cb = w_kind._ctor_body
+        if cb is None:
+            cb = w_kind.init_ctor_body(self.tc.declarations)
+        m = cb.m
+        if m < 0:
+            return 0
+        if is_leaf(cur):
+            if m != 0:
+                return 0
+            if cb.delegate_const is not None:
+                return self._eval_delegate_ctor_proj(
+                    j, const, decl, cb, 0, 0, pbase, ptop,
+                )
+            return self._eval_direct_ctor_proj(
+                j, const, decl, cb, 0, 0, pbase, ptop,
+            )
+        mark = store._spine_top
+        store.unapp_push(cur)
+        try:
+            n = store._spine_top - mark
+            if n < m:
+                return 0
+            if cb.delegate_const is not None:
+                if n != m:
+                    return 0
+                return self._eval_delegate_ctor_proj(
+                    j, const, decl, cb, mark, m, pbase, ptop,
+                )
+            idx = cb.num_params + fidx
+            nargs = len(cb.args)
+            if idx >= nargs + (n - m):
+                return 0
+            if idx >= nargs:
+                self._proj_popped = 1
+                return store.spine_arg(mark + (nargs + n - m - 1 - idx))
+            return self._eval_direct_ctor_proj(
+                j, const, decl, cb, mark + n - m, m, pbase, ptop,
+            )
         finally:
             store.unapp_pop(mark)
 

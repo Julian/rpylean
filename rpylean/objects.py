@@ -5113,18 +5113,126 @@ HINT_ABBREV = -1
 
 class _CtorBody(object):
     """Pre-stripped constructor body for a `W_Definition` of the form
-    `λ... => let... => Ctor p_0 ... p_{np-1} f_0 ...`, allowing `try_proj`
-    to import and instantiate only the projected field."""
+    `λ... => let... => Ctor p_0 ... p_{np-1} f_0 ...` (direct:
+    ``delegate_const is None``) or a saturated wrapper
+    `λ... => let... => Inner a_0 ... a_{k-1}` whose target ``Inner`` itself
+    has a valid `_CtorBody` (delegating: ``delegate_const is not None``)."""
 
-    _attrs_ = ['m', 'num_params', 'let_vals', 'args', 'uses_lets']
-    _immutable_fields_ = ['m', 'num_params', 'let_vals', 'args', 'uses_lets']
+    _attrs_ = [
+        'm', 'num_params', 'let_vals', 'args', 'uses_lets',
+        'delegate_const', 'delegate_decl', 'field_masks',
+    ]
+    _immutable_fields_ = [
+        'm', 'num_params', 'let_vals', 'args', 'uses_lets',
+        'delegate_const', 'delegate_decl',
+    ]
 
-    def __init__(self, m, num_params, let_vals, args, uses_lets):
+    def __init__(self, m, num_params, let_vals, args, uses_lets,
+                 delegate_const=None, delegate_decl=None):
         self.m = m
         self.num_params = num_params
         self.let_vals = let_vals
         self.args = args
         self.uses_lets = uses_lets
+        self.delegate_const = delegate_const
+        self.delegate_decl = delegate_decl
+        self.field_masks = None
+
+    def field_mask(self, fidx):
+        """Bitmask of this definition's ``m`` lambda BVars (``0 .. m-1``,
+        shifted past ``len(let_vals)`` if any) needed to compute structure
+        field ``fidx``, or ``-1`` if all arguments must be materialized, or
+        ``-2`` if ``fidx`` is out of range."""
+        if fidx < 0:
+            return -2
+        fm = self.field_masks
+        if fm is not None and fidx < len(fm):
+            v = fm[fidx]
+            if v != -3:
+                return v
+        res = self._compute_field_mask(fidx)
+        if fm is None:
+            fm = [-3] * (fidx + 1)
+            self.field_masks = fm
+        elif fidx >= len(fm):
+            fm.extend([-3] * (fidx + 1 - len(fm)))
+        fm[fidx] = res
+        return res
+
+    def bvar_field(self, fidx):
+        """When this `_CtorBody` selects a single lambda argument ``BVar(bid)``
+        directly for structure field ``fidx`` (no lets, chaining through any
+        delegating `_CtorBody`s), return ``bid`` (``0 <= bid < self.m``);
+        otherwise return ``-1``."""
+        if fidx < 0 or self.let_vals is not None:
+            return -1
+        if self.delegate_const is None:
+            idx = self.num_params + fidx
+            if idx >= len(self.args):
+                return -1
+            arg = self.args[idx]
+            if isinstance(arg, W_BVar):
+                bid = arg.id
+                if 0 <= bid < self.m:
+                    return bid
+            return -1
+        inner_decl = self.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        ibid = inner_cb.bvar_field(fidx)
+        if ibid < 0:
+            return -1
+        arg = self.args[inner_cb.m - 1 - ibid]
+        if isinstance(arg, W_BVar):
+            bid = arg.id
+            if 0 <= bid < self.m:
+                return bid
+        return -1
+
+    def _compute_field_mask(self, fidx):
+        nlets = 0 if self.let_vals is None else len(self.let_vals)
+        if self.delegate_const is None:
+            idx = self.num_params + fidx
+            if idx >= len(self.args):
+                return -2
+            if nlets > 0:
+                uses = self.uses_lets
+                assert uses is not None
+                if uses[idx]:
+                    return -1
+            return _expr_bvar_mask(self.args[idx], self.m, nlets, {})
+        inner_decl = self.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        inner_mask = inner_cb.field_mask(fidx)
+        if inner_mask < 0:
+            return inner_mask
+        inner_m = inner_cb.m
+        if inner_m > 62:
+            return -1
+        out_mask = 0
+        uses = self.uses_lets
+        seen = {}
+        bid = 0
+        while bid < inner_m:
+            if (inner_mask & (1 << bid)) != 0:
+                arg_idx = inner_m - 1 - bid
+                if nlets > 0:
+                    assert uses is not None
+                    if uses[arg_idx]:
+                        return -1
+                bm = _expr_bvar_mask(self.args[arg_idx], self.m, nlets, seen)
+                if bm < 0:
+                    return -1
+                out_mask |= bm
+            bid += 1
+        return out_mask
 
 
 _NO_CTOR_BODY = _CtorBody(-1, 0, None, [], None)
@@ -5143,9 +5251,10 @@ class W_Definition(W_DeclarationKind):
         self._ctor_body = None
 
     @dont_inline
-    def init_ctor_body(self, declarations):
+    def init_ctor_body(self, declarations, max_depth=6):
         """Inspect `self.value` once and cache a `_CtorBody` when it peels via
-        leading lambdas (and up to 8 leading lets) to a constructor application."""
+        leading lambdas (and up to 8 leading lets) to a constructor application
+        or to a saturated application of another `_CtorBody` definition."""
         target = self.get_delta_reduce_target()
         if target is None:
             self._ctor_body = _NO_CTOR_BODY
@@ -5175,31 +5284,58 @@ class W_Definition(W_DeclarationKind):
         if not isinstance(node, W_Const):
             self._ctor_body = _NO_CTOR_BODY
             return _NO_CTOR_BODY
-        ctor_decl = find_decl(declarations, node.name)
-        if ctor_decl is None:
+        target_decl = find_decl(declarations, node.name)
+        if target_decl is None:
             self._ctor_body = _NO_CTOR_BODY
             return _NO_CTOR_BODY
-        ctor_kind = ctor_decl.w_kind
-        if not isinstance(ctor_kind, W_Constructor):
+        target_kind = target_decl.w_kind
+        if isinstance(target_kind, W_Constructor):
+            args = []
+            i = len(rev_args) - 1
+            while i >= 0:
+                args.append(rev_args[i])
+                i -= 1
+            uses_lets = None
+            if let_vals is not None:
+                nlets = len(let_vals)
+                uses_lets = []
+                i = 0
+                nargs = len(args)
+                while i < nargs:
+                    uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
+                    i += 1
+            cb = _CtorBody(m, target_kind.num_params, let_vals, args, uses_lets)
+            self._ctor_body = cb
+            return cb
+        if (max_depth > 0
+                and isinstance(target_kind, W_Definition)
+                and len(node.levels) == len(target_decl.levels)):
+            # Install negative sentinel before recursing so self/mutual cycles
+            # terminate immediately.
             self._ctor_body = _NO_CTOR_BODY
-            return _NO_CTOR_BODY
-        args = []
-        i = len(rev_args) - 1
-        while i >= 0:
-            args.append(rev_args[i])
-            i -= 1
-        uses_lets = None
-        if let_vals is not None:
-            nlets = len(let_vals)
-            uses_lets = []
-            i = 0
-            nargs = len(args)
-            while i < nargs:
-                uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
-                i += 1
-        cb = _CtorBody(m, ctor_kind.num_params, let_vals, args, uses_lets)
-        self._ctor_body = cb
-        return cb
+            inner_cb = target_kind._ctor_body
+            if inner_cb is None:
+                inner_cb = target_kind.init_ctor_body(declarations, max_depth - 1)
+            if inner_cb.m >= 0 and len(rev_args) == inner_cb.m:
+                args = []
+                i = len(rev_args) - 1
+                while i >= 0:
+                    args.append(rev_args[i])
+                    i -= 1
+                uses_lets = None
+                if let_vals is not None:
+                    nlets = len(let_vals)
+                    uses_lets = []
+                    i = 0
+                    nargs = len(args)
+                    while i < nargs:
+                        uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
+                        i += 1
+                cb = _CtorBody(m, 0, let_vals, args, uses_lets, node, target_decl)
+                self._ctor_body = cb
+                return cb
+        self._ctor_body = _NO_CTOR_BODY
+        return _NO_CTOR_BODY
 
     def group_key(self, name, safety):
         # An unsafe definition enters the environment before its value is
@@ -5647,6 +5783,58 @@ def _expr_has_bvar_lt(e, k, depth):
     if isinstance(e, W_Proj):
         return _expr_has_bvar_lt(e.struct_expr, k, depth)
     return False
+
+
+def _expr_bvar_mask(e, limit, depth, seen):
+    """Bitmask of bound-variable indices ``b`` in ``[0, limit)`` occurring
+    free in ``e`` at binder depth ``depth``. Memoized on ``seen`` keyed by
+    ``(e, depth)`` so shared DAGs run in O(nodes) instead of exponentially."""
+    if limit <= 0 or e.loose_bvar_range() <= depth:
+        return 0
+    if limit > 62 or depth > 128:
+        return -1
+    if isinstance(e, W_BVar):
+        b = e.id - depth
+        if 0 <= b < limit:
+            return 1 << b
+        return 0
+    key = (e, depth)
+    cached = seen.get(key, -2)
+    if cached != -2:
+        return cached
+    if len(seen) >= 4096:
+        return -1
+    if isinstance(e, W_App):
+        m1 = _expr_bvar_mask(e.fn, limit, depth, seen)
+        if m1 < 0:
+            res = -1
+        else:
+            m2 = _expr_bvar_mask(e.arg, limit, depth, seen)
+            res = -1 if m2 < 0 else (m1 | m2)
+    elif isinstance(e, W_FunBase):
+        m1 = _expr_bvar_mask(e.binder.type, limit, depth, seen)
+        if m1 < 0:
+            res = -1
+        else:
+            m2 = _expr_bvar_mask(e.body, limit, depth + 1, seen)
+            res = -1 if m2 < 0 else (m1 | m2)
+    elif isinstance(e, W_Let):
+        m1 = _expr_bvar_mask(e.type, limit, depth, seen)
+        if m1 < 0:
+            res = -1
+        else:
+            m2 = _expr_bvar_mask(e.value, limit, depth, seen)
+            if m2 < 0:
+                res = -1
+            else:
+                m3 = _expr_bvar_mask(e.body, limit, depth + 1, seen)
+                res = -1 if m3 < 0 else (m1 | m2 | m3)
+    elif isinstance(e, W_Proj):
+        res = _expr_bvar_mask(e.struct_expr, limit, depth, seen)
+    else:
+        res = 0
+    seen[key] = res
+    return res
 
 
 class W_Inductive(W_DeclarationKind):

@@ -2021,3 +2021,183 @@ class TestJointCheckAndInferExpected(object):
             )
         finally:
             tc.free()
+
+    def test_try_proj_transitive_ctor_body_delegation(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_Const
+
+        u_n = Name.simple("u")
+        u_l = u_n.as_level_param()
+        v_l = Name.simple("v").as_level_param()
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        combine = Name.simple("combine").axiom(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+        )
+        dead1 = Name.simple("deadProof1").axiom(type=forall(x.binder(type=NAT))(NAT))
+        dead2 = Name.simple("deadProof2").axiom(type=forall(x.binder(type=NAT))(NAT))
+        dead3 = Name.simple("deadProof3").axiom(type=forall(x.binder(type=NAT))(NAT))
+        dead_let = Name.simple("deadLet").axiom(type=forall(x.binder(type=NAT))(NAT))
+
+        # Structure `S := mk (val : Nat) (proof : Nat)`
+        s_name = Name.simple("WrapS")
+        mk_name = s_name.child("mk")
+        mk_decl = mk_name.constructor(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        s_decl = s_name.inductive(type=TYPE, num_params=0, constructors=[mk_decl])
+
+        # Direct CtorBody: `mkBase x p := WrapS.mk x p`
+        mk_base = Name.simple("mkBase").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                mk_name.const().app(b1, b0),
+            ),
+        )
+        # 3-layer chain: mkChain3 -> mkChain2 -> mkChain1 -> mkBase (each passes dead proof!)
+        mk_chain1 = Name.simple("mkChain1").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                mk_base.name.const().app(b1, dead1.name.const().app(b0)),
+            ),
+        )
+        mk_chain2 = Name.simple("mkChain2").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                mk_chain1.name.const().app(b1, dead2.name.const().app(b0)),
+            ),
+        )
+        mk_chain3 = Name.simple("mkChain3").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(
+                mk_chain2.name.const().app(b0, dead3.name.const().app(b0)),
+            ),
+        )
+
+        # Compound-field direct CtorBody: `mkComp x y p := WrapS.mk (combine x y) p`
+        mk_comp = Name.simple("mkComp").definition(
+            type=forall(
+                x.binder(type=NAT), y.binder(type=NAT), Name.simple("p").binder(type=NAT),
+            )(s_name.const()),
+            value=fun(
+                x.binder(type=NAT), y.binder(type=NAT), Name.simple("p").binder(type=NAT),
+            )(mk_name.const().app(combine.name.const().app(b2, b1), b0)),
+        )
+        # Wrapper around compound-field CtorBody with dead proof arg
+        mk_comp_wrap = Name.simple("mkCompWrap").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                mk_comp.name.const().app(b1, b0, dead1.name.const().app(b0)),
+            ),
+        )
+
+        # Let-wrapped delegating definition: field 0 ignores let, field 1 uses let
+        mk_let_wrap = Name.simple("mkLetWrap").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(
+                y.let(
+                    type=NAT,
+                    value=dead_let.name.const().app(b0),
+                    body=mk_base.name.const().app(b1, b0),
+                ),
+            ),
+        )
+
+        # Nullary delegating definition: `nullInst := mkChain1 a b`
+        null_inst = Name.simple("nullInst").definition(
+            type=s_name.const(),
+            value=mk_chain1.name.const().app(a_decl.name.const(), b_decl.name.const()),
+        )
+
+        # Universe-polymorphic delegation: `PolyS.{u} := mk (val : Sort (u+1)) (p : Nat)`
+        ps_name = Name.simple("PolyS")
+        pmk_name = ps_name.child("mk")
+        pmk_decl = pmk_name.constructor(
+            levels=[u_n],
+            type=forall(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(
+                ps_name.const([u_l]),
+            ),
+            num_params=0,
+            num_fields=2,
+        )
+        ps_decl = ps_name.inductive(
+            levels=[u_n], type=u_l.succ().succ().sort(), num_params=0, constructors=[pmk_decl],
+        )
+        p_inner = Name.simple("pInner").definition(
+            levels=[u_n],
+            type=forall(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(
+                ps_name.const([u_l]),
+            ),
+            value=fun(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(
+                pmk_name.const([u_l]).app(b1, b0),
+            ),
+        )
+        p_outer = Name.simple("pOuter").definition(
+            levels=[u_n],
+            type=forall(x.binder(type=NAT))(ps_name.const([u_l.succ()])),
+            value=fun(x.binder(type=NAT))(
+                p_inner.name.const([u_l.succ()]).app(u_l.succ().sort(), dead1.name.const().app(b0)),
+            ),
+        )
+
+        # Self-recursive cycle must NOT infinitely recurse in init_ctor_body!
+        cyc = Name.simple("cycDef").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(Name.simple("cycDef").const().app(b0)),
+        )
+
+        env = Environment.having([
+            nat_decl, a_decl, b_decl, combine, dead1, dead2, dead3, dead_let,
+            s_decl, mk_decl, mk_base, mk_chain1, mk_chain2, mk_chain3,
+            mk_comp, mk_comp_wrap, mk_let_wrap, null_inst,
+            ps_decl, pmk_decl, p_inner, p_outer, cyc,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            B = b_decl.name.const()
+            h_a = store.import_term(A)
+
+            # 1. 3-layer delegation chain extracts `a` with ZERO new records!
+            p3 = store.import_term(s_name.proj(0, mk_chain3.name.const().app(A)))
+            nrecs0 = store.nrecs
+            assert m.try_proj(p3, False) == h_a
+            assert store.nrecs == nrecs0
+
+            # 2. Compound-field delegation computes `combine a b` without importing deadProof1!
+            pc = store.import_term(s_name.proj(0, mk_comp_wrap.name.const().app(A, B)))
+            assert m.try_proj(pc, False) == store.import_term(combine.name.const().app(A, B))
+
+            # 3. Nullary delegating definition extracts `a` without importing deadProof1!
+            pn = store.import_term(s_name.proj(0, null_inst.name.const()))
+            assert m.try_proj(pn, False) == h_a
+
+            # 4. Let-wrapped delegation: field 0 skips deadLet!
+            pl0 = store.import_term(s_name.proj(0, mk_let_wrap.name.const().app(A)))
+            assert m.try_proj(pl0, False) == h_a
+
+            # 5. Universe-polymorphic delegation substitutes u -> v+1 properly!
+            pp = store.import_term(ps_name.proj(0, p_outer.name.const([v_l]).app(A)))
+            assert m.try_proj(pp, False) == store.import_term(v_l.succ().sort())
+
+            # Verify NONE of deadProof1/2/3 or deadLet were ever imported!
+            dead_names = [dead1.name, dead2.name, dead3.name, dead_let.name]
+            assert all(
+                not (isinstance(le, W_Const) and any(le.name.syntactic_eq(dn) for dn in dead_names))
+                for le in store.leaves
+            )
+
+            # 6. Let-wrapped delegation field 1 DOES evaluate deadLet accurately!
+            pl1 = store.import_term(s_name.proj(1, mk_let_wrap.name.const().app(A)))
+            assert m.try_proj(pl1, False) == store.import_term(dead_let.name.const().app(A))
+
+            # 7. Self-recursive cycle terminates cleanly with _NO_CTOR_BODY (m == -1).
+            assert cyc.w_kind.init_ctor_body(tc.declarations).m == -1
+        finally:
+            tc.free()
