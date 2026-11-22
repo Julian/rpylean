@@ -691,3 +691,34 @@ class TestLevelOrderSoundness(object):
         got = m.succ().normalize()
         expected = a.succ().max(b.succ().succ()).normalize()
         assert got == expected
+
+
+class TestNameInterning(object):
+    def test_num_child_int_matches_rbigint(self):
+        from rpython.rlib.rbigint import rbigint
+        base = Name.simple("TestNumIntern")
+        for n in [0, 1, 42, 100000, (1 << 32) + 7]:
+            a = base.num_child_int(n)
+            b = base.num_child(rbigint.fromint(n))
+            assert a is b
+            assert a.idx_int() == n
+            assert a.idx_str() == str(n)
+            assert a.str() == "TestNumIntern.%d" % n
+
+    def test_num_child_huge_bigint_interned(self):
+        from rpython.rlib.rbigint import rbigint
+        base = Name.simple("TestBigNumIntern")
+        big_str = "1234567890123456789012345678901234567890"
+        a = base.num_child(rbigint.fromdecimalstr(big_str))
+        b = base.num_child(rbigint.fromdecimalstr(big_str))
+        assert a is b
+        assert a.idx_str() == big_str
+        assert a.str() == "TestBigNumIntern." + big_str
+
+    def test_name_tables_grow_and_preserve_identity(self):
+        base = Name.simple("TestGrowIntern")
+        str_names = [base.child("k_%d" % i) for i in range(5000)]
+        num_names = [base.num_child_int(i) for i in range(5000)]
+        for i in range(0, 5000, 17):
+            assert base.child("k_%d" % i) is str_names[i]
+            assert base.num_child_int(i) is num_names[i]

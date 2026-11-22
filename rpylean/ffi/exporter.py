@@ -345,7 +345,7 @@ class Exporter(object):
         self._next_name += 1
         self._names[name] = nid
         if isinstance(name, NumName):
-            payload = '{"i":%s,"pre":%d}' % (name.idx.str(), parent_id)
+            payload = '{"i":%s,"pre":%d}' % (name.idx_str(), parent_id)
             self.stream.write('{"in":%d,"num":%s}\n' % (nid, payload))
         else:
             assert isinstance(name, StrName)

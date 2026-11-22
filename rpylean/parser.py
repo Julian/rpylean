@@ -639,9 +639,7 @@ def _try_parse_compact_rare(line, pos, end, builder):
                         if np >= 0:
                             builder.register_name(
                                 nidx,
-                                builder.names[pre].num_child(
-                                    rbigint.fromint(id_val),
-                                ),
+                                builder.names[pre].num_child_int(id_val),
                             )
                             return np << 1
         return -1
@@ -1429,7 +1427,10 @@ def _parse_name(cursor, builder):
         parent_nidx, id_val = _parse_name_num_inner(cursor)
         cursor.expect('}')
         parent = builder.names[parent_nidx]
-        builder.register_name(nidx, parent.num_child(rbigint.fromint(id_val)))
+        if id_val >= 0:
+            builder.register_name(nidx, parent.num_child_int(id_val))
+        else:
+            builder.register_name(nidx, parent.num_child(rbigint.fromint(id_val)))
     else:
         raise MalformedLine("unknown name discriminator: %s" % second_key)
 

@@ -349,8 +349,10 @@ class EnvironmentBuilder(object):
         """
         env_decls = self.env.declarations
         dname = decl.name
-        if dname._decl_dict is env_decls or dname in env_decls:
-            raise AlreadyDeclared(dname, env_decls)
+        cached_dict = dname._decl_dict
+        if cached_dict is not None:
+            if cached_dict is env_decls or dname in env_decls:
+                raise AlreadyDeclared(dname, env_decls)
         dlevels = decl.levels
         nl = len(dlevels)
         if nl == 2:

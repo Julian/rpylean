@@ -935,8 +935,67 @@ def _mk_w_litnat(val):
 
 # ---- Globally-interned content-keyed tables -----------------------------
 
-_INTERN_STR_NAME = {}      # int -> StrName (intrusive `_intern_next` chain)
-_INTERN_NUM_NAME = {}      # int -> NumName (intrusive `_intern_next` chain)
+class _StrNameTable(object):
+    """Compact open-addressed hash table for globally interned `StrName`s.
+
+    Stores `(hash:31 << 32) | (entry_idx + 1)` in a pointer-free `list[int]`
+    and appends objects densely to `entries`, avoiding GC card-marking storms
+    on random inserts and pointer chasing on misses/resizes.
+    """
+
+    _attrs_ = ['indexes', 'entries', 'mask']
+
+    def __init__(self, initial_cap):
+        self.indexes = [0] * initial_cap
+        self.entries = []
+        self.mask = initial_cap - 1
+
+    @dont_inline
+    def _grow(self):
+        old = self.indexes
+        new_cap = (self.mask + 1) * 2
+        new_mask = new_cap - 1
+        ni = [0] * new_cap
+        for v in old:
+            if v != 0:
+                h = v >> 32
+                slot = (h ^ (h >> 15)) & new_mask
+                while ni[slot] != 0:
+                    slot = (slot + 1) & new_mask
+                ni[slot] = v
+        self.indexes = ni
+        self.mask = new_mask
+
+
+class _NumNameTable(object):
+    """Compact open-addressed hash table for globally interned `NumName`s."""
+
+    _attrs_ = ['indexes', 'entries', 'mask']
+
+    def __init__(self, initial_cap):
+        self.indexes = [0] * initial_cap
+        self.entries = []
+        self.mask = initial_cap - 1
+
+    @dont_inline
+    def _grow(self):
+        old = self.indexes
+        new_cap = (self.mask + 1) * 2
+        new_mask = new_cap - 1
+        ni = [0] * new_cap
+        for v in old:
+            if v != 0:
+                h = v >> 32
+                slot = (h ^ (h >> 15)) & new_mask
+                while ni[slot] != 0:
+                    slot = (slot + 1) & new_mask
+                ni[slot] = v
+        self.indexes = ni
+        self.mask = new_mask
+
+
+_STR_NAME_TABLE = _StrNameTable(1 << 12)
+_NUM_NAME_TABLE = _NumNameTable(1 << 12)
 _EMPTY_LEVELS = []         # shared empty list[W_Level] for monomorphic W_Const
 _EMPTY_LEVEL_NAMES = []    # shared empty list[Name] for monomorphic W_Declaration
 # The expression tables map each content hash to a single node — on a
@@ -989,32 +1048,106 @@ def intern_stats():
 
 def _mk_str_name(parent, suffix):
     assert isinstance(parent, Name)
-    h = _mix2(parent.hash(), compute_hash(suffix))
-    head = _INTERN_STR_NAME.get(h, None)
-    cur = head
-    while cur is not None:
-        if cur.parent is parent and cur.suffix == suffix:
-            return cur
-        cur = cur._intern_next
-    e = StrName(parent, suffix)
-    e._intern_next = head
-    _INTERN_STR_NAME[h] = e
+    h = ((parent._hash * 1000003) ^ compute_hash(suffix)) & 0x7FFFFFFF
+    table = _STR_NAME_TABLE
+    indexes = table.indexes
+    entries = table.entries
+    mask = table.mask
+    slot = (h ^ (h >> 15)) & mask
+    while True:
+        v = indexes[slot]
+        if v == 0:
+            break
+        if (v >> 32) == h:
+            cand = entries[(v & 0xFFFFFFFF) - 1]
+            if cand.parent is parent and cand.suffix == suffix:
+                return cand
+        slot = (slot + 1) & mask
+    e = StrName(parent, suffix, h)
+    idx = len(entries)
+    entries.append(e)
+    if (idx + 1) * 2 > mask + 1:
+        table._grow()
+        indexes = table.indexes
+        mask = table.mask
+        slot = (h ^ (h >> 15)) & mask
+        while indexes[slot] != 0:
+            slot = (slot + 1) & mask
+    indexes[slot] = (h << 32) | (idx + 1)
+    return e
+
+
+def _mk_num_name_int(parent, idx):
+    assert isinstance(parent, Name)
+    assert idx >= 0
+    ih = ((idx * 1000003) ^ (idx >> 16)) ^ 0x5A5A5A5A
+    h = ((parent._hash * 1000003) ^ ih) & 0x7FFFFFFF
+    table = _NUM_NAME_TABLE
+    indexes = table.indexes
+    entries = table.entries
+    mask = table.mask
+    slot = (h ^ (h >> 15)) & mask
+    while True:
+        v = indexes[slot]
+        if v == 0:
+            break
+        if (v >> 32) == h:
+            cand = entries[(v & 0xFFFFFFFF) - 1]
+            if cand._small_idx == idx and cand.parent is parent:
+                return cand
+        slot = (slot + 1) & mask
+    e = NumName(parent, idx, None, h)
+    eidx = len(entries)
+    entries.append(e)
+    if (eidx + 1) * 2 > mask + 1:
+        table._grow()
+        indexes = table.indexes
+        mask = table.mask
+        slot = (h ^ (h >> 15)) & mask
+        while indexes[slot] != 0:
+            slot = (slot + 1) & mask
+    indexes[slot] = (h << 32) | (eidx + 1)
     return e
 
 
 def _mk_num_name(parent, idx):
     assert isinstance(parent, Name)
-    # `idx.hash()` here is rbigint's content hash — cheap, no string alloc.
-    h = _mix2(parent.hash(), idx.hash())
-    head = _INTERN_NUM_NAME.get(h, None)
-    cur = head
-    while cur is not None:
-        if cur.parent is parent and cur.idx.eq(idx):
-            return cur
-        cur = cur._intern_next
-    e = NumName(parent, idx)
-    e._intern_next = head
-    _INTERN_NUM_NAME[h] = e
+    try:
+        iv = idx.toint()
+    except OverflowError:
+        iv = -1
+    if iv >= 0:
+        return _mk_num_name_int(parent, iv)
+    ih = idx.hash() ^ 0x5A5A5A5A
+    h = ((parent._hash * 1000003) ^ ih) & 0x7FFFFFFF
+    table = _NUM_NAME_TABLE
+    indexes = table.indexes
+    entries = table.entries
+    mask = table.mask
+    slot = (h ^ (h >> 15)) & mask
+    while True:
+        v = indexes[slot]
+        if v == 0:
+            break
+        if (v >> 32) == h:
+            cand = entries[(v & 0xFFFFFFFF) - 1]
+            if cand._small_idx < 0 and cand.parent is parent:
+                big = cand._big_idx
+                assert big is not None
+                if big.eq(idx):
+                    return cand
+        slot = (slot + 1) & mask
+    e = NumName(parent, -1, idx, h)
+    eidx = len(entries)
+    entries.append(e)
+    if (eidx + 1) * 2 > mask + 1:
+        table._grow()
+        indexes = table.indexes
+        mask = table.mask
+        slot = (h ^ (h >> 15)) & mask
+        while indexes[slot] != 0:
+            slot = (slot + 1) & mask
+    indexes[slot] = (h << 32) | (eidx + 1)
     return e
 
 
@@ -1335,6 +1468,10 @@ class Name(_Item):
         integer index (an ``rbigint`` since Lean's ``Nat`` is unbounded).
         """
         return _mk_num_name(self, idx)
+
+    def num_child_int(self, idx):
+        """Construct a ``Name.num`` child from a non-negative machine int."""
+        return _mk_num_name_int(self, idx)
 
     def __repr__(self):
         return "`%s" % (self.str(),)
@@ -1720,17 +1857,14 @@ class _AnonymousName(Name):
 class StrName(Name):
     """Lean's ``Name.str p s``: a string-suffixed name nested in ``p``."""
 
-    _attrs_ = ['suffix', '_intern_next']
+    _attrs_ = ['suffix']
     _immutable_fields_ = ['suffix']
 
-    def __init__(self, parent, suffix):
+    def __init__(self, parent, suffix, h):
         Name.__init__(self)
         self.parent = parent
         self.suffix = suffix
-        self._intern_next = None
-        self._hash = (
-            (parent.hash() * 1000003) ^ compute_hash(suffix)
-        ) & 0xFFFFFFFF
+        self._hash = h
         self.is_internal = (
             parent.is_internal
             or (len(suffix) > 0 and suffix[0] == "_")
@@ -1758,22 +1892,20 @@ class StrName(Name):
 class NumName(Name):
     """
     Lean's ``Name.num p n``: a numerically-indexed name nested in ``p``.
-    ``idx`` is an ``rbigint`` since Lean's ``Nat`` is unbounded.
+    Non-negative indices that fit in a machine int are stored directly in
+    ``_small_idx`` without allocating an ``rbigint``; larger indices store
+    ``_small_idx = -1`` and the ``rbigint`` in ``_big_idx``.
     """
 
-    _attrs_ = ['idx', '_intern_next']
-    _immutable_fields_ = ['idx']
+    _attrs_ = ['_small_idx', '_big_idx']
+    _immutable_fields_ = ['_small_idx', '_big_idx']
 
-    def __init__(self, parent, idx):
+    def __init__(self, parent, small_idx, big_idx, h):
         Name.__init__(self)
         self.parent = parent
-        self.idx = idx
-        self._intern_next = None
-        # XOR with a marker bit so a `Name.num n` and a `Name.str (str n)`
-        # don't collide in the hash table; `syntactic_eq` also distinguishes
-        # via subclass identity.
-        h = idx.hash() ^ 0x5A5A5A5A
-        self._hash = ((parent.hash() * 1000003) ^ h) & 0xFFFFFFFF
+        self._small_idx = small_idx
+        self._big_idx = big_idx
+        self._hash = h
         # Lean's `isInternal` / private-name checks: num parts don't
         # trigger themselves but they don't block parent propagation.
         self.is_internal = parent.is_internal
@@ -1783,8 +1915,20 @@ class NumName(Name):
         # Lean: `.num n _ => hasMacroScopes n`
         return self.parent.has_macro_scopes()
 
+    def idx_str(self):
+        if self._small_idx >= 0:
+            return str(self._small_idx)
+        assert self._big_idx is not None
+        return self._big_idx.str()
+
+    def idx_int(self):
+        if self._small_idx >= 0:
+            return self._small_idx
+        assert self._big_idx is not None
+        return self._big_idx.toint()
+
     def _part_str(self):
-        return self.idx.str()
+        return self.idx_str()
 
 
 def names(*many):

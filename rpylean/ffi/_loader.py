@@ -369,7 +369,7 @@ class FFI(object):
                     n, self._mk_string(rffi.str2charp(part.suffix)))
             else:
                 assert isinstance(part, NumName)
-                n = self._name_mk_numeral(n, _lean.box(part.idx.toint()))
+                n = self._name_mk_numeral(n, _lean.box(part.idx_int()))
         return n
 
     def _build_import(self, module_name):
