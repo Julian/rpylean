@@ -2201,3 +2201,144 @@ class TestJointCheckAndInferExpected(object):
             assert cyc.w_kind.init_ctor_body(tc.declarations).m == -1
         finally:
             tc.free()
+
+    def test_infer_app_const_ast_skips_domain_imports_and_checks_soundly(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.exceptions import UndeclaredLevelParam, W_InvalidDeclaration
+        from rpylean.machine import KIND_FORALL, _LEAF_INFER_SEEN, _s32, leaf_index
+        from rpylean.objects import (
+            SAFETY_SAFE,
+            SAFETY_UNSAFE,
+            W_LEVEL_ZERO,
+            W_NotYetDeclared,
+            W_TypeError,
+            W_UnsafeReference,
+        )
+
+        u_n = Name.simple("u")
+        v_n = Name.simple("v")
+        u_l = u_n.as_level_param()
+        v_l = v_n.as_level_param()
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        mynat_decl = Name.simple("MyNat").definition(type=TYPE, value=NAT)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        a_my = Name.simple("aMy").axiom(type=mynat_decl.name.const())
+        box_decl = Name.simple("Box").axiom(
+            levels=[u_n], type=forall(x.binder(type=u_l.succ().sort()))(u_l.succ().sort()),
+        )
+        res_decl = Name.simple("Res").axiom(
+            levels=[u_n],
+            type=forall(x.binder(type=u_l.succ().sort()), y.binder(type=b0))(u_l.succ().sort()),
+        )
+        # Polymorphic 3-arg constant `pf.{u} (α : Type u) (bx : Box.{u} α) (x : α) : Res.{u} α x`
+        pf_decl = Name.simple("pf").axiom(
+            levels=[u_n],
+            type=forall(
+                x.binder(type=u_l.succ().sort()),
+                y.binder(type=box_decl.name.const([u_l]).app(b0)),
+                Name.simple("z").binder(type=b1),
+            )(res_decl.name.const([u_l]).app(b2, b0)),
+        )
+        # 1-arg constant `f1 (x : Box.{0} Nat) : Res.{0} Nat a`
+        f1_decl = Name.simple("f1").axiom(
+            type=forall(x.binder(type=box_decl.name.const([W_LEVEL_ZERO]).app(NAT)))(
+                res_decl.name.const([W_LEVEL_ZERO]).app(NAT, a_decl.name.const()),
+            ),
+        )
+        # Alias-headed constant (mid-spine non-W_ForAll)
+        alias_ty = Name.simple("AliasPi").definition(
+            type=forall(x.binder(type=NAT))(TYPE),
+            value=fun(x.binder(type=NAT))(
+                forall(y.binder(type=NAT))(res_decl.name.const([W_LEVEL_ZERO]).app(NAT, b1)),
+            ),
+        )
+        f_alias = Name.simple("fAlias").axiom(
+            type=forall(x.binder(type=NAT))(alias_ty.name.const().app(b0)),
+        )
+        # Higher-order lambda arg constant `ho (g : Nat -> Nat) : Nat`
+        ho_decl = Name.simple("ho").axiom(
+            type=forall(x.binder(type=forall(y.binder(type=NAT))(NAT)))(NAT),
+        )
+        # Def-eq non-structural domain (`fNat (x : Nat) : Nat`)
+        fnat_decl = Name.simple("fNat").axiom(type=forall(x.binder(type=NAT))(NAT))
+        bx_nat = Name.simple("bxNat").axiom(type=box_decl.name.const([W_LEVEL_ZERO]).app(NAT))
+        unsafe_fn = Name.simple("uFn").axiom(
+            type=forall(x.binder(type=NAT))(NAT), is_unsafe=True,
+        )
+        d_safe_bad_unsafe = Name.simple("dSafeBadU").definition(
+            type=NAT, value=unsafe_fn.name.const().app(a_decl.name.const()), safety=SAFETY_SAFE,
+        )
+        d_bad_lvl = Name.simple("dBadLvl").definition(
+            levels=[u_n],
+            type=res_decl.name.const([v_l]).app(NAT, a_decl.name.const()),
+            value=pf_decl.name.const([v_l]).app(NAT, bx_nat.name.const(), a_decl.name.const()),
+        )
+        d_early = Name.simple("dEarly").definition(
+            type=NAT, value=Name.simple("laterFn").const().app(a_decl.name.const()),
+        )
+        later_fn = Name.simple("laterFn").axiom(type=forall(x.binder(type=NAT))(NAT))
+
+        env = Environment.having([
+            nat_decl, mynat_decl, a_decl, a_my, box_decl, res_decl,
+            pf_decl, f1_decl, alias_ty, f_alias, ho_decl, fnat_decl, bx_nat,
+            unsafe_fn, d_safe_bad_unsafe, d_bad_lvl, d_early, later_fn,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            BX = bx_nat.name.const()
+            pf_app = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]).app(NAT, BX, A))
+            exp = store.import_term(res_decl.name.const([W_LEVEL_ZERO]).app(NAT, A))
+            # Pre-infer arguments so we measure strictly `_infer_app_const_ast_buf` allocations.
+            for leaf_e in [NAT, BX, A]:
+                m.infer(store.import_term(leaf_e), True)
+            nrecs_before = store.nrecs
+            assert m.infer_expected(pf_app, exp) == exp
+            # ZERO new records allocated for pf's entire `decl.type`!
+            assert store.nrecs == nrecs_before
+            pf_head = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]))
+            assert _s32(store.leaf_infer[leaf_index(pf_head)]) == _LEAF_INFER_SEEN
+            # Second application of `pf` promotes `leaf_infer` to a real imported handle.
+            pf_app2 = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]).app(NAT, BX, a_my.name.const()))
+            assert m.infer(pf_app2, True) == store.import_term(
+                res_decl.name.const([W_LEVEL_ZERO]).app(NAT, a_my.name.const()),
+            )
+            li2 = _s32(store.leaf_infer[leaf_index(pf_head)])
+            assert 0 < li2 < _LEAF_INFER_SEEN
+
+            # 1-arg constant with expected match allocates ZERO new records!
+            f1_app = store.import_term(f1_decl.name.const().app(BX))
+            nrecs_before = store.nrecs
+            assert m.infer_expected(f1_app, exp) == exp
+            assert store.nrecs == nrecs_before
+
+            # Non-structural def_eq fallback (`MyNat` vs `Nat`) succeeds!
+            h_my = store.import_term(fnat_decl.name.const().app(a_my.name.const()))
+            assert m.infer(h_my, True) == store.import_term(NAT)
+
+            # Mid-spine type alias falls through to _infer_app_rem_buf cleanly!
+            h_al = store.import_term(f_alias.name.const().app(A, A))
+            assert m.infer(h_al, True) == exp
+
+            # Higher-order lambda argument checked cleanly!
+            h_ho = store.import_term(ho_decl.name.const().app(fun(x.binder(type=NAT))(b0)))
+            assert m.infer(h_ho, True) == store.import_term(NAT)
+
+            # Ill-typed argument raises W_TypeError!
+            h_bad = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]).app(NAT, A, A))
+            with pytest.raises(W_TypeError):
+                m.infer(h_bad, True)
+            h_bad1 = store.import_term(f1_decl.name.const().app(A))
+            with pytest.raises(W_TypeError):
+                m.infer(h_bad1, True)
+        finally:
+            tc.free()
+
+        # Soundness checks: unsafe reference, undeclared level param, out-of-order decl!
+        assert isinstance(env.type_check_one(d_safe_bad_unsafe, measure=False).error, W_UnsafeReference)
+        err_lvl = env.type_check_one(d_bad_lvl, measure=False).error
+        assert isinstance(err_lvl, W_InvalidDeclaration) and isinstance(err_lvl.inner, UndeclaredLevelParam)
+        assert isinstance(env.type_check_one(d_early, measure=False).error, W_NotYetDeclared)

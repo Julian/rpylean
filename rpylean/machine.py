@@ -49,6 +49,7 @@ from rpylean.objects import (
     W_Lambda,
     W_Let,
     W_LevelParam,
+    W_LevelSucc,
     W_LitNat,
     W_LitStr,
     W_NotAFunction,
@@ -393,6 +394,19 @@ def _subst_level_fast(lvl, params, clevels):
     return lvl.subst_levels_lists(params, clevels)
 
 
+def _level_subst_eq(lvl, params, clevels, target_lvl):
+    """Whether substituting ``params -> clevels`` in ``lvl`` produces a level
+    semantically equal to ``target_lvl``, avoiding `W_LevelSucc` allocation on
+    common `Type u` / `Sort (u + 1)` comparisons."""
+    while lvl.__class__ is W_LevelSucc and target_lvl.__class__ is W_LevelSucc:
+        assert isinstance(lvl, W_LevelSucc)
+        assert isinstance(target_lvl, W_LevelSucc)
+        lvl = lvl.parent
+        target_lvl = target_lvl.parent
+    sub = _subst_level_fast(lvl, params, clevels)
+    return sub is target_lvl or sub.eq(target_lvl)
+
+
 class _CacheGen(object):
     _attrs_ = ['count']
 
@@ -443,6 +457,12 @@ _WARM_MAX_FAILED = 1 << 17
 #: `W_LevelParam`s, and `decl.index < current.index`. Valid across all
 #: subsequent monotonic warm declarations even after `check_gen` bumps.
 _CHECKED_PERM = 0x7FFFFFFF
+#: Sentinel stored in `TermStore.leaf_infer[j]` after a `W_Const` leaf has been
+#: checked once via the AST-direct `_infer_app` path. Single-use constants
+#: (~78% of `_infer_leaf` records) never import their `decl.type`, while a
+#: second application promotes the constant into `TermStore` for fast flat
+#: `u32` checking and `_infer_app_expected_pat` reuse.
+_LEAF_INFER_SEEN = 0x7FFFFFFF
 
 
 @always_inline
@@ -3085,6 +3105,200 @@ class TermStore(object):
         or probing consing tables. Bounded by a step budget so heavily shared
         DAGs fall back cleanly to memoized instantiation."""
         return self._inst_eq_d0(pat, self._spine_buf, start, n, target, 512) >= 0
+
+    @dont_inline
+    def ast_inst_eq_buf(self, pat, params, clevels, start, n, target):
+        """Return True only when instantiating raw AST ``pat`` with universe
+        levels ``params -> clevels`` and ``_spine_buf[start:start+n]`` produces
+        a term structurally equal to handle ``target`` (modulo binder names/info),
+        without importing ``pat`` or allocating any `TermStore` records."""
+        return self._ast_inst_eq(
+            pat, params, clevels, self._spine_buf, start, n, target, 0, 512,
+        ) >= 0
+
+    def _ast_inst_eq(self, pat, params, clevels, buf, start, n, target, depth, budget):
+        if not pat.has_level_param() and pat.loose_bvar_range() <= depth:
+            c = pat._cache
+            if (c >> 32) == self._store_gen:
+                return budget if (c & _TABLE_SLOT_MASK) == target else -1
+        cls = pat.__class__
+        if cls is W_BVar:
+            assert isinstance(pat, W_BVar)
+            bid = pat.id
+            if bid < depth:
+                if (is_leaf(target)
+                        and _s32(self.leaf_meta[leaf_index(target)]) == ((bid + 1) << 1)):
+                    return budget
+                return -1
+            rel = bid - depth
+            if rel < n:
+                sub = _s32(buf[start + rel])
+                if sub == target and (depth == 0 or self.loose_bvar_range(sub) == 0):
+                    return budget
+                return -1
+            if (is_leaf(target)
+                    and _s32(self.leaf_meta[leaf_index(target)]) == ((bid - n + 1) << 1)):
+                return budget
+            return -1
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        if cls is W_App:
+            if is_leaf(target):
+                return -1
+            tbase = rec_index(target) << 2
+            if (_s32(recs[tbase]) & _KIND_MASK) != KIND_APP:
+                return -1
+            cur = pat
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                assert isinstance(cur, W_App)
+                pa = cur.arg
+                tb = _s32(recs[tbase + F_B])
+                if pa.__class__ is W_BVar:
+                    assert isinstance(pa, W_BVar)
+                    bid = pa.id
+                    if bid < depth:
+                        if not (is_leaf(tb)
+                                and _s32(leaf_meta[leaf_index(tb)]) == ((bid + 1) << 1)):
+                            return -1
+                    else:
+                        rel = bid - depth
+                        if rel < n:
+                            sub = _s32(buf[start + rel])
+                            if sub != tb or (depth > 0 and self.loose_bvar_range(sub) != 0):
+                                return -1
+                        elif not (is_leaf(tb)
+                                  and _s32(leaf_meta[leaf_index(tb)]) == ((bid - n + 1) << 1)):
+                            return -1
+                else:
+                    budget = self._ast_inst_eq(
+                        pa, params, clevels, buf, start, n, tb, depth, budget,
+                    )
+                    if budget < 0:
+                        return -1
+                pf = cur.fn
+                ta = _s32(recs[tbase + F_A])
+                if pf.__class__ is W_App:
+                    if is_leaf(ta):
+                        return -1
+                    tbase = rec_index(ta) << 2
+                    if (_s32(recs[tbase]) & _KIND_MASK) != KIND_APP:
+                        return -1
+                    cur = pf
+                    continue
+                return self._ast_inst_eq(
+                    pf, params, clevels, buf, start, n, ta, depth, budget,
+                )
+        if cls is W_Const:
+            if not is_leaf(target):
+                return -1
+            te = self.leaves[leaf_index(target)]
+            if te.__class__ is not W_Const:
+                return -1
+            assert isinstance(pat, W_Const)
+            assert isinstance(te, W_Const)
+            if not pat.name.syntactic_eq(te.name):
+                return -1
+            plvls = pat.levels
+            tlvls = te.levels
+            nl = len(plvls)
+            if nl != len(tlvls):
+                return -1
+            if nl == 0:
+                return budget
+            if not pat.has_level_param():
+                k = 0
+                while k < nl:
+                    if plvls[k] is not tlvls[k] and not plvls[k].eq(tlvls[k]):
+                        return -1
+                    k += 1
+                return budget
+            k = 0
+            while k < nl:
+                if not _level_subst_eq(plvls[k], params, clevels, tlvls[k]):
+                    return -1
+                k += 1
+            return budget
+        if cls is W_Sort:
+            if not is_leaf(target):
+                return -1
+            te = self.leaves[leaf_index(target)]
+            if te.__class__ is not W_Sort:
+                return -1
+            assert isinstance(pat, W_Sort)
+            assert isinstance(te, W_Sort)
+            if _level_subst_eq(pat.level, params, clevels, te.level):
+                return budget
+            return -1
+        if cls is W_ForAll or cls is W_Lambda:
+            if is_leaf(target) or budget <= 0:
+                return -1
+            budget -= 1
+            tbase = rec_index(target) << 2
+            want = KIND_FORALL if cls is W_ForAll else KIND_LAMBDA
+            if (_s32(recs[tbase]) & _KIND_MASK) != want:
+                return -1
+            assert isinstance(pat, W_ForAll) or isinstance(pat, W_Lambda)
+            budget = self._ast_inst_eq(
+                pat.binder.type, params, clevels, buf, start, n,
+                _s32(recs[tbase + F_A]), depth, budget,
+            )
+            if budget < 0:
+                return -1
+            return self._ast_inst_eq(
+                pat.body, params, clevels, buf, start, n,
+                _s32(recs[tbase + F_B]), depth + 1, budget,
+            )
+        if cls is W_Proj:
+            if is_leaf(target) or budget <= 0:
+                return -1
+            budget -= 1
+            tbase = rec_index(target) << 2
+            if (_s32(recs[tbase]) & _KIND_MASK) != KIND_PROJ:
+                return -1
+            assert isinstance(pat, W_Proj)
+            if self.proj_index(target) != pat.field_index:
+                return -1
+            if not self.name_of(target).syntactic_eq(pat.struct_name):
+                return -1
+            return self._ast_inst_eq(
+                pat.struct_expr, params, clevels, buf, start, n,
+                _s32(recs[tbase + F_A]), depth, budget,
+            )
+        if cls is W_Let:
+            if is_leaf(target) or budget <= 0:
+                return -1
+            budget -= 1
+            tbase = rec_index(target) << 2
+            if (_s32(recs[tbase]) & _KIND_MASK) != KIND_LET:
+                return -1
+            assert isinstance(pat, W_Let)
+            budget = self._ast_inst_eq(
+                pat.type, params, clevels, buf, start, n,
+                _s32(recs[tbase + F_A]), depth, budget,
+            )
+            if budget < 0:
+                return -1
+            tpair = _s32(recs[tbase + F_B])
+            budget = self._ast_inst_eq(
+                pat.value, params, clevels, buf, start, n,
+                self.field_a(tpair), depth, budget,
+            )
+            if budget < 0:
+                return -1
+            return self._ast_inst_eq(
+                pat.body, params, clevels, buf, start, n,
+                self.field_b(tpair), depth + 1, budget,
+            )
+        if cls is W_LitNat or cls is W_LitStr:
+            if not is_leaf(target):
+                return -1
+            if pat.syntactic_eq(self.leaves[leaf_index(target)]):
+                return budget
+            return -1
+        return -1
 
     def _inst_eq_d0(self, pat, buf, start, n, target, budget):
         recs = self.recs
@@ -8647,7 +8861,7 @@ class Machine(object):
         if is_leaf(h):
             j = leaf_index(h)
             t = _s32(store.leaf_infer[j])
-            if t != 0:
+            if 0 < t < _LEAF_INFER_SEEN:
                 if check:
                     cg = _s32(store.leaf_checked[j])
                     if cg < self.check_gen:
@@ -8682,7 +8896,7 @@ class Machine(object):
         if is_leaf(h):
             j = leaf_index(h)
             t = _s32(store.leaf_infer[j])
-            if t != 0:
+            if 0 < t < _LEAF_INFER_SEEN:
                 cg = _s32(store.leaf_checked[j])
                 if cg < self.check_gen:
                     return self._check_leaf(h, t)
@@ -9623,11 +9837,26 @@ class Machine(object):
         fn = store.field_a(h)
         if store.kind(fn) != KIND_APP:
             arg = store.field_b(h)
-            if not check and is_leaf(fn):
+            if is_leaf(fn):
                 j = leaf_index(fn)
                 fn_type = _s32(store.leaf_infer[j])
-                if fn_type == 0:
-                    return self._infer_app1_only_leaf(fn, j, arg)
+                if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
+                    if not check:
+                        return self._infer_app1_only_leaf(fn, j, arg)
+                    if fn_type == 0 and not self._def_eq_hooked:
+                        e = store.leaves[j]
+                        if isinstance(e, W_Const):
+                            store.leaf_infer[j] = _u32(_LEAF_INFER_SEEN)
+                            return self._infer_app1_const_ast(
+                                fn, j, e, arg, expected, exp_start, exp_n,
+                            )
+                    fn_type = self._infer_leaf(fn, True)
+                elif check:
+                    cg = _s32(store.leaf_checked[j])
+                    if cg < self.check_gen:
+                        fn_type = self._check_leaf(fn, fn_type)
+                    elif cg != _CHECKED_PERM:
+                        self._saw_nonperm = True
             else:
                 fn_type = self.infer(fn, check)
             if store.kind(fn_type) != KIND_FORALL:
@@ -9683,70 +9912,89 @@ class Machine(object):
                 if is_leaf(head):
                     j = leaf_index(head)
                     fn_type = _s32(store.leaf_infer[j])
-                    if fn_type == 0:
+                    if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
                         return self._infer_app_only_leaf_buf(head, j, mark, n)
                     return self._infer_app_only_buf(head, mark, n, fn_type, n)
                 fn_type = self.infer(head, False)
                 return self._infer_app_only_buf(head, mark, n, fn_type, n)
-            fn_type = self.infer(head, True)
-            plen = 0
-            i = n - 1
-            while i >= 0:
-                arg = store.spine_arg(mark + i)
-                if store.kind(fn_type) != KIND_FORALL:
-                    if plen > 0:
-                        if plen == 1:
-                            fn_type = store.instantiate(
-                                fn_type, store.spine_arg(mark + i + 1), 0,
+            if is_leaf(head):
+                j = leaf_index(head)
+                fn_type = _s32(store.leaf_infer[j])
+                if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
+                    if fn_type == 0 and not self._def_eq_hooked:
+                        e = store.leaves[j]
+                        if isinstance(e, W_Const):
+                            store.leaf_infer[j] = _u32(_LEAF_INFER_SEEN)
+                            return self._infer_app_const_ast_buf(
+                                head, j, e, mark, n, expected, exp_start, exp_n,
                             )
-                        else:
-                            fn_type = store.instantiate_multi_buf(
-                                fn_type, mark + i + 1, plen, 0,
-                            )
-                        plen = 0
-                    fn_type = self.whnf(fn_type)
-                    if store.kind(fn_type) != KIND_FORALL:
-                        self._not_a_function_buf(head, mark, n, i, fn_type)
-                domain = store.field_a(fn_type)
-                if plen == 0 or store.loose_bvar_range(domain) == 0:
-                    arg_type = self.infer_expected(arg, domain)
-                elif is_leaf(domain):
-                    bid = (_s32(store.leaf_meta[leaf_index(domain)]) >> 1) - 1
-                    if bid < plen:
-                        domain = store.spine_arg(mark + i + 1 + bid)
-                    else:
-                        domain = store.bvar(bid - plen)
-                    arg_type = self.infer_expected(arg, domain)
+                    fn_type = self._infer_leaf(head, True)
                 else:
-                    if not self._def_eq_hooked and not is_leaf(arg):
-                        ak = _s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK
-                        if ak == KIND_APP:
-                            arg_type = self._infer_app_expected_pat(
-                                arg, domain, mark + i + 1, plen,
-                            )
-                        elif ak == KIND_LAMBDA and store.kind(domain) == KIND_FORALL:
-                            arg_type = self._infer_lambda_expected_pat(
-                                arg, domain, mark + i + 1, plen,
-                            )
-                        elif ak == KIND_LET:
-                            arg_type = self._infer_let_expected_pat(
-                                arg, domain, mark + i + 1, plen,
-                            )
-                        else:
-                            arg_type = self.infer(arg, True)
-                        if arg_type == 0:
-                            fn_type = store.field_b(fn_type)
-                            if store.loose_bvar_range(fn_type) == 0:
-                                plen = 0
-                            else:
-                                plen += 1
-                            i -= 1
-                            continue
+                    cg = _s32(store.leaf_checked[j])
+                    if cg < self.check_gen:
+                        fn_type = self._check_leaf(head, fn_type)
+                    elif cg != _CHECKED_PERM:
+                        self._saw_nonperm = True
+            else:
+                fn_type = self.infer(head, True)
+            return self._infer_app_rem_buf(
+                head, mark, n, n - 1, 0, fn_type, expected, exp_start, exp_n,
+            )
+        finally:
+            store.unapp_pop(mark)
+
+    def _infer_app_rem_buf(self, head, mark, n, start_i, plen, fn_type,
+                           expected, exp_start, exp_n):
+        """Check arguments ``start_i .. 0`` of ``head`` (sitting at
+        `_spine_buf[mark:mark+n]`) against the imported type handle ``fn_type``
+        with ``plen`` pending substitutions."""
+        store = self.store
+        tc = self.tc
+        i = start_i
+        while i >= 0:
+            arg = store.spine_arg(mark + i)
+            if store.kind(fn_type) != KIND_FORALL:
+                if plen > 0:
+                    if plen == 1:
+                        fn_type = store.instantiate(
+                            fn_type, store.spine_arg(mark + i + 1), 0,
+                        )
+                    else:
+                        fn_type = store.instantiate_multi_buf(
+                            fn_type, mark + i + 1, plen, 0,
+                        )
+                    plen = 0
+                fn_type = self.whnf(fn_type)
+                if store.kind(fn_type) != KIND_FORALL:
+                    self._not_a_function_buf(head, mark, n, i, fn_type)
+            domain = store.field_a(fn_type)
+            if plen == 0 or store.loose_bvar_range(domain) == 0:
+                arg_type = self.infer_expected(arg, domain)
+            elif is_leaf(domain):
+                bid = (_s32(store.leaf_meta[leaf_index(domain)]) >> 1) - 1
+                if bid < plen:
+                    domain = store.spine_arg(mark + i + 1 + bid)
+                else:
+                    domain = store.bvar(bid - plen)
+                arg_type = self.infer_expected(arg, domain)
+            else:
+                if not self._def_eq_hooked and not is_leaf(arg):
+                    ak = _s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK
+                    if ak == KIND_APP:
+                        arg_type = self._infer_app_expected_pat(
+                            arg, domain, mark + i + 1, plen,
+                        )
+                    elif ak == KIND_LAMBDA and store.kind(domain) == KIND_FORALL:
+                        arg_type = self._infer_lambda_expected_pat(
+                            arg, domain, mark + i + 1, plen,
+                        )
+                    elif ak == KIND_LET:
+                        arg_type = self._infer_let_expected_pat(
+                            arg, domain, mark + i + 1, plen,
+                        )
                     else:
                         arg_type = self.infer(arg, True)
-                    if (not is_leaf(arg_type)
-                            and not self._def_eq_hooked
-                            and store.inst_eq_buf(domain, mark + i + 1, plen, arg_type)):
+                    if arg_type == 0:
                         fn_type = store.field_b(fn_type)
                         if store.loose_bvar_range(fn_type) == 0:
                             plen = 0
@@ -9754,50 +10002,334 @@ class Machine(object):
                             plen += 1
                         i -= 1
                         continue
+                else:
+                    arg_type = self.infer(arg, True)
+                if (not is_leaf(arg_type)
+                        and not self._def_eq_hooked
+                        and store.inst_eq_buf(domain, mark + i + 1, plen, arg_type)):
+                    fn_type = store.field_b(fn_type)
+                    if store.loose_bvar_range(fn_type) == 0:
+                        plen = 0
+                    else:
+                        plen += 1
+                    i -= 1
+                    continue
+                if plen == 1:
+                    domain = store.instantiate(
+                        domain, store.spine_arg(mark + i + 1), 0,
+                    )
+                else:
+                    domain = store.instantiate_multi_buf(
+                        domain, mark + i + 1, plen, 0,
+                    )
+            tracing = tc.tracer.recording
+            if tracing:
+                tc.tracer.begin_argcheck()
+            ok = self.def_eq(domain, arg_type)
+            if tracing:
+                tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
+            if not ok:
+                raise W_TypeError(
+                    tc, self.export(arg), self.export(domain),
+                    inferred_type=self.export(arg_type),
+                )
+            fn_type = store.field_b(fn_type)
+            if store.loose_bvar_range(fn_type) == 0:
+                plen = 0
+            else:
+                plen += 1
+            i -= 1
+        if plen > 0:
+            if is_leaf(fn_type):
+                bid = (_s32(store.leaf_meta[leaf_index(fn_type)]) >> 1) - 1
+                return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
+            if expected != 0 and not self._def_eq_hooked:
+                if exp_n == 0:
+                    if (not is_leaf(expected)
+                            and store.inst_eq_buf(fn_type, mark, plen, expected)):
+                        return expected
+                elif store.inst_eq_inst_buf(
+                        fn_type, mark, plen, expected, exp_start, exp_n):
+                    return 0
+            if plen == 1:
+                fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
+            else:
+                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
+        return fn_type
+
+    @dont_inline
+    def _infer_app1_const_ast(self, fn, j, e, arg, expected, exp_start, exp_n):
+        """Check 1-arg application ``fn arg`` directly on ``decl.type`` AST
+        when ``fn`` is an unimported `W_Const` leaf (``leaf_infer[j] == 0``),
+        avoiding importing unused binder domains and `KIND_FORALL` records."""
+        store = self.store
+        tc = self.tc
+        decl = self._leaf_decl(fn, e)
+        if decl is None:
+            decl = get_decl(tc.declarations, e.name)
+        cg = _s32(store.leaf_checked[j])
+        if cg < self.check_gen:
+            tc.check_reference(e, decl)
+            if e.has_level_param():
+                for lvl in e.levels:
+                    if lvl.has_param:
+                        tc.check_level(lvl)
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+            elif (self._can_perm
+                    and decl.safety == SAFETY_SAFE
+                    and decl.index >= 0
+                    and decl.index < tc.decl.index):
+                store.leaf_checked[j] = _u32(_CHECKED_PERM)
+            else:
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+        elif cg != _CHECKED_PERM:
+            self._saw_nonperm = True
+        dt = decl.type
+        if not isinstance(dt, W_ForAll):
+            fn_type = store.import_const_term(e, decl, dt)
+            store.leaf_infer[j] = _u32(fn_type)
+            fn_type = self.whnf(fn_type)
+            if store.kind(fn_type) != KIND_FORALL:
+                raise W_NotAFunction(
+                    tc, self.export(fn), inferred_type=self.export(fn_type),
+                )
+            domain = store.field_a(fn_type)
+            arg_type = self.infer_expected(arg, domain)
+            tracing = tc.tracer.recording
+            if tracing:
+                tc.tracer.begin_argcheck()
+            ok = self.def_eq(domain, arg_type)
+            if tracing:
+                tc.tracer.end_argcheck(self._head_label(fn), 0)
+            if not ok:
+                raise W_TypeError(
+                    tc, self.export(arg), self.export(domain),
+                    inferred_type=self.export(arg_type),
+                )
+            body = store.field_b(fn_type)
+            if store.loose_bvar_range(body) == 0:
+                return body
+            if is_leaf(body):
+                bid = (_s32(store.leaf_meta[leaf_index(body)]) >> 1) - 1
+                return arg if bid == 0 else store.bvar(bid - 1)
+            return store.instantiate(body, arg, 0)
+        params = decl.levels
+        clevels = e.levels
+        dom_ast = dt.binder.type
+        matched = False
+        if (not is_leaf(arg)
+                and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_LAMBDA
+                and isinstance(dom_ast, W_ForAll)):
+            domain = store.import_const_term(e, decl, dom_ast)
+            arg_type = self.infer_expected(arg, domain)
+        else:
+            arg_type = self.infer(arg, True)
+            if store.ast_inst_eq_buf(dom_ast, params, clevels, 0, 0, arg_type):
+                matched = True
+            else:
+                domain = store.import_const_term(e, decl, dom_ast)
+        if not matched:
+            tracing = tc.tracer.recording
+            if tracing:
+                tc.tracer.begin_argcheck()
+            ok = self.def_eq(domain, arg_type)
+            if tracing:
+                tc.tracer.end_argcheck(self._head_label(fn), 0)
+            if not ok:
+                raise W_TypeError(
+                    tc, self.export(arg), self.export(domain),
+                    inferred_type=self.export(arg_type),
+                )
+        body_ast = dt.body
+        if body_ast.loose_bvar_range() == 0:
+            if expected != 0 and exp_n == 0:
+                if store.ast_inst_eq_buf(body_ast, params, clevels, 0, 0, expected):
+                    return expected
+            return store.import_const_term(e, decl, body_ast)
+        if body_ast.__class__ is W_BVar:
+            assert isinstance(body_ast, W_BVar)
+            return arg if body_ast.id == 0 else store.bvar(body_ast.id - 1)
+        if expected != 0 and exp_n == 0:
+            sm = store._spine_top
+            store.spine_push(arg)
+            ok_exp = store.ast_inst_eq_buf(body_ast, params, clevels, sm, 1, expected)
+            store.unapp_pop(sm)
+            if ok_exp:
+                return expected
+        body = store.import_const_term(e, decl, body_ast)
+        if expected != 0 and exp_n > 0:
+            sm = store._spine_top
+            store.spine_push(arg)
+            ok_exp = store.inst_eq_inst_buf(
+                body, sm, 1, expected, exp_start, exp_n,
+            )
+            store.unapp_pop(sm)
+            if ok_exp:
+                return 0
+        return store.instantiate(body, arg, 0)
+
+    @dont_inline
+    def _infer_app_const_ast_buf(self, head, j, e, mark, n,
+                                 expected, exp_start, exp_n):
+        """Check multi-arg application ``head args`` (at `_spine_buf[mark:mark+n]`)
+        directly on ``decl.type`` AST when ``head`` is an unimported `W_Const`
+        leaf (``leaf_infer[j] == 0``), verifying binder domains structurally via
+        `ast_inst_eq_buf` so matched domains and `KIND_FORALL` records are never
+        imported into `TermStore`."""
+        store = self.store
+        tc = self.tc
+        decl = self._leaf_decl(head, e)
+        if decl is None:
+            decl = get_decl(tc.declarations, e.name)
+        cg = _s32(store.leaf_checked[j])
+        if cg < self.check_gen:
+            tc.check_reference(e, decl)
+            if e.has_level_param():
+                for lvl in e.levels:
+                    if lvl.has_param:
+                        tc.check_level(lvl)
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+            elif (self._can_perm
+                    and decl.safety == SAFETY_SAFE
+                    and decl.index >= 0
+                    and decl.index < tc.decl.index):
+                store.leaf_checked[j] = _u32(_CHECKED_PERM)
+            else:
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+        elif cg != _CHECKED_PERM:
+            self._saw_nonperm = True
+        cur = decl.type
+        if not isinstance(cur, W_ForAll):
+            fn_type = store.import_const_term(e, decl, cur)
+            store.leaf_infer[j] = _u32(fn_type)
+            return self._infer_app_rem_buf(
+                head, mark, n, n - 1, 0, fn_type, expected, exp_start, exp_n,
+            )
+        params = decl.levels
+        clevels = e.levels
+        plen = 0
+        i = n - 1
+        while i >= 0:
+            if not isinstance(cur, W_ForAll):
+                fn_type = store.import_const_term(e, decl, cur)
+                return self._infer_app_rem_buf(
+                    head, mark, n, i, plen, fn_type, expected, exp_start, exp_n,
+                )
+            arg = store.spine_arg(mark + i)
+            dom_ast = cur.binder.type
+            if plen > 0 and dom_ast.__class__ is W_BVar:
+                assert isinstance(dom_ast, W_BVar)
+                bid = dom_ast.id
+                if bid < plen:
+                    domain = store.spine_arg(mark + i + 1 + bid)
+                else:
+                    domain = store.bvar(bid - plen)
+                arg_type = self.infer_expected(arg, domain)
+            elif (not is_leaf(arg)
+                    and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_LAMBDA
+                    and isinstance(dom_ast, W_ForAll)):
+                dom_h = store.import_const_term(e, decl, dom_ast)
+                if plen == 0 or store.loose_bvar_range(dom_h) == 0:
+                    domain = dom_h
+                    arg_type = self.infer_expected(arg, domain)
+                else:
+                    arg_type = self._infer_lambda_expected_pat(
+                        arg, dom_h, mark + i + 1, plen,
+                    )
+                    if arg_type == 0:
+                        cur = cur.body
+                        if cur.loose_bvar_range() == 0:
+                            plen = 0
+                        else:
+                            plen += 1
+                        i -= 1
+                        continue
+                    if (not is_leaf(arg_type)
+                            and store.inst_eq_buf(dom_h, mark + i + 1, plen, arg_type)):
+                        cur = cur.body
+                        if cur.loose_bvar_range() == 0:
+                            plen = 0
+                        else:
+                            plen += 1
+                        i -= 1
+                        continue
                     if plen == 1:
                         domain = store.instantiate(
-                            domain, store.spine_arg(mark + i + 1), 0,
+                            dom_h, store.spine_arg(mark + i + 1), 0,
                         )
                     else:
                         domain = store.instantiate_multi_buf(
-                            domain, mark + i + 1, plen, 0,
+                            dom_h, mark + i + 1, plen, 0,
                         )
-                tracing = tc.tracer.recording
-                if tracing:
-                    tc.tracer.begin_argcheck()
-                ok = self.def_eq(domain, arg_type)
-                if tracing:
-                    tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
-                if not ok:
-                    raise W_TypeError(
-                        tc, self.export(arg), self.export(domain),
-                        inferred_type=self.export(arg_type),
-                    )
-                fn_type = store.field_b(fn_type)
-                if store.loose_bvar_range(fn_type) == 0:
-                    plen = 0
-                else:
-                    plen += 1
-                i -= 1
-            if plen > 0:
-                if is_leaf(fn_type):
-                    bid = (_s32(store.leaf_meta[leaf_index(fn_type)]) >> 1) - 1
-                    return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
-                if expected != 0 and not self._def_eq_hooked:
-                    if exp_n == 0:
-                        if (not is_leaf(expected)
-                                and store.inst_eq_buf(fn_type, mark, plen, expected)):
-                            return expected
-                    elif store.inst_eq_inst_buf(
-                            fn_type, mark, plen, expected, exp_start, exp_n):
-                        return 0
+            elif plen == 0 or dom_ast.loose_bvar_range() == 0:
+                arg_type = self.infer(arg, True)
+                if store.ast_inst_eq_buf(dom_ast, params, clevels, mark + i + 1, 0, arg_type):
+                    cur = cur.body
+                    if cur.loose_bvar_range() == 0:
+                        plen = 0
+                    else:
+                        plen += 1
+                    i -= 1
+                    continue
+                domain = store.import_const_term(e, decl, dom_ast)
+            else:
+                arg_type = self.infer(arg, True)
+                if store.ast_inst_eq_buf(dom_ast, params, clevels, mark + i + 1, plen, arg_type):
+                    cur = cur.body
+                    if cur.loose_bvar_range() == 0:
+                        plen = 0
+                    else:
+                        plen += 1
+                    i -= 1
+                    continue
+                dom_h = store.import_const_term(e, decl, dom_ast)
                 if plen == 1:
-                    fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
+                    domain = store.instantiate(
+                        dom_h, store.spine_arg(mark + i + 1), 0,
+                    )
                 else:
-                    fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
-            return fn_type
-        finally:
-            store.unapp_pop(mark)
+                    domain = store.instantiate_multi_buf(
+                        dom_h, mark + i + 1, plen, 0,
+                    )
+            tracing = tc.tracer.recording
+            if tracing:
+                tc.tracer.begin_argcheck()
+            ok = self.def_eq(domain, arg_type)
+            if tracing:
+                tc.tracer.end_argcheck(self._head_label(head), n - 1 - i)
+            if not ok:
+                raise W_TypeError(
+                    tc, self.export(arg), self.export(domain),
+                    inferred_type=self.export(arg_type),
+                )
+            cur = cur.body
+            if cur.loose_bvar_range() == 0:
+                plen = 0
+            else:
+                plen += 1
+            i -= 1
+        if plen > 0 and cur.__class__ is W_BVar:
+            assert isinstance(cur, W_BVar)
+            bid = cur.id
+            return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
+        if expected != 0 and exp_n == 0:
+            if store.ast_inst_eq_buf(cur, params, clevels, mark, plen, expected):
+                return expected
+        fn_type = store.import_const_term(e, decl, cur)
+        if plen > 0:
+            if expected != 0 and exp_n > 0:
+                if store.inst_eq_inst_buf(
+                        fn_type, mark, plen, expected, exp_start, exp_n):
+                    return 0
+            if plen == 1:
+                fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
+            else:
+                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
+        return fn_type
 
     @dont_inline
     def _infer_app1_only_leaf(self, fn, j, arg):
