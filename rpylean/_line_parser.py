@@ -14,7 +14,6 @@ robustness we don't rely on that — every reader scans for its key by name.
 from __future__ import print_function
 
 from rpython.rlib.objectmodel import always_inline
-from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rstring import StringBuilder
 from rpython.rlib.rutf8 import unichr_as_utf8_append
 
@@ -41,24 +40,6 @@ class LineCursor(object):
         self.length = end
 
     @always_inline
-    def at_eol(self):
-        """Return True if at end of line (``self.pos == self.length``, or
-        immediately at ``\\n`` / ``\\r\\n`` in chunk-streaming mode, advancing
-        past the newline)."""
-        p = self.pos
-        end = self.length
-        if p == end:
-            return True
-        c = self.line[p]
-        if c == '\n':
-            self.pos = p + 1
-            return True
-        if c == '\r' and p + 1 < end and self.line[p + 1] == '\n':
-            self.pos = p + 2
-            return True
-        return False
-
-    @always_inline
     def match_lit(self, lit):
         """Match literal bytes ``lit`` at ``self.pos`` with no whitespace
         skipping. Returns True and advances ``self.pos`` on match."""
@@ -74,29 +55,6 @@ class LineCursor(object):
             i += 1
         self.pos = p + n
         return True
-
-    @always_inline
-    def read_uint_compact(self):
-        """Read a non-negative integer at ``self.pos`` with no whitespace
-        skipping, or return -1 if no digit is present."""
-        line = self.line
-        n = self.length
-        i = self.pos
-        if i >= n:
-            return -1
-        d = ord(line[i]) - 48
-        if r_uint(d) > r_uint(9):
-            return -1
-        val = d
-        i += 1
-        while i < n:
-            d = ord(line[i]) - 48
-            if r_uint(d) > r_uint(9):
-                break
-            val = val * 10 + d
-            i += 1
-        self.pos = i
-        return val
 
     def skip_string(self):
         """Advance past a JSON string literal without allocating it."""
@@ -146,7 +104,6 @@ class LineCursor(object):
                 self.pos = i + 1
                 return start, end
             if c == '\\':
-                # Rare escaped key: fall back cleanly via read_key semantics
                 raise MalformedLine("escaped key at pos %d" % start)
             i += 1
         raise MalformedLine("unterminated string at pos %d" % start)
@@ -277,35 +234,35 @@ class LineCursor(object):
         return s
 
     def expect_key(self, expected):
-        """Match ``"<expected>":`` literally without allocating the key.
-
-        For known keys this avoids the string slice + dict-style equality
-        check the generic ``read_key`` then ``==`` would do — and on hot
-        paths (e.g. expecting ``"ie"`` after a disc-first expression body)
-        that's millions of avoided allocations per export.
-        """
+        """Match ``"<expected>":`` without allocating the key on the compact
+        no-whitespace path, falling back to ``read_key()`` if whitespace or
+        escapes are present."""
         self.skip_ws()
         line = self.line
         elen = len(expected)
         end = self.pos + elen + 3
         if (
-            end > self.length
-            or line[self.pos] != '"'
-            or line[self.pos + elen + 1] != '"'
-            or line[self.pos + elen + 2] != ':'
+            end <= self.length
+            and line[self.pos] == '"'
+            and line[self.pos + elen + 1] == '"'
+            and line[self.pos + elen + 2] == ':'
         ):
+            j = self.pos + 1
+            matched = True
+            for k in range(elen):
+                if line[j + k] != expected[k]:
+                    matched = False
+                    break
+            if matched:
+                self.pos = end
+                return
+        pos = self.pos
+        key = self.read_key()
+        if key != expected:
             raise MalformedLine(
                 "expected key %s at pos %d in %s"
-                % (expected, self.pos, self.line)
+                % (expected, pos, self.line)
             )
-        j = self.pos + 1
-        for k in range(elen):
-            if line[j + k] != expected[k]:
-                raise MalformedLine(
-                    "expected key %s at pos %d in %s"
-                    % (expected, self.pos, self.line)
-                )
-        self.pos = end
 
     def read_int_array(self):
         self.expect('[')

@@ -104,6 +104,11 @@ def test_expect_key_matches():
     c.expect_key("name")
 
 
+def test_expect_key_matches_with_whitespace():
+    c = LineCursor('  "name"  :  ')
+    c.expect_key("name")
+
+
 def test_expect_key_mismatch():
     c = LineCursor('"other":')
     with pytest.raises(MalformedLine):
