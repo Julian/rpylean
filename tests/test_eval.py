@@ -311,3 +311,16 @@ def test_litstr_lazy_expansion():
     # Second char via tail projection -> 66 ('B') (reuses cached expansion).
     second_char = List.proj(0, List.proj(1, data))
     assert syntactic_eq(_eval(env, Char.proj(0, second_char)), W_LitNat.int(ord("B")))
+
+    # Non-ASCII UTF-8 string ("é€😀"): 2-, 3-, and 4-byte codepoints decode to
+    # scalar values [0xE9, 0x20AC, 0x1F600] rather than raw UTF-8 bytes.
+    utf8_lit = W_LitStr("\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80")
+    utf8_data = String.proj(0, utf8_lit)
+    c0 = Char.proj(0, List.proj(0, utf8_data))
+    tail1 = List.proj(1, utf8_data)
+    c1 = Char.proj(0, List.proj(0, tail1))
+    tail2 = List.proj(1, tail1)
+    c2 = Char.proj(0, List.proj(0, tail2))
+    assert syntactic_eq(_eval(env, c0), W_LitNat.int(0xE9))
+    assert syntactic_eq(_eval(env, c1), W_LitNat.int(0x20AC))
+    assert syntactic_eq(_eval(env, c2), W_LitNat.int(0x1F600))

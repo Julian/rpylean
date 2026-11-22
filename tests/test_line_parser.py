@@ -71,6 +71,17 @@ def test_read_string_with_unicode_escape():
     assert c.read_string() == "\xc3\xa9"
 
 
+def test_read_string_with_surrogate_pair():
+    c = LineCursor(r'"\uD83D\uDE00"')  # 😀 (U+1F600)
+    assert c.read_string() == "\xf0\x9f\x98\x80"
+
+
+def test_read_string_with_bad_unicode_escape():
+    c = LineCursor(r'"\uZZZZ"')
+    with pytest.raises(MalformedLine):
+        c.read_string()
+
+
 def test_read_string_unterminated():
     c = LineCursor('"oops')
     with pytest.raises(MalformedLine):

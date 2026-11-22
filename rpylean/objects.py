@@ -3036,6 +3036,57 @@ class W_FVar(W_Expr):
         return self
 
 
+def _utf8_codepoints(s):
+    """Decode UTF-8 bytes ``s`` into a list of Unicode codepoints."""
+    out = []
+    n = len(s)
+    i = 0
+    while i < n:
+        b0 = ord(s[i])
+        if b0 < 0x80:
+            out.append(b0)
+            i += 1
+        elif (
+            (b0 & 0xE0) == 0xC0
+            and i + 1 < n
+            and (ord(s[i + 1]) & 0xC0) == 0x80
+        ):
+            b1 = ord(s[i + 1])
+            out.append(((b0 & 0x1F) << 6) | (b1 & 0x3F))
+            i += 2
+        elif (
+            (b0 & 0xF0) == 0xE0
+            and i + 2 < n
+            and (ord(s[i + 1]) & 0xC0) == 0x80
+            and (ord(s[i + 2]) & 0xC0) == 0x80
+        ):
+            b1 = ord(s[i + 1])
+            b2 = ord(s[i + 2])
+            out.append(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+            i += 3
+        elif (
+            (b0 & 0xF8) == 0xF0
+            and i + 3 < n
+            and (ord(s[i + 1]) & 0xC0) == 0x80
+            and (ord(s[i + 2]) & 0xC0) == 0x80
+            and (ord(s[i + 3]) & 0xC0) == 0x80
+        ):
+            b1 = ord(s[i + 1])
+            b2 = ord(s[i + 2])
+            b3 = ord(s[i + 3])
+            out.append(
+                ((b0 & 0x07) << 18)
+                | ((b1 & 0x3F) << 12)
+                | ((b2 & 0x3F) << 6)
+                | (b3 & 0x3F)
+            )
+            i += 4
+        else:
+            out.append(b0)
+            i += 1
+    return out
+
+
 class W_LitStr(W_Expr):
     _attrs_ = ['val']
     _immutable_fields_ = ['val']
@@ -3083,8 +3134,10 @@ class W_LitStr(W_Expr):
         Char = Name.simple("Char").const()
         cons = Name.from_str("List.cons").const([W_LEVEL_ZERO]).app(Char)
         expr = Name.from_str("List.nil").const([W_LEVEL_ZERO]).app(Char)
-        for i in range(len(self.val) - 1, -1, -1):
-            char_expr = Name.from_str("Char.ofNat").app(W_LitNat.char(self.val[i]))
+        char_of_nat = Name.from_str("Char.ofNat")
+        codepoints = _utf8_codepoints(self.val)
+        for i in range(len(codepoints) - 1, -1, -1):
+            char_expr = char_of_nat.app(W_LitNat.int(codepoints[i]))
             expr = cons.app(char_expr).app(expr)
         return Name.from_str("String.ofList").app(expr)
 

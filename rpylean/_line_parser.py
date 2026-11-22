@@ -352,7 +352,29 @@ def _decode_escapes(line, start, end):
             elif ec == 't':
                 builder.append('\t')
             elif ec == 'u':
-                code = int(line[i + 1:i + 5], 16)
+                if i + 5 > end:
+                    raise MalformedLine("truncated \\u escape")
+                try:
+                    code = int(line[i + 1:i + 5], 16)
+                except ValueError:
+                    raise MalformedLine("bad \\u escape")
+                if (
+                    0xD800 <= code <= 0xDBFF
+                    and i + 11 <= end
+                    and line[i + 5] == '\\'
+                    and line[i + 6] == 'u'
+                ):
+                    try:
+                        low = int(line[i + 7:i + 11], 16)
+                    except ValueError:
+                        raise MalformedLine("bad \\u escape")
+                    if 0xDC00 <= low <= 0xDFFF:
+                        code = (
+                            0x10000
+                            + ((code - 0xD800) << 10)
+                            + (low - 0xDC00)
+                        )
+                        i += 6
                 unichr_as_utf8_append(builder, code, allow_surrogates=True)
                 i += 4
             else:
