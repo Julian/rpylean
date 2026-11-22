@@ -5238,8 +5238,29 @@ class _CtorBody(object):
 _NO_CTOR_BODY = _CtorBody(-1, 0, None, [], None)
 
 
+class _CasesBody(object):
+    """Pre-analysed recursor-wrapper body for a `W_Definition` (such as
+    `Foo.casesOn`, non-recursive `Foo.recOn`, or a single-scrutinee `match_1`
+    wrapper) whose value peels via ``m`` leading lambdas to a fully-applied
+    recursor `Rec ... major` (or another `_CasesBody`) with `major = BVar(major_bvar)`
+    and minor premises passing `BVar(minor_bvars[r])` directly or via a
+    casesOn lambda wrapper discarding induction hypotheses."""
+
+    _attrs_ = ['m', 'major_bvar', 'rec_decl', 'minor_bvars']
+    _immutable_fields_ = ['m', 'major_bvar', 'rec_decl', 'minor_bvars']
+
+    def __init__(self, m, major_bvar, rec_decl, minor_bvars):
+        self.m = m
+        self.major_bvar = major_bvar
+        self.rec_decl = rec_decl
+        self.minor_bvars = minor_bvars
+
+
+_NO_CASES_BODY = _CasesBody(-1, 0, None, None)
+
+
 class W_Definition(W_DeclarationKind):
-    _attrs_ = ['value', 'hint', 'all', '_ctor_body']
+    _attrs_ = ['value', 'hint', 'all', '_ctor_body', '_cases_body']
     _immutable_fields_ = ['value', 'hint', 'all']
 
     def __init__(self, value, hint, all=None):
@@ -5249,6 +5270,147 @@ class W_Definition(W_DeclarationKind):
         #: all`), or ``None`` when it stands alone.
         self.all = all
         self._ctor_body = None
+        self._cases_body = None
+
+    @dont_inline
+    def init_cases_body(self, declarations, max_depth=2):
+        """Inspect `self.value` once and cache a `_CasesBody` when it peels via
+        leading lambdas to a fully-applied `W_Recursor` (or another `_CasesBody`
+        definition) whose major premise is a lambda `BVar` and at least one
+        constructor minor premise maps cleanly to a lambda `BVar` without using
+        induction hypotheses."""
+        target = self.get_delta_reduce_target()
+        if target is None:
+            self._cases_body = _NO_CASES_BODY
+            return _NO_CASES_BODY
+        cur = target
+        m = 0
+        while isinstance(cur, W_Lambda):
+            cur = cur.body
+            m += 1
+        if m < 2 or not isinstance(cur, W_App):
+            self._cases_body = _NO_CASES_BODY
+            return _NO_CASES_BODY
+        rev_args = []
+        node = cur
+        while isinstance(node, W_App):
+            rev_args.append(node.arg)
+            node = node.fn
+        if not isinstance(node, W_Const):
+            self._cases_body = _NO_CASES_BODY
+            return _NO_CASES_BODY
+        target_decl = find_decl(declarations, node.name)
+        if target_decl is None:
+            self._cases_body = _NO_CASES_BODY
+            return _NO_CASES_BODY
+        target_kind = target_decl.w_kind
+        n_app = len(rev_args)
+        if isinstance(target_kind, W_Recursor):
+            skip = (
+                target_kind.num_params
+                + target_kind.num_motives
+                + target_kind.num_minors
+                + target_kind.num_indices
+            )
+            if n_app != skip + 1 or target_kind.num_minors <= 0:
+                self._cases_body = _NO_CASES_BODY
+                return _NO_CASES_BODY
+            major_arg = rev_args[0]
+            if not isinstance(major_arg, W_BVar):
+                self._cases_body = _NO_CASES_BODY
+                return _NO_CASES_BODY
+            major_bvar = major_arg.id
+            if major_bvar < 0 or major_bvar >= m:
+                self._cases_body = _NO_CASES_BODY
+                return _NO_CASES_BODY
+            minor_bvars = [-1] * target_kind.num_minors
+            any_ok = False
+            for rule in target_kind.rules:
+                sminor = rule.simple_minor(
+                    target_decl,
+                    target_kind.num_params,
+                    target_kind.num_motives,
+                    target_kind.num_minors,
+                    target_kind.num_indices,
+                )
+                if sminor < 0 or sminor >= target_kind.num_minors:
+                    continue
+                pos = target_kind.num_params + target_kind.num_motives + sminor
+                marg = rev_args[n_app - 1 - pos]
+                nf = rule.num_fields
+                nr = 0 if rule._rec_fields is None else len(rule._rec_fields)
+                if nr == 0 and isinstance(marg, W_BVar):
+                    bid = marg.id
+                    if 0 <= bid < m:
+                        minor_bvars[sminor] = bid
+                        any_ok = True
+                    continue
+                k = 0
+                wcur = marg
+                while isinstance(wcur, W_Lambda):
+                    wcur = wcur.body
+                    k += 1
+                if k == 0 or k != nf + nr:
+                    continue
+                wrev = []
+                wnode = wcur
+                while isinstance(wnode, W_App):
+                    wrev.append(wnode.arg)
+                    wnode = wnode.fn
+                if len(wrev) != nf or not isinstance(wnode, W_BVar):
+                    continue
+                hbid = wnode.id
+                if hbid < k or hbid >= k + m:
+                    continue
+                ok = True
+                i = 0
+                while i < nf:
+                    fa = wrev[nf - 1 - i]
+                    if not isinstance(fa, W_BVar) or fa.id != k - 1 - i:
+                        ok = False
+                        break
+                    i += 1
+                if ok:
+                    minor_bvars[sminor] = hbid - k
+                    any_ok = True
+            if any_ok:
+                cb = _CasesBody(m, major_bvar, target_decl, minor_bvars)
+                self._cases_body = cb
+                return cb
+            self._cases_body = _NO_CASES_BODY
+            return _NO_CASES_BODY
+        if max_depth > 0 and isinstance(target_kind, W_Definition):
+            self._cases_body = _NO_CASES_BODY
+            inner = target_kind._cases_body
+            if inner is None:
+                inner = target_kind.init_cases_body(declarations, max_depth - 1)
+            if inner.m >= 0 and n_app == inner.m:
+                major_arg = rev_args[inner.major_bvar]
+                if isinstance(major_arg, W_BVar):
+                    outer_major = major_arg.id
+                    if 0 <= outer_major < m:
+                        in_minors = inner.minor_bvars
+                        assert in_minors is not None
+                        nmin = len(in_minors)
+                        out_minors = [-1] * nmin
+                        any_ok = False
+                        r = 0
+                        while r < nmin:
+                            imb = in_minors[r]
+                            if imb >= 0:
+                                ma = rev_args[imb]
+                                if isinstance(ma, W_BVar):
+                                    ob = ma.id
+                                    if 0 <= ob < m:
+                                        out_minors[r] = ob
+                                        any_ok = True
+                            r += 1
+                        if any_ok:
+                            cb = _CasesBody(m, outer_major, inner.rec_decl, out_minors)
+                            self._cases_body = cb
+                            return cb
+        self._cases_body = _NO_CASES_BODY
+        return _NO_CASES_BODY
 
     @dont_inline
     def init_ctor_body(self, declarations, max_depth=6):

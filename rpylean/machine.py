@@ -435,6 +435,7 @@ _LF_SHORT_BOOL = 128
 _LF_BOOL_ARG0 = 256
 _LF_NAT_SUCC = 512
 _LF_NAT_ZERO = 1024
+_LF_CASES = 2048
 _LF_HINT_SHIFT = 16
 _LF_HINT_OVF = 65535
 #: Tag bits (60..61) of `TermStore.leaf_delta_body[j]` for fast unfolds that
@@ -8086,7 +8087,8 @@ class Machine(object):
     def _try_unfold_app_miss(self, h):
         store = self.store
         head = store.head(h)
-        if (self._leaf_flags(head) & _LF_DELTA) == 0:
+        flags = self._leaf_flags(head)
+        if (flags & _LF_DELTA) == 0:
             return 0
         j = leaf_index(head)
         const = store.leaves[j]
@@ -8103,6 +8105,10 @@ class Machine(object):
                 return store.apply_buf_rev(val, mark, store._spine_top - mark - 1)
             finally:
                 store.unapp_pop(mark)
+        if (flags & _LF_CASES) != 0:
+            res = self._try_cases_unfold(h, head, const, j)
+            if res != 0:
+                return res
         packed = store.leaf_delta_body[j]
         if packed == 0:
             return self._try_unfold_first_use(h, head, const, j)
@@ -8216,6 +8222,161 @@ class Machine(object):
             store.unapp_pop(mark)
 
     @dont_inline
+    def _try_cases_unfold(self, h, head, const, j):
+        """Fused delta+iota+beta for `*.casesOn`, non-recursive `*.recOn`, and
+        single-scrutinee `*.match_1` wrappers: when the major premise reduces
+        to a matching constructor, jump directly to its minor premise applied
+        to the constructor's fields without allocating the intermediate `*.rec`
+        spine or unused minor wrapper lambdas."""
+        store = self.store
+        tc = self.tc
+        decl = store.leaf_decl[j]
+        if decl is None:
+            decl = self._leaf_decl(head, const)
+            if decl is None:
+                return 0
+        dkind = decl.w_kind
+        assert isinstance(dkind, W_Definition)
+        cases = dkind._cases_body
+        assert cases is not None and cases.m >= 0
+        rec_decl = cases.rec_decl
+        assert rec_decl is not None
+        rec = rec_decl.w_kind
+        assert isinstance(rec, W_Recursor)
+        minor_bvars = cases.minor_bvars
+        assert minor_bvars is not None
+        mark = store._spine_top
+        store.unapp_push(h)
+        try:
+            n = store._spine_top - mark
+            if n < cases.m:
+                return 0
+            extra = n - cases.m
+            major = self.whnf(store.spine_arg(mark + extra + cases.major_bvar))
+            lit = store.litnat_leaf(major)
+            if lit is not None:
+                if rec_decl.name.syntactic_eq(_NAT_REC_NAME):
+                    if lit.val.eq(rbigint.fromint(0)):
+                        rule = rec.rule_for_ctor(NAT_ZERO.name)
+                        if rule is None or rule._simple_minor < 0:
+                            return 0
+                        mb = minor_bvars[rule._simple_minor]
+                        if mb < 0:
+                            return 0
+                        if tc.tracer.recording:
+                            tc.tracer.delta(const.name)
+                            tc.tracer.iota(rec_decl.name)
+                        minor = store.spine_arg(mark + extra + mb)
+                        if extra == 0:
+                            return minor
+                        if store.kind(minor) == KIND_LAMBDA:
+                            return self._beta_spine_buf(minor, mark, extra)
+                        return store.apply_buf_rev(minor, mark, extra - 1)
+                    rule = rec.rule_for_ctor(_NAT_SUCC_NAME)
+                    if rule is None or rule._simple_minor < 0:
+                        return 0
+                    mb = minor_bvars[rule._simple_minor]
+                    if mb < 0:
+                        return 0
+                    if tc.tracer.recording:
+                        tc.tracer.delta(const.name)
+                        tc.tracer.iota(rec_decl.name)
+                    pred = store.leaf_for(
+                        _mk_w_litnat(lit.val.sub(rbigint.fromint(1))),
+                    )
+                    minor = store.spine_arg(mark + extra + mb)
+                    if store.kind(minor) == KIND_LAMBDA:
+                        if extra == 0:
+                            if tc.tracer.recording:
+                                tc.tracer.beta()
+                            return store.instantiate(store.field_b(minor), pred, 0)
+                        rmark = store._spine_top
+                        try:
+                            i = 0
+                            while i < extra:
+                                store.spine_push(store.spine_arg(mark + i))
+                                i += 1
+                            store.spine_push(pred)
+                            return self._beta_spine_buf(
+                                minor, rmark, store._spine_top - rmark,
+                            )
+                        finally:
+                            store.unapp_pop(rmark)
+                    res = store.cons_app(minor, pred)
+                    return store.apply_buf_rev(res, mark, extra - 1)
+                major = store.import_term(lit.one_step_constructor())
+            elif rec.k == 0:
+                expanded = self._to_cnstr_when_structure(rec_decl, rec, major)
+                if expanded != 0:
+                    major = expanded
+            cmark = store._spine_top
+            ctor_head = store.unapp_push(major)
+            try:
+                n_ctor = store._spine_top - cmark
+                if (self._leaf_flags(ctor_head) & _LF_CTOR) == 0:
+                    return 0
+                cj = leaf_index(ctor_head)
+                ctor = store.leaves[cj]
+                assert isinstance(ctor, W_Const)
+                rule = rec.rule_for_ctor(ctor.name)
+                if rule is None:
+                    return 0
+                sminor = rule._simple_minor
+                if sminor < 0:
+                    return 0
+                mb = minor_bvars[sminor]
+                if mb < 0:
+                    return 0
+                ctor_decl = store.leaf_decl[cj]
+                assert ctor_decl is not None
+                ctor_kind = ctor_decl.w_kind
+                assert isinstance(ctor_kind, W_Constructor)
+                nf = rule.num_fields
+                lo = n_ctor - (ctor_kind.num_params + nf)
+                hi = n_ctor - 1 - ctor_kind.num_params
+                if lo < 0:
+                    return 0
+                if tc.tracer.recording:
+                    tc.tracer.delta(const.name)
+                    tc.tracer.iota(rec_decl.name)
+                minor = store.spine_arg(mark + extra + mb)
+                if nf == 0:
+                    if extra == 0:
+                        return minor
+                    if store.kind(minor) == KIND_LAMBDA:
+                        return self._beta_spine_buf(minor, mark, extra)
+                    return store.apply_buf_rev(minor, mark, extra - 1)
+                if store.kind(minor) == KIND_LAMBDA:
+                    if nf == 1 and extra == 0:
+                        if tc.tracer.recording:
+                            tc.tracer.beta()
+                        return store.instantiate(
+                            store.field_b(minor), store.spine_arg(cmark + hi), 0,
+                        )
+                    rmark = store._spine_top
+                    i = 0
+                    while i < extra:
+                        store.spine_push(store.spine_arg(mark + i))
+                        i += 1
+                    i = lo
+                    while i <= hi:
+                        store.spine_push(store.spine_arg(cmark + i))
+                        i += 1
+                    return self._beta_spine_buf(
+                        minor, rmark, store._spine_top - rmark,
+                    )
+                res = minor
+                i = hi
+                while i >= lo:
+                    res = store.cons_app(res, store.spine_arg(cmark + i))
+                    i -= 1
+                return store.apply_buf_rev(res, mark, extra - 1)
+            finally:
+                store.unapp_pop(cmark)
+        finally:
+            store.unapp_pop(mark)
+
+    @dont_inline
     def _try_unfold_first_use(self, h, head, const, j):
         """First-use delta unfold of ``h = head args``: when ``head`` has
         leading lambdas and a BVar-bearing body, fuse level+argument
@@ -8268,6 +8429,20 @@ class Machine(object):
                                 )
                                 store.leaf_delta_body[j] = packed
                                 return self._unfold_fast(h, head, const, packed, 2)
+            if (m >= 2 and isinstance(cur, W_App)
+                    and (_s32(store.leaf_head_kind[j]) & _LF_CASES) == 0):
+                dkind = decl.w_kind
+                assert isinstance(dkind, W_Definition)
+                cases = dkind._cases_body
+                if cases is None:
+                    cases = dkind.init_cases_body(self.tc.declarations)
+                if cases.m >= 0:
+                    store.leaf_head_kind[j] = _u32(
+                        _s32(store.leaf_head_kind[j]) | _LF_CASES,
+                    )
+                    res = self._try_cases_unfold(h, head, const, j)
+                    if res != 0:
+                        return res
             if m > 0 and cur.loose_bvar_range() > 0:
                 if store.field_a(h) == head:
                     store.leaf_delta_body[j] = _DB_SEEN_TAG

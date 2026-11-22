@@ -2482,3 +2482,155 @@ class TestJointCheckAndInferExpected(object):
             assert store.leaf_decl[pd_j] is None
         finally:
             tc.free()
+
+    def test_cases_on_direct_iota_fusion(self):
+        from rpython.rlib.rbigint import rbigint
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import _LF_CASES, leaf_index
+        from rpylean.objects import W_BVar, W_LEVEL_ZERO, W_LitNat, W_RecRule
+
+        b3 = W_BVar(3)
+
+        nat_n = Name.simple("Nat")
+        zero_n = nat_n.child("zero")
+        succ_n = nat_n.child("succ")
+        rec_n = nat_n.child("rec")
+        cases_n = nat_n.child("casesOn")
+        recon_n = nat_n.child("recOn")
+        match_n = Name.simple("myMatch")
+
+        u_n = Name.simple("u")
+        u_l = u_n.as_level_param()
+        m_b = Name.simple("motive").binder(type=forall(x.binder(type=NAT))(u_l.sort()))
+        z_b = Name.simple("z").binder(type=b0.app(zero_n.const()))
+        s_b = Name.simple("s").binder(
+            type=forall(x.binder(type=NAT), y.binder(type=b2.app(b0)))(
+                b3.app(succ_n.const().app(b1)),
+            ),
+        )
+        t_b = Name.simple("t").binder(type=NAT)
+        zero_decl = zero_n.constructor(type=NAT, num_params=0, num_fields=0, cidx=0, induct=nat_n)
+        succ_decl = succ_n.constructor(
+            type=forall(x.binder(type=NAT))(NAT), num_params=0, num_fields=1, cidx=1, induct=nat_n,
+        )
+        # Nat.rec rules:
+        #   zero: fun motive z s => z
+        #   succ: fun motive z s n => s n (Nat.rec motive z s n)
+        rule_zero = W_RecRule(ctor_name=zero_n, num_fields=0, rhs=fun(m_b, z_b, s_b)(b1))
+        rule_succ = W_RecRule(
+            ctor_name=succ_n,
+            num_fields=1,
+            rhs=fun(m_b, z_b, s_b, t_b)(
+                b1.app(b0, rec_n.const([u_l]).app(b3, b2, b1, b0)),
+            ),
+        )
+        rec_decl = rec_n.recursor(
+            levels=[u_n],
+            type=forall(m_b, z_b, s_b, t_b)(b3.app(b0)),
+            all=[nat_n],
+            rules=[rule_zero, rule_succ],
+            k=False, num_params=0, num_indices=0, num_motives=1, num_minors=2,
+        )
+        nat_decl = nat_n.inductive(
+            type=TYPE, num_params=0, constructors=[zero_decl, succ_decl], recursors=[rec_decl],
+        )
+        # Nat.casesOn (motive t z s) := Nat.rec motive z (fun n ih => s n) t
+        sc_b = Name.simple("sc").binder(type=forall(x.binder(type=NAT))(b2.app(succ_n.const().app(b0))))
+        cases_decl = cases_n.definition(
+            levels=[u_n],
+            type=forall(m_b, t_b, z_b, sc_b)(b3.app(b2)),
+            value=fun(m_b, t_b, z_b, sc_b)(
+                rec_n.const([u_l]).app(
+                    b3, b1,
+                    fun(x.binder(type=NAT), y.binder(type=NAT))(b2.app(b1)),
+                    b2,
+                ),
+            ),
+        )
+        # Nat.recOn (motive t z s) := Nat.rec motive z s t
+        recon_decl = recon_n.definition(
+            levels=[u_n],
+            type=forall(m_b, t_b, z_b, s_b)(b3.app(b2)),
+            value=fun(m_b, t_b, z_b, s_b)(rec_n.const([u_l]).app(b3, b1, b0, b2)),
+        )
+        # myMatch (motive t z s) := Nat.casesOn motive t z s (1-hop delegation)
+        match_decl = match_n.definition(
+            levels=[u_n],
+            type=forall(m_b, t_b, z_b, sc_b)(b3.app(b2)),
+            value=fun(m_b, t_b, z_b, sc_b)(cases_n.const([u_l]).app(b3, b2, b1, b0)),
+        )
+        a_decl = Name.simple("a").axiom(type=NAT)
+        f_decl = Name.simple("f").axiom(type=forall(x.binder(type=NAT))(NAT))
+        g_decl = Name.simple("g").axiom(type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT))
+
+        env = Environment.having([
+            nat_decl, zero_decl, succ_decl, rec_decl,
+            cases_decl, recon_decl, match_decl, a_decl, f_decl, g_decl,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            F = f_decl.name.const()
+            G = g_decl.name.const()
+            M = fun(x.binder(type=NAT))(NAT)
+            C = cases_n.const([W_LEVEL_ZERO.succ()])
+            R = recon_n.const([W_LEVEL_ZERO.succ()])
+            MM = match_n.const([W_LEVEL_ZERO.succ()])
+
+            # 1. Nat.casesOn on LitNat(0) and LitNat(5) with lambda minor + extra arg
+            c_head = store.import_term(C)
+            cj = leaf_index(c_head)
+            h_zero = store.import_term(C.app(M, W_LitNat(rbigint.fromint(0)), A, F))
+            assert m.try_unfold_head(h_zero) == store.import_term(A)
+            assert (store.leaf_head_kind[cj] & _LF_CASES) != 0
+            assert store.leaf_delta_body[cj] == 0  # body was never even imported!
+
+            h_five = store.import_term(
+                C.app(M, W_LitNat(rbigint.fromint(5)), A, fun(x.binder(type=NAT))(F.app(b0))),
+            )
+            assert m.try_unfold_head(h_five) == store.import_term(
+                F.app(W_LitNat(rbigint.fromint(4))),
+            )
+
+            # 2. Nat.casesOn on Nat.succ a with extra trailing argument
+            h_extra = store.import_term(
+                C.app(
+                    M, succ_n.const().app(A),
+                    fun(x.binder(type=NAT))(b0),
+                    fun(x.binder(type=NAT), y.binder(type=NAT))(G.app(b1, b0)),
+                    W_LitNat(rbigint.fromint(9)),
+                ),
+            )
+            assert m.try_unfold_head(h_extra) == store.import_term(
+                G.app(A, W_LitNat(rbigint.fromint(9))),
+            )
+
+            # 3. Single-scrutinee myMatch delegates straight through Nat.casesOn!
+            mm_head = store.import_term(MM)
+            mmj = leaf_index(mm_head)
+            h_match = store.import_term(MM.app(M, succ_n.const().app(A), A, F))
+            assert m.try_unfold_head(h_match) == store.import_term(F.app(A))
+            assert (store.leaf_head_kind[mmj] & _LF_CASES) != 0
+            assert store.leaf_delta_body[mmj] == 0
+
+            # 4. Stuck FVar major falls back cleanly to unfolding into Nat.rec
+            fv = x.binder(type=NAT).fvar()
+            h_stuck = store.import_term(C.app(M, fv, A, F))
+            unfolded_stuck = m.try_unfold_head(h_stuck)
+            assert unfolded_stuck != 0
+            assert store.head(unfolded_stuck) == store.import_term(
+                rec_n.const([W_LEVEL_ZERO.succ()]),
+            )
+
+            # 5. Nat.recOn shortcuts zero directly, and falls back to Nat.rec on succ
+            h_r0 = store.import_term(R.app(M, W_LitNat(rbigint.fromint(0)), A, G))
+            assert m.try_unfold_head(h_r0) == store.import_term(A)
+            h_rs = store.import_term(R.app(M, succ_n.const().app(A), A, G))
+            unfolded_rs = m.try_unfold_head(h_rs)
+            assert store.head(unfolded_rs) == store.import_term(
+                rec_n.const([W_LEVEL_ZERO.succ()]),
+            )
+        finally:
+            tc.free()
