@@ -12,18 +12,18 @@ no JSON tree, no per-line ``compile()`` step.
 from __future__ import print_function
 
 from StringIO import StringIO
+import errno
 import sys
 from textwrap import dedent
 
+from rpython.rlib import rposix, streamio
 from rpython.rlib.objectmodel import (
     always_inline, dont_inline, newlist_hint, specialize, we_are_translated,
 )
 from rpython.rlib.rarithmetic import r_uint
 from rpython.rlib.rbigint import rbigint
-from rpython.rtyper.annlowlevel import llstr
 from rpython.rtyper.lltypesystem import llmemory, lltype, rffi
 from rpython.rtyper.lltypesystem.lloperation import llop
-from rpython.rtyper.lltypesystem.rstr import STR
 
 from rpylean import objects
 from rpylean._line_parser import LineCursor
@@ -400,10 +400,7 @@ def validate_export_metadata(stream):
 _IS_LITTLE_ENDIAN = sys.byteorder == "little"
 _IS_64BIT = sys.maxint > 2147483647
 _USE_FAST_WORDS = _IS_LITTLE_ENDIAN and _IS_64BIT
-_STR_BASE_OFS = (
-    llmemory.offsetof(STR, 'chars') + llmemory.itemoffsetof(STR.chars, 0)
-)
-_CHAR_SCALE = llmemory.sizeof(lltype.Char)
+_STREAM_BUF_CAP = 262144
 
 
 def _w(s):
@@ -522,82 +519,108 @@ _W8_IMAX_0 = _w8(',"imax":')
 
 
 @always_inline
-def _load_u64(s, p):
+def _load_u64(buf, p):
     if we_are_translated():
-        lls = llstr(s)
-        return llop.gc_load_indexed(
-            lltype.Unsigned,
-            lltype.cast_opaque_ptr(llmemory.GCREF, lls),
-            p,
-            _CHAR_SCALE,
-            _STR_BASE_OFS,
+        return llop.raw_load(
+            lltype.Unsigned, rffi.cast(llmemory.Address, buf), p,
         )
     return (
-        r_uint(ord(s[p]))
-        | (r_uint(ord(s[p + 1])) << 8)
-        | (r_uint(ord(s[p + 2])) << 16)
-        | (r_uint(ord(s[p + 3])) << 24)
-        | (r_uint(ord(s[p + 4])) << 32)
-        | (r_uint(ord(s[p + 5])) << 40)
-        | (r_uint(ord(s[p + 6])) << 48)
-        | (r_uint(ord(s[p + 7])) << 56)
+        r_uint(ord(buf[p]))
+        | (r_uint(ord(buf[p + 1])) << 8)
+        | (r_uint(ord(buf[p + 2])) << 16)
+        | (r_uint(ord(buf[p + 3])) << 24)
+        | (r_uint(ord(buf[p + 4])) << 32)
+        | (r_uint(ord(buf[p + 5])) << 40)
+        | (r_uint(ord(buf[p + 6])) << 48)
+        | (r_uint(ord(buf[p + 7])) << 56)
     )
 
 
 @always_inline
-def _load_u32(s, p):
+def _load_u32(buf, p):
     if we_are_translated():
-        lls = llstr(s)
         return rffi.cast(
             lltype.Unsigned,
-            llop.gc_load_indexed(
-                rffi.UINT,
-                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
-                p,
-                _CHAR_SCALE,
-                _STR_BASE_OFS,
-            ),
+            llop.raw_load(rffi.UINT, rffi.cast(llmemory.Address, buf), p),
         )
     return (
-        r_uint(ord(s[p]))
-        | (r_uint(ord(s[p + 1])) << 8)
-        | (r_uint(ord(s[p + 2])) << 16)
-        | (r_uint(ord(s[p + 3])) << 24)
+        r_uint(ord(buf[p]))
+        | (r_uint(ord(buf[p + 1])) << 8)
+        | (r_uint(ord(buf[p + 2])) << 16)
+        | (r_uint(ord(buf[p + 3])) << 24)
     )
 
 
 @always_inline
-def _load_u16(s, p):
+def _load_u16(buf, p):
     if we_are_translated():
-        lls = llstr(s)
         return rffi.cast(
             lltype.Unsigned,
-            llop.gc_load_indexed(
-                rffi.USHORT,
-                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
-                p,
-                _CHAR_SCALE,
-                _STR_BASE_OFS,
-            ),
+            llop.raw_load(rffi.USHORT, rffi.cast(llmemory.Address, buf), p),
         )
-    return r_uint(ord(s[p])) | (r_uint(ord(s[p + 1])) << 8)
+    return r_uint(ord(buf[p])) | (r_uint(ord(buf[p + 1])) << 8)
 
 
 @always_inline
-def _load_u8(s, p):
+def _load_u8(buf, p):
     if we_are_translated():
-        lls = llstr(s)
         return rffi.cast(
             lltype.Signed,
-            llop.gc_load_indexed(
-                rffi.UCHAR,
-                lltype.cast_opaque_ptr(llmemory.GCREF, lls),
-                p,
-                _CHAR_SCALE,
-                _STR_BASE_OFS,
-            ),
+            llop.raw_load(rffi.UCHAR, rffi.cast(llmemory.Address, buf), p),
         )
-    return ord(s[p])
+    return ord(buf[p])
+
+
+def _slice_buf(buf, s, q):
+    n = q - s
+    if n <= 0:
+        return ""
+    if we_are_translated():
+        return rffi.charpsize2str(rffi.ptradd(buf, s), n)
+    return buf[s:q]
+
+
+@always_inline
+def _rfind_nl(buf, start, end):
+    """Return index of the last '\\n' in buf[start:end], or ``-1``."""
+    p = end - 1
+    while p >= start:
+        if _load_u8(buf, p) == 10:
+            return p
+        p -= 1
+    return -1
+
+
+def _raw_read_fd(fd, dst, count):
+    void_buf = rffi.cast(rffi.VOIDP, dst)
+    while True:
+        try:
+            return rposix.handle_posix_error(
+                'read', rposix.c_read(fd, void_buf, count),
+            )
+        except OSError as e:
+            if e.errno != errno.EINTR:
+                raise
+
+
+@dont_inline
+def _grow_raw_buf(buf, used, min_cap):
+    cap = min_cap
+    new_buf = lltype.malloc(rffi.CCHARP.TO, cap, flavor='raw')
+    if used > 0:
+        if we_are_translated():
+            rffi.c_memcpy(
+                rffi.cast(rffi.VOIDP, new_buf),
+                rffi.cast(rffi.CONST_VOIDP, buf),
+                used,
+            )
+        else:
+            k = 0
+            while k < used:
+                new_buf[k] = buf[k]
+                k += 1
+    lltype.free(buf, flavor='raw')
+    return new_buf
 
 
 @always_inline
@@ -879,7 +902,7 @@ def _parse_compact_in(line, pos, end, builder):
                 if np >= 0:
                     assert s >= 0 and q >= s
                     builder.register_name(
-                        nidx, builder.names[pre].child(line[s:q]),
+                        nidx, builder.names[pre].child(_slice_buf(line, s, q)),
                     )
                     return np << 1
     elif dw == _W8_IN_NUM_0 and _load_u32(line, q + 8) == _W4_IN_NUM_1:
@@ -949,7 +972,9 @@ def _parse_compact_ie_leaf(line, q, end, dw, eidx, builder):
                 np = _at_eol_pos(line, q + 2, end)
                 if np >= 0:
                     assert s >= 0 and q >= s
-                    builder.register_expr(eidx, objects._mk_w_litstr(line[s:q]))
+                    builder.register_expr(
+                        eidx, objects._mk_w_litstr(_slice_buf(line, s, q)),
+                    )
                     return np << 1
         return -1
     if dw == _W8_SORT:
@@ -1364,7 +1389,7 @@ def _make_chunk_fast(mode):
                 return ~pos
         if is_plain:
             if target._refcount is not None and not target._scanning:
-                return _parse_chunk_fast_rc(
+                return _parse_chunk_fast_rc_raw(
                     line, pos, end, target, stop_on_decl,
                 )
         if is_rc:
@@ -1548,9 +1573,29 @@ def _make_chunk_fast(mode):
     return _chunk_fast
 
 
-_parse_chunk_fast_rc = _make_chunk_fast(_CHUNK_RC)
-_parse_chunk_fast = _make_chunk_fast(_CHUNK_PLAIN)
-_prescan_chunk_fast = _make_chunk_fast(_CHUNK_PRESCAN)
+_parse_chunk_fast_rc_raw = _make_chunk_fast(_CHUNK_RC)
+_parse_chunk_fast_raw = _make_chunk_fast(_CHUNK_PLAIN)
+_prescan_chunk_fast_raw = _make_chunk_fast(_CHUNK_PRESCAN)
+
+
+def _parse_chunk_fast(line, pos, end, target, stop_on_decl=False):
+    if not _USE_FAST_WORDS:
+        return ~pos
+    assert line is not None
+    if not we_are_translated():
+        return _parse_chunk_fast_raw(line, pos, end, target, stop_on_decl)
+    with rffi.scoped_nonmovingbuffer(line) as buf:
+        return _parse_chunk_fast_raw(buf, pos, end, target, stop_on_decl)
+
+
+def _prescan_chunk_fast(line, pos, end, target):
+    if not _USE_FAST_WORDS:
+        return ~pos
+    assert line is not None
+    if not we_are_translated():
+        return _prescan_chunk_fast_raw(line, pos, end, target)
+    with rffi.scoped_nonmovingbuffer(line) as buf:
+        return _prescan_chunk_fast_raw(buf, pos, end, target)
 
 
 def parse_cursor(cursor, builder):
@@ -2720,99 +2765,171 @@ def _prescan_line_general(cursor, counts):
 
 
 def _make_stream_driver(prescan):
-    """Import-time factory generating both 256KB chunk-streaming loops
+    """Import-time factory generating both 256KB raw-buffer chunk-streaming loops
     (``_consume_stream`` for `EnvironmentBuilder.consume`, ``_prescan_stream``
-    for `prescan_refcounts`) with zero runtime dispatch overhead."""
+    for `prescan_refcounts`) with zero per-chunk GC string allocations."""
 
     def _stream_lines(stream, target, hook=None):
         cursor = LineCursor("")
-        tail = ""
         n = 0
-        while True:
-            chunk = stream.read(262144)
-            if not chunk:
+        stop_on_decl = (not prescan) and (hook is not None)
+        if not we_are_translated():
+            tail = ""
+            while True:
+                chunk = stream.read(_STREAM_BUF_CAP)
+                if not chunk:
+                    if tail:
+                        end = len(tail)
+                        if end > 0 and tail[end - 1] == '\r':
+                            end -= 1
+                        cursor.reset(tail, 0, end)
+                        if prescan:
+                            _prescan_line(cursor, target)
+                        else:
+                            parse_cursor(cursor, target)
+                            if hook is not None:
+                                while n < len(target.declarations):
+                                    if hook.on_declaration(target.declarations[n]):
+                                        return
+                                    n += 1
+                    return
                 if tail:
-                    end = len(tail)
-                    if end > 0 and tail[end - 1] == '\r':
-                        end -= 1
-                    cursor.reset(tail, 0, end)
-                    if prescan:
-                        _prescan_line(cursor, target)
-                    else:
-                        parse_cursor(cursor, target)
-                        if hook is not None:
-                            while n < len(target.declarations):
-                                if hook.on_declaration(target.declarations[n]):
-                                    return
-                                n += 1
-                return
-            clen = len(chunk)
-            pos = 0
-            if tail:
-                nl = chunk.find('\n')
-                if nl < 0:
-                    tail = tail + chunk
+                    chunk = tail + chunk
+                    tail = ""
+                clen = len(chunk)
+                last_nl = chunk.rfind('\n')
+                if last_nl < 0:
+                    tail = chunk
                     continue
-                line = tail + chunk[:nl]
-                tail = ""
-                llen = len(line)
-                if llen > 0 and line[llen - 1] == '\r':
-                    llen -= 1
-                cursor.reset(line, 0, llen)
-                if prescan:
-                    _prescan_line(cursor, target)
-                else:
-                    parse_cursor(cursor, target)
-                    if hook is not None:
+                limit = last_nl + 1
+                pos = 0
+                while pos <= last_nl:
+                    if prescan:
+                        res = _prescan_chunk_fast_raw(chunk, pos, limit, target)
+                    else:
+                        res = _parse_chunk_fast_raw(
+                            chunk, pos, limit, target, stop_on_decl,
+                        )
+                    if res >= 0:
+                        pos = res
+                    else:
+                        pos = ~res
+                        nl = chunk.find('\n', pos)
+                        end = nl - 1 if nl > pos and chunk[nl - 1] == '\r' else nl
+                        cursor.reset(chunk, pos, end)
+                        if prescan:
+                            _prescan_line_general(cursor, target)
+                        else:
+                            parse_cursor_general(cursor, target)
+                        pos = nl + 1
+                    if not prescan and hook is not None:
                         while n < len(target.declarations):
                             if hook.on_declaration(target.declarations[n]):
                                 return
                             n += 1
-                pos = nl + 1
-                if pos >= clen:
-                    continue
-            last_nl = chunk.rfind('\n', pos)
-            if last_nl < 0:
-                assert pos >= 0
-                tail = chunk[pos:]
-                continue
-            limit = last_nl + 1
-            cursor.line = chunk
-            cursor.length = limit
-            stop_on_decl = (not prescan) and (hook is not None)
-            while pos <= last_nl:
-                if prescan:
-                    res = _prescan_chunk_fast(chunk, pos, limit, target)
+                if pos < clen:
+                    tail = chunk[pos:]
+        fd = -1
+        if isinstance(stream, streamio.DiskFile) and stream.signal_checker is None:
+            fd = stream.fd
+        cap = _STREAM_BUF_CAP
+        buf = lltype.malloc(rffi.CCHARP.TO, cap, flavor='raw')
+        rem = 0
+        try:
+            while True:
+                avail = cap - rem
+                if fd >= 0:
+                    got = _raw_read_fd(fd, rffi.ptradd(buf, rem), avail)
                 else:
-                    res = _parse_chunk_fast(
-                        chunk, pos, limit, target, stop_on_decl,
-                    )
-                if res >= 0:
-                    pos = res
-                else:
-                    pos = ~res
-                    assert pos >= 0
-                    nl = chunk.find('\n', pos)
-                    assert nl >= 0
-                    end = nl
-                    if end > pos and chunk[end - 1] == '\r':
-                        end -= 1
-                    cursor.pos = pos
-                    cursor.length = end
-                    if prescan:
-                        _prescan_line_general(cursor, target)
+                    chunk = stream.read(avail)
+                    if not chunk:
+                        got = 0
                     else:
-                        parse_cursor_general(cursor, target)
-                    cursor.length = limit
-                    pos = nl + 1
-                if not prescan and hook is not None:
-                    while n < len(target.declarations):
-                        if hook.on_declaration(target.declarations[n]):
-                            return
-                        n += 1
-            if pos < clen:
-                assert pos >= 0
-                tail = chunk[pos:]
+                        assert chunk is not None
+                        got = len(chunk)
+                        if rem + got > cap:
+                            new_cap = cap * 2
+                            while new_cap < rem + got:
+                                new_cap *= 2
+                            buf = _grow_raw_buf(buf, rem, new_cap)
+                            cap = new_cap
+                        with rffi.scoped_nonmovingbuffer(chunk) as src:
+                            rffi.c_memcpy(
+                                rffi.cast(rffi.VOIDP, rffi.ptradd(buf, rem)),
+                                rffi.cast(rffi.CONST_VOIDP, src),
+                                got,
+                            )
+                if got == 0:
+                    if rem > 0:
+                        end = rem
+                        if _load_u8(buf, end - 1) == 13:
+                            end -= 1
+                        tail = _slice_buf(buf, 0, end)
+                        cursor.reset(tail, 0, end)
+                        if prescan:
+                            _prescan_line(cursor, target)
+                        else:
+                            parse_cursor(cursor, target)
+                            if hook is not None:
+                                while n < len(target.declarations):
+                                    if hook.on_declaration(target.declarations[n]):
+                                        return
+                                    n += 1
+                    return
+                clen = rem + got
+                last_nl = _rfind_nl(buf, 0, clen)
+                if last_nl < 0:
+                    if clen == cap:
+                        buf = _grow_raw_buf(buf, clen, cap * 2)
+                        cap *= 2
+                    rem = clen
+                    continue
+                limit = last_nl + 1
+                pos = 0
+                while pos <= last_nl:
+                    if prescan:
+                        res = _prescan_chunk_fast_raw(buf, pos, limit, target)
+                    else:
+                        res = _parse_chunk_fast_raw(
+                            buf, pos, limit, target, stop_on_decl,
+                        )
+                    if res >= 0:
+                        pos = res
+                    else:
+                        pos = ~res
+                        assert pos >= 0
+                        nl_next = _find_nl(buf, pos, limit)
+                        nl = nl_next - 1
+                        end = nl
+                        if end > pos and _load_u8(buf, end - 1) == 13:
+                            end -= 1
+                        line = _slice_buf(buf, pos, end)
+                        cursor.reset(line, 0, len(line))
+                        if prescan:
+                            _prescan_line_general(cursor, target)
+                        else:
+                            parse_cursor_general(cursor, target)
+                        pos = nl_next
+                    if not prescan and hook is not None:
+                        while n < len(target.declarations):
+                            if hook.on_declaration(target.declarations[n]):
+                                return
+                            n += 1
+                rem = clen - pos
+                if rem > 0:
+                    if we_are_translated() and rem <= pos:
+                        rffi.c_memcpy(
+                            rffi.cast(rffi.VOIDP, buf),
+                            rffi.cast(rffi.CONST_VOIDP, rffi.ptradd(buf, pos)),
+                            rem,
+                        )
+                    else:
+                        k = 0
+                        while k < rem:
+                            buf[k] = buf[pos + k]
+                            k += 1
+        finally:
+            lltype.free(buf, flavor='raw')
 
     _stream_lines.__name__ = (
         "_prescan_stream" if prescan else "_consume_stream"
