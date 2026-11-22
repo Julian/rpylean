@@ -6644,6 +6644,43 @@ class Machine(object):
                 return t
         return self._infer_miss(h, ri, mbase, check)
 
+    def infer_expected(self, h, expected):
+        """Like `infer(h, True)`, hinting that the result is expected to equal
+        the closed handle ``expected`` so `_infer_app` can verify the return
+        type structurally via `inst_eq_buf` without allocating records."""
+        store = self.store
+        if is_leaf(h):
+            j = leaf_index(h)
+            t = _s32(store.leaf_infer[j])
+            if t != 0:
+                if _s32(store.leaf_checked[j]) != self.check_gen:
+                    return self._check_leaf(h, t)
+                return t
+            return self._infer_leaf(h, True)
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
+        if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+            return _s32(memos[mbase + M_INFER])
+        if (expected != 0
+                and not is_leaf(expected)
+                and not self._def_eq_hooked
+                and (_s32(store.recs[ri << 2]) & _KIND_MASK) == KIND_APP):
+            return self._infer_app_miss_expected(h, ri, mbase, expected)
+        return self._infer_miss(h, ri, mbase, True)
+
+    @dont_inline
+    def _infer_app_miss_expected(self, h, ri, mbase, expected):
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        t = self._infer_app(h, True, expected)
+        memos = self.store.memos
+        memos[mbase + M_INFER] = _u32(t)
+        memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return t
+
     @dont_inline
     def _infer_miss(self, h, ri, mbase, check):
         tick = (self._stack_tick + 1) & 31
@@ -6950,7 +6987,7 @@ class Machine(object):
             raise W_NotASort(self.tc, self.export(h), inferred_type=self.export(t))
         return sort.level
 
-    def _infer_app(self, h, check):
+    def _infer_app(self, h, check, expected=0):
         store = self.store
         tc = self.tc
         fn = store.field_a(h)
@@ -6964,8 +7001,8 @@ class Machine(object):
                         tc, self.export(fn), inferred_type=self.export(fn_type),
                     )
             if check:
-                arg_type = self.infer(arg, True)
                 domain = store.field_a(fn_type)
+                arg_type = self.infer_expected(arg, domain)
                 tracing = tc.tracer.recording
                 if tracing:
                     tc.tracer.begin_argcheck()
@@ -6980,6 +7017,14 @@ class Machine(object):
             body = store.field_b(fn_type)
             if store.loose_bvar_range(body) == 0:
                 return body
+            if (expected != 0 and not is_leaf(expected)
+                    and not self._def_eq_hooked):
+                sm = store._spine_top
+                store.spine_push(arg)
+                ok_exp = store.inst_eq_buf(body, sm, 1, expected)
+                store.unapp_pop(sm)
+                if ok_exp:
+                    return expected
             return store.instantiate(body, arg, 0)
         mark = store._spine_top
         head = store.unapp_push(h)
@@ -7006,16 +7051,19 @@ class Machine(object):
                     fn_type = self.whnf(fn_type)
                     if store.kind(fn_type) != KIND_FORALL:
                         self._not_a_function_buf(head, mark, n, i, fn_type)
-                arg_type = self.infer(arg, True)
                 domain = store.field_a(fn_type)
-                if plen > 0 and store.loose_bvar_range(domain) > 0:
-                    if is_leaf(domain):
-                        bid = (_s32(store.leaf_meta[leaf_index(domain)]) >> 1) - 1
-                        if bid < plen:
-                            domain = store.spine_arg(mark + i + 1 + bid)
-                        else:
-                            domain = store.bvar(bid - plen)
-                    elif (not is_leaf(arg_type)
+                if plen == 0 or store.loose_bvar_range(domain) == 0:
+                    arg_type = self.infer_expected(arg, domain)
+                elif is_leaf(domain):
+                    bid = (_s32(store.leaf_meta[leaf_index(domain)]) >> 1) - 1
+                    if bid < plen:
+                        domain = store.spine_arg(mark + i + 1 + bid)
+                    else:
+                        domain = store.bvar(bid - plen)
+                    arg_type = self.infer_expected(arg, domain)
+                else:
+                    arg_type = self.infer(arg, True)
+                    if (not is_leaf(arg_type)
                             and not self._def_eq_hooked
                             and store.inst_eq_buf(domain, mark + i + 1, plen, arg_type)):
                         fn_type = store.field_b(fn_type)
@@ -7025,7 +7073,7 @@ class Machine(object):
                             plen += 1
                         i -= 1
                         continue
-                    elif plen == 1:
+                    if plen == 1:
                         domain = store.instantiate(
                             domain, store.spine_arg(mark + i + 1), 0,
                         )
@@ -7051,6 +7099,10 @@ class Machine(object):
                     plen += 1
                 i -= 1
             if plen > 0:
+                if (expected != 0 and not is_leaf(expected)
+                        and not self._def_eq_hooked
+                        and store.inst_eq_buf(fn_type, mark, plen, expected)):
+                    return expected
                 if plen == 1:
                     fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
                 else:
@@ -7264,7 +7316,7 @@ class Machine(object):
         body = store.field_b(pair)
         if check:
             self._ensure_sort(type_h, True)
-            value_type = self.infer(value, True)
+            value_type = self.infer_expected(value, type_h)
             if not self.def_eq(value_type, type_h):
                 raise W_TypeError(
                     self.tc, self.export(value), self.export(type_h),
@@ -8497,6 +8549,68 @@ class Machine(object):
 
     # ---- checking --------------------------------------------------------
 
+    def _check_value_joint(self, ty, val, prop):
+        """Jointly check a leading `KIND_FORALL` / `KIND_LAMBDA` telescope with
+        identical domain handles: validates each binder domain once, shares the
+        opened FVars between type and value, avoids `bind_fvars` and `KIND_FORALL`
+        re-wrapping, and passes the opened codomain as the expected type.
+
+        Returns True when accepted, False to fall back to the general path for
+        diagnostics (top-level NotASort / NotAProp / TypeError)."""
+        store = self.store
+        levels = []
+        fvars = []
+        tcur = ty
+        vcur = val
+        while (store.kind(tcur) == KIND_FORALL
+                and store.kind(vcur) == KIND_LAMBDA):
+            orig_dt = store.field_a(tcur)
+            if store.field_a(vcur) != orig_dt:
+                break
+            nf = len(fvars)
+            if nf > 0 and store.loose_bvar_range(orig_dt) > 0:
+                if is_leaf(orig_dt):
+                    bid = (_s32(store.leaf_meta[leaf_index(orig_dt)]) >> 1) - 1
+                    dom = fvars[nf - 1 - bid] if bid < nf else store.bvar(bid - nf)
+                else:
+                    dom = store.instantiate_multi_rev(orig_dt, fvars, nf, 0)
+            else:
+                dom = orig_dt
+            levels.append(self._ensure_sort(dom, True))
+            tnxt = store.field_b(tcur)
+            vnxt = store.field_b(vcur)
+            if (store.loose_bvar_range(tnxt) == 0
+                    and store.loose_bvar_range(vnxt) == 0):
+                if nf > 0:
+                    fvars = []
+            else:
+                fvars.append(self.fvar_for_domain(vcur, dom))
+            tcur = tnxt
+            vcur = vnxt
+        nf = len(fvars)
+        if nf > 0 and store.loose_bvar_range(tcur) > 0:
+            tcur = store.instantiate_multi_rev(tcur, fvars, nf, 0)
+        t_ty = self.infer(tcur, True)
+        t_sort = store.sort_leaf(self.whnf(t_ty))
+        if t_sort is None:
+            return False
+        level = t_sort.level
+        i = len(levels) - 1
+        while i >= 0:
+            level = levels[i].imax(level)
+            i -= 1
+        sort_h = store.leaf_for(level.sort())
+        tbase = rec_index(ty) * MEMO_SLOTS
+        memos = store.memos
+        memos[tbase + M_INFER] = _u32(sort_h)
+        memos[tbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        if prop and not level.eq(W_LEVEL_ZERO):
+            return False
+        if nf > 0 and store.loose_bvar_range(vcur) > 0:
+            vcur = store.instantiate_multi_rev(vcur, fvars, nf, 0)
+        val_ty = self.infer_expected(vcur, tcur)
+        return self.def_eq(tcur, val_ty)
+
     def check_value(self, type, value, prop):
         """
         Check a definition-like declaration: ``type`` must be a sort (a
@@ -8510,6 +8624,16 @@ class Machine(object):
             raise LooseBoundVariable(value.loose_bvar_range() - 1)
         ty = store.import_term(type)
         val = store.import_term(value)
+        if (not self._def_eq_hooked
+                and store.kind(ty) == KIND_FORALL
+                and store.kind(val) == KIND_LAMBDA
+                and store.field_a(ty) == store.field_a(val)
+                and store.loose_bvar_range(ty) == 0
+                and not store.has_fvar(ty)
+                and not store.has_fvar(val)
+                and store.nrecs - self._decl_start_recs < _OPEN_RECORDS):
+            if self._check_value_joint(ty, val, prop):
+                return None
         ty_ty = self.infer(ty, True)
         ty_ty_whnf = self.whnf(ty_ty)
         sort = store.sort_leaf(ty_ty_whnf)
@@ -8517,7 +8641,7 @@ class Machine(object):
             return W_NotASort(tc, type, inferred_type=self.export(ty_ty), name=None)
         if prop and not sort.level.eq(W_LEVEL_ZERO):
             return W_NotAProp(tc, type, inferred_sort=sort, name=None)
-        val_ty = self.infer(val, True)
+        val_ty = self.infer_expected(val, ty)
         if tc.tracer.recording:
             tc.tracer.phase("infer value")
         ok = self.def_eq(ty, val_ty)

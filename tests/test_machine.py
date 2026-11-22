@@ -701,3 +701,119 @@ class TestU32Map(object):
         rule_bad = W_RecRule(Name.from_str("MyList.cons"), 2, bad_rhs)
         assert rule_bad.simple_minor(rec_decl, 1, 1, 2, 0) == -1
         assert rule_bad._rec_fields is None
+
+
+class TestJointCheckAndInferExpected(object):
+    def test_infer_expected_avoids_allocating_return_type(self):
+        from rpylean.environment import Environment, TypeChecker
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        box_name = Name.simple("Box")
+        box_decl = box_name.axiom(type=forall(x.binder(type=TYPE))(TYPE))
+        mk_name = Name.simple("mk")
+        # mk : forall (a : Type) (v : a), Box a
+        mk_type = forall(x.binder(type=TYPE))(
+            forall(y.binder(type=b0))(box_name.const().app(b1)),
+        )
+        mk_decl = mk_name.axiom(type=mk_type)
+        # mk1 : forall (a : Type), Box a  (1-arg fast path)
+        mk1_name = Name.simple("mk1")
+        mk1_decl = mk1_name.axiom(
+            type=forall(x.binder(type=TYPE))(box_name.const().app(b0)),
+        )
+        a_decl = Name.simple("A").axiom(type=TYPE)
+        b_decl = Name.simple("B").axiom(type=TYPE)
+        av_decl = Name.simple("a").axiom(type=a_decl.name.const())
+        env = Environment.having(
+            [nat_decl, box_decl, mk_decl, mk1_decl, a_decl, b_decl, av_decl],
+        )
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            box_a = store.import_term(box_name.const().app(a_decl.name.const()))
+            box_b = store.import_term(box_name.const().app(b_decl.name.const()))
+            app2 = store.import_term(
+                mk_name.const().app(a_decl.name.const(), av_decl.name.const()),
+            )
+            app1 = store.import_term(mk1_name.const().app(a_decl.name.const()))
+            # Pre-import mk/mk1 types so only return-type instantiation could allocate.
+            m.infer(store.import_term(mk_name.const()), True)
+            m.infer(store.import_term(mk1_name.const()), True)
+            m.infer(store.import_term(a_decl.name.const()), True)
+            m.infer(store.import_term(av_decl.name.const()), True)
+            before = store.nrecs
+            assert m.infer_expected(app2, box_a) == box_a
+            assert m.infer_expected(app1, box_a) == box_a
+            assert store.nrecs == before
+
+            # Wrong expected hint falls back cleanly to the true instantiated type.
+            m.reset()
+            store = m.store
+            box_b = store.import_term(box_name.const().app(b_decl.name.const()))
+            app2 = store.import_term(
+                mk_name.const().app(a_decl.name.const(), av_decl.name.const()),
+            )
+            inferred = m.infer_expected(app2, box_b)
+            assert inferred == store.import_term(
+                box_name.const().app(a_decl.name.const()),
+            )
+        finally:
+            tc.free()
+
+    def test_check_value_joint_accepts_and_fallbacks(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_NotAProp, W_NotASort, W_TypeError
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        mynat_name = Name.simple("MyNat")
+        mynat_decl = mynat_name.definition(type=TYPE, value=NAT)
+        env = Environment.having([nat_decl, mynat_decl])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            # Dependent matching telescope
+            id_ty = forall(x.binder(type=TYPE))(forall(y.binder(type=b0))(b1))
+            id_val = fun(x.binder(type=TYPE))(fun(y.binder(type=b0))(b0))
+            assert m.check_value(id_ty, id_val, False) is None
+
+            # Unused outer binder clearing fvars before dependent inner telescope
+            ty_unused = forall(x.binder(type=NAT))(id_ty)
+            val_unused = fun(x.binder(type=NAT))(id_val)
+            assert m.check_value(ty_unused, val_unused, False) is None
+
+            # Def-eq but syntactically distinct domain breaks cleanly & succeeds
+            ty_defeq = forall(x.binder(type=NAT))(forall(y.binder(type=NAT))(NAT))
+            val_defeq = fun(x.binder(type=NAT))(fun(y.binder(type=mynat_name.const()))(b0))
+            assert m.check_value(ty_defeq, val_defeq, False) is None
+
+            # Theorem (prop=True) with Prop codomain succeeds
+            prop_ty = forall(x.binder(type=PROP))(forall(y.binder(type=b0))(b1))
+            prop_val = fun(x.binder(type=PROP))(fun(y.binder(type=b0))(b0))
+            assert m.check_value(prop_ty, prop_val, True) is None
+
+            # Theorem (prop=True) with Type codomain returns W_NotAProp
+            err = m.check_value(
+                forall(x.binder(type=NAT))(NAT),
+                fun(x.binder(type=NAT))(b0),
+                True,
+            )
+            assert isinstance(err, W_NotAProp)
+
+            # Type mismatch falls back and returns W_TypeError
+            err = m.check_value(
+                forall(x.binder(type=NAT))(PROP),
+                fun(x.binder(type=NAT))(b0),
+                False,
+            )
+            assert isinstance(err, W_TypeError)
+
+            # Non-sort codomain falls back and raises W_NotASort
+            with pytest.raises(W_NotASort):
+                m.check_value(
+                    forall(x.binder(type=NAT))(b0),
+                    fun(x.binder(type=NAT))(b0),
+                    False,
+                )
+        finally:
+            tc.free()
