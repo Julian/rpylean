@@ -327,11 +327,10 @@ _U32_KEY_LIMIT = 1 << 31
 _U32_VAL_MASK = 0xFFFFFFFF
 _CACHE_GEN_LIMIT = 1 << 31
 _BVAR_ARR_LEN = 256
-_LGEN_SIZE = 128
+_LGEN_SIZE = 512
 _LGEN_MASK = _LGEN_SIZE - 1
 
 
-@always_inline
 @dont_inline
 def _check_stack_store(label):
     if stack_almost_full():
@@ -405,12 +404,12 @@ _PROP_MASK_DONE = 1 << 62
 _DB_TAG_SHIFT = 60
 _DB_BVAR_TAG = 1 << 60
 _DB_PROJ_TAG = 2 << 60
-_STORE_KEEP_CAP = 1 << 17
-_WARM_MAX_RECS = 98304
-_WARM_MAX_LEAVES = 1 << 15
-_WARM_MAX_EQV = 1 << 16
-_WARM_MAX_NEQ = 1 << 16
-_WARM_MAX_FAILED = 1 << 16
+_STORE_KEEP_CAP = 1 << 18
+_WARM_MAX_RECS = 196608
+_WARM_MAX_LEAVES = 1 << 16
+_WARM_MAX_EQV = 1 << 17
+_WARM_MAX_NEQ = 1 << 17
+_WARM_MAX_FAILED = 1 << 17
 
 
 @always_inline
@@ -5200,9 +5199,14 @@ class TermStore(object):
             nlvls = len(lvls)
             if nlvls == 1:
                 l0 = lvls[0]
-                nl0 = _subst_level_fast(l0, params, clevels)
-                if nl0 is not l0:
-                    leaf_e = _mk_w_const1(e.name, nl0)
+                if l0.has_param:
+                    if l0.__class__ is W_LevelParam and len(params) == 1:
+                        assert isinstance(l0, W_LevelParam)
+                        nl0 = clevels[0] if l0.name is params[0] else l0
+                    else:
+                        nl0 = _subst_level_fast(l0, params, clevels)
+                    if nl0 is not l0:
+                        leaf_e = _mk_w_const1(e.name, nl0)
             elif nlvls == 2:
                 l0 = lvls[0]
                 l1 = lvls[1]
@@ -5232,9 +5236,14 @@ class TermStore(object):
             assert isinstance(e, W_Sort)
             leaf_e = e
             lvl = e.level
-            nl = _subst_level_fast(lvl, params, clevels)
-            if nl is not lvl:
-                leaf_e = nl.sort()
+            if lvl.has_param:
+                if lvl.__class__ is W_LevelParam and len(params) == 1:
+                    assert isinstance(lvl, W_LevelParam)
+                    nl = clevels[0] if lvl.name is params[0] else lvl
+                else:
+                    nl = _subst_level_fast(lvl, params, clevels)
+                if nl is not lvl:
+                    leaf_e = nl.sort()
             lc = leaf_e._cache
             if (lc >> 32) == sgen:
                 h = lc & _TABLE_SLOT_MASK
