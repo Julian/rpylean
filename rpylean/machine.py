@@ -2146,6 +2146,67 @@ class TermStore(object):
                 e._cache = tagged
         return h
 
+    def _const_leaf1(self, name, l0):
+        """Canonical leaf handle for `W_Const(name, [l0])`, probing the store's
+        `_content_head` directly to avoid `_CONST_CACHE` probes and `W_Const`
+        allocations on hits."""
+        nl0 = l0._normal
+        if nl0 is None:
+            nl0 = l0.normalize()
+        h31 = (
+            ((((name.hash() * 1000003) ^ nl0.hash()) * 1000003) ^ 0xC057)
+            & 0x7FFFFFFF
+        )
+        key = h31 if h31 != 0 else 1
+        cur = self._content_head.get(key, 0)
+        while cur != 0:
+            j = leaf_index(cur)
+            le = self.leaves[j]
+            if le.__class__ is W_Const:
+                assert isinstance(le, W_Const)
+                if le.name is name:
+                    el = le.levels
+                    if len(el) == 1 and el[0] is nl0:
+                        return cur
+            cur = _s32(self.leaf_next[j])
+        return self._const_leaf1_miss(name, nl0)
+
+    @dont_inline
+    def _const_leaf1_miss(self, name, nl0):
+        return self.leaf_for(_mk_w_const1(name, nl0))
+
+    def _const_leaf2(self, name, l0, l1):
+        """Canonical leaf handle for `W_Const(name, [l0, l1])` without
+        allocating a `W_Const` or probing `_CONST_CACHE` on hits."""
+        nl0 = l0._normal
+        if nl0 is None:
+            nl0 = l0.normalize()
+        nl1 = l1._normal
+        if nl1 is None:
+            nl1 = l1.normalize()
+        h31 = (
+            ((((((name.hash() * 1000003) ^ nl0.hash()) * 1000003) ^ nl1.hash())
+              * 1000003) ^ 0xC057)
+            & 0x7FFFFFFF
+        )
+        key = h31 if h31 != 0 else 1
+        cur = self._content_head.get(key, 0)
+        while cur != 0:
+            j = leaf_index(cur)
+            le = self.leaves[j]
+            if le.__class__ is W_Const:
+                assert isinstance(le, W_Const)
+                if le.name is name:
+                    el = le.levels
+                    if len(el) == 2 and el[0] is nl0 and el[1] is nl1:
+                        return cur
+            cur = _s32(self.leaf_next[j])
+        return self._const_leaf2_miss(name, nl0, nl1)
+
+    @dont_inline
+    def _const_leaf2_miss(self, name, nl0, nl1):
+        return self.leaf_for(_mk_w_const2(name, nl0, nl1))
+
     # ---- spines ----------------------------------------------------------
 
     def head(self, h):
@@ -5092,12 +5153,14 @@ class TermStore(object):
         if cls is W_App:
             assert isinstance(e, W_App)
             fn = e.fn
-            if not isinstance(fn, W_App):
-                fc = fn._cache
-                if (fc >> 32) == gen:
-                    fn_h = fc & _TABLE_SLOT_MASK
-                else:
-                    fn_h = self._import_rec(fn, gen, nr)
+            fc = fn._cache
+            if (fc >> 32) == gen:
+                fn_h = fc & _TABLE_SLOT_MASK
+            elif not isinstance(fn, W_App):
+                fn_h = self._import_rec(fn, gen, nr)
+            else:
+                fn_h = 0
+            if fn_h != 0:
                 arg = e.arg
                 ac = arg._cache
                 if (ac >> 32) == gen:
@@ -5129,7 +5192,13 @@ class TermStore(object):
             spine = self._import_spine
             mark = self._import_spine_len
             top = mark
-            cur = e
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                spine.append(e)
+            top += 1
+            cur = fn
             head = 0
             while True:
                 if not isinstance(cur, W_App):
@@ -5335,21 +5404,20 @@ class TermStore(object):
         if cls is W_App:
             assert isinstance(e, W_App)
             fn = e.fn
-            if not isinstance(fn, W_App):
-                if fn.has_level_param():
-                    fc = fn._cache
-                    fn_h = (
-                        fc & _TABLE_SLOT_MASK
-                        if (fc >> 32) == lgen
-                        else self._import_with_levels(fn, params, clevels, lgen, nr)
-                    )
+            fn_h = 0
+            if fn.has_level_param():
+                fc = fn._cache
+                if (fc >> 32) == lgen:
+                    fn_h = fc & _TABLE_SLOT_MASK
+                elif not isinstance(fn, W_App):
+                    fn_h = self._import_with_levels(fn, params, clevels, lgen, nr)
+            else:
+                fc = fn._cache
+                if (fc >> 32) == sgen:
+                    fn_h = fc & _TABLE_SLOT_MASK
                 else:
-                    fc = fn._cache
-                    fn_h = (
-                        fc & _TABLE_SLOT_MASK
-                        if (fc >> 32) == sgen
-                        else self._import_rec(fn, sgen, nr)
-                    )
+                    fn_h = self._import_rec(fn, sgen, nr)
+            if fn_h != 0:
                 arg = e.arg
                 if arg.has_level_param():
                     ac = arg._cache
@@ -5383,7 +5451,13 @@ class TermStore(object):
             spine = self._import_spine
             mark = self._import_spine_len
             top = mark
-            cur = e
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                spine.append(e)
+            top += 1
+            cur = fn
             head = 0
             while True:
                 if not cur.has_level_param():
@@ -5512,8 +5586,9 @@ class TermStore(object):
         elif cls is W_Const:
             assert isinstance(e, W_Const)
             lvls = e.levels
-            leaf_e = e
             nlvls = len(lvls)
+            h = 0
+            leaf_e = e
             if nlvls == 1:
                 l0 = lvls[0]
                 if l0.has_param:
@@ -5523,14 +5598,14 @@ class TermStore(object):
                     else:
                         nl0 = _subst_level_fast(l0, params, clevels)
                     if nl0 is not l0:
-                        leaf_e = _mk_w_const1(e.name, nl0)
+                        h = self._const_leaf1(e.name, nl0)
             elif nlvls == 2:
                 l0 = lvls[0]
                 l1 = lvls[1]
-                nl0 = _subst_level_fast(l0, params, clevels)
-                nl1 = _subst_level_fast(l1, params, clevels)
+                nl0 = _subst_level_fast(l0, params, clevels) if l0.has_param else l0
+                nl1 = _subst_level_fast(l1, params, clevels) if l1.has_param else l1
                 if nl0 is not l0 or nl1 is not l1:
-                    leaf_e = _mk_w_const2(e.name, nl0, nl1)
+                    h = self._const_leaf2(e.name, nl0, nl1)
             elif nlvls > 2:
                 new_lvls = None
                 i = 0
@@ -5544,11 +5619,12 @@ class TermStore(object):
                     i += 1
                 if new_lvls is not None:
                     leaf_e = e.name.const(new_lvls)
-            lc = leaf_e._cache
-            if (lc >> 32) == sgen:
-                h = lc & _TABLE_SLOT_MASK
-            else:
-                h = self.leaf_for(leaf_e)
+            if h == 0:
+                lc = leaf_e._cache
+                if (lc >> 32) == sgen:
+                    h = lc & _TABLE_SLOT_MASK
+                else:
+                    h = self.leaf_for(leaf_e)
         elif cls is W_Sort:
             assert isinstance(e, W_Sort)
             leaf_e = e

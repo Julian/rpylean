@@ -1037,3 +1037,24 @@ class TestJointCheckAndInferExpected(object):
         assert env.type_check_one(d_late_ok, measure=False).error is None
         res_order = env.type_check_one(d_early_bad, measure=False)
         assert isinstance(res_order.error, W_NotYetDeclared)
+
+    def test_const_leaf1_and_2_direct_dedup_and_normalization(self, store):
+        from rpylean.objects import W_LEVEL_ZERO
+        u_l = Name.simple("u").as_level_param()
+        v_l = Name.simple("v").as_level_param()
+        l1 = W_LEVEL_ZERO.succ()
+        # Non-normalized max(0, u) must canonicalize to the exact same leaf as u.
+        h_u = store.leaf_for(f.const([u_l]))
+        assert store._const_leaf1(f, u_l) == h_u
+        assert store._const_leaf1(f, W_LEVEL_ZERO.max(u_l)) == h_u
+        # Miss path inserts and subsequent call hits without allocating a new leaf.
+        nleaves_before = store.nleaves
+        h_l1 = store._const_leaf1(f, l1)
+        assert store.nleaves == nleaves_before + 1
+        assert store._const_leaf1(f, l1) == h_l1
+        assert store.leaf_for(f.const([l1])) == h_l1
+        # 2-level direct lookup and normalization
+        h2 = store._const_leaf2(g, u_l, l1)
+        assert store._const_leaf2(g, W_LEVEL_ZERO.max(u_l), W_LEVEL_ZERO.max(l1)) == h2
+        assert store.leaf_for(g.const([u_l, l1])) == h2
+        assert store._const_leaf2(g, l1, u_l) != h2
