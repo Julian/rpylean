@@ -1556,6 +1556,8 @@ def _read_expr_value(cursor, builder, disc):
         return objects._mk_w_litstr(cursor.read_string())
     if disc == "proj":
         return _read_proj(cursor, builder)
+    if disc == "mdata":
+        return _read_mdata(cursor, builder)
     raise MalformedLine("unknown expr discriminator: %s" % disc)
 
 
@@ -1691,6 +1693,24 @@ def _read_proj(cursor, builder):
         cursor.expect(',')
 
 
+def _read_mdata(cursor, builder):
+    cursor.expect('{')
+    expr_eidx = -1
+    while True:
+        key = cursor.read_key()
+        if key == "expr":
+            expr_eidx = cursor.read_int()
+        elif key == "data":
+            _skip_value(cursor)
+        else:
+            raise MalformedLine("unexpected key %s in mdata" % key)
+        if cursor.maybe('}'):
+            if expr_eidx < 0:
+                raise MalformedLine("mdata missing `expr`")
+            return builder.ref_expr(expr_eidx)
+        cursor.expect(',')
+
+
 def _skip_value(cursor):
     """Skip a JSON value of any shape (for fields the parser ignores)."""
     cursor.skip_ws()
@@ -1700,13 +1720,16 @@ def _skip_value(cursor):
     if c == '"':
         cursor.read_string()
     elif c == '-' or ('0' <= c <= '9'):
-        cursor.read_int()
+        cursor.skip_number()
     elif c == 't':
-        cursor.pos += 4
+        if not cursor.match_lit("true"):
+            raise MalformedLine("expected true at pos %d" % cursor.pos)
     elif c == 'f':
-        cursor.pos += 5
+        if not cursor.match_lit("false"):
+            raise MalformedLine("expected false at pos %d" % cursor.pos)
     elif c == 'n':
-        cursor.pos += 4
+        if not cursor.match_lit("null"):
+            raise MalformedLine("expected null at pos %d" % cursor.pos)
     elif c == '[':
         cursor.pos += 1
         if cursor.maybe(']'):
@@ -2392,17 +2415,26 @@ def _parse_metadata_version(line):
 
 def _parse_meta_inner(cursor):
     cursor.expect('{')
-    version = ""
+    has_format = False
+    format_version = ""
+    exporter_version = ""
     if cursor.maybe('}'):
-        return version
+        return ""
     while True:
         key = cursor.read_key()
-        if key == "format" or key == "exporter":
-            version = _parse_format_inner(cursor)
+        if key == "format":
+            has_format = True
+            format_version = _parse_format_inner(cursor)
+        elif key == "exporter":
+            cursor.skip_ws()
+            if cursor.pos < cursor.length and cursor.line[cursor.pos] == '{':
+                exporter_version = _parse_format_inner(cursor)
+            else:
+                _skip_value(cursor)
         else:
             _skip_value(cursor)
         if cursor.maybe('}'):
-            return version
+            return format_version if has_format else exporter_version
         cursor.expect(',')
 
 
@@ -2778,13 +2810,16 @@ def _skip_value_noalloc(cursor):
     if c == '"':
         cursor.skip_string()
     elif c == '-' or ('0' <= c <= '9'):
-        cursor.read_int()
+        cursor.skip_number()
     elif c == 't':
-        cursor.pos += 4
+        if not cursor.match_lit("true"):
+            raise MalformedLine("expected true at pos %d" % cursor.pos)
     elif c == 'f':
-        cursor.pos += 5
+        if not cursor.match_lit("false"):
+            raise MalformedLine("expected false at pos %d" % cursor.pos)
     elif c == 'n':
-        cursor.pos += 4
+        if not cursor.match_lit("null"):
+            raise MalformedLine("expected null at pos %d" % cursor.pos)
     elif c == '[':
         cursor.pos += 1
         if cursor.maybe(']'):
@@ -2799,7 +2834,8 @@ def _skip_value_noalloc(cursor):
         if cursor.maybe('}'):
             return
         while True:
-            cursor.read_key_span()
+            cursor.skip_string()
+            cursor.expect(':')
             _skip_value_noalloc(cursor)
             if cursor.maybe('}'):
                 return
@@ -2894,6 +2930,23 @@ def _prescan_expr_value(cursor, counts, ks, ke):
                 raise MalformedLine("unexpected key in proj")
             if cursor.maybe('}'):
                 _bump_refcount_slot(counts, struct_eidx)
+                return
+            cursor.expect(',')
+    if cursor.span_eq(ks, ke, "mdata"):
+        cursor.expect('{')
+        expr_eidx = -1
+        while True:
+            s, e = cursor.read_key_span()
+            if cursor.span_eq(s, e, "expr"):
+                expr_eidx = cursor.read_int()
+            elif cursor.span_eq(s, e, "data"):
+                _skip_value_noalloc(cursor)
+            else:
+                raise MalformedLine("unexpected key in mdata")
+            if cursor.maybe('}'):
+                if expr_eidx < 0:
+                    raise MalformedLine("mdata missing `expr`")
+                _bump_refcount_slot(counts, expr_eidx)
                 return
             cursor.expect(',')
     raise MalformedLine("unknown expr discriminator")

@@ -167,3 +167,17 @@ def test_read_bool_neither():
     c = LineCursor("null")
     with pytest.raises(MalformedLine):
         c.read_bool()
+
+
+def test_skip_number_variants():
+    for raw in ("0", "-42", "3.14", "-0.5e+10", "1E-3"):
+        c = LineCursor(" " + raw + ",")
+        c.skip_number()
+        assert c.line[c.pos] == ","
+
+
+def test_skip_number_malformed():
+    for raw in ("", "-", "1.", "1e", "1e+", "abc"):
+        c = LineCursor(raw)
+        with pytest.raises(MalformedLine):
+            c.skip_number()

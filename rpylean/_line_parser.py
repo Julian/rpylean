@@ -213,6 +213,34 @@ class LineCursor(object):
         self.pos = i
         return sign * val
 
+    def skip_number(self):
+        """Advance past a JSON number (integer or floating-point)."""
+        self.skip_ws()
+        line = self.line
+        n = self.length
+        i = self.pos
+        if i < n and line[i] == '-':
+            i += 1
+        if i >= n or line[i] < '0' or line[i] > '9':
+            raise MalformedLine("expected number at pos %d" % self.pos)
+        while i < n and '0' <= line[i] <= '9':
+            i += 1
+        if i < n and line[i] == '.':
+            i += 1
+            if i >= n or line[i] < '0' or line[i] > '9':
+                raise MalformedLine("expected digit after '.' at pos %d" % i)
+            while i < n and '0' <= line[i] <= '9':
+                i += 1
+        if i < n and (line[i] == 'e' or line[i] == 'E'):
+            i += 1
+            if i < n and (line[i] == '+' or line[i] == '-'):
+                i += 1
+            if i >= n or line[i] < '0' or line[i] > '9':
+                raise MalformedLine("expected exponent digit at pos %d" % i)
+            while i < n and '0' <= line[i] <= '9':
+                i += 1
+        self.pos = i
+
     def read_string(self):
         self.skip_ws()
         line = self.line

@@ -113,9 +113,70 @@ def test_wrong_version():
         )
 
 
+def test_metadata_format_takes_precedence_over_exporter():
+    # Key order must not let `exporter.version` (e.g. Lean 4.35.0) overwrite
+    # `format.version` (3.1.0), nor let a matching `exporter.version` mask a
+    # mismatched `format.version`.
+    for line in (
+        '{"meta":{"exporter":{"name":"leanexport","version":"4.35.0"},"format":{"version":"3.1.0"}}}\n',
+        '{"meta":{"format":{"version":"3.1.0"},"exporter":{"name":"leanexport","version":"4.35.0"}}}\n',
+        '{"meta":{"format":{},"exporter":{"name":"leanexport","version":"4.35.0"}}}\n',
+        '{"meta":{"format":{"version":"3.1.0"},"exporter":"leanexport"}}\n',
+        '{"meta":{"exporter":{"name":"lean4export","version":"3.1.0"}}}\n',
+        '{"meta":{}}\n',
+        '{}\n',
+    ):
+        parser.validate_export_metadata(StringIO(line))
+
+    for bad in (
+        '{"meta":{"format":{"version":"2.0.0"},"exporter":{"name":"lean4export","version":"3.1.0"}}}\n',
+        '{"meta":{"exporter":{"name":"lean4export","version":"3.1.0"},"format":{"version":"2.0.0"}}}\n',
+        '{"meta":{"exporter":{"name":"lean4export","version":"2.0.0"}}}\n',
+    ):
+        with pytest.raises(parser.ExportVersionError) as exc:
+            parser.validate_export_metadata(StringIO(bad))
+        assert exc.value.got == "2.0.0"
+
+
 def test_totally_empty():
     with pytest.raises(parser.ExportVersionError):
         parser.validate_export_metadata(StringIO(""))
+
+
+def test_mdata_unwraps_inner_expr_and_prescans():
+    body = "\n".join([
+        '{"in":1,"str":{"pre":0,"str":"P"}}',
+        '{"il":1,"succ":0}',
+        '{"ie":0,"sort":1}',
+        '{"ie":1,"mdata":{"data":{"float":1.5,"exp":-2e+3,"flag":true,"nil":null,"arr":[1,false],"nested":{"esc\\"k":"v"}},"expr":0}}',
+        '{"mdata":{"expr":1,"data":{}},"ie":2}',
+        '{"axiom":{"isUnsafe":false,"levelParams":[],"name":1,"type":2}}',
+    ]) + "\n"
+
+    expected = EnvironmentBuilder()
+    expected.start_scan()
+    expected.consume(StringIO(body))
+    got_rc = parser.prescan_refcounts(StringIO(body))
+    assert got_rc == expected._refcount
+
+    b = EnvironmentBuilder()
+    b.set_refcount(got_rc)
+    b.consume(StringIO(body))
+    assert len(b.declarations) == 1
+    assert b.declarations[0].name == Name.simple("P")
+    assert b.declarations[0].type == b.levels[1].sort()
+
+    got_rc.free()
+    expected._refcount.free()
+
+
+def test_mdata_missing_expr_rejected():
+    from rpylean.exceptions import MalformedLine
+
+    with pytest.raises(MalformedLine):
+        parse('{"ie":0,"mdata":{"data":{}}}')
+    with pytest.raises(MalformedLine):
+        parser.prescan_refcounts(StringIO('{"ie":0,"mdata":{"data":{}}}\n'))
 
 
 class TestSafety(object):
