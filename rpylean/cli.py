@@ -181,6 +181,55 @@ def check(self, args, stdin, stdout, stderr):
     return 1 if failures else 0
 
 
+def _write_progress_heap_dump(stderrw, directory="/tmp"):
+    """
+    Dump the translated RPython heap and typeids table for offline analysis.
+
+    Swallows ``OSError`` (e.g. a read-only ``/tmp`` inside a sandbox) so a
+    progress signal never crashes an in-flight type check.
+    """
+    heap_path = directory + "/rpylean-heap.dump"
+    typeids_path = directory + "/rpylean-typeids.z"
+    fd = -1
+    try:
+        fd = os.open(
+            heap_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0644,
+        )
+        rgc.dump_rpy_heap(fd)
+        os.close(fd)
+        fd = -1
+        fd = os.open(
+            typeids_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0644,
+        )
+        # `get_typeids_z` hands back a low-level char array,
+        # not a str — join it the way pypy's gc module does.
+        array = rgc.get_typeids_z()
+        blob = ''.join([array[i] for i in range(len(array))])
+        pos = 0
+        total = len(blob)
+        while pos < total:
+            assert pos >= 0
+            written = os.write(fd, blob[pos:])
+            if written <= 0:
+                break
+            pos += written
+        os.close(fd)
+        fd = -1
+    except OSError as err:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        stderrw.write_plain(
+            "[progress] skipped heap dump: %s\n" % (os.strerror(err.errno),)
+        )
+
+
 class _StreamingChecker(DeclarationHook):
     """
     Per-declaration filter + type-check, accumulating errors and failure count.
@@ -257,24 +306,7 @@ class _StreamingChecker(DeclarationHook):
             # equivalent. Pauses the check for the dump's duration,
             # which is fine for a manual `kill -INFO` probe.
             if we_are_translated():
-                fd = os.open(
-                    "/tmp/rpylean-heap.dump",
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                    0644,
-                )
-                rgc.dump_rpy_heap(fd)
-                os.close(fd)
-                fd = os.open(
-                    "/tmp/rpylean-typeids.z",
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                    0644,
-                )
-                # `get_typeids_z` hands back a low-level char array,
-                # not a str — join it the way pypy's gc module does.
-                array = rgc.get_typeids_z()
-                blob = ''.join([array[i] for i in range(len(array))])
-                os.write(fd, blob)
-                os.close(fd)
+                _write_progress_heap_dump(self.stderrw)
             # `stderr` is block-buffered when redirected to a file, so
             # without an explicit flush the user's `kill -INFO` probe
             # would set the flag and write the line but it'd stay in
@@ -459,40 +491,45 @@ class _CheckRun(object):
             )
 
 
-def _prescan_refcounts(path, stdin):
+def _prescan_refcounts(stream):
     """
-    Scan ``path`` once at raw-byte level to tally, per expression index,
-    how many times the real parse will reference it.
+    Scan seekable ``stream`` once at raw-byte level to tally, per expression
+    index, how many times the real parse will reference it, then rewind
+    ``stream`` back to its starting offset.
 
-    Returns the ``RefCountTable``, or ``None`` if the metadata line or any
+    Returns the ``RefCountTable``, or ``None`` if the stream is not seekable
+    (e.g. a pipe, FIFO, or ``/dev/fd/N``) or if the metadata line or any
     record is malformed (the real pass will report the error).
     """
-    scan_file = _open_export(path, stdin)
+    try:
+        start_pos = stream.tell()
+        stream.seek(0, 2)
+        file_size = stream.tell() - start_pos
+        stream.seek(start_pos, 0)
+    except OSError:
+        return None
+    size_hint = 65536
+    est = intmask(file_size // 50) + 1024
+    if est > 4096:
+        size_hint = est
     counts = None
     try:
-        try:
-            size_hint = 65536
-            try:
-                scan_file.seek(0, 2)
-                file_size = scan_file.tell()
-                scan_file.seek(0, 0)
-                est = intmask(file_size // 50) + 1024
-                if est > 4096:
-                    size_hint = est
-            except OSError:
-                pass
-            parser.validate_export_metadata(scan_file)
-            counts = parser.prescan_refcounts(scan_file, size_hint)
-            return counts
-        except ExportError:
-            if counts is not None:
-                counts.free()
-            # Any malformed line makes the scan's counts unusable; fall
-            # back to the unpruned path and let the real parse surface the
-            # error (it is the authority on both checking and reporting).
-            return None
-    finally:
-        scan_file.close()
+        parser.validate_export_metadata(stream)
+        counts = parser.prescan_refcounts(stream, size_hint)
+    except ExportError:
+        if counts is not None:
+            counts.free()
+        # Any malformed line makes the scan's counts unusable; fall
+        # back to the unpruned path and let the real parse surface the
+        # error (it is the authority on both checking and reporting).
+        counts = None
+    try:
+        stream.seek(start_pos, 0)
+    except:
+        if counts is not None:
+            counts.free()
+        raise
+    return counts
 
 
 def _check_one_file(path, stdin, stderr, run, abort_at):
@@ -501,41 +538,55 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
 
     ``abort_at`` is the failure count at which to stop (0 means unlimited).
     """
-    # A reference-counting pre-pass over the (reopenable) file lets the
-    # real pass free each expr-pool slot the moment its last parse-time
-    # reference is consumed, so proof terms of already-checked theorems
-    # don't pin the heap. Streamed stdin can't be rewound, so it keeps the
-    # single-pass path (no pruning).
-    refcount = None
-    if path != "-":
-        refcount = _prescan_refcounts(path, stdin)
-
     file = _open_export(path, stdin)
-    builder, checker, tracer = run.start(abort_at)
-    if refcount is not None:
-        builder.set_refcount(refcount)
-    bytes_at_start = _bytes_allocated()
+    refcount = None
     try:
+        # A reference-counting pre-pass over a seekable stream lets the real
+        # pass free each expr-pool slot the moment its last parse-time
+        # reference is consumed, so proof terms of already-checked theorems
+        # don't pin the heap. Non-seekable streams (stdin, pipes, FIFOs,
+        # `/dev/fd/N`) keep the single-pass path without reopening `path`.
+        if path != "-":
+            try:
+                refcount = _prescan_refcounts(file)
+            except OSError as err:
+                raise UsageError(
+                    "Could not read `%s`: %s" % (path, os.strerror(err.errno))
+                )
+
+        builder, checker, tracer = run.start(abort_at)
+        if refcount is not None:
+            builder.set_refcount(refcount)
+        bytes_at_start = _bytes_allocated()
         try:
-            parser.validate_export_metadata(file)
-            builder.consume(file, hook=checker)
-        except ExportError as err:
-            run.stderrw.writeline(err.tokens())
-            run.stderrw.write_plain("\n")
-            return checker.failures + 1
-        except UsageError:
-            raise
-        except:
-            stderr.write("Unexpected error during type checking\n")
-            raise
+            try:
+                parser.validate_export_metadata(file)
+                builder.consume(file, hook=checker)
+            except ExportError as err:
+                run.stderrw.writeline(err.tokens())
+                run.stderrw.write_plain("\n")
+                return checker.failures + 1
+            except OSError as err:
+                raise UsageError(
+                    "Could not read `%s`: %s" % (path, os.strerror(err.errno))
+                )
+            except UsageError:
+                raise
+            except:
+                stderr.write("Unexpected error during type checking\n")
+                raise
+        finally:
+            if refcount is not None:
+                builder._refcount = None
+                refcount.free()
+                refcount = None
+            run.summarize(checker, tracer, bytes_at_start)
+        return checker.failures
     finally:
         if refcount is not None:
-            builder._refcount = None
             refcount.free()
         if path != "-":
             file.close()
-        run.summarize(checker, tracer, bytes_at_start)
-    return checker.failures
 
 
 @cli.subcommand(
@@ -880,9 +931,11 @@ def _open_export(path, stdin):
     try:
         return open_file_as_stream(path, "r", 0)
     except OSError as err:
-        if err.errno != errno.ENOENT:
-            raise
-        raise UsageError("`%s` does not exist." % (path,))
+        if err.errno == errno.ENOENT:
+            raise UsageError("`%s` does not exist." % (path,))
+        raise UsageError(
+            "Could not open `%s`: %s" % (path, os.strerror(err.errno))
+        )
 
 
 def environment_from(path, stdin):

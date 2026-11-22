@@ -1,11 +1,13 @@
 from io import BytesIO
 from StringIO import StringIO
+import os
+import threading
 
 from rpylean._rlib.rcli import CLI, Args, UsageError
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
 from rpylean.cli import (
     Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_bytes,
-    _parse_seconds, cli as rpylean_cli,
+    _parse_seconds, _write_progress_heap_dump, cli as rpylean_cli,
 )
 from rpylean.environment import CheckResult, Environment
 from rpylean.objects import TYPE, Name
@@ -405,6 +407,68 @@ class TestCheckCLI(object):
         out, err = run(rpylean_cli, ["rpylean", "--", "dump"], exit=1)
         assert "`dump` does not exist." in err
         assert out == ""
+
+    def test_check_regular_file_single_open_prescan_and_rewind(self, tmpdir):
+        export = tmpdir.join("ok.ndjson")
+        export.write(
+            '{"meta":{"format":{"version":"3.1.0"},"exporter":{"name":"leanexport","version":"4.35.0"}}}\n'
+            '{"in":1,"str":{"pre":0,"str":"P"}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"ie":0,"sort":1}\n'
+            '{"ie":1,"sort":0}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":1}}\n'
+        )
+        out, err = run(rpylean_cli, ["rpylean", "check", "--", str(export)], exit=0)
+        assert out == ""
+        assert "1/1 decls checked" in err
+
+    def test_check_regular_file_bad_metadata_rewinds_and_reports(self, tmpdir):
+        export = tmpdir.join("bad-meta.ndjson")
+        export.write('{"meta":{"format":{"version":"9.9.9"}}}\n')
+        out, err = run(rpylean_cli, ["rpylean", "check", str(export)], exit=1)
+        assert out == ""
+        assert "9.9.9" in err
+
+    def test_check_non_seekable_fifo_works_in_single_pass(self, tmpdir):
+        fifo_path = str(tmpdir.join("export.fifo"))
+        os.mkfifo(fifo_path)
+        payload = (
+            '{"meta":{"format":{"version":"3.1.0"}}}\n'
+            '{"in":1,"str":{"pre":0,"str":"P"}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"ie":0,"sort":1}\n'
+            '{"ie":1,"sort":0}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":1}}\n'
+        )
+
+        def write_once():
+            fd = os.open(fifo_path, os.O_WRONLY)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+
+        writer = threading.Thread(target=write_once)
+        writer.start()
+        try:
+            out, err = run(rpylean_cli, ["rpylean", "check", "--", fifo_path], exit=0)
+        finally:
+            writer.join(timeout=5)
+        assert not writer.is_alive()
+        assert out == ""
+        assert "1/1 decls checked" in err
+
+    def test_check_directory_exits_nonzero_cleanly(self, tmpdir):
+        out, err = run(rpylean_cli, ["rpylean", "check", str(tmpdir)], exit=1)
+        assert out == ""
+        assert "Could not read" in err
+
+    def test_progress_heap_dump_swallows_oserror(self, tmpdir):
+        out = StringIO()
+        stderrw = TokenWriter(out, FORMAT_PLAIN)
+        missing_dir = str(tmpdir.join("no-such-dir"))
+        _write_progress_heap_dump(stderrw, directory=missing_dir)
+        assert "[progress] skipped heap dump:" in out.getvalue()
 
 
 class TestPrinter(object):
