@@ -76,6 +76,30 @@ def test_subcli_dispatches_to_named_child():
     assert "beta" in out
 
 
+def test_subcommand_explicit_name_and_custom_executable():
+    cli = CLI(executable="mytool")
+    grp = cli.subcli("grp", help="A group.")
+
+    @cli.subcommand([], name="top-cmd", help="Top command.")
+    def impl_top(self, args, stdin, stdout, stderr):
+        stdout.write("top\n")
+        return 0
+
+    @grp.subcommand(["ARG"], name="sub-cmd", help="Sub command.")
+    def impl_sub(self, args, stdin, stdout, stderr):
+        stdout.write("sub=%s\n" % args.args[0])
+        return 0
+
+    out, _ = run(cli, ["mytool", "top-cmd"])
+    assert out == "top\n"
+    out, _ = run(cli, ["mytool", "grp", "sub-cmd", "x"])
+    assert out == "sub=x\n"
+    _, err = run(cli, ["mytool", "grp", "sub-cmd"], exit=1)
+    assert "mytool grp sub-cmd ARG" in err
+    _, err = run(cli, ["mytool", "--version"], exit=0)
+    assert err.startswith("mytool ")
+
+
 def test_subcli_shared_options_flow_to_child():
     cli = CLI()
     grp = cli.subcli("grp", help="A group.", options=[("shared", "shared opt")])
@@ -469,6 +493,27 @@ class TestCheckCLI(object):
         missing_dir = str(tmpdir.join("no-such-dir"))
         _write_progress_heap_dump(stderrw, directory=missing_dir)
         assert "[progress] skipped heap dump:" in out.getvalue()
+
+    def test_dump_export_emits_declarations(self, tmpdir):
+        export = tmpdir.join("ok.ndjson")
+        export.write(
+            '{"meta":{"format":{"version":"3.1.0"}}}\n'
+            '{"in":1,"str":{"pre":0,"str":"P"}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"ie":0,"sort":1}\n'
+            '{"ie":1,"sort":0}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":1}}\n'
+        )
+        out, err = run(rpylean_cli, ["rpylean", "dump", "--export", str(export)], exit=0)
+        assert err == ""
+        assert '{"def":' in out
+        assert '"str":"P"' in out
+
+    def test_ffi_subcommands_require_module(self):
+        for sub in ["check", "repl", "export"]:
+            out, err = run(rpylean_cli, ["rpylean", "ffi", sub], exit=1)
+            assert out == ""
+            assert "Expected a MODULE" in err
 
 
 class TestPrinter(object):

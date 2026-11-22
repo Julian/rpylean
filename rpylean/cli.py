@@ -21,10 +21,8 @@ from rpylean._tokens import (
     PLAIN, writer_from_arg,
 )
 from rpylean.exceptions import ExportError
-from rpylean.ffi import (
-    Exporter, FFI, detect_prefix, read_constant_info,
-)
-from rpylean.ffi import _lltypes as _lean
+from rpylean.exporter import Exporter, json_escape as _json_escape
+from rpylean.ffi import FFI, detect_prefix, read_constant_info
 from rpylean.environment import (
     DeclarationHook,
     EnvironmentBuilder,
@@ -37,7 +35,7 @@ from rpylean.environment import (
     from_export,
 )
 from rpylean.objects import (
-    Name, Resolver, intern_stats, name_dict, set_resolver,
+    Name, Resolver, name_dict, set_resolver,
 )
 
 
@@ -143,6 +141,21 @@ CHECK_FLAGS = [
 ]
 
 
+def _setup_writers(args, stdout, stderr):
+    stdoutw = writer_from_arg(args.options["color"], stdout)
+    stderrw = writer_from_arg(args.options["color"], stderr)
+    apply_width(args.options["width"], stdout)
+    return stdoutw, stderrw
+
+
+def _emit_export(exporter, names=None):
+    exporter.emit_meta()
+    if names is not None:
+        exporter.dump_named(names)
+    else:
+        exporter.dump_all()
+
+
 @cli.subcommand(
     ["*EXPORT_FILES"],
     help="Type check an exported Lean environment.",
@@ -153,9 +166,7 @@ def check(self, args, stdin, stdout, stderr):
     if not args.varargs:
         self.usage_error("Expected an EXPORT_FILE")
 
-    stdoutw = writer_from_arg(args.options["color"], stdout)
-    stderrw = writer_from_arg(args.options["color"], stderr)
-    apply_width(args.options["width"], stdout)
+    stdoutw, stderrw = _setup_writers(args, stdout, stderr)
 
     # Wire `kill -INFO <pid>` (macOS) / `kill -USR1 <pid>` (Linux) to
     # print a one-line progress dump from `_StreamingChecker`. Cheap
@@ -276,18 +287,15 @@ class _StreamingChecker(DeclarationHook):
         # `decl.name.str()` we print *is* what we were stuck on (the
         # decl that just blocked the loop on the prior iteration).
         if _progress.poll():
-            apps, projs, consts = intern_stats()
             _MB = 1024 * 1024
             self.stderrw.write_plain(
                 "[progress] seen=%d checked=%d failures=%d "
                 "live=%dMB arena=%dMB rawmalloc=%dMB "
-                "interned(apps=%d projs=%d consts=%d) "
                 "cur=%s\n" % (
                     self.n_seen, self.n_checked, self.failures,
                     _live_memory() // _MB,
                     _arena_memory() // _MB,
                     _rawmalloced_memory() // _MB,
-                    apps, projs, consts,
                     decl.name.str(),
                 ),
             )
@@ -604,9 +612,7 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
     ],
 )
 def dump(self, args, stdin, stdout, stderr):
-    stdoutw = writer_from_arg(args.options["color"], stdout)
-    stderrw = writer_from_arg(args.options["color"], stderr)
-    apply_width(args.options["width"], stdout)
+    stdoutw, stderrw = _setup_writers(args, stdout, stderr)
 
     (path,) = args.args
     try:
@@ -619,13 +625,11 @@ def dump(self, args, stdin, stdout, stderr):
         exporter = Exporter(stdout)
         for each in env.declarations.values():
             exporter.register(each)
-        exporter.emit_meta()
-        if args.varargs:
-            exporter.dump_named(
-                [Name.from_str(each) for each in args.varargs],
-            )
-        else:
-            exporter.dump_all()
+        names = (
+            [Name.from_str(each) for each in args.varargs]
+            if args.varargs else None
+        )
+        _emit_export(exporter, names)
         return 0
     declarations = env.only([Name.from_str(each) for each in args.varargs])
     for each in declarations:
@@ -688,16 +692,20 @@ ffi = cli.subcli(
         (
             "prefix",
             "path to the Lean prefix to link against",
-            # TODO: default to `lean --print-prefix` once we can spawn from RPython.
         ),
     ],
 )
 
 
-def _resolve_prefix(args, stderr):
-    """Resolve the `--prefix` option, falling back to `$LEAN_PREFIX` /
-    `lean --print-prefix`. Returns `None` (after writing a usage hint to
-    `stderr`) if nothing turns up; otherwise returns the path."""
+def _resolve_ffi_args(cmd, args, stderr):
+    """Validate `*MODULES` and resolve `--prefix` / `$LEAN_PREFIX` / `lean`.
+
+    Raises `UsageError` when no modules were given; returns `(modules, None)`
+    (after writing a hint to `stderr`) if no Lean prefix can be found.
+    """
+    modules = args.varargs
+    if not modules:
+        cmd.usage_error("Expected a MODULE")
     prefix = args.options["prefix"]
     if prefix is None:
         prefix = detect_prefix()
@@ -705,26 +713,22 @@ def _resolve_prefix(args, stderr):
         stderr.write(
             "no --prefix, no $LEAN_PREFIX, and `lean` not on PATH\n"
         )
-    return prefix
+    return modules, prefix
 
 
 @ffi.subcommand(
     ["*MODULES"],
+    name="check",
     help="Type-check declarations from a Lean toolchain via FFI.",
     options=CHECK_OPTIONS,
     flags=CHECK_FLAGS,
 )
-def check(self, args, stdin, stdout, stderr):
-    modules = args.varargs
-    if not modules:
-        return 1
-    prefix = _resolve_prefix(args, stderr)
+def ffi_check(self, args, stdin, stdout, stderr):
+    modules, prefix = _resolve_ffi_args(self, args, stderr)
     if prefix is None:
         return 1
 
-    stdoutw = writer_from_arg(args.options["color"], stdout)
-    stderrw = writer_from_arg(args.options["color"], stderr)
-    apply_width(args.options["width"], stdout)
+    stdoutw, stderrw = _setup_writers(args, stdout, stderr)
 
     _progress.install()
 
@@ -746,15 +750,11 @@ def check(self, args, stdin, stdout, stderr):
                     # Fast path: look up each filtered name individually
                     # rather than walking the entire SMap.
                     for fname in run.filter_names:
-                        opt = ffi_obj.find_constant_named(env_obj, fname)
-                        if _lean.obj_tag(opt) == 0:
+                        decl = ffi_obj.read_constant_named(env_obj, fname)
+                        if decl is None:
                             stderr.write("%s: not found\n" % fname.str())
                             continue
-                        aborted = collector.on_constant(
-                            _lean.box(0), _lean.ctor_get(opt, 0),
-                        )
-                        ffi_obj.release(opt)
-                        if aborted:
+                        if collector._handle(decl):
                             break
                 else:
                     ffi_obj.each_constant(env_obj, collector)
@@ -769,14 +769,12 @@ def check(self, args, stdin, stdout, stderr):
 
 @ffi.subcommand(
     ["*MODULES"],
+    name="repl",
     help="Open a REPL with a Lean toolchain's environment loaded via FFI.",
     options=REPL_OPTIONS,
 )
-def repl(self, args, stdin, stdout, stderr):
-    modules = args.varargs
-    if not modules:
-        return 1
-    prefix = _resolve_prefix(args, stderr)
+def ffi_repl(self, args, stdin, stdout, stderr):
+    modules, prefix = _resolve_ffi_args(self, args, stderr)
     if prefix is None:
         return 1
 
@@ -792,6 +790,7 @@ def repl(self, args, stdin, stdout, stderr):
 
 @ffi.subcommand(
     ["*MODULES"],
+    name="export",
     help="Emit lean4export-format NDJSON for a Lean toolchain via FFI.",
     options=[
         (
@@ -801,11 +800,8 @@ def repl(self, args, stdin, stdout, stderr):
         ),
     ],
 )
-def export(self, args, stdin, stdout, stderr):
-    modules = args.varargs
-    if not modules:
-        return 1
-    prefix = _resolve_prefix(args, stderr)
+def ffi_export(self, args, stdin, stdout, stderr):
+    modules, prefix = _resolve_ffi_args(self, args, stderr)
     if prefix is None:
         return 1
 
@@ -821,11 +817,7 @@ def export(self, args, stdin, stdout, stderr):
         collector = _ExportCollector(exporter)
         ffi_obj.each_constant(env_obj, collector)
         ffi_obj.release(env_obj)
-    exporter.emit_meta()
-    if filter_names is None:
-        exporter.dump_all()
-    else:
-        exporter.dump_named(filter_names)
+    _emit_export(exporter, filter_names)
     return 0
 
 
@@ -917,12 +909,9 @@ class _FFIResolver(Resolver):
         self.builder = builder
 
     def resolve(self, name):
-        opt = self.ffi.find_constant_named(self.env_obj, name)
-        if _lean.obj_tag(opt) != 0:
-            self.builder.register_declaration(
-                read_constant_info(_lean.ctor_get(opt, 0)),
-            )
-        self.ffi.release(opt)
+        decl = self.ffi.read_constant_named(self.env_obj, name)
+        if decl is not None:
+            self.builder.register_declaration(decl)
 
 
 def _open_export(path, stdin):
@@ -1124,32 +1113,6 @@ class _TimingPrinter(_NamePrinter):
                 [PLAIN.emit(timing + " "), ERROR.emit("FAIL")],
             )
         self.writer.flush()
-
-
-_HEX = "0123456789abcdef"
-
-
-def _json_escape(s):
-    """Escape `s` for use inside a JSON string literal."""
-    out = []
-    for ch in s:
-        c = ord(ch)
-        if c == 0x22:
-            out.append("\\\"")
-        elif c == 0x5c:
-            out.append("\\\\")
-        elif c == 0x0a:
-            out.append("\\n")
-        elif c == 0x0d:
-            out.append("\\r")
-        elif c == 0x09:
-            out.append("\\t")
-        elif c < 0x20:
-            # All control chars fit in two hex digits; the upper byte is 0.
-            out.append("\\u00" + _HEX[c >> 4] + _HEX[c & 0xf])
-        else:
-            out.append(ch)
-    return "".join(out)
 
 
 class _JSONLPrinter(Printer):

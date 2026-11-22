@@ -1,5 +1,5 @@
 """
-Emit a `lean4export`-format NDJSON stream from rpylean's walked declarations.
+Emit a `lean4export`-format NDJSON stream from rpylean's declarations.
 
 The format is documented at
 https://github.com/leanprover/lean4export/blob/master/format_ndjson.md
@@ -30,6 +30,8 @@ env and produces the same diagnostics as `rpylean ffi check Init`.
 """
 from __future__ import print_function
 
+from rpython.rlib.objectmodel import r_dict
+
 from rpylean.objects import (
     HINT_ABBREV,
     HINT_OPAQUE,
@@ -48,11 +50,10 @@ from rpylean.objects import (
     syntactic_eq,
 )
 from rpylean.parser import EXPORT_VERSION
-from rpython.rlib.objectmodel import compute_unique_id, r_dict
 
 
 def _level_dict():
-    """A content-keyed `r_dict` mapping `W_Level` → int (level id).
+    """A content-keyed `r_dict` mapping `W_Level` -> int (level id).
 
     Matches `lean4export`'s `HashMap Level Nat`: structurally-equal
     levels collapse to one cache entry, even when they came from
@@ -68,10 +69,10 @@ def _level_dict():
 
 
 def _expr_dict():
-    """Same idea as `_level_dict`, but for `W_Expr` → int (expr id).
+    """Same idea as `_level_dict`, but for `W_Expr` -> int (expr id).
 
     Matches `lean4export`'s `HashMap Expr Nat`. Each W_Expr subclass
-    sets a content-mixing `_hash` in its constructor; structurally-equal
+    sets a content-mixing hash in its constructor; structurally-equal
     exprs from different Lean pointers collapse here.
     """
     def _eq(a, b):
@@ -101,34 +102,35 @@ def _meta_line(lean_version, lean_githash):
     )
 
 
-def _json_string(s):
-    """Quote `s` for JSON. Handles the bare minimum: backslash, quote,
-    control bytes. Lean names are typically ASCII identifiers, so we
-    don't worry about full Unicode escaping."""
-    out = ['"']
+_HEX = "0123456789abcdef"
+
+
+def json_escape(s):
+    """Escape `s` for use inside a JSON string literal (without outer quotes)."""
+    out = []
     for ch in s:
         c = ord(ch)
-        if ch == '\\':
-            out.append('\\\\')
-        elif ch == '"':
+        if c == 0x22:
             out.append('\\"')
-        elif ch == '\n':
+        elif c == 0x5c:
+            out.append('\\\\')
+        elif c == 0x0a:
             out.append('\\n')
-        elif ch == '\r':
+        elif c == 0x0d:
             out.append('\\r')
-        elif ch == '\t':
+        elif c == 0x09:
             out.append('\\t')
         elif c < 0x20:
-            h = "0123456789abcdef"
-            out.append("\\u")
-            out.append(h[(c >> 12) & 0xf])
-            out.append(h[(c >> 8) & 0xf])
-            out.append(h[(c >> 4) & 0xf])
-            out.append(h[c & 0xf])
+            # All control chars fit in two hex digits; the upper byte is 0.
+            out.append("\\u00" + _HEX[c >> 4] + _HEX[c & 0xf])
         else:
             out.append(ch)
-    out.append('"')
     return "".join(out)
+
+
+def json_string(s):
+    """Quote and escape `s` as a JSON string literal."""
+    return '"' + json_escape(s) + '"'
 
 
 #: The export format's spelling of each `SAFETY_*` value, by value.
@@ -144,12 +146,11 @@ def _json_bool(value):
 
 class Exporter(object):
     """
-    Two-pass export: callers feed every walked W_Declaration via
-    `register`, then call `dump_all` to drive the topological emit.
+    Two-pass export: callers feed every declaration via `register`,
+    then call `dump_all` or `dump_named` to drive the topological emit.
 
-    Index assignment for Name/Level/Expr is per-export, and Expr/Level
-    dedup relies on the FFI walker's pointer-cache (so shared subterms
-    come back as the same rpylean object).
+    Index assignment for Name/Level/Expr is per-export, with content-keyed
+    dedup for levels and expressions matching `lean4export`.
     """
 
     _attrs_ = [
@@ -163,8 +164,8 @@ class Exporter(object):
 
     def __init__(self, stream):
         self.stream = stream
-        self.decls = name_dict()                # name → W_Declaration
-        self._visited = name_dict()             # name → True (emitted)
+        self.decls = name_dict()                # name -> W_Declaration
+        self._visited = name_dict()             # name -> True (emitted)
         self._names = name_dict()
         self._names[Name.ANONYMOUS] = 0
         self._next_name = 1
@@ -173,13 +174,13 @@ class Exporter(object):
         # Content-keyed (`lean4export`-style): structurally-equal
         # levels and exprs share an id even when they came from
         # distinct Lean pointers.
-        self._level_ids = _level_dict()    # W_Level → level_id
-        self._expr_ids = _expr_dict()      # W_Expr → expr_id
+        self._level_ids = _level_dict()    # W_Level -> level_id
+        self._expr_ids = _expr_dict()      # W_Expr -> expr_id
         # Filled in by `_index_inductive_members` before the first
         # `dump_constant` call.
-        self._induct_for_ctor = name_dict()     # ctor_name → induct_name
-        self._ctors_of = name_dict()            # induct_name → [ctor_name]
-        self._recs_of = name_dict()             # induct_name → [rec_name]
+        self._induct_for_ctor = name_dict()     # ctor_name -> induct_name
+        self._ctors_of = name_dict()            # induct_name -> [ctor_name]
+        self._recs_of = name_dict()             # induct_name -> [rec_name]
         self._indexed = False
         # Set by the CLI via `set_lean_meta` before `emit_meta` so we
         # can include the Lean toolchain's own version + git hash.
@@ -189,9 +190,9 @@ class Exporter(object):
     # ---- registration -------------------------------------------------
 
     def register(self, decl):
-        """Add a walked declaration to the export pool.
+        """Add a declaration to the export pool.
 
-        Must be called for every constant before `dump_all`."""
+        Must be called for every constant before `dump_all` / `dump_named`."""
         self.decls[decl.name] = decl
 
     def set_lean_meta(self, version, githash):
@@ -206,7 +207,7 @@ class Exporter(object):
     def quote(self, s):
         """JSON-quote `s` for embedding inside an export record. Used
         by `W_LitStr.emit_to` / `W_LitNat.emit_to`."""
-        return _json_string(s)
+        return json_string(s)
 
     # ---- visitor-facing API -------------------------------------------
     # The following methods form the contract that `W_*.dump_to` /
@@ -273,7 +274,7 @@ class Exporter(object):
             decl = self.decls[name]
             if name.is_internal:
                 continue
-            if decl.is_unsafe:
+            if decl.is_unsafe():
                 continue
             self.dump_constant(decl)
 
@@ -350,7 +351,7 @@ class Exporter(object):
         else:
             assert isinstance(name, StrName)
             payload = '{"pre":%d,"str":%s}' % (
-                parent_id, _json_string(name.suffix),
+                parent_id, json_string(name.suffix),
             )
             self.stream.write('{"in":%d,"str":%s}\n' % (nid, payload))
         return nid
@@ -379,11 +380,8 @@ class Exporter(object):
         # Match `lean4export`'s `dumpUparams`: register each name, then
         # also emit each as a `Level.param` record up front, so the
         # output reads "name, param, name, param, ..." before any expr
-        # starts referencing them. `Name.as_level_param()` is cached so the
-        # `W_LevelParam` we materialise here is `is`-identical to the
-        # one the walker handed `read_level` for `Lean.Level.param`;
-        # the existing `compute_unique_id`-keyed dedup then handles
-        # any later references for free.
+        # starts referencing them. Content-keyed dedup in `_level_ids`
+        # then handles any later references automatically.
         out = [self.name_id(n) for n in names]
         for n in names:
             self.level_id(n.as_level_param())
@@ -392,30 +390,29 @@ class Exporter(object):
     def _ids_list(self, ids):
         return "[" + ",".join([str(i) for i in ids]) + "]"
 
-    def emit_axiom(self, decl):
+    def _decl_header(self, decl):
         nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
+        levels_json = self._ids_list(self._level_param_ids(decl.levels))
         tid = self.expr_id(decl.type)
+        return nid, levels_json, tid
+
+    def emit_axiom(self, decl):
+        nid, levels_json, tid = self._decl_header(decl)
         self.stream.write(
             '{"axiom":{"isUnsafe":%s,"levelParams":%s,'
             '"name":%d,"type":%d}}\n'
-            % (_json_bool(decl.is_unsafe()), self._ids_list(levels),
-               nid, tid),
+            % (_json_bool(decl.is_unsafe()), levels_json, nid, tid),
         )
 
     def emit_quot(self, decl, kind):
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         self.stream.write(
             '{"quot":{"kind":"%s","levelParams":%s,"name":%d,"type":%d}}\n'
-            % (kind, self._ids_list(levels), nid, tid),
+            % (kind, levels_json, nid, tid),
         )
 
     def emit_def(self, decl, value, hint):
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         vid = self.expr_id(value)
         kind = decl.w_kind
         assert isinstance(kind, W_Definition)
@@ -427,31 +424,25 @@ class Exporter(object):
             '{"def":{"all":%s,"hints":%s,"levelParams":%s,'
             '"name":%d,"safety":"%s","type":%d,"value":%d}}\n'
             % (self._ids_list(all_ids), self._hint_json(hint),
-               self._ids_list(levels), nid, _SAFETY_JSON[decl.safety],
-               tid, vid),
+               levels_json, nid, _SAFETY_JSON[decl.safety], tid, vid),
         )
 
     def emit_thm(self, decl, value):
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         vid = self.expr_id(value)
         self.stream.write(
             '{"thm":{"all":[%d],"levelParams":%s,"name":%d,'
             '"type":%d,"value":%d}}\n'
-            % (nid, self._ids_list(levels), nid, tid, vid),
+            % (nid, levels_json, nid, tid, vid),
         )
 
     def emit_opaque(self, decl, value):
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         vid = self.expr_id(value)
         self.stream.write(
             '{"opaque":{"all":[%d],"isUnsafe":%s,"levelParams":%s,'
             '"name":%d,"type":%d,"value":%d}}\n'
-            % (nid, _json_bool(decl.is_unsafe()), self._ids_list(levels),
-               nid, tid, vid),
+            % (nid, _json_bool(decl.is_unsafe()), levels_json, nid, tid, vid),
         )
 
     def _hint_json(self, hint):
@@ -501,42 +492,37 @@ class Exporter(object):
     def _inductive_val_json(self, decl):
         kind = decl.w_kind
         assert isinstance(kind, W_Inductive)
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         all_ids = self._ids_list([self.name_id(n) for n in kind.all])
         ctor_ids = self._ids_list(self._ctor_names_for(decl.name))
         return (
             '{"all":%s,"ctors":%s,"isRec":%s,"isReflexive":%s,'
-            '"isUnsafe":false,"levelParams":%s,"name":%d,'
+            '"isUnsafe":%s,"levelParams":%s,"name":%d,'
             '"numIndices":%d,"numNested":%d,"numParams":%d,"type":%d}'
             % (all_ids, ctor_ids,
-               "true" if kind.is_recursive else "false",
-               "true" if kind.is_reflexive else "false",
-               self._ids_list(levels), nid,
+               _json_bool(kind.is_recursive),
+               _json_bool(kind.is_reflexive),
+               _json_bool(decl.is_unsafe()),
+               levels_json, nid,
                kind.num_indices, kind.num_nested, kind.num_params, tid)
         )
 
     def _constructor_val_json(self, decl, induct_name):
         kind = decl.w_kind
         assert isinstance(kind, W_Constructor)
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         induct_id = self.name_id(induct_name)
         return (
-            '{"cidx":%d,"induct":%d,"isUnsafe":false,"levelParams":%s,'
+            '{"cidx":%d,"induct":%d,"isUnsafe":%s,"levelParams":%s,'
             '"name":%d,"numFields":%d,"numParams":%d,"type":%d}'
-            % (kind.cidx, induct_id, self._ids_list(levels),
-               nid, kind.num_fields, kind.num_params, tid)
+            % (kind.cidx, induct_id, _json_bool(decl.is_unsafe()),
+               levels_json, nid, kind.num_fields, kind.num_params, tid)
         )
 
     def _recursor_val_json(self, decl):
         kind = decl.w_kind
         assert isinstance(kind, W_Recursor)
-        nid = self.name_id(decl.name)
-        levels = self._level_param_ids(decl.levels)
-        tid = self.expr_id(decl.type)
+        nid, levels_json, tid = self._decl_header(decl)
         all_ids = self._ids_list([self.name_id(n) for n in kind.all])
         rule_parts = []
         for rule in kind.rules:
@@ -547,12 +533,13 @@ class Exporter(object):
                 % (ctor_id, rule.num_fields, rhs_id),
             )
         return (
-            '{"all":%s,"isUnsafe":false,"k":%s,"levelParams":%s,'
+            '{"all":%s,"isUnsafe":%s,"k":%s,"levelParams":%s,'
             '"name":%d,"numIndices":%d,"numMinors":%d,"numMotives":%d,'
             '"numParams":%d,"rules":[%s],"type":%d}'
             % (all_ids,
-               "true" if kind.k else "false",
-               self._ids_list(levels), nid,
+               _json_bool(decl.is_unsafe()),
+               _json_bool(kind.k),
+               levels_json, nid,
                kind.num_indices, kind.num_minors, kind.num_motives,
                kind.num_params, ",".join(rule_parts), tid)
         )

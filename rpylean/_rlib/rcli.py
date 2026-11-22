@@ -96,8 +96,14 @@ USAGE_ERROR = """\
 
 USAGE
 
-  rpylean %s %s
+  %s %s %s
 """
+
+
+def _format_executable(executable, app_name):
+    if executable.endswith("__main__.py"):
+        return "pypy -m %s" % (app_name,)
+    return executable.split("/")[-1]
 
 
 class _CommandLike(object):
@@ -106,10 +112,11 @@ class _CommandLike(object):
     `CLI._commands` dict without RPython complaining about
     can't-unify instances."""
 
-    _attrs_ = ['name', 'short_help']
+    _attrs_ = ['name', 'short_help', '_executable']
 
     name = ""
     short_help = ""
+    _executable = "rpylean"
 
     def run(self, executable, args, stdin, stdout, stderr):
         raise NotImplementedError
@@ -127,12 +134,14 @@ class Command(_CommandLike):
         flags,
         run,
         short_help=None,
+        executable="rpylean",
     ):
         if short_help is None:
             short_help = help.strip().split("\n", 1)[0]
 
         self.name = name
         self.short_help = short_help
+        self._executable = executable
         self._help = help
         self._metavars = metavars
         self._options = dict(options)
@@ -206,10 +215,7 @@ class Command(_CommandLike):
         return self._run(self, combined, stdin, stdout, stderr)
 
     def help(self, executable):
-        if executable.endswith("__main__.py"):
-            executable = "pypy -m rpylean"
-        else:
-            executable = executable.split("/")[-1]
+        executable = _format_executable(executable, self._executable)
         options = [
             "  --%s: %s" % (opt, desc)
             for opt, desc in self._options.iteritems()
@@ -235,6 +241,7 @@ class Command(_CommandLike):
         message = USAGE_ERROR % (
             message,
             self._help,
+            self._executable,
             self.name,
             " ".join(self._metavars),
         )
@@ -250,20 +257,21 @@ class CLI(object):
         self._default = default
         self._commands = {}
 
-    def subcommand(self, metavars, help, options=None, flags=None):
+    def subcommand(self, metavars, help, options=None, flags=None, name=None):
         def _subcommand(fn):
             # Underscores in the function name become hyphens in the
             # subcommand name, matching the option-naming convention
             # (e.g. "max-fail", "filter-match").
-            name = fn.__name__.replace("_", "-")
-            assert name not in self._commands, name
-            command = self._commands[name] = Command(
-                name=name,
+            cmd_name = fn.__name__.replace("_", "-") if name is None else name
+            assert cmd_name not in self._commands, cmd_name
+            command = self._commands[cmd_name] = Command(
+                name=cmd_name,
                 help=help.strip("\n"),
                 metavars=metavars,
                 options=options or [],
                 flags=flags or [],
                 run=fn,
+                executable=self.executable,
             )
             return command
 
@@ -281,6 +289,7 @@ class CLI(object):
             name=name,
             help=help.strip("\n"),
             options=options or [],
+            executable=self.executable,
         )
         return sub
 
@@ -316,7 +325,8 @@ class CLI(object):
         return 0
 
     def usage(self, executable):
-        return _USAGE % (executable.split("/")[-1],) + "\n".join(
+        executable = _format_executable(executable, self.executable)
+        return _USAGE % (executable,) + "\n".join(
             [
                 "  %s: %s" % (k, cmd.short_help)
                 for k, cmd in self._commands.iteritems()
@@ -328,11 +338,9 @@ class CLI(object):
             from rpylean._version import __version__
         except ImportError:
             __version__ = "unknown"
-        return UsageError("rpylean %s" % (__version__,), exit_code=0)
+        return UsageError("%s %s" % (self.executable, __version__), exit_code=0)
 
     def with_tagline(self, executable):
-        if executable.endswith("__main__.py"):
-            executable = "pypy -m %s" % (self.executable,)
         return UsageError(
             self.tagline + "\n\n" + self.usage(executable),
             exit_code=0,
@@ -350,16 +358,17 @@ class SubCLI(_CommandLike):
 
     _attrs_ = ['_help', '_options', '_commands']
 
-    def __init__(self, name, help, options):
+    def __init__(self, name, help, options, executable="rpylean"):
         self.name = name
+        self._executable = executable
         self._help = help
         self.short_help = help.split("\n", 1)[0]
         self._options = options  # list of (name, desc) tuples
         self._commands = {}
 
-    def subcommand(self, metavars, help, options=None, flags=None):
+    def subcommand(self, metavars, help, options=None, flags=None, name=None):
         def _subcommand(fn):
-            sub_name = fn.__name__.replace("_", "-")
+            sub_name = fn.__name__.replace("_", "-") if name is None else name
             assert sub_name not in self._commands, sub_name
             merged = list(self._options) + list(options or [])
             command = self._commands[sub_name] = Command(
@@ -369,6 +378,7 @@ class SubCLI(_CommandLike):
                 options=merged,
                 flags=flags or [],
                 run=fn,
+                executable=self._executable,
             )
             return command
 
@@ -415,10 +425,7 @@ class SubCLI(_CommandLike):
         )
 
     def help(self, executable):
-        if executable.endswith("__main__.py"):
-            executable = "pypy -m rpylean"
-        else:
-            executable = executable.split("/")[-1]
+        executable = _format_executable(executable, self._executable)
         lines = [self._help, "", "USAGE", "",
                  "  %s %s <subcommand> [<args>]" % (executable, self.name),
                  "", "SUBCOMMANDS", ""]
