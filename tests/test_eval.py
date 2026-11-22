@@ -236,6 +236,17 @@ def test_first_class_and_partial_native_nat_ops():
     assert syntactic_eq(_eval(env, pow_.app(W_LitNat.int(3), W_LitNat.int(5))), W_LitNat.int(243))
 
 
+def test_nat_shift_huge_counts_in_eval():
+    env = _bool_nat_env()
+    shl = _NAT_SHIFT_LEFT.const()
+    shr = _NAT_SHIFT_RIGHT.const()
+    huge = W_LitNat.long(1 << 64)
+
+    assert syntactic_eq(_eval(env, shr.app(W_LitNat.int(42), huge)), W_LitNat.int(0))
+    assert syntactic_eq(_eval(env, shl.app(W_LitNat.int(0), huge)), W_LitNat.int(0))
+    assert _eval(env, shl.app(W_LitNat.int(1), huge)) is None
+
+
 def test_litstr_lazy_expansion():
     """String literals expand lazily through `String.ofList` on projection."""
     u = Name.simple("u")

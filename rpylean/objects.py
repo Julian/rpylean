@@ -3344,7 +3344,8 @@ _NAT_REC_NAME = _NAT_NAME.child("rec")
 _BOOL_TRUE = Name.simple("Bool").child("true").const()
 _BOOL_FALSE = Name.simple("Bool").child("false").const()
 
-# Max exponent for Nat.pow to prevent excessive computation
+_BIG_ZERO = rbigint.fromint(0)
+# Max exponent for Nat.pow / Nat.shiftLeft to prevent excessive computation
 _REDUCE_POW_MAX_EXP = rbigint.fromint(1 << 24)
 
 
@@ -3486,9 +3487,19 @@ def nat_binop_value(name, v1, v2):
     if name_eq(name, _NAT_XOR):
         return _mk_w_litnat(v1.xor(v2))
     if name_eq(name, _NAT_SHIFT_LEFT):
+        if v1.eq(_BIG_ZERO):
+            return _mk_w_litnat(_BIG_ZERO)
+        if v2.gt(_REDUCE_POW_MAX_EXP):
+            return None
         return _mk_w_litnat(v1.lshift(v2.toint()))
     if name_eq(name, _NAT_SHIFT_RIGHT):
-        return _mk_w_litnat(v1.rshift(v2.toint()))
+        if v1.eq(_BIG_ZERO):
+            return _mk_w_litnat(_BIG_ZERO)
+        try:
+            shift = v2.toint()
+        except OverflowError:
+            return _mk_w_litnat(_BIG_ZERO)
+        return _mk_w_litnat(v1.rshift(shift))
     return None
 
 

@@ -904,6 +904,23 @@ class TestNativeNatReduction(object):
         result = app.whnf(NAT_OPS_ENV)
         assert syntactic_eq(result, _BOOL_FALSE)
 
+    def test_nat_shift_huge_counts(self):
+        huge = W_LitNat.long(1 << 64)
+        shr = Name.simple("Nat").child("shiftRight").const()
+        shl = Name.simple("Nat").child("shiftLeft").const()
+
+        res_shr = shr.app(W_LitNat.int(42), huge).whnf(NAT_OPS_ENV)
+        assert isinstance(res_shr, W_LitNat)
+        assert res_shr.val.str() == "0"
+
+        res_shl_zero = shl.app(W_LitNat.int(0), huge).whnf(NAT_OPS_ENV)
+        assert isinstance(res_shl_zero, W_LitNat)
+        assert res_shl_zero.val.str() == "0"
+
+        # Non-zero shiftLeft past the cap declines cleanly instead of overflowing.
+        capped = shl.app(W_LitNat.int(1), huge)
+        assert capped.whnf(NAT_OPS_ENV) is capped
+
     def test_non_literal_arg_falls_through(self):
         """Native reduction does not fire when an arg isn't a nat value."""
         a_decl = a.axiom(type=NAT)

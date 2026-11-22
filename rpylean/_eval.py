@@ -788,6 +788,8 @@ def _eval_nat_op_big(op_id, v1, v2, cache):
     if op_id == OP_SHL:
         if b1.eq(_BIG_ZERO):
             return _NAT_ZERO_VAL
+        if b2.gt(_REDUCE_POW_MAX_EXP):
+            raise _EvalBail()
         return mk_nat_from_bigint(b1.lshift(b2.toint()))
     if op_id == OP_SHR:
         if b2.gt(_MAX_SMALL_NAT):
