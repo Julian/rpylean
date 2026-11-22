@@ -3670,9 +3670,13 @@ class TermStore(object):
         try:
             if depth == 0:
                 return self._inst_multi_buf_d0(h, buf, start, count, gen << 8, 0)
+            ac = self._buf_all_closed(buf, start, count)
+            if ac and depth < 256:
+                return self._inst_multi_buf_closed(
+                    h, buf, start, count, (gen << 8) | depth, 0,
+                )
             return self._inst_multi_buf_oneshot(
-                h, buf, start, count, depth, gen,
-                self._buf_all_closed(buf, start, count), 0,
+                h, buf, start, count, depth, gen, ac, 0,
             )
         finally:
             self._subst_top = 0
@@ -3835,9 +3839,14 @@ class TermStore(object):
                 if ac < 0:
                     ac = 1 if self._buf_all_closed(buf, start, n) else 0
                     self._inst_all_closed = ac
-                nb = self._inst_multi_buf_oneshot(
-                    b, buf, start, n, 1, tag >> 8, ac != 0, nr,
-                )
+                if ac != 0:
+                    nb = self._inst_multi_buf_closed(
+                        b, buf, start, n, tag | 1, nr,
+                    )
+                else:
+                    nb = self._inst_multi_buf_oneshot(
+                        b, buf, start, n, 1, tag >> 8, False, nr,
+                    )
             if na == a and nb == b:
                 r = h
             else:
@@ -3861,9 +3870,14 @@ class TermStore(object):
                 if ac < 0:
                     ac = 1 if self._buf_all_closed(buf, start, n) else 0
                     self._inst_all_closed = ac
-                nbody = self._inst_multi_buf_oneshot(
-                    body, buf, start, n, 1, tag >> 8, ac != 0, nr,
-                )
+                if ac != 0:
+                    nbody = self._inst_multi_buf_closed(
+                        body, buf, start, n, tag | 1, nr,
+                    )
+                else:
+                    nbody = self._inst_multi_buf_oneshot(
+                        body, buf, start, n, 1, tag >> 8, False, nr,
+                    )
             if na == a and nv == value and nbody == body:
                 r = h
             else:
@@ -3872,6 +3886,217 @@ class TermStore(object):
         self.call_slot[ri] = (tag << 32) | r
         return r
 
+    def _inst_multi_buf_closed(self, h, buf, start, n, tag, rdepth):
+        """Hot specialization of `_inst_multi_buf_oneshot` when all substitutes
+        are closed (`loose_bvar_range == 0`) and `1 <= depth < 256`, packing
+        `(gen << 8) | depth` into `tag` to minimize live registers and spills."""
+        depth = tag & 0xFF
+        if is_leaf(h):
+            lo = _s32(self.leaf_meta[leaf_index(h)]) >> 1
+            if lo <= depth:
+                return h
+            id = lo - 1
+            rel = id - depth
+            return _s32(buf[start + rel]) if rel < n else self.bvar(id - n)
+        ri = rec_index(h)
+        recs = self.recs
+        base = ri << 2
+        hdr = _s32(recs[base])
+        if (hdr >> 4) <= depth:
+            return h
+        call_slot = self.call_slot
+        entry = call_slot[ri]
+        if (entry >> 32) == tag:
+            return entry & _TABLE_SLOT_MASK
+        if (entry >> 40) == (tag >> 8):
+            r = self._call_memo.get((h << 16) | depth, 0)
+            if r != 0:
+                return r
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
+        kind = hdr & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        nr = rdepth + 1
+        if kind == KIND_APP:
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    na = _s32(buf[start + arel]) if arel < n else self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                ahdr = _s32(recs[ari << 2])
+                if (ahdr >> 4) <= depth:
+                    na = a
+                elif (ahdr & _KIND_MASK) != KIND_APP:
+                    aentry = call_slot[ari]
+                    if (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
+                else:
+                    smark = self._subst_top
+                    stop = smark
+                    cur = a
+                    while True:
+                        if is_leaf(cur):
+                            clo = _s32(self.leaf_meta[leaf_index(cur)]) >> 1
+                            if clo <= depth:
+                                na = cur
+                            else:
+                                cid = clo - 1
+                                crel = cid - depth
+                                na = _s32(buf[start + crel]) if crel < n else self.bvar(cid - n)
+                            break
+                        cri = rec_index(cur)
+                        chdr = _s32(recs[cri << 2])
+                        if (chdr >> 4) <= depth:
+                            na = cur
+                            break
+                        centry = call_slot[cri]
+                        if (centry >> 32) == tag:
+                            na = centry & _TABLE_SLOT_MASK
+                            break
+                        if (centry >> 40) == (tag >> 8):
+                            cr = self._call_memo.get((cur << 16) | depth, 0)
+                            if cr != 0:
+                                na = cr
+                                break
+                        if (chdr & _KIND_MASK) != KIND_APP:
+                            self._subst_top = stop
+                            na = self._inst_multi_buf_closed(cur, buf, start, n, tag, nr)
+                            break
+                        if stop == self._subst_cap:
+                            ncap = self._subst_cap * 2
+                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
+                            self._subst_cap = ncap
+                        self._subst_stack[stop] = _u32(cri)
+                        stop += 1
+                        cur = _s32(recs[(cri << 2) + F_A])
+                    while stop > smark:
+                        stop -= 1
+                        nri = _s32(self._subst_stack[stop])
+                        recs = self.recs
+                        old_b = _s32(recs[(nri << 2) + F_B])
+                        if is_leaf(old_b):
+                            blo2 = _s32(self.leaf_meta[leaf_index(old_b)]) >> 1
+                            if blo2 <= depth:
+                                nb2 = old_b
+                            else:
+                                bid2 = blo2 - 1
+                                brel2 = bid2 - depth
+                                nb2 = _s32(buf[start + brel2]) if brel2 < n else self.bvar(bid2 - n)
+                        else:
+                            bri2 = rec_index(old_b)
+                            if (_s32(recs[bri2 << 2]) >> 4) <= depth:
+                                nb2 = old_b
+                            else:
+                                bentry2 = self.call_slot[bri2]
+                                if (bentry2 >> 32) == tag:
+                                    nb2 = bentry2 & _TABLE_SLOT_MASK
+                                else:
+                                    self._subst_top = stop
+                                    nb2 = self._inst_multi_buf_closed(old_b, buf, start, n, tag, nr)
+                        na = self.cons_app(na, nb2)
+                        call_slot = self.call_slot
+                        if (call_slot[nri] >> 40) != (tag >> 8):
+                            call_slot[nri] = (tag << 32) | na
+                        else:
+                            self._call_memo.set((rec_handle(nri) << 16) | depth, na)
+                    self._subst_top = smark
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= depth:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - depth
+                    nb = _s32(buf[start + brel]) if brel < n else self.bvar(bid - n)
+            else:
+                bri = rec_index(b)
+                if (_s32(self.recs[bri << 2]) >> 4) <= depth:
+                    nb = b
+                else:
+                    bentry = self.call_slot[bri]
+                    if (bentry >> 32) == tag:
+                        nb = bentry & _TABLE_SLOT_MASK
+                    else:
+                        nb = self._inst_multi_buf_closed(b, buf, start, n, tag, nr)
+            r = self.cons_app(na, nb)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    na = _s32(buf[start + arel]) if arel < n else self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                if (_s32(recs[ari << 2]) >> 4) <= depth:
+                    na = a
+                else:
+                    aentry = call_slot[ari]
+                    if (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
+            d1 = depth + 1
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= d1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - d1
+                    nb = _s32(buf[start + brel]) if brel < n else self.bvar(bid - n)
+            elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= d1:
+                nb = b
+            elif d1 < 256:
+                nb = self._inst_multi_buf_closed(b, buf, start, n, tag + 1, nr)
+            else:
+                nb = self._inst_multi_buf_oneshot(b, buf, start, n, d1, tag >> 8, True, nr)
+            if na == a and nb == b:
+                r = h
+            else:
+                r = self.cons(kind, na, nb, _s32(self.recs[(ri << 2) + F_INFO]))
+        elif kind == KIND_PROJ:
+            na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, _s32(self.recs[(ri << 2) + F_INFO]))
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
+            nv = self._inst_multi_buf_closed(value, buf, start, n, tag, nr)
+            d1 = depth + 1
+            if self.loose_bvar_range(body) <= d1:
+                nbody = body
+            elif d1 < 256:
+                nbody = self._inst_multi_buf_closed(body, buf, start, n, tag + 1, nr)
+            else:
+                nbody = self._inst_multi_buf_oneshot(body, buf, start, n, d1, tag >> 8, True, nr)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody)
+                r = self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
+        call_slot = self.call_slot
+        if (call_slot[ri] >> 40) != (tag >> 8):
+            call_slot[ri] = (tag << 32) | r
+        else:
+            self._call_memo.set((h << 16) | depth, r)
+        return r
+
+    @dont_inline
     def _inst_multi_buf_oneshot(self, h, buf, start, n, depth, gen, all_closed, rdepth):
         if is_leaf(h):
             lo = _s32(self.leaf_meta[leaf_index(h)]) >> 1
@@ -4138,9 +4363,13 @@ class TermStore(object):
         try:
             if depth == 0:
                 return self._inst_multi_rev_d0(h, substs, count, gen << 8, 0)
+            ac = self._list_all_closed(substs, count)
+            if ac and depth < 256:
+                return self._inst_multi_rev_closed(
+                    h, substs, count, (gen << 8) | depth, 0,
+                )
             return self._inst_multi_rev_oneshot(
-                h, substs, count, depth, gen,
-                self._list_all_closed(substs, count), 0,
+                h, substs, count, depth, gen, ac, 0,
             )
         finally:
             self._subst_top = 0
@@ -4303,9 +4532,14 @@ class TermStore(object):
                 if ac < 0:
                     ac = 1 if self._list_all_closed(substs, n) else 0
                     self._inst_all_closed = ac
-                nb = self._inst_multi_rev_oneshot(
-                    b, substs, n, 1, tag >> 8, ac != 0, nr,
-                )
+                if ac != 0:
+                    nb = self._inst_multi_rev_closed(
+                        b, substs, n, tag | 1, nr,
+                    )
+                else:
+                    nb = self._inst_multi_rev_oneshot(
+                        b, substs, n, 1, tag >> 8, False, nr,
+                    )
             if na == a and nb == b:
                 r = h
             else:
@@ -4329,9 +4563,14 @@ class TermStore(object):
                 if ac < 0:
                     ac = 1 if self._list_all_closed(substs, n) else 0
                     self._inst_all_closed = ac
-                nbody = self._inst_multi_rev_oneshot(
-                    body, substs, n, 1, tag >> 8, ac != 0, nr,
-                )
+                if ac != 0:
+                    nbody = self._inst_multi_rev_closed(
+                        body, substs, n, tag | 1, nr,
+                    )
+                else:
+                    nbody = self._inst_multi_rev_oneshot(
+                        body, substs, n, 1, tag >> 8, False, nr,
+                    )
             if na == a and nv == value and nbody == body:
                 r = h
             else:
@@ -4340,6 +4579,216 @@ class TermStore(object):
         self.call_slot[ri] = (tag << 32) | r
         return r
 
+    def _inst_multi_rev_closed(self, h, substs, n, tag, rdepth):
+        """Hot specialization of `_inst_multi_rev_oneshot` when all substitutes
+        are closed (`loose_bvar_range == 0`) and `1 <= depth < 256`."""
+        depth = tag & 0xFF
+        if is_leaf(h):
+            lo = _s32(self.leaf_meta[leaf_index(h)]) >> 1
+            if lo <= depth:
+                return h
+            id = lo - 1
+            rel = id - depth
+            return substs[n - 1 - rel] if rel < n else self.bvar(id - n)
+        ri = rec_index(h)
+        recs = self.recs
+        base = ri << 2
+        hdr = _s32(recs[base])
+        if (hdr >> 4) <= depth:
+            return h
+        call_slot = self.call_slot
+        entry = call_slot[ri]
+        if (entry >> 32) == tag:
+            return entry & _TABLE_SLOT_MASK
+        if (entry >> 40) == (tag >> 8):
+            r = self._call_memo.get((h << 16) | depth, 0)
+            if r != 0:
+                return r
+        if (rdepth & 31) == 31:
+            _check_stack_store("instantiate_multi")
+        kind = hdr & _KIND_MASK
+        a = _s32(recs[base + F_A])
+        b = _s32(recs[base + F_B])
+        nr = rdepth + 1
+        if kind == KIND_APP:
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    na = substs[n - 1 - arel] if arel < n else self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                ahdr = _s32(recs[ari << 2])
+                if (ahdr >> 4) <= depth:
+                    na = a
+                elif (ahdr & _KIND_MASK) != KIND_APP:
+                    aentry = call_slot[ari]
+                    if (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_rev_closed(a, substs, n, tag, nr)
+                else:
+                    smark = self._subst_top
+                    stop = smark
+                    cur = a
+                    while True:
+                        if is_leaf(cur):
+                            clo = _s32(self.leaf_meta[leaf_index(cur)]) >> 1
+                            if clo <= depth:
+                                na = cur
+                            else:
+                                cid = clo - 1
+                                crel = cid - depth
+                                na = substs[n - 1 - crel] if crel < n else self.bvar(cid - n)
+                            break
+                        cri = rec_index(cur)
+                        chdr = _s32(recs[cri << 2])
+                        if (chdr >> 4) <= depth:
+                            na = cur
+                            break
+                        centry = call_slot[cri]
+                        if (centry >> 32) == tag:
+                            na = centry & _TABLE_SLOT_MASK
+                            break
+                        if (centry >> 40) == (tag >> 8):
+                            cr = self._call_memo.get((cur << 16) | depth, 0)
+                            if cr != 0:
+                                na = cr
+                                break
+                        if (chdr & _KIND_MASK) != KIND_APP:
+                            self._subst_top = stop
+                            na = self._inst_multi_rev_closed(cur, substs, n, tag, nr)
+                            break
+                        if stop == self._subst_cap:
+                            ncap = self._subst_cap * 2
+                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
+                            self._subst_cap = ncap
+                        self._subst_stack[stop] = _u32(cri)
+                        stop += 1
+                        cur = _s32(recs[(cri << 2) + F_A])
+                    while stop > smark:
+                        stop -= 1
+                        nri = _s32(self._subst_stack[stop])
+                        recs = self.recs
+                        old_b = _s32(recs[(nri << 2) + F_B])
+                        if is_leaf(old_b):
+                            blo2 = _s32(self.leaf_meta[leaf_index(old_b)]) >> 1
+                            if blo2 <= depth:
+                                nb2 = old_b
+                            else:
+                                bid2 = blo2 - 1
+                                brel2 = bid2 - depth
+                                nb2 = substs[n - 1 - brel2] if brel2 < n else self.bvar(bid2 - n)
+                        else:
+                            bri2 = rec_index(old_b)
+                            if (_s32(recs[bri2 << 2]) >> 4) <= depth:
+                                nb2 = old_b
+                            else:
+                                bentry2 = self.call_slot[bri2]
+                                if (bentry2 >> 32) == tag:
+                                    nb2 = bentry2 & _TABLE_SLOT_MASK
+                                else:
+                                    self._subst_top = stop
+                                    nb2 = self._inst_multi_rev_closed(old_b, substs, n, tag, nr)
+                        na = self.cons_app(na, nb2)
+                        call_slot = self.call_slot
+                        if (call_slot[nri] >> 40) != (tag >> 8):
+                            call_slot[nri] = (tag << 32) | na
+                        else:
+                            self._call_memo.set((rec_handle(nri) << 16) | depth, na)
+                    self._subst_top = smark
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= depth:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - depth
+                    nb = substs[n - 1 - brel] if brel < n else self.bvar(bid - n)
+            else:
+                bri = rec_index(b)
+                if (_s32(self.recs[bri << 2]) >> 4) <= depth:
+                    nb = b
+                else:
+                    bentry = self.call_slot[bri]
+                    if (bentry >> 32) == tag:
+                        nb = bentry & _TABLE_SLOT_MASK
+                    else:
+                        nb = self._inst_multi_rev_closed(b, substs, n, tag, nr)
+            r = self.cons_app(na, nb)
+        elif kind == KIND_LAMBDA or kind == KIND_FORALL:
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    na = substs[n - 1 - arel] if arel < n else self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                if (_s32(recs[ari << 2]) >> 4) <= depth:
+                    na = a
+                else:
+                    aentry = call_slot[ari]
+                    if (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_rev_closed(a, substs, n, tag, nr)
+            d1 = depth + 1
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= d1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - d1
+                    nb = substs[n - 1 - brel] if brel < n else self.bvar(bid - n)
+            elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= d1:
+                nb = b
+            elif d1 < 256:
+                nb = self._inst_multi_rev_closed(b, substs, n, tag + 1, nr)
+            else:
+                nb = self._inst_multi_rev_oneshot(b, substs, n, d1, tag >> 8, True, nr)
+            if na == a and nb == b:
+                r = h
+            else:
+                r = self.cons(kind, na, nb, _s32(self.recs[(ri << 2) + F_INFO]))
+        elif kind == KIND_PROJ:
+            na = self._inst_multi_rev_closed(a, substs, n, tag, nr)
+            if na == a:
+                r = h
+            else:
+                r = self.cons(KIND_PROJ, na, b, _s32(self.recs[(ri << 2) + F_INFO]))
+        else:
+            assert kind == KIND_LET
+            value = self.field_a(b)
+            body = self.field_b(b)
+            na = self._inst_multi_rev_closed(a, substs, n, tag, nr)
+            nv = self._inst_multi_rev_closed(value, substs, n, tag, nr)
+            d1 = depth + 1
+            if self.loose_bvar_range(body) <= d1:
+                nbody = body
+            elif d1 < 256:
+                nbody = self._inst_multi_rev_closed(body, substs, n, tag + 1, nr)
+            else:
+                nbody = self._inst_multi_rev_oneshot(body, substs, n, d1, tag >> 8, True, nr)
+            if na == a and nv == value and nbody == body:
+                r = h
+            else:
+                pair = self.cons(KIND_PAIR, nv, nbody)
+                r = self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
+        call_slot = self.call_slot
+        if (call_slot[ri] >> 40) != (tag >> 8):
+            call_slot[ri] = (tag << 32) | r
+        else:
+            self._call_memo.set((h << 16) | depth, r)
+        return r
+
+    @dont_inline
     def _inst_multi_rev_oneshot(self, h, substs, n, depth, gen, all_closed, rdepth):
         if is_leaf(h):
             lo = _s32(self.leaf_meta[leaf_index(h)]) >> 1
