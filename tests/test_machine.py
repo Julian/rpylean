@@ -1536,3 +1536,170 @@ class TestJointCheckAndInferExpected(object):
             assert use_alias_decl._prop_mask == (_PROP_MASK_DONE | (1 << 1))
         finally:
             tc.free()
+
+    def test_try_proj_nested_ctor_fusion_and_cache(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_Const
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        dead_fn = Name.simple("deadFn").axiom(
+            type=forall(x.binder(type=NAT))(NAT),
+        )
+        # Inner structure `Inner := mk (val : Nat) (junk : Nat)`
+        inner_s = Name.simple("Inner")
+        inner_mk = inner_s.child("mk")
+        inner_mk_decl = inner_mk.constructor(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(inner_s.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        inner_decl = inner_s.inductive(
+            type=TYPE, num_params=0, constructors=[inner_mk_decl],
+        )
+        # Outer structure `Outer := mk (toInner : Inner) (junk : Nat)`
+        outer_s = Name.simple("Outer")
+        outer_mk = outer_s.child("mk")
+        outer_mk_decl = outer_mk.constructor(
+            type=forall(x.binder(type=inner_s.const()), y.binder(type=NAT))(
+                outer_s.const(),
+            ),
+            num_params=0,
+            num_fields=2,
+        )
+        outer_decl = outer_s.inductive(
+            type=TYPE, num_params=0, constructors=[outer_mk_decl],
+        )
+        # Wrapper `Outer.toInner o := Proj(Outer, 0, o)` (like `LinearMap.toAddHom`)
+        to_inner_name = outer_s.child("toInner")
+        to_inner_decl = to_inner_name.definition(
+            type=forall(x.binder(type=outer_s.const()))(inner_s.const()),
+            value=fun(x.binder(type=outer_s.const()))(outer_s.proj(0, b0)),
+        )
+        big_junk = dead_fn.name.const().app(
+            dead_fn.name.const().app(b0),
+        )
+        # `mkOuter x := Outer.mk (Inner.mk x (deadFn (deadFn x))) (deadFn x)`
+        mk_outer_name = Name.simple("mkOuter")
+        mk_outer_decl = mk_outer_name.definition(
+            type=forall(x.binder(type=NAT))(outer_s.const()),
+            value=fun(x.binder(type=NAT))(
+                outer_mk.const().app(
+                    inner_mk.const().app(b0, big_junk),
+                    dead_fn.name.const().app(b0),
+                ),
+            ),
+        )
+        # Let-wrapped nested ctor where inner field 0 does NOT use the let,
+        # while inner field 1 DOES use the let.
+        mk_let_outer_name = Name.simple("mkLetOuter")
+        mk_let_outer_decl = mk_let_outer_name.definition(
+            type=forall(x.binder(type=NAT))(outer_s.const()),
+            value=fun(x.binder(type=NAT))(
+                y.let(
+                    type=NAT,
+                    value=dead_fn.name.const().app(b0),
+                    body=outer_mk.const().app(
+                        inner_mk.const().app(b1, b0),
+                        b0,
+                    ),
+                ),
+            ),
+        )
+        # Half-stuck: `mkStuck o := Outer.mk o a` where `o` is an axiom of type `Inner`
+        stuck_inner = Name.simple("stuckInner").axiom(type=inner_s.const())
+        mk_stuck_name = Name.simple("mkStuck")
+        mk_stuck_decl = mk_stuck_name.definition(
+            type=forall(x.binder(type=inner_s.const()))(outer_s.const()),
+            value=fun(x.binder(type=inner_s.const()))(
+                outer_mk.const().app(b0, a_decl.name.const()),
+            ),
+        )
+        # Def-wrapped nested ctor: `mkInnerDef x y := Inner.mk x y`,
+        # `mkOuterViaDef x := Outer.mk (mkInnerDef x (deadFn x)) (deadFn x)`
+        mk_inner_def_name = Name.simple("mkInnerDef")
+        mk_inner_def_decl = mk_inner_def_name.definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(inner_s.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                inner_mk.const().app(b1, b0),
+            ),
+        )
+        mk_outer_via_def_name = Name.simple("mkOuterViaDef")
+        mk_outer_via_def_decl = mk_outer_via_def_name.definition(
+            type=forall(x.binder(type=NAT))(outer_s.const()),
+            value=fun(x.binder(type=NAT))(
+                outer_mk.const().app(
+                    mk_inner_def_name.const().app(b0, dead_fn.name.const().app(b0)),
+                    dead_fn.name.const().app(b0),
+                ),
+            ),
+        )
+
+        env = Environment.having([
+            nat_decl, a_decl, b_decl, dead_fn,
+            inner_decl, inner_mk_decl,
+            outer_decl, outer_mk_decl,
+            to_inner_decl, mk_outer_decl, mk_let_outer_decl,
+            stuck_inner, mk_stuck_decl,
+            mk_inner_def_decl, mk_outer_via_def_decl,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            h_a = store.import_term(a_decl.name.const())
+            h_b = store.import_term(b_decl.name.const())
+
+            # 1. Direct nested projection `Proj(Inner, 0, Proj(Outer, 0, mkOuter a))`
+            #    skips BOTH `Inner.mk` and `deadFn` completely (zero new records!).
+            p_nested = store.import_term(
+                inner_s.proj(0, outer_s.proj(0, mk_outer_name.const().app(a_decl.name.const()))),
+            )
+            nrecs_before = store.nrecs
+            assert m.try_proj(p_nested, False) == h_a
+            assert store.nrecs == nrecs_before
+
+            # 2. Projection through `tag == 2` wrapper `Proj(Inner, 0, Outer.toInner (mkOuter b))`
+            #    fuses through `Outer.toInner` -> `Outer.mk` -> `Inner.mk` without importing `deadFn`!
+            p_wrapped = store.import_term(
+                inner_s.proj(0, to_inner_name.const().app(mk_outer_name.const().app(b_decl.name.const()))),
+            )
+            assert m.try_proj(p_wrapped, False) == h_b
+
+            # 3. Projection through DefCtorApp `Proj(Inner, 0, Proj(Outer, 0, mkOuterViaDef a))`
+            #    peels `mkOuterViaDef` -> `mkInnerDef` -> `b0` directly on the AST (zero new records!).
+            p_via_def = store.import_term(
+                inner_s.proj(0, outer_s.proj(0, mk_outer_via_def_name.const().app(a_decl.name.const()))),
+            )
+            nrecs_before = store.nrecs
+            assert m.try_proj(p_via_def, False) == h_a
+            assert store.nrecs == nrecs_before
+            # Verify `deadFn` was never even imported as a leaf!
+            assert all(
+                not (isinstance(le, W_Const) and le.name.syntactic_eq(dead_fn.name))
+                for le in store.leaves
+            )
+
+            # 3. Let-wrapped nested ctor: inner field 0 skips the let; inner field 1 evaluates it.
+            p_let0 = store.import_term(
+                inner_s.proj(0, outer_s.proj(0, mk_let_outer_name.const().app(a_decl.name.const()))),
+            )
+            nrecs_before = store.nrecs
+            assert m.try_proj(p_let0, False) == h_a
+            assert store.nrecs == nrecs_before
+
+            p_let1 = store.import_term(
+                inner_s.proj(1, outer_s.proj(0, mk_let_outer_name.const().app(a_decl.name.const()))),
+            )
+            assert m.try_proj(p_let1, False) == store.import_term(
+                dead_fn.name.const().app(a_decl.name.const()),
+            )
+
+            # 4. Soundness: half-stuck nested projection MUST return 0!
+            p_stuck = store.import_term(
+                inner_s.proj(0, outer_s.proj(0, mk_stuck_name.const().app(stuck_inner.name.const()))),
+            )
+            assert m.try_proj(p_stuck, False) == 0
+        finally:
+            tc.free()

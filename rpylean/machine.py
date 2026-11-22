@@ -65,6 +65,7 @@ from rpylean.objects import (
     _NAT_SUCC_NAME,
     _PROP_MASK_DONE,
     _PROP_MASK_PLANS,
+    _expr_has_bvar_lt,
     _mk_w_const1,
     _mk_w_const2,
     _mk_w_litnat,
@@ -6358,6 +6359,7 @@ class Machine(object):
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
         '_warm_max_index', '_warm_levels', '_warm_safe_cohort',
         '_can_perm', '_saw_nonperm',
+        '_proj_field_cache', '_proj_fidxs', '_proj_fidx_top', '_proj_popped',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
 
@@ -6372,6 +6374,12 @@ class Machine(object):
         self._decl_start_recs = 0
         #: (rec const leaf index, ctor leaf index) -> rule rhs handle
         self._rule_memo = IntMap(1 << 8, keep_cap=1 << 12)
+        #: (const leaf index, depth, fidx chain) -> imported raw field handle
+        self._proj_field_cache = IntMap(1 << 8, keep_cap=1 << 12)
+        #: Re-entrant stack of pending projection field indices for `try_proj`.
+        self._proj_fidxs = [0] * 32
+        self._proj_fidx_top = 0
+        self._proj_popped = 0
         #: (binder record, domain) -> the free-variable leaf opening it
         self._fvars = IntMap(1 << 8, keep_cap=1 << 13)
         #: number of union-find merges recorded in `store.memos[M_EQV]`/`leaf_eqv`
@@ -6444,6 +6452,8 @@ class Machine(object):
         self.store.reset()
         self.store.record_nodes = True
         self._rule_memo.clear()
+        self._proj_field_cache.clear()
+        self._proj_fidx_top = 0
         self._fvars.clear()
         self._eqv_count = 0
         self._neq.clear()
@@ -6463,6 +6473,7 @@ class Machine(object):
     def free(self):
         self.store.free()
         self._rule_memo.free()
+        self._proj_field_cache.free()
         self._fvars.free()
         self._neq.free()
         self._failed.free()
@@ -7270,41 +7281,210 @@ class Machine(object):
                 return store.field_b(h)
         return 0
 
-    def _try_lazy_ctor_proj(self, cur, fidx):
-        """When ``cur`` is an application (or nullary leaf) of a `W_Definition`
-        whose stripped body is a constructor application `λ... => let... => Ctor ...`,
-        import and instantiate only the projected field ``fidx``, avoiding
-        materializing all sibling fields (such as large typeclass proofs)."""
+    def _peel_nested_ctor_field(self, raw_field, fidxs, pbase, ptop):
+        """Follow pending outer projection indices `fidxs[pbase .. ptop - 1)`
+        directly through inline nested `W_Constructor` applications (and
+        `W_Definition` constructor-bodied applications whose projected field
+        selects an argument `W_BVar`) on the AST, setting `self._proj_popped`
+        to the total number of projection layers consumed (at least 1)."""
+        popped = 1
+        rem = ptop - 1
+        decls = self.tc.declarations
+        while rem > pbase and isinstance(raw_field, W_App):
+            node = raw_field
+            n_app = 0
+            while isinstance(node, W_App):
+                node = node.fn
+                n_app += 1
+            if not isinstance(node, W_Const):
+                break
+            c2_decl = find_decl(decls, node.name)
+            if c2_decl is None:
+                break
+            c2_kind = c2_decl.w_kind
+            if isinstance(c2_kind, W_Constructor):
+                idx2 = c2_kind.num_params + fidxs[rem - 1]
+                if idx2 >= n_app:
+                    break
+                steps = n_app - 1 - idx2
+                cur_app = raw_field
+                while steps > 0:
+                    assert isinstance(cur_app, W_App)
+                    cur_app = cur_app.fn
+                    steps -= 1
+                assert isinstance(cur_app, W_App)
+                raw_field = cur_app.arg
+                rem -= 1
+                popped += 1
+                continue
+            if isinstance(c2_kind, W_Definition):
+                if len(node.levels) != len(c2_decl.levels):
+                    break
+                cb2 = c2_kind._ctor_body
+                if cb2 is None:
+                    cb2 = c2_kind.init_ctor_body(decls)
+                m2 = cb2.m
+                if m2 < 0 or cb2.let_vals is not None or n_app < m2:
+                    break
+                idx2 = cb2.num_params + fidxs[rem - 1]
+                nargs2 = len(cb2.args)
+                if idx2 >= nargs2 + (n_app - m2):
+                    break
+                if idx2 >= nargs2:
+                    arg_idx = m2 + (idx2 - nargs2)
+                    steps = n_app - 1 - arg_idx
+                    cur_app = raw_field
+                    while steps > 0:
+                        assert isinstance(cur_app, W_App)
+                        cur_app = cur_app.fn
+                        steps -= 1
+                    assert isinstance(cur_app, W_App)
+                    raw_field = cur_app.arg
+                    rem -= 1
+                    popped += 1
+                    continue
+                f2 = cb2.args[idx2]
+                r2 = rem - 1
+                step2 = 1
+                while r2 > pbase and isinstance(f2, W_App):
+                    n2 = f2
+                    na2 = 0
+                    while isinstance(n2, W_App):
+                        n2 = n2.fn
+                        na2 += 1
+                    if not isinstance(n2, W_Const):
+                        break
+                    d3 = find_decl(decls, n2.name)
+                    if d3 is None:
+                        break
+                    k3 = d3.w_kind
+                    if not isinstance(k3, W_Constructor):
+                        break
+                    ix3 = k3.num_params + fidxs[r2 - 1]
+                    if ix3 >= na2:
+                        break
+                    st3 = na2 - 1 - ix3
+                    ca3 = f2
+                    while st3 > 0:
+                        assert isinstance(ca3, W_App)
+                        ca3 = ca3.fn
+                        st3 -= 1
+                    assert isinstance(ca3, W_App)
+                    f2 = ca3.arg
+                    r2 -= 1
+                    step2 += 1
+                if isinstance(f2, W_BVar):
+                    bid2 = f2.id
+                    if 0 <= bid2 < m2:
+                        steps = n_app - m2 + bid2
+                        cur_app = raw_field
+                        while steps > 0:
+                            assert isinstance(cur_app, W_App)
+                            cur_app = cur_app.fn
+                            steps -= 1
+                        assert isinstance(cur_app, W_App)
+                        raw_field = cur_app.arg
+                        rem = r2
+                        popped += step2
+                        continue
+            break
+        self._proj_popped = popped
+        return raw_field
+
+    def _import_proj_field(self, j, popped, fidxs, ptop, const, decl, raw_field):
+        """Import ``raw_field`` instantiated at ``const.levels``, memoized per
+        `(const_leaf_index, projection_chain)` for the current store epoch."""
+        key = 0
+        if popped == 1:
+            f0 = fidxs[ptop - 1]
+            if 0 <= f0 < 1024:
+                key = ((j + 1) << 22) | (1 << 20) | f0
+        elif popped == 2:
+            f0 = fidxs[ptop - 1]
+            f1 = fidxs[ptop - 2]
+            if 0 <= f0 < 1024 and 0 <= f1 < 1024:
+                key = ((j + 1) << 22) | (2 << 20) | (f0 << 10) | f1
+        elif popped == 3:
+            f0 = fidxs[ptop - 1]
+            f1 = fidxs[ptop - 2]
+            f2 = fidxs[ptop - 3]
+            if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64:
+                key = ((j + 1) << 22) | (3 << 20) | (f0 << 12) | (f1 << 6) | f2
+        if key != 0:
+            fh = self._proj_field_cache.get(key, 0)
+            if fh != 0:
+                return fh
+        fh = self.store.import_const_term(const, decl, raw_field)
+        if key != 0:
+            self._proj_field_cache.set(key, fh)
+        return fh
+
+    def _extract_ctor_field(self, struct, head, fidx):
+        """Extract field ``fidx`` from an already-materialized constructor
+        application ``struct`` with head ``head``, or return 0."""
         store = self.store
+        decl = store.leaf_decl[leaf_index(head)]
+        assert decl is not None
+        kind = decl.w_kind
+        assert isinstance(kind, W_Constructor)
+        mark = store._spine_top
+        store.unapp_push(struct)
+        try:
+            n = store._spine_top - mark
+            idx = kind.num_params + fidx
+            if idx < n:
+                return store.spine_arg(mark + n - 1 - idx)
+            return 0
+        finally:
+            store.unapp_pop(mark)
+
+    def _try_lazy_ctor_proj(self, cur, head, pbase, ptop):
+        """When ``cur`` is an application (or nullary leaf) of a `_LF_DELTA`
+        `W_Definition` ``head`` whose stripped body is a constructor application
+        `λ... => let... => Ctor ...`, peel one or more pending projection layers
+        directly on the AST and import and instantiate only the final projected
+        field, avoiding materializing dead sibling fields and intermediate
+        structures."""
+        store = self.store
+        fidxs = self._proj_fidxs
+        fidx = fidxs[ptop - 1]
+        j = leaf_index(head)
+        const = store.leaves[j]
+        assert isinstance(const, W_Const)
+        decl = self._leaf_decl(head, const)
+        if decl is None or len(const.levels) != len(decl.levels):
+            return 0
+        w_kind = decl.w_kind
+        if not isinstance(w_kind, W_Definition):
+            return 0
+        cb = w_kind._ctor_body
+        if cb is None:
+            cb = w_kind.init_ctor_body(self.tc.declarations)
         if is_leaf(cur):
-            if (self._leaf_flags(cur) & _LF_DELTA) == 0:
-                return 0
-            j = leaf_index(cur)
-            const = store.leaves[j]
-            assert isinstance(const, W_Const)
-            decl = self._leaf_decl(cur, const)
-            if decl is None or len(const.levels) != len(decl.levels):
-                return 0
-            w_kind = decl.w_kind
-            if not isinstance(w_kind, W_Definition):
-                return 0
-            cb = w_kind._ctor_body
-            if cb is None:
-                cb = w_kind.init_ctor_body(self.tc.declarations)
             if cb.m != 0:
                 return 0
             idx = cb.num_params + fidx
             if idx >= len(cb.args):
                 return 0
-            raw_field = cb.args[idx]
+            raw_field = self._peel_nested_ctor_field(
+                cb.args[idx], fidxs, pbase, ptop,
+            )
+            popped = self._proj_popped
             let_vals = cb.let_vals
             if let_vals is None:
-                return store.import_const_term(const, decl, raw_field)
+                return self._import_proj_field(
+                    j, popped, fidxs, ptop, const, decl, raw_field,
+                )
             nlets = len(let_vals)
             uses = cb.uses_lets
             assert uses is not None
-            if not uses[idx] and raw_field.loose_bvar_range() == 0:
-                return store.import_const_term(const, decl, raw_field)
+            uses_let = uses[idx]
+            if uses_let and popped > 1:
+                uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
+            if not uses_let and raw_field.loose_bvar_range() == 0:
+                return self._import_proj_field(
+                    j, popped, fidxs, ptop, const, decl, raw_field,
+                )
             smark = store._spine_top
             store.ensure_spine_room(nlets)
             store._spine_top = smark + nlets
@@ -7323,7 +7503,9 @@ class Machine(object):
                             )
                     store._spine_buf[smark + nlets - 1 - li] = _u32(vh)
                     li += 1
-                fh = store.import_const_term(const, decl, raw_field)
+                fh = self._import_proj_field(
+                    j, popped, fidxs, ptop, const, decl, raw_field,
+                )
                 if store.loose_bvar_range(fh) == 0:
                     return fh
                 if is_leaf(fh):
@@ -7338,23 +7520,6 @@ class Machine(object):
                 return store.instantiate_multi_buf(fh, smark, nlets, 0)
             finally:
                 store.unapp_pop(smark)
-        if store.kind(cur) != KIND_APP:
-            return 0
-        head = store.head(cur)
-        if (self._leaf_flags(head) & _LF_DELTA) == 0:
-            return 0
-        j = leaf_index(head)
-        const = store.leaves[j]
-        assert isinstance(const, W_Const)
-        decl = self._leaf_decl(head, const)
-        if decl is None or len(const.levels) != len(decl.levels):
-            return 0
-        w_kind = decl.w_kind
-        if not isinstance(w_kind, W_Definition):
-            return 0
-        cb = w_kind._ctor_body
-        if cb is None:
-            cb = w_kind.init_ctor_body(self.tc.declarations)
         m = cb.m
         if m < 0:
             return 0
@@ -7369,15 +7534,21 @@ class Machine(object):
             if idx >= nargs + (n - m):
                 return 0
             if idx >= nargs:
+                self._proj_popped = 1
                 return store.spine_arg(mark + (nargs + n - m - 1 - idx))
-            raw_field = cb.args[idx]
+            raw_field = self._peel_nested_ctor_field(
+                cb.args[idx], fidxs, pbase, ptop,
+            )
+            popped = self._proj_popped
             let_vals = cb.let_vals
             if let_vals is None:
                 if isinstance(raw_field, W_BVar):
                     bid = raw_field.id
                     if 0 <= bid < m:
                         return store.spine_arg(mark + n - m + bid)
-                fh = store.import_const_term(const, decl, raw_field)
+                fh = self._import_proj_field(
+                    j, popped, fidxs, ptop, const, decl, raw_field,
+                )
                 if m == 0 or store.loose_bvar_range(fh) == 0:
                     return fh
                 if m == 1:
@@ -7399,7 +7570,10 @@ class Machine(object):
                 k += 1
             uses = cb.uses_lets
             assert uses is not None
-            if not uses[idx]:
+            uses_let = uses[idx]
+            if uses_let and popped > 1:
+                uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
+            if not uses_let:
                 li = 0
                 while li < nlets:
                     buf[smark + li] = _u32(self.h_prop)
@@ -7422,7 +7596,9 @@ class Machine(object):
                             )
                     store._spine_buf[smark + nlets - 1 - li] = _u32(vh)
                     li += 1
-            fh = store.import_const_term(const, decl, raw_field)
+            fh = self._import_proj_field(
+                j, popped, fidxs, ptop, const, decl, raw_field,
+            )
             if total == 0 or store.loose_bvar_range(fh) == 0:
                 return fh
             if is_leaf(fh):
@@ -7453,38 +7629,7 @@ class Machine(object):
             else:
                 struct = store.memo(raw, M_WHNF)
             if struct == 0:
-                fidx = store.proj_index(h)
-                cur = raw
-                while True:
-                    if self.tc.has_limits:
-                        self.tc.tick_wall_time()
-                    cur = self.whnf_core(cur)
-                    if cur != raw:
-                        cached = (
-                            _s32(store.leaf_whnf[leaf_index(cur)])
-                            if is_leaf(cur)
-                            else store.memo(cur, M_WHNF)
-                        )
-                        if cached != 0:
-                            cur = cached
-                            break
-                    if store.kind(cur) == KIND_APP:
-                        reduced = self.try_reduce_nat(cur)
-                        if reduced != 0:
-                            cur = reduced
-                            continue
-                    fld = self._try_lazy_ctor_proj(cur, fidx)
-                    if fld != 0:
-                        return fld
-                    unfolded = self.try_unfold_head(cur)
-                    if unfolded == 0:
-                        break
-                    cur = unfolded
-                if is_leaf(raw):
-                    store.leaf_whnf[leaf_index(raw)] = _u32(cur)
-                else:
-                    store.set_memo(raw, M_WHNF, cur)
-                struct = cur
+                return self._try_proj_fused(raw, store.proj_index(h))
         lit = None
         if is_leaf(struct):
             e = store.leaf(struct)
@@ -7494,24 +7639,129 @@ class Machine(object):
             struct = self.whnf(store.import_term(lit.build_str_expr()))
         if store.kind(struct) != KIND_APP:
             return 0
-        mark = store._spine_top
-        head = store.unapp_push(struct)
-        try:
-            if (self._leaf_flags(head) & _LF_CTOR) == 0:
-                return 0
-            decl = store.leaf_decl[leaf_index(head)]
-            assert decl is not None
-            kind = decl.w_kind
-            assert isinstance(kind, W_Constructor)
-            n = store._spine_top - mark
-            idx = kind.num_params + store.proj_index(h)
-            if idx < n:
-                # args are outermost-first: field i of a left-to-right list
-                # sits at n - 1 - i.
-                return store.spine_arg(mark + n - 1 - idx)
+        head = store.head(struct)
+        if (self._leaf_flags(head) & _LF_CTOR) == 0:
             return 0
+        return self._extract_ctor_field(struct, head, store.proj_index(h))
+
+    def _try_proj_fused(self, raw, fidx0):
+        """Evaluate a projection (or chain of nested projections / projection
+        wrappers) lazily, deferring intermediate `KIND_PROJ` materialization so
+        `_try_lazy_ctor_proj` can peel nested constructor bodies on the AST."""
+        store = self.store
+        pbase = self._proj_fidx_top
+        ptop = pbase
+        fidxs = self._proj_fidxs
+        if ptop == len(fidxs):
+            fidxs = fidxs + ([0] * len(fidxs))
+            self._proj_fidxs = fidxs
+        fidxs[ptop] = fidx0
+        ptop += 1
+        self._proj_fidx_top = ptop
+        cur = raw
+        try:
+            while True:
+                if self.tc.has_limits:
+                    self.tc.tick_wall_time()
+                # Peel uncached nested `KIND_PROJ` records onto `fidxs` instead
+                # of calling `whnf_core` on them and forcing intermediate ctors.
+                while store.kind(cur) == KIND_PROJ:
+                    c_whnf = store.memo(cur, M_WHNF)
+                    if c_whnf != 0:
+                        cur = c_whnf
+                        break
+                    c_core = store.memo(cur, M_WHNF_CORE)
+                    if c_core != 0:
+                        if c_core == cur:
+                            return 0
+                        cur = c_core
+                        continue
+                    fidxs = self._proj_fidxs
+                    if ptop == len(fidxs):
+                        fidxs = fidxs + ([0] * len(fidxs))
+                        self._proj_fidxs = fidxs
+                    fidxs[ptop] = store.proj_index(cur)
+                    ptop += 1
+                    self._proj_fidx_top = ptop
+                    cur = store.field_a(cur)
+                if store.kind(cur) != KIND_PROJ:
+                    cur = self.whnf_core(cur)
+                    if store.kind(cur) == KIND_PROJ:
+                        continue
+                cached = 0
+                if cur != raw:
+                    cached = (
+                        _s32(store.leaf_whnf[leaf_index(cur)])
+                        if is_leaf(cur)
+                        else store.memo(cur, M_WHNF)
+                    )
+                    if cached != 0:
+                        cur = cached
+                k = store.kind(cur)
+                if k == KIND_APP:
+                    if cached == 0:
+                        reduced = self.try_reduce_nat(cur)
+                        if reduced != 0:
+                            cur = reduced
+                            continue
+                    ch = store.head(cur)
+                    flags = self._leaf_flags(ch)
+                    if (flags & _LF_CTOR) != 0:
+                        if ptop == pbase + 1 and cur != raw:
+                            if is_leaf(raw):
+                                store.leaf_whnf[leaf_index(raw)] = _u32(cur)
+                            else:
+                                store.set_memo(raw, M_WHNF, cur)
+                        fld = self._extract_ctor_field(
+                            cur, ch, self._proj_fidxs[ptop - 1],
+                        )
+                        if fld == 0:
+                            return 0
+                        ptop -= 1
+                        self._proj_fidx_top = ptop
+                        if ptop == pbase:
+                            return fld
+                        cur = fld
+                        continue
+                    if cached == 0 and (flags & _LF_DELTA) != 0:
+                        fld = self._try_lazy_ctor_proj(cur, ch, pbase, ptop)
+                        if fld != 0:
+                            ptop -= self._proj_popped
+                            self._proj_fidx_top = ptop
+                            if ptop == pbase:
+                                return fld
+                            cur = fld
+                            continue
+                        unfolded = self.try_unfold_head(cur)
+                        if unfolded != 0:
+                            cur = unfolded
+                            continue
+                elif k == 0:
+                    if cached == 0 and (self._leaf_flags(cur) & _LF_DELTA) != 0:
+                        fld = self._try_lazy_ctor_proj(cur, cur, pbase, ptop)
+                        if fld != 0:
+                            ptop -= self._proj_popped
+                            self._proj_fidx_top = ptop
+                            if ptop == pbase:
+                                return fld
+                            cur = fld
+                            continue
+                        unfolded = self.try_unfold_head(cur)
+                        if unfolded != 0:
+                            cur = unfolded
+                            continue
+                    e = store.leaf(cur)
+                    if isinstance(e, W_LitStr):
+                        cur = self.whnf(store.import_term(e.build_str_expr()))
+                        continue
+                if ptop == pbase + 1:
+                    if is_leaf(raw):
+                        store.leaf_whnf[leaf_index(raw)] = _u32(cur)
+                    else:
+                        store.set_memo(raw, M_WHNF, cur)
+                return 0
         finally:
-            store.unapp_pop(mark)
+            self._proj_fidx_top = pbase
 
     def _try_quot_lift_spine(self, mark, n):
         """``Quot.lift α r β f h (Quot.mk r a) extra... ⇒ f a extra...``, or 0."""
