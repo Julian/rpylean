@@ -1058,3 +1058,59 @@ class TestJointCheckAndInferExpected(object):
         assert store._const_leaf2(g, W_LEVEL_ZERO.max(u_l), W_LEVEL_ZERO.max(l1)) == h2
         assert store.leaf_for(g.const([u_l, l1])) == h2
         assert store._const_leaf2(g, l1, u_l) != h2
+
+    def test_try_unfold_head_memo_and_whnf_core_interop(self):
+        from rpylean.environment import Environment, TypeChecker
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        fn_decl = f.axiom(type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT))
+        # Multi-arg definition `g x y := f y x`
+        g_decl = g.definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                f.const().app(b0, b1),
+            ),
+        )
+        env = Environment.having([nat_decl, a_decl, b_decl, fn_decl, g_decl])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            h_app = store.import_term(
+                g.const().app(a_decl.name.const(), b_decl.name.const()),
+            )
+            h_expected = store.import_term(
+                f.const().app(b_decl.name.const(), a_decl.name.const()),
+            )
+            # 1. whnf_core (cheap and full) before unfold returns h_app
+            assert m.whnf_core(h_app, True) == h_app
+            assert m.whnf_core(h_app, False) == h_app
+
+            # 2. First try_unfold_head unfolds and caches tagged result
+            assert m.try_unfold_head(h_app) == h_expected
+
+            # 3. Subsequent try_unfold_head hits memo without allocating records
+            nrecs_before = store.nrecs
+            assert m.try_unfold_head(h_app) == h_expected
+            assert store.nrecs == nrecs_before
+
+            # 4. whnf_core (cheap & full) after tagged unfold still returns h_app,
+            #    and let-reduction stopping at a tagged delta app preserves h_app!
+            assert m.whnf_core(h_app, True) == h_app
+            assert m.whnf_core(h_app, False) == h_app
+            h_let = store.let(
+                x, store.import_term(NAT), store.import_term(a_decl.name.const()),
+                store.cons_app(
+                    store.cons_app(store.import_term(g.const()), store.bvar(0)),
+                    store.import_term(b_decl.name.const()),
+                ),
+            )
+            assert m.whnf_core(h_let, True) == h_app
+            assert m.whnf_core(h_let, False) == h_app
+            # And non-app records (e.g. lambda) return 0 cleanly
+            h_lam = store.import_term(fun(x.binder(type=NAT))(b0))
+            assert m.try_unfold_head(h_lam) == 0
+        finally:
+            tc.free()

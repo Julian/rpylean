@@ -146,6 +146,12 @@ M_INFER = 2
 M_CHECKED_GEN = 3
 M_WHNF_CORE_CHEAP = 4
 M_EQV = 5
+#: High bit set in `M_WHNF_CORE_CHEAP` on a `_LF_DELTA` `KIND_APP` record to
+#: cache its one-step `try_unfold_head` result. Any record carrying this tag is
+#: a delta-headed `KIND_APP` and therefore already in `whnf_core` normal form
+#: (both full and cheap).
+_UNFOLD_TAG = 0x80000000
+_UNFOLD_MASK = 0x7FFFFFFF
 
 _SIGNED_ARRAY = rffi.CArray(lltype.Signed)
 _U32_ARRAY = rffi.CArray(rffi.UINT)
@@ -6165,12 +6171,17 @@ class Machine(object):
         mbase = rec_index(h) * MEMO_SLOTS
         cached = _s32(memos[mbase + slot])
         if cached != 0:
+            if (cached & _UNFOLD_TAG) != 0:
+                return h
             return cached
         # A term already known to be in full WHNF is whnf_core-normal
         # either way, and a full whnf_core result is a cheap one too.
         if _s32(memos[mbase + M_WHNF]) == h:
             return h
-        if cheap_proj and _s32(memos[mbase + M_WHNF_CORE]) == h:
+        if cheap_proj:
+            if _s32(memos[mbase + M_WHNF_CORE]) == h:
+                return h
+        elif (_s32(memos[mbase + M_WHNF_CORE_CHEAP]) & _UNFOLD_TAG) != 0:
             return h
         return self._whnf_core_miss(h, cheap_proj, traced, slot)
 
@@ -6199,6 +6210,8 @@ class Machine(object):
                     break
                 cached = store.memo(h, slot)
                 if cached != 0:
+                    if (cached & _UNFOLD_TAG) != 0:
+                        break
                     h = cached
                     break
         store.set_memo(start, slot, h)
@@ -6388,16 +6401,39 @@ class Machine(object):
         the spine re-applied (beta-reducing leading lambdas when not writing
         traces), or 0 when the head isn't unfoldable."""
         store = self.store
+        if not is_leaf(h):
+            ri = rec_index(h)
+            if (_s32(store.recs[ri << 2]) & _KIND_MASK) != KIND_APP:
+                return 0
+            if not self.tc.tracer.recording:
+                cached = _s32(store.memos[ri * MEMO_SLOTS + M_WHNF_CORE_CHEAP])
+                if (cached & _UNFOLD_TAG) != 0:
+                    return cached & _UNFOLD_MASK
+            res = self._try_unfold_app_miss(h)
+            if res != 0 and not self.tc.tracer.recording:
+                store.memos[ri * MEMO_SLOTS + M_WHNF_CORE_CHEAP] = _u32(
+                    res | _UNFOLD_TAG,
+                )
+            return res
+        if (self._leaf_flags(h) & _LF_DELTA) == 0:
+            return 0
+        const = store.leaves[leaf_index(h)]
+        assert isinstance(const, W_Const)
+        return self._delta_value(h, const)
+
+    @dont_inline
+    def _try_unfold_app_miss(self, h):
+        store = self.store
         head = store.head(h)
         if (self._leaf_flags(head) & _LF_DELTA) == 0:
             return 0
         j = leaf_index(head)
         const = store.leaves[j]
         assert isinstance(const, W_Const)
-        if h == head or (self.tc.tracer.recording and self.tc.tracer.writes):
+        if self.tc.tracer.recording and self.tc.tracer.writes:
             val = self._delta_value(head, const)
-            if val == 0 or h == head:
-                return val
+            if val == 0:
+                return 0
             if store.field_a(h) == head:
                 return store.cons_app(val, store.field_b(h))
             mark = store._spine_top
