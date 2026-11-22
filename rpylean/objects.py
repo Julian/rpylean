@@ -4921,13 +4921,15 @@ def _check_eq_for_quot(tc):
     """Verify ``Eq`` and its single constructor match Lean's prelude ``Eq``,
     as required by Lean's kernel before introducing ``Quot.lift``."""
     eq_decl = find_decl(tc.declarations, _EQ_NAME)
-    if eq_decl is None or not isinstance(eq_decl.w_kind, W_Inductive):
+    if eq_decl is None:
+        return "missing inductive `Eq`"
+    eq_ind = eq_decl.w_kind
+    if not isinstance(eq_ind, W_Inductive):
         return "missing inductive `Eq`"
     if len(eq_decl.levels) != 1:
         return "`Eq` must have 1 universe parameter"
     eq_u = eq_decl.levels[0].as_level_param()
     tc.check_reference(_EQ_NAME.const([eq_u]), eq_decl)
-    eq_ind = eq_decl.w_kind
     if len(eq_ind.ctor_names) != 1:
         return "`Eq` must have 1 constructor"
     alpha = Name.simple("α")
@@ -5065,10 +5067,14 @@ class W_Quotient(W_DeclarationKind):
             )
         else:
             quot_decl = find_decl(tc.declarations, _QUOT_NAME)
+            if quot_decl is None:
+                return W_InvalidQuotient(
+                    tc, "missing quotient type declaration `Quot`", type,
+                )
+            quot_wk = quot_decl.w_kind
             if (
-                quot_decl is None
-                or not isinstance(quot_decl.w_kind, W_Quotient)
-                or quot_decl.w_kind.kind != W_Quotient.KIND_TYPE
+                not isinstance(quot_wk, W_Quotient)
+                or quot_wk.kind != W_Quotient.KIND_TYPE
             ):
                 return W_InvalidQuotient(
                     tc, "missing quotient type declaration `Quot`", type,
@@ -5127,10 +5133,14 @@ class W_Quotient(W_DeclarationKind):
             else:
                 # KIND_IND
                 mk_decl = find_decl(tc.declarations, _QUOT_MK_NAME)
+                if mk_decl is None:
+                    return W_InvalidQuotient(
+                        tc, "missing quotient constructor `Quot.mk`", type,
+                    )
+                mk_wk = mk_decl.w_kind
                 if (
-                    mk_decl is None
-                    or not isinstance(mk_decl.w_kind, W_Quotient)
-                    or mk_decl.w_kind.kind != W_Quotient.KIND_CTOR
+                    not isinstance(mk_wk, W_Quotient)
+                    or mk_wk.kind != W_Quotient.KIND_CTOR
                 ):
                     return W_InvalidQuotient(
                         tc, "missing quotient constructor `Quot.mk`", type,
