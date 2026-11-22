@@ -58,6 +58,7 @@ RPY_EXTERN long rpylean_grow_stack(long wanted, char **argv) {
     struct rlimit limit;
     char path[PATH_MAX];
     rlim_t current, target;
+    int have_path;
 
     if (getrlimit(RLIMIT_STACK, &limit) != 0)
         return 0;
@@ -70,15 +71,23 @@ RPY_EXTERN long rpylean_grow_stack(long wanted, char **argv) {
     target = (rlim_t)wanted;
     if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max < target)
         target = limit.rlim_max;
-    if (target <= current || !rpylean_executable(path, sizeof(path)))
+    if (target <= current)
+        return (long)current;
+
+    have_path = rpylean_executable(path, sizeof(path));
+    if (!have_path && (argv == NULL || argv[0] == NULL || argv[0][0] == 0))
         return (long)current;
 
     limit.rlim_cur = target;
     if (setrlimit(RLIMIT_STACK, &limit) != 0)
         return (long)current;
     setenv("RPYLEAN_STACK_GROWN", "1", 1);
-    execv(path, argv);
+    if (have_path)
+        execv(path, argv);
+    if (argv != NULL && argv[0] != NULL && argv[0][0] != 0)
+        execvp(argv[0], argv);
 
+    unsetenv("RPYLEAN_STACK_GROWN");
     limit.rlim_cur = current;
     setrlimit(RLIMIT_STACK, &limit);
     return (long)current;
