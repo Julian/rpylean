@@ -84,6 +84,14 @@ def command(names, nargs=0, help=None):
     return _command
 
 
+def _lookup_decl(env, name_str, stderrw):
+    name = Name.from_str(name_str)
+    declaration = env.declarations.get(name, None)
+    if declaration is None:
+        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
+    return declaration
+
+
 @command(["dump", "d"], help="Dump the current environment.")
 def dump(env, _, __, stdoutw, ___):
     for each in env.public():
@@ -107,15 +115,13 @@ def check(env, args, _, stdoutw, stderrw):
             )
         return
 
-    name = Name.from_str(args[0])
-    declaration = env.declarations.get(name, None)
+    declaration = _lookup_decl(env, args[0], stderrw)
     if declaration is None:
-        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
 
     error = env.check_decl(declaration)
     if error is None:
-        stdoutw.write_plain("%s correctly type checks.\n" % name.str())
+        stdoutw.write_plain("%s correctly type checks.\n" % declaration.name.str())
     else:
         error.write_to(stdoutw)
 
@@ -145,10 +151,8 @@ def first(env, _, __, stdoutw, stderrw):
 
 @command(["print", "p"], nargs=1, help="Pretty print a declaration by name.")
 def print_decl(env, args, _, stdoutw, stderrw):
-    name = Name.from_str(args[0])
-    declaration = env.declarations.get(name, None)
+    declaration = _lookup_decl(env, args[0], stderrw)
     if declaration is None:
-        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
     stdoutw.writeline(declaration.tokens(env.declarations))
 
@@ -159,13 +163,13 @@ def print_decl(env, args, _, stdoutw, stderrw):
     help="Step through WHNF reduction of a declaration's value.",
 )
 def reduce_decl(env, args, _, stdoutw, stderrw):
-    name = Name.from_str(args[0])
-    declaration = env.declarations.get(name, None)
+    declaration = _lookup_decl(env, args[0], stderrw)
     if declaration is None:
-        stderrw.write_plain("%s does not exist in the environment.\n" % name.str())
         return
     if declaration.w_kind.get_delta_reduce_target() is None:
-        stderrw.write_plain("%s has no reducible value.\n" % name.str())
+        stderrw.write_plain(
+            "%s has no reducible value.\n" % declaration.name.str(),
+        )
         return
 
     const = declaration.const_with_level_params()
@@ -232,7 +236,12 @@ def dispatch(env, input, stdin, stdoutw, stderrw):
     if fn is None:
         stderrw.write_plain("Unknown command: %s\n" % command)
         return 1
-    fn(env, split[1:], stdin, stdoutw, stderrw)
+    args = []
+    if len(split) > 1:
+        rest = split[1].strip()
+        if rest:
+            args = [rest]
+    fn(env, args, stdin, stdoutw, stderrw)
     return 0
 
 

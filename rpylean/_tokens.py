@@ -260,22 +260,6 @@ class TokenWriter(object):
         self.stream.flush()
 
 
-def indent(tokens, prefix):
-    """Return tokens with prefix inserted after every newline in plain tokens."""
-    result = []
-    for tag, text in tokens:
-        if tag == PLAIN.name and "\n" in text:
-            parts = text.split("\n")
-            for i, part in enumerate(parts):
-                if i == 0:
-                    result.append(PLAIN.emit(part))
-                else:
-                    result.append(PLAIN.emit("\n" + prefix + part))
-        else:
-            result.append((tag, text))
-    return result
-
-
 def writer_from_arg(string, stream):
     """
     Create a token writer from a string provided at the CLI.

@@ -84,6 +84,22 @@ class TestDispatch(object):
         assert out.getvalue().decode("utf-8") == "axiom a : Nat\n"
         assert err.getvalue() == ""
 
+    def test_argument_whitespace_is_stripped(self):
+        a_decl = Name.simple("a").axiom(type=NAT)
+        env = Environment.having([a_decl])
+
+        out, err, stdoutw, stderrw = _writers()
+        assert dispatch(env, "print   a  ", BytesIO(), stdoutw, stderrw) == 0
+        assert out.getvalue().decode("utf-8") == "axiom a : Nat\n"
+        assert err.getvalue() == ""
+
+    def test_missing_decl_reports_to_stderr(self):
+        for cmd in ["print nope", "check nope", "reduce nope"]:
+            out, err, stdoutw, stderrw = _writers()
+            assert dispatch(Environment.EMPTY, cmd, BytesIO(), stdoutw, stderrw) == 0
+            assert out.getvalue() == ""
+            assert err.getvalue() == "nope does not exist in the environment.\n"
+
     def test_reduce_traces_each_step(self):
         """Dispatching ``reduce`` runs the command's WHNF tracing."""
         a_decl = Name.simple("a").axiom(type=NAT)
