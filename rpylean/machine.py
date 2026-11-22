@@ -443,9 +443,12 @@ _LF_HINT_OVF = 65535
 #:   1 = identity/arg-picker `λ... => BVar(b)`: `_DB_BVAR_TAG | (m << 32) | b`
 #:   2 = projection `λ... => Proj(S, idx, BVar(b))`:
 #:       `_DB_PROJ_TAG | (m << 52) | (b << 44) | (name_id << 24) | proj_packed`
+#:   3 = seen once via fused AST-subst unfold (`_DB_SEEN_TAG`); a second
+#:       unfold promotes the stripped body into `TermStore`.
 _DB_TAG_SHIFT = 60
 _DB_BVAR_TAG = 1 << 60
 _DB_PROJ_TAG = 2 << 60
+_DB_SEEN_TAG = 3 << 60
 _STORE_KEEP_CAP = 1 << 18
 _WARM_MAX_RECS = 196608
 _WARM_MAX_LEAVES = 1 << 16
@@ -1131,6 +1134,9 @@ class TermStore(object):
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
         '_store_gen', '_import_spine', '_import_spine_len',
         '_fvar_gens', '_fvar_gens_len', '_fvar_base_gen', '_fvar_multi',
+        '_cs_gens', '_cs_gens_len', '_cs_base_gen', '_cs_multi',
+        '_cs_params', '_cs_clevels', '_cs_has_lp', '_cs_lgen',
+        '_cs_base', '_cs_m', '_cs_all_closed',
         '_lgen1_p', '_lgen1_l', '_lgen1_g', '_lgen1_dirty',
         '_lgen2_p0', '_lgen2_p1', '_lgen2_l0', '_lgen2_l1', '_lgen2_g', '_lgen2_dirty',
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
@@ -1198,6 +1204,17 @@ class TermStore(object):
         self._fvar_gens_len = 0
         self._fvar_base_gen = 0
         self._fvar_multi = None
+        self._cs_gens = [0] * 64
+        self._cs_gens_len = 0
+        self._cs_base_gen = 0
+        self._cs_multi = None
+        self._cs_params = None
+        self._cs_clevels = None
+        self._cs_has_lp = False
+        self._cs_lgen = 0
+        self._cs_base = 0
+        self._cs_m = 0
+        self._cs_all_closed = True
         #: Direct-mapped per-epoch level-substitution generation caches so
         #: polymorphic DAG subterms shared across declarations at the same
         #: concrete universe levels reuse `W_Expr._cache` hits.
@@ -1333,6 +1350,7 @@ class TermStore(object):
         self._content_head.clear()
         self._store_gen = _next_cache_gen()
         self.clear_fvar_gens()
+        self._clear_cs_state()
         if self._lgen1_dirty:
             p = self._lgen1_p
             l = self._lgen1_l
@@ -6175,8 +6193,15 @@ class TermStore(object):
             if base > 0 and (e._cache >> 32) >= base and (e._cache >> 32) != dgen:
                 mm = self._fvar_multi
                 if mm is None:
-                    mm = self._fvar_multi = {}
-                mm[(e, depth)] = h
+                    n = depth + 1 if depth >= 16 else 16
+                    mm = self._fvar_multi = [None] * n
+                else:
+                    while depth >= len(mm):
+                        mm.append(None)
+                dm = mm[depth]
+                if dm is None:
+                    dm = mm[depth] = {}
+                dm[e] = h
                 return
             e._cache = (dgen << 32) | h
 
@@ -6215,10 +6240,12 @@ class TermStore(object):
             if (c >> 32) == dgen:
                 return c & _TABLE_SLOT_MASK
             mm = self._fvar_multi
-            if mm is not None:
-                mh = mm.get((e, depth), 0)
-                if mh != 0:
-                    return mh
+            if mm is not None and depth < len(mm):
+                dm = mm[depth]
+                if dm is not None:
+                    mh = dm.get(e, 0)
+                    if mh != 0:
+                        return mh
         if (rdepth & 31) == 31:
             _check_stack_store("import_term")
         cls = e.__class__
@@ -6309,11 +6336,14 @@ class TermStore(object):
                 if dgen > 0 and (cur._cache >> 32) == dgen:
                     head = cur._cache & _TABLE_SLOT_MASK
                     break
-                if self._fvar_multi is not None:
-                    mh = self._fvar_multi.get((cur, depth), 0)
-                    if mh != 0:
-                        head = mh
-                        break
+                mm = self._fvar_multi
+                if mm is not None and depth < len(mm):
+                    dm = mm[depth]
+                    if dm is not None:
+                        mh = dm.get(cur, 0)
+                        if mh != 0:
+                            head = mh
+                            break
                 if not isinstance(cur, W_App):
                     if cur.__class__ is W_BVar:
                         assert isinstance(cur, W_BVar)
@@ -6455,6 +6485,72 @@ class TermStore(object):
                 e._cache = (dgen << 32) | h
         return h
 
+    def _level_cache_gen(self, params, clevels):
+        """Return (and lazily allocate) the persistent per-epoch cache
+        generation for universe-level substitution ``params -> clevels``."""
+        n = len(params)
+        if n == 1:
+            p0 = params[0]
+            l0 = clevels[0]
+            slot = ((p0.hash() * 1000003) ^ l0.hash()) & _LGEN_MASK
+            if self._lgen1_p[slot] is p0 and self._lgen1_l[slot] is l0:
+                return self._lgen1_g[slot]
+            lgen = _next_cache_gen()
+            if lgen > 0:
+                self._lgen1_p[slot] = p0
+                self._lgen1_l[slot] = l0
+                self._lgen1_g[slot] = lgen
+                self._lgen1_dirty = True
+            return lgen
+        if n == 2:
+            p0 = params[0]
+            p1 = params[1]
+            l0 = clevels[0]
+            l1 = clevels[1]
+            hh = ((p0.hash() * 1000003) ^ p1.hash()) * 1000003
+            hh = ((hh ^ l0.hash()) * 1000003) ^ l1.hash()
+            slot = hh & _LGEN_MASK
+            if (self._lgen2_p0[slot] is p0
+                    and self._lgen2_p1[slot] is p1
+                    and self._lgen2_l0[slot] is l0
+                    and self._lgen2_l1[slot] is l1):
+                return self._lgen2_g[slot]
+            lgen = _next_cache_gen()
+            if lgen > 0:
+                self._lgen2_p0[slot] = p0
+                self._lgen2_p1[slot] = p1
+                self._lgen2_l0[slot] = l0
+                self._lgen2_l1[slot] = l1
+                self._lgen2_g[slot] = lgen
+                self._lgen2_dirty = True
+            return lgen
+        hh = n
+        i = 0
+        while i < n:
+            hh = ((hh * 1000003) ^ params[i].hash()) * 1000003 ^ clevels[i].hash()
+            i += 1
+        slot = hh & _LGEN_MASK
+        cp = self._lgenN_p[slot]
+        cl = self._lgenN_l[slot]
+        hit = False
+        if cp is not None and cl is not None and len(cp) == n:
+            hit = True
+            i = 0
+            while i < n:
+                if cp[i] is not params[i] or cl[i] is not clevels[i]:
+                    hit = False
+                    break
+                i += 1
+        if hit:
+            return self._lgenN_g[slot]
+        lgen = _next_cache_gen()
+        if lgen > 0:
+            self._lgenN_p[slot] = params
+            self._lgenN_l[slot] = clevels
+            self._lgenN_g[slot] = lgen
+            self._lgenN_dirty = True
+        return lgen
+
     def import_const_term(self, const, decl, target):
         """Import ``target`` (a declaration's type, body, or recursor rule)
         instantiated with ``const.levels`` directly into record handles,
@@ -6481,68 +6577,7 @@ class TermStore(object):
             i += 1
         if identity:
             return self.import_term(target)
-        if n == 1:
-            p0 = params[0]
-            l0 = clevels[0]
-            slot = ((p0.hash() * 1000003) ^ l0.hash()) & _LGEN_MASK
-            if self._lgen1_p[slot] is p0 and self._lgen1_l[slot] is l0:
-                lgen = self._lgen1_g[slot]
-            else:
-                lgen = _next_cache_gen()
-                if lgen > 0:
-                    self._lgen1_p[slot] = p0
-                    self._lgen1_l[slot] = l0
-                    self._lgen1_g[slot] = lgen
-                    self._lgen1_dirty = True
-        elif n == 2:
-            p0 = params[0]
-            p1 = params[1]
-            l0 = clevels[0]
-            l1 = clevels[1]
-            hh = ((p0.hash() * 1000003) ^ p1.hash()) * 1000003
-            hh = ((hh ^ l0.hash()) * 1000003) ^ l1.hash()
-            slot = hh & _LGEN_MASK
-            if (self._lgen2_p0[slot] is p0
-                    and self._lgen2_p1[slot] is p1
-                    and self._lgen2_l0[slot] is l0
-                    and self._lgen2_l1[slot] is l1):
-                lgen = self._lgen2_g[slot]
-            else:
-                lgen = _next_cache_gen()
-                if lgen > 0:
-                    self._lgen2_p0[slot] = p0
-                    self._lgen2_p1[slot] = p1
-                    self._lgen2_l0[slot] = l0
-                    self._lgen2_l1[slot] = l1
-                    self._lgen2_g[slot] = lgen
-                    self._lgen2_dirty = True
-        else:
-            hh = n
-            i = 0
-            while i < n:
-                hh = ((hh * 1000003) ^ params[i].hash()) * 1000003 ^ clevels[i].hash()
-                i += 1
-            slot = hh & _LGEN_MASK
-            cp = self._lgenN_p[slot]
-            cl = self._lgenN_l[slot]
-            hit = False
-            if cp is not None and cl is not None and len(cp) == n:
-                hit = True
-                i = 0
-                while i < n:
-                    if cp[i] is not params[i] or cl[i] is not clevels[i]:
-                        hit = False
-                        break
-                    i += 1
-            if hit:
-                lgen = self._lgenN_g[slot]
-            else:
-                lgen = _next_cache_gen()
-                if lgen > 0:
-                    self._lgenN_p[slot] = params
-                    self._lgenN_l[slot] = clevels
-                    self._lgenN_g[slot] = lgen
-                    self._lgenN_dirty = True
+        lgen = self._level_cache_gen(params, clevels)
         mark = self._import_spine_len
         try:
             return self._import_with_levels(target, params, clevels, lgen, 0)
@@ -6809,6 +6844,516 @@ class TermStore(object):
             h = self.leaf_for(e)
         if lgen > 0:
             e._cache = (lgen << 32) | h
+        return h
+
+    def _clear_cs_state(self):
+        n = self._cs_gens_len
+        if n > 0:
+            gens = self._cs_gens
+            i = 0
+            while i < n:
+                gens[i] = 0
+                i += 1
+            self._cs_gens_len = 0
+        self._cs_base_gen = 0
+        if self._cs_multi is not None:
+            self._cs_multi = None
+        self._cs_params = None
+        self._cs_clevels = None
+        self._cs_lgen = 0
+
+    def _cs_gen_for_depth(self, depth):
+        gens = self._cs_gens
+        while depth >= len(gens):
+            gens.append(0)
+        g = gens[depth]
+        if g == 0:
+            g = _next_cache_gen()
+            gens[depth] = g
+            if depth + 1 > self._cs_gens_len:
+                self._cs_gens_len = depth + 1
+        return g
+
+    def _cs_cache_put(self, e, depth, dgen, h):
+        if dgen > 0:
+            base = self._cs_base_gen
+            if base > 0 and (e._cache >> 32) >= base and (e._cache >> 32) != dgen:
+                mm = self._cs_multi
+                if mm is None:
+                    n = depth + 1 if depth >= 16 else 16
+                    mm = self._cs_multi = [None] * n
+                else:
+                    while depth >= len(mm):
+                        mm.append(None)
+                dm = mm[depth]
+                if dm is None:
+                    dm = mm[depth] = {}
+                dm[e] = h
+                return
+            e._cache = (dgen << 32) | h
+
+    @dont_inline
+    def import_const_subst_buf(self, const, decl, target, arg_base, m):
+        """Import ``target`` instantiated with ``const.levels`` while
+        simultaneously substituting ``BVar(k) -> _spine_buf[arg_base + k]``
+        (``0 <= k < m``) in a single AST pass, avoiding throwaway `BVar`
+        records and a second `instantiate_multi_buf` traversal while
+        preserving persistent `_lgen` caches on all closed polymorphic
+        subtrees."""
+        if m == 0 or target.loose_bvar_range() == 0:
+            return self.import_const_term(const, decl, target)
+        if target.__class__ is W_BVar:
+            assert isinstance(target, W_BVar)
+            bid = target.id
+            return self.spine_arg(arg_base + bid) if bid < m else self.bvar(bid - m)
+        params = decl.levels
+        np = len(params)
+        clevels = const.levels
+        has_lp = False
+        lgen = 0
+        if np > 0 and target.has_level_param():
+            if len(clevels) != np:
+                raise RuntimeError(
+                    "W_Const.infer: expected %s levels, got %s"
+                    % (np, len(clevels)),
+                )
+            identity = True
+            i = 0
+            while i < np:
+                cl = clevels[i]
+                if not cl.has_param or cl is not params[i].as_level_param():
+                    identity = False
+                    break
+                i += 1
+            if not identity:
+                has_lp = True
+                lgen = self._level_cache_gen(params, clevels)
+        buf = self._spine_buf
+        all_closed = True
+        k = 0
+        while k < m:
+            if self.loose_bvar_range(_s32(buf[arg_base + k])) > 0:
+                all_closed = False
+                break
+            k += 1
+        fgen = _next_cache_gen()
+        self._cs_params = params
+        self._cs_clevels = clevels
+        self._cs_has_lp = has_lp
+        self._cs_lgen = lgen
+        self._cs_base = arg_base
+        self._cs_m = m
+        self._cs_all_closed = all_closed
+        self._cs_base_gen = fgen
+        mark = self._import_spine_len
+        try:
+            return self._import_const_subst_rec(target, 0, fgen, 0)
+        finally:
+            if self._import_spine_len > mark:
+                self._clear_import_spine(mark)
+            self._clear_cs_state()
+
+    def _import_const_subst_rec(self, e, depth, dgen, rdepth):
+        sgen = self._store_gen
+        has_lp = self._cs_has_lp
+        if e.loose_bvar_range() <= depth:
+            if has_lp and e.has_level_param():
+                lgen = self._cs_lgen
+                c = e._cache
+                if (c >> 32) == lgen:
+                    return c & _TABLE_SLOT_MASK
+                params = self._cs_params
+                clevels = self._cs_clevels
+                assert params is not None and clevels is not None
+                return self._import_with_levels(e, params, clevels, lgen, rdepth)
+            c = e._cache
+            if (c >> 32) == sgen:
+                return c & _TABLE_SLOT_MASK
+            return self._import_rec(e, sgen, rdepth)
+        if dgen > 0:
+            c = e._cache
+            if (c >> 32) == dgen:
+                return c & _TABLE_SLOT_MASK
+            mm = self._cs_multi
+            if mm is not None and depth < len(mm):
+                dm = mm[depth]
+                if dm is not None:
+                    mh = dm.get(e, 0)
+                    if mh != 0:
+                        return mh
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        cls = e.__class__
+        nr = rdepth + 1
+        if cls is W_BVar:
+            assert isinstance(e, W_BVar)
+            rel = e.id - depth
+            m = self._cs_m
+            if rel < m:
+                sub = _s32(self._spine_buf[self._cs_base + rel])
+                if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                    return self.shift(sub, depth, 0)
+                return sub
+            return self.bvar(e.id - m)
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            fn_h = 0
+            if fn.loose_bvar_range() <= depth:
+                if has_lp and fn.has_level_param():
+                    lgen = self._cs_lgen
+                    fc = fn._cache
+                    if (fc >> 32) == lgen:
+                        fn_h = fc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        fn_h = self._import_with_levels(fn, params, clevels, lgen, nr)
+                else:
+                    fc = fn._cache
+                    if (fc >> 32) == sgen:
+                        fn_h = fc & _TABLE_SLOT_MASK
+                    else:
+                        fn_h = self._import_rec(fn, sgen, nr)
+            elif dgen > 0 and (fn._cache >> 32) == dgen:
+                fn_h = fn._cache & _TABLE_SLOT_MASK
+            elif not isinstance(fn, W_App):
+                if fn.__class__ is W_BVar:
+                    assert isinstance(fn, W_BVar)
+                    rel = fn.id - depth
+                    m = self._cs_m
+                    if rel < m:
+                        sub = _s32(self._spine_buf[self._cs_base + rel])
+                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                            fn_h = self.shift(sub, depth, 0)
+                        else:
+                            fn_h = sub
+                    else:
+                        fn_h = self.bvar(fn.id - m)
+                else:
+                    fn_h = self._import_const_subst_rec(fn, depth, dgen, nr)
+            if fn_h != 0:
+                arg = e.arg
+                if arg.loose_bvar_range() <= depth:
+                    if has_lp and arg.has_level_param():
+                        lgen = self._cs_lgen
+                        ac = arg._cache
+                        if (ac >> 32) == lgen:
+                            arg_h = ac & _TABLE_SLOT_MASK
+                        else:
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
+                    else:
+                        ac = arg._cache
+                        if (ac >> 32) == sgen:
+                            arg_h = ac & _TABLE_SLOT_MASK
+                        elif arg.__class__ is W_BVar:
+                            assert isinstance(arg, W_BVar)
+                            bid = arg.id
+                            if 0 <= bid < _BVAR_ARR_LEN:
+                                arg_h = self._bvar_arr[bid]
+                                if arg_h == 0:
+                                    arg_h = self._new_leaf(arg)
+                                    self._bvar_arr[bid] = arg_h
+                                    if bid + 1 > self._bvar_max:
+                                        self._bvar_max = bid + 1
+                            else:
+                                arg_h = self.leaf_for(arg)
+                        else:
+                            arg_h = self._import_rec(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    m = self._cs_m
+                    if rel < m:
+                        sub = _s32(self._spine_buf[self._cs_base + rel])
+                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                            arg_h = self.shift(sub, depth, 0)
+                        else:
+                            arg_h = sub
+                    else:
+                        arg_h = self.bvar(arg.id - m)
+                elif dgen > 0 and (arg._cache >> 32) == dgen:
+                    arg_h = arg._cache & _TABLE_SLOT_MASK
+                else:
+                    arg_h = self._import_const_subst_rec(arg, depth, dgen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                if dgen > 0:
+                    if (self._cs_base_gen > 0
+                            and (e._cache >> 32) >= self._cs_base_gen
+                            and (e._cache >> 32) != dgen):
+                        self._cs_cache_put(e, depth, dgen, head)
+                    else:
+                        e._cache = (dgen << 32) | head
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                spine.append(e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if cur.loose_bvar_range() <= depth:
+                    if has_lp and cur.has_level_param():
+                        lgen = self._cs_lgen
+                        cc = cur._cache
+                        if (cc >> 32) == lgen:
+                            head = cc & _TABLE_SLOT_MASK
+                        else:
+                            self._import_spine_len = top
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            head = self._import_with_levels(cur, params, clevels, lgen, nr)
+                    else:
+                        cc = cur._cache
+                        if (cc >> 32) == sgen:
+                            head = cc & _TABLE_SLOT_MASK
+                        else:
+                            self._import_spine_len = top
+                            head = self._import_rec(cur, sgen, nr)
+                    break
+                if dgen > 0 and (cur._cache >> 32) == dgen:
+                    head = cur._cache & _TABLE_SLOT_MASK
+                    break
+                mm = self._cs_multi
+                if mm is not None and depth < len(mm):
+                    dm = mm[depth]
+                    if dm is not None:
+                        mh = dm.get(cur, 0)
+                        if mh != 0:
+                            head = mh
+                            break
+                if not isinstance(cur, W_App):
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        rel = cur.id - depth
+                        m = self._cs_m
+                        if rel < m:
+                            sub = _s32(self._spine_buf[self._cs_base + rel])
+                            if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                                head = self.shift(sub, depth, 0)
+                            else:
+                                head = sub
+                        else:
+                            head = self.bvar(cur.id - m)
+                    else:
+                        self._import_spine_len = top
+                        head = self._import_const_subst_rec(cur, depth, dgen, nr)
+                    break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    spine.append(cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.loose_bvar_range() <= depth:
+                    if has_lp and arg.has_level_param():
+                        lgen = self._cs_lgen
+                        ac = arg._cache
+                        if (ac >> 32) == lgen:
+                            arg_h = ac & _TABLE_SLOT_MASK
+                        else:
+                            self._import_spine_len = top
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
+                    else:
+                        ac = arg._cache
+                        if (ac >> 32) == sgen:
+                            arg_h = ac & _TABLE_SLOT_MASK
+                        elif arg.__class__ is W_BVar:
+                            assert isinstance(arg, W_BVar)
+                            bid = arg.id
+                            if 0 <= bid < _BVAR_ARR_LEN:
+                                arg_h = self._bvar_arr[bid]
+                                if arg_h == 0:
+                                    arg_h = self._new_leaf(arg)
+                                    self._bvar_arr[bid] = arg_h
+                                    if bid + 1 > self._bvar_max:
+                                        self._bvar_max = bid + 1
+                            else:
+                                arg_h = self.leaf_for(arg)
+                        else:
+                            self._import_spine_len = top
+                            arg_h = self._import_rec(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    m = self._cs_m
+                    if rel < m:
+                        sub = _s32(self._spine_buf[self._cs_base + rel])
+                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                            arg_h = self.shift(sub, depth, 0)
+                        else:
+                            arg_h = sub
+                    else:
+                        arg_h = self.bvar(arg.id - m)
+                elif dgen > 0 and (arg._cache >> 32) == dgen:
+                    arg_h = arg._cache & _TABLE_SLOT_MASK
+                else:
+                    self._import_spine_len = top
+                    arg_h = self._import_const_subst_rec(arg, depth, dgen, nr)
+                head = self.cons_app(head, arg_h)
+                if dgen > 0:
+                    if (self._cs_base_gen > 0
+                            and (app._cache >> 32) >= self._cs_base_gen
+                            and (app._cache >> 32) != dgen):
+                        self._cs_cache_put(app, depth, dgen, head)
+                    else:
+                        app._cache = (dgen << 32) | head
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            binder = e.binder
+            btype = binder.type
+            if btype.loose_bvar_range() <= depth:
+                if has_lp and btype.has_level_param():
+                    lgen = self._cs_lgen
+                    tc = btype._cache
+                    if (tc >> 32) == lgen:
+                        type_h = tc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        type_h = self._import_with_levels(btype, params, clevels, lgen, nr)
+                else:
+                    tc = btype._cache
+                    type_h = (
+                        tc & _TABLE_SLOT_MASK
+                        if (tc >> 32) == sgen
+                        else self._import_rec(btype, sgen, nr)
+                    )
+            else:
+                type_h = self._import_const_subst_rec(btype, depth, dgen, nr)
+            ebody = e.body
+            ndepth = depth + 1
+            if ebody.loose_bvar_range() <= ndepth:
+                if has_lp and ebody.has_level_param():
+                    lgen = self._cs_lgen
+                    bc = ebody._cache
+                    if (bc >> 32) == lgen:
+                        body_h = bc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        body_h = self._import_with_levels(ebody, params, clevels, lgen, nr)
+                else:
+                    bc = ebody._cache
+                    body_h = (
+                        bc & _TABLE_SLOT_MASK
+                        if (bc >> 32) == sgen
+                        else self._import_rec(ebody, sgen, nr)
+                    )
+            else:
+                ndgen = self._cs_gen_for_depth(ndepth)
+                body_h = self._import_const_subst_rec(ebody, ndepth, ndgen, nr)
+            if cls is W_Lambda:
+                h = self.lam(binder, type_h, body_h)
+            else:
+                h = self.forall(binder, type_h, body_h)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index,
+                self._import_const_subst_rec(e.struct_expr, depth, dgen, nr),
+            )
+        elif cls is W_Let:
+            assert isinstance(e, W_Let)
+            et = e.type
+            if et.loose_bvar_range() <= depth:
+                if has_lp and et.has_level_param():
+                    lgen = self._cs_lgen
+                    tc = et._cache
+                    if (tc >> 32) == lgen:
+                        th = tc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        th = self._import_with_levels(et, params, clevels, lgen, nr)
+                else:
+                    tc = et._cache
+                    th = (
+                        tc & _TABLE_SLOT_MASK
+                        if (tc >> 32) == sgen
+                        else self._import_rec(et, sgen, nr)
+                    )
+            else:
+                th = self._import_const_subst_rec(et, depth, dgen, nr)
+            ev = e.value
+            if ev.loose_bvar_range() <= depth:
+                if has_lp and ev.has_level_param():
+                    lgen = self._cs_lgen
+                    vc = ev._cache
+                    if (vc >> 32) == lgen:
+                        vh = vc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        vh = self._import_with_levels(ev, params, clevels, lgen, nr)
+                else:
+                    vc = ev._cache
+                    vh = (
+                        vc & _TABLE_SLOT_MASK
+                        if (vc >> 32) == sgen
+                        else self._import_rec(ev, sgen, nr)
+                    )
+            else:
+                vh = self._import_const_subst_rec(ev, depth, dgen, nr)
+            eb = e.body
+            ndepth = depth + 1
+            if eb.loose_bvar_range() <= ndepth:
+                if has_lp and eb.has_level_param():
+                    lgen = self._cs_lgen
+                    bc = eb._cache
+                    if (bc >> 32) == lgen:
+                        bh = bc & _TABLE_SLOT_MASK
+                    else:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        bh = self._import_with_levels(eb, params, clevels, lgen, nr)
+                else:
+                    bc = eb._cache
+                    bh = (
+                        bc & _TABLE_SLOT_MASK
+                        if (bc >> 32) == sgen
+                        else self._import_rec(eb, sgen, nr)
+                    )
+            else:
+                ndgen = self._cs_gen_for_depth(ndepth)
+                bh = self._import_const_subst_rec(eb, ndepth, ndgen, nr)
+            h = self.let(e.name, th, vh, bh)
+        else:
+            return self.leaf_for(e)
+        if dgen > 0:
+            if (self._cs_base_gen > 0
+                    and (e._cache >> 32) >= self._cs_base_gen
+                    and (e._cache >> 32) != dgen):
+                self._cs_cache_put(e, depth, dgen, h)
+            else:
+                e._cache = (dgen << 32) | h
         return h
 
     def export_term(self, h):
@@ -7473,6 +8018,8 @@ class Machine(object):
                 store.unapp_pop(mark)
         packed = store.leaf_delta_body[j]
         if packed == 0:
+            return self._try_unfold_first_use(h, head, const, j)
+        if packed == _DB_SEEN_TAG:
             packed = self._delta_body(head, const, j)
         if packed < 0:
             return 0
@@ -7582,6 +8129,146 @@ class Machine(object):
             store.unapp_pop(mark)
 
     @dont_inline
+    def _try_unfold_first_use(self, h, head, const, j):
+        """First-use delta unfold of ``h = head args``: when ``head`` has
+        leading lambdas and a BVar-bearing body, fuse level+argument
+        substitution directly on the AST (`import_const_subst_buf`) and mark
+        `leaf_delta_body[j] = _DB_SEEN_TAG` so single-use definitions (~40-55%
+        of `_delta_body` records) never allocate throwaway BVar records, while
+        a second unfold promotes the stripped body into `TermStore`."""
+        store = self.store
+        if _si32(store.leaf_delta[j]) > 0:
+            packed = self._delta_body(head, const, j)
+        else:
+            decl = self._leaf_decl(head, const)
+            if decl is None or not isinstance(decl.w_kind, W_Definition):
+                store.leaf_delta_body[j] = -1
+                return 0
+            target = decl.w_kind.get_delta_reduce_target()
+            if target is None:
+                store.leaf_delta_body[j] = -1
+                return 0
+            m = 0
+            cur = target
+            while isinstance(cur, W_Lambda):
+                cur = cur.body
+                m += 1
+            if m > 0:
+                if isinstance(cur, W_BVar):
+                    bid = cur.id
+                    if 0 <= bid < m and m < (1 << 28):
+                        if self.tc.tracer.recording:
+                            self.tc.tracer.delta(const.name)
+                        packed = _DB_BVAR_TAG | (m << 32) | bid
+                        store.leaf_delta_body[j] = packed
+                        return self._unfold_fast(h, head, const, packed, 1)
+                elif isinstance(cur, W_Proj) and m < 256:
+                    inner = cur.struct_expr
+                    if isinstance(inner, W_BVar):
+                        bid = inner.id
+                        if 0 <= bid < m:
+                            name_id = store._name_index(cur.struct_name)
+                            proj_packed = store._proj_pack(name_id, cur.field_index)
+                            if name_id < (1 << 20) and proj_packed < (1 << 24):
+                                if self.tc.tracer.recording:
+                                    self.tc.tracer.delta(const.name)
+                                packed = (
+                                    _DB_PROJ_TAG
+                                    | (m << 52)
+                                    | (bid << 44)
+                                    | (name_id << 24)
+                                    | proj_packed
+                                )
+                                store.leaf_delta_body[j] = packed
+                                return self._unfold_fast(h, head, const, packed, 2)
+            if m > 0 and cur.loose_bvar_range() > 0:
+                if store.field_a(h) == head:
+                    store.leaf_delta_body[j] = _DB_SEEN_TAG
+                    if self.tc.tracer.recording:
+                        self.tc.tracer.delta(const.name)
+                        self.tc.tracer.beta()
+                    assert isinstance(target, W_Lambda)
+                    cur1 = cur if m == 1 else target.body
+                    sm = store._spine_top
+                    store.spine_push(store.field_b(h))
+                    try:
+                        return store.import_const_subst_buf(const, decl, cur1, sm, 1)
+                    finally:
+                        store.unapp_pop(sm)
+                mark = store._spine_top
+                store.unapp_push(h)
+                try:
+                    n = store._spine_top - mark
+                    store.leaf_delta_body[j] = _DB_SEEN_TAG
+                    if n >= m:
+                        if self.tc.tracer.recording:
+                            self.tc.tracer.delta(const.name)
+                            k = 0
+                            while k < m:
+                                self.tc.tracer.beta()
+                                k += 1
+                        res = store.import_const_subst_buf(
+                            const, decl, cur, mark + n - m, m,
+                        )
+                        if n > m and store.kind(res) == KIND_LAMBDA:
+                            return self._beta_spine_buf(res, mark, n - m)
+                        return store.apply_buf_rev(res, mark, n - 1 - m)
+                    if self.tc.tracer.recording:
+                        self.tc.tracer.delta(const.name)
+                        k = 0
+                        while k < n:
+                            self.tc.tracer.beta()
+                            k += 1
+                    cur_n = target
+                    k = 0
+                    while k < n:
+                        assert isinstance(cur_n, W_Lambda)
+                        cur_n = cur_n.body
+                        k += 1
+                    return store.import_const_subst_buf(const, decl, cur_n, mark, n)
+                finally:
+                    store.unapp_pop(mark)
+            if self.tc.tracer.recording:
+                self.tc.tracer.delta(const.name)
+            body_h = store.import_const_term(const, decl, cur)
+            if m == 0:
+                store.leaf_delta[j] = _i32(body_h)
+            packed = (m << 32) | body_h
+            store.leaf_delta_body[j] = packed
+        if packed < 0:
+            return 0
+        tag = packed >> _DB_TAG_SHIFT
+        if tag != 0:
+            return self._unfold_fast(h, head, const, packed, tag)
+        m = packed >> 32
+        body_h = packed & 0xFFFFFFFF
+        if store.field_a(h) == head:
+            if m == 0:
+                return store.cons_app(body_h, store.field_b(h))
+            if m == 1:
+                if self.tc.tracer.recording:
+                    self.tc.tracer.beta()
+                return store.instantiate(body_h, store.field_b(h), 0)
+            val = self._delta_value(head, const)
+            if val == 0:
+                return 0
+            if self.tc.tracer.recording:
+                self.tc.tracer.beta()
+            return store.instantiate(store.field_b(val), store.field_b(h), 0)
+        mark = store._spine_top
+        store.unapp_push(h)
+        try:
+            n = store._spine_top - mark
+            if n >= m:
+                return self._apply_stripped_body(body_h, m, mark, n)
+            val = self._delta_value(head, const)
+            if val == 0:
+                return 0
+            return self._beta_spine_buf(val, mark, n)
+        finally:
+            store.unapp_pop(mark)
+
+    @dont_inline
     def _delta_body(self, head, const, j):
         """Peel leading `W_Lambda` binders from a definition's value before
         importing so fully-applied delta unfolds never import discarded binder
@@ -7605,7 +8292,7 @@ class Machine(object):
         if target is None:
             store.leaf_delta_body[j] = -1
             return -1
-        if self.tc.tracer.recording:
+        if self.tc.tracer.recording and store.leaf_delta_body[j] == 0:
             self.tc.tracer.delta(const.name)
         m = 0
         cur = target
@@ -7947,7 +8634,7 @@ class Machine(object):
                 key = ((j + 1) << 22) | (3 << 20) | (f0 << 12) | (f1 << 6) | f2
         if key != 0:
             fh = self._proj_field_cache.get(key, 0)
-            if fh != 0:
+            if 0 < fh < _LEAF_INFER_SEEN:
                 return fh
         fh = self.store.import_const_term(const, decl, raw_field)
         if key != 0:
@@ -7986,6 +8673,36 @@ class Machine(object):
                 bid = raw_field.id
                 if 0 <= bid < m:
                     return store.spine_arg(arg_base + bid)
+            if m > 0 and raw_field.loose_bvar_range() > 0:
+                key = 0
+                if popped == 1:
+                    f0 = fidxs[ptop - 1]
+                    if 0 <= f0 < 1024:
+                        key = ((j + 1) << 22) | (1 << 20) | f0
+                elif popped == 2:
+                    f0 = fidxs[ptop - 1]
+                    f1 = fidxs[ptop - 2]
+                    if 0 <= f0 < 1024 and 0 <= f1 < 1024:
+                        key = ((j + 1) << 22) | (2 << 20) | (f0 << 10) | f1
+                elif popped == 3:
+                    f0 = fidxs[ptop - 1]
+                    f1 = fidxs[ptop - 2]
+                    f2 = fidxs[ptop - 3]
+                    if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64:
+                        key = ((j + 1) << 22) | (3 << 20) | (f0 << 12) | (f1 << 6) | f2
+                if key != 0:
+                    fh = self._proj_field_cache.get(key, 0)
+                    if fh == 0:
+                        self._proj_field_cache.set(key, _LEAF_INFER_SEEN)
+                        return store.import_const_subst_buf(
+                            const, decl, raw_field, arg_base, m,
+                        )
+                    if fh == _LEAF_INFER_SEEN:
+                        fh = store.import_const_term(const, decl, raw_field)
+                        self._proj_field_cache.set(key, fh)
+                    if m == 1:
+                        return store.instantiate(fh, store.spine_arg(arg_base), 0)
+                    return store.instantiate_multi_buf(fh, arg_base, m, 0)
             fh = self._import_proj_field(
                 j, popped, fidxs, ptop, const, decl, raw_field,
             )
@@ -10158,8 +10875,8 @@ class Machine(object):
             store.unapp_pop(sm)
             if ok_exp:
                 return expected
-        body = store.import_const_term(e, decl, body_ast)
         if expected != 0 and exp_n > 0:
+            body = store.import_const_term(e, decl, body_ast)
             sm = store._spine_top
             store.spine_push(arg)
             ok_exp = store.inst_eq_inst_buf(
@@ -10168,7 +10885,13 @@ class Machine(object):
             store.unapp_pop(sm)
             if ok_exp:
                 return 0
-        return store.instantiate(body, arg, 0)
+            return store.instantiate(body, arg, 0)
+        sm = store._spine_top
+        store.spine_push(arg)
+        try:
+            return store.import_const_subst_buf(e, decl, body_ast, sm, 1)
+        finally:
+            store.unapp_pop(sm)
 
     @dont_inline
     def _infer_app_const_ast_buf(self, head, j, e, mark, n,
@@ -10286,15 +11009,9 @@ class Machine(object):
                         plen += 1
                     i -= 1
                     continue
-                dom_h = store.import_const_term(e, decl, dom_ast)
-                if plen == 1:
-                    domain = store.instantiate(
-                        dom_h, store.spine_arg(mark + i + 1), 0,
-                    )
-                else:
-                    domain = store.instantiate_multi_buf(
-                        dom_h, mark + i + 1, plen, 0,
-                    )
+                domain = store.import_const_subst_buf(
+                    e, decl, dom_ast, mark + i + 1, plen,
+                )
             tracing = tc.tracer.recording
             if tracing:
                 tc.tracer.begin_argcheck()
@@ -10319,17 +11036,17 @@ class Machine(object):
         if expected != 0 and exp_n == 0:
             if store.ast_inst_eq_buf(cur, params, clevels, mark, plen, expected):
                 return expected
-        fn_type = store.import_const_term(e, decl, cur)
         if plen > 0:
             if expected != 0 and exp_n > 0:
+                fn_type = store.import_const_term(e, decl, cur)
                 if store.inst_eq_inst_buf(
                         fn_type, mark, plen, expected, exp_start, exp_n):
                     return 0
-            if plen == 1:
-                fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
-            else:
-                fn_type = store.instantiate_multi_buf(fn_type, mark, plen, 0)
-        return fn_type
+                if plen == 1:
+                    return store.instantiate(fn_type, store.spine_arg(mark), 0)
+                return store.instantiate_multi_buf(fn_type, mark, plen, 0)
+            return store.import_const_subst_buf(e, decl, cur, mark, plen)
+        return store.import_const_term(e, decl, cur)
 
     @dont_inline
     def _infer_app1_only_leaf(self, fn, j, arg):
@@ -10348,10 +11065,14 @@ class Machine(object):
                 if isinstance(cur, W_BVar):
                     bid = cur.id
                     return arg if bid == 0 else store.bvar(bid - 1)
-                body = store.import_const_term(e, decl, cur)
-                if store.loose_bvar_range(body) == 0:
-                    return body
-                return store.instantiate(body, arg, 0)
+                if cur.loose_bvar_range() == 0:
+                    return store.import_const_term(e, decl, cur)
+                sm = store._spine_top
+                store.spine_push(arg)
+                try:
+                    return store.import_const_subst_buf(e, decl, cur, sm, 1)
+                finally:
+                    store.unapp_pop(sm)
         fn_type = self._infer_leaf(fn, False)
         if store.kind(fn_type) != KIND_FORALL:
             fn_type = self.whnf(fn_type)
@@ -10394,14 +11115,7 @@ class Machine(object):
                             if bid < n
                             else store.bvar(bid - n)
                         )
-                    fn_type = store.import_const_term(e, decl, cur)
-                    if store.loose_bvar_range(fn_type) == 0:
-                        return fn_type
-                    if n == 1:
-                        return store.instantiate(
-                            fn_type, store.spine_arg(mark), 0,
-                        )
-                    return store.instantiate_multi_buf(fn_type, mark, n, 0)
+                    return store.import_const_subst_buf(e, decl, cur, mark, n)
                 rem = n - k
                 if isinstance(cur, W_BVar):
                     bid = cur.id
@@ -10411,16 +11125,7 @@ class Machine(object):
                         else store.bvar(bid - k)
                     )
                 else:
-                    fn_type = store.import_const_term(e, decl, cur)
-                    if store.loose_bvar_range(fn_type) > 0:
-                        if k == 1:
-                            fn_type = store.instantiate(
-                                fn_type, store.spine_arg(mark + rem), 0,
-                            )
-                        else:
-                            fn_type = store.instantiate_multi_buf(
-                                fn_type, mark + rem, k, 0,
-                            )
+                    fn_type = store.import_const_subst_buf(e, decl, cur, mark + rem, k)
                 return self._infer_app_only_buf(head, mark, n, fn_type, rem)
         fn_type = self._infer_leaf(head, False)
         return self._infer_app_only_buf(head, mark, n, fn_type, n)

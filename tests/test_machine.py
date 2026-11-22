@@ -2342,3 +2342,115 @@ class TestJointCheckAndInferExpected(object):
         err_lvl = env.type_check_one(d_bad_lvl, measure=False).error
         assert isinstance(err_lvl, W_InvalidDeclaration) and isinstance(err_lvl.inner, UndeclaredLevelParam)
         assert isinstance(env.type_check_one(d_early, measure=False).error, W_NotYetDeclared)
+
+    def test_import_const_subst_buf_and_adaptive_one_shot_unfold(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import _DB_SEEN_TAG, _LEAF_INFER_SEEN, leaf_index
+
+        u_n = Name.simple("u")
+        u_l = u_n.as_level_param()
+        v_l = Name.simple("v").as_level_param()
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        fn2 = Name.simple("fn2").axiom(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+        )
+        # Polymorphic pair container + def with inner lambda (tests depth > 0 + open sub shift!)
+        box_decl = Name.simple("BoxU").axiom(
+            levels=[u_n], type=forall(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(u_l.succ().sort()),
+        )
+        # `polyDef.{u} (α : Type u) (n : Nat) := fun (k : Nat) => BoxU.{u} α (fn2 n k)`
+        z = Name.simple("z")
+        poly_def = Name.simple("polyDef").definition(
+            levels=[u_n],
+            type=forall(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(
+                forall(z.binder(type=NAT))(u_l.succ().sort()),
+            ),
+            value=fun(x.binder(type=u_l.succ().sort()), y.binder(type=NAT))(
+                fun(z.binder(type=NAT))(
+                    box_decl.name.const([u_l]).app(b2, fn2.name.const().app(b1, b0)),
+                ),
+            ),
+        )
+        # Structure with non-BVar compound field to test 1-shot projection field + promotion
+        s_name = Name.simple("CompS")
+        mk_name = s_name.child("mk")
+        mk_decl = mk_name.constructor(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            num_params=0,
+            num_fields=1,
+        )
+        s_decl = s_name.inductive(type=TYPE, num_params=0, constructors=[mk_decl])
+        mk_s = Name.simple("mkCompS").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                mk_name.const().app(fn2.name.const().app(b1, b0)),
+            ),
+        )
+
+        env = Environment.having([
+            nat_decl, a_decl, b_decl, fn2, box_decl, poly_def, s_decl, mk_decl, mk_s,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            B = b_decl.name.const()
+            h_a = store.import_term(A)
+            h_b = store.import_term(B)
+
+            # 1. Open-substitute shift at depth > 0: substitute BVar(0) (open!) for `n`
+            #    into `fun (k : Nat) => BoxU.{u} α (fn2 n k)` -> must shift open BVar(0) to BVar(1)!
+            sm = store._spine_top
+            store.spine_push(store.bvar(0))  # n = BVar(0) (open!)
+            store.spine_push(store.import_term(v_l.sort()))  # α = Sort v
+            try:
+                inner_body = poly_def.w_kind.value.body.body
+                res_open = store.import_const_subst_buf(
+                    poly_def.name.const([v_l]), poly_def, inner_body, sm, 2,
+                )
+            finally:
+                store.unapp_pop(sm)
+            expected_open = store.import_term(
+                fun(z.binder(type=NAT))(
+                    box_decl.name.const([v_l]).app(v_l.sort(), fn2.name.const().app(b1, b0)),
+                ),
+            )
+            assert res_open == expected_open
+
+            # 2. First delta unfold of `polyDef` (both partial n < m and full n == m)
+            #    uses fused 1-shot & marks `_DB_SEEN_TAG`; second unfold promotes
+            #    `leaf_delta_body` to a real packed body!
+            pd_head = store.import_term(poly_def.name.const([v_l]))
+            pd_j = leaf_index(pd_head)
+            h_unfold1 = store.import_term(poly_def.name.const([v_l]).app(v_l.sort(), A))
+            h_unfold2 = store.import_term(poly_def.name.const([v_l]).app(v_l.sort(), B, A))
+            assert m.try_unfold_head(h_unfold1) == store.import_term(
+                fun(z.binder(type=NAT))(
+                    box_decl.name.const([v_l]).app(v_l.sort(), fn2.name.const().app(A, b0)),
+                ),
+            )
+            assert store.leaf_delta_body[pd_j] == _DB_SEEN_TAG
+            assert m.try_unfold_head(h_unfold2) == store.import_term(
+                box_decl.name.const([v_l]).app(v_l.sort(), fn2.name.const().app(B, A)),
+            )
+            assert store.leaf_delta_body[pd_j] != _DB_SEEN_TAG
+            assert store.leaf_delta_body[pd_j] > 0
+
+            # 3. First projection of `mkCompS` uses fused 1-shot & marks `_LEAF_INFER_SEEN`;
+            #    second projection promotes `_proj_field_cache` to a real handle!
+            ms_head = store.import_term(mk_s.name.const())
+            ms_j = leaf_index(ms_head)
+            pkey = ((ms_j + 1) << 22) | (1 << 20) | 0
+            p1 = store.import_term(s_name.proj(0, mk_s.name.const().app(A, B)))
+            p2 = store.import_term(s_name.proj(0, mk_s.name.const().app(B, A)))
+            assert m.try_proj(p1, False) == store.import_term(fn2.name.const().app(A, B))
+            assert m._proj_field_cache.get(pkey, 0) == _LEAF_INFER_SEEN
+            assert m.try_proj(p2, False) == store.import_term(fn2.name.const().app(B, A))
+            cached_fh = m._proj_field_cache.get(pkey, 0)
+            assert 0 < cached_fh < _LEAF_INFER_SEEN
+        finally:
+            tc.free()
