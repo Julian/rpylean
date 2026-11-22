@@ -1965,3 +1965,59 @@ class TestJointCheckAndInferExpected(object):
         assert env.type_check_one(d_safe_ok2, measure=False).error is None
         # Second declaration with identical prefix & body allocates ZERO new records!
         assert _SPARE.machine.store.nrecs == recs_after_1
+
+    def test_proj_lazy_eq_skips_ctor_body_unfold(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_Const
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        dead1 = Name.simple("deadJunk1").axiom(type=forall(x.binder(type=NAT))(NAT))
+        dead2 = Name.simple("deadJunk2").axiom(type=forall(x.binder(type=NAT))(NAT))
+        s_name = Name.simple("PairS")
+        mk_name = s_name.child("mk")
+        mk_decl = mk_name.constructor(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(s_name.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        s_decl = s_name.inductive(type=TYPE, num_params=0, constructors=[mk_decl])
+        # Two distinct constructor-body definitions agreeing on field 0, differing on field 1
+        d1 = Name.simple("mkS1").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(
+                mk_name.const().app(b0, dead1.name.const().app(b0)),
+            ),
+        )
+        d2 = Name.simple("mkS2").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(
+                mk_name.const().app(b0, dead2.name.const().app(b0)),
+            ),
+        )
+        # Wrapper alias around mkS1 to ensure non-CtorBody wrappers still unfold cleanly
+        wrap = Name.simple("wrapS1").definition(
+            type=forall(x.binder(type=NAT))(s_name.const()),
+            value=fun(x.binder(type=NAT))(d1.name.const().app(b0)),
+        )
+        env = Environment.having([nat_decl, a_decl, dead1, dead2, s_decl, mk_decl, d1, d2, wrap])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            A = a_decl.name.const()
+            p1 = store.import_term(s_name.proj(0, d1.name.const().app(A)))
+            p2 = store.import_term(s_name.proj(0, d2.name.const().app(A)))
+            p3 = store.import_term(s_name.proj(0, wrap.name.const().app(A)))
+            assert m.def_eq(p1, p2)
+            assert m.def_eq(p1, p3)
+            # Neither deadJunk1 nor deadJunk2 was ever imported!
+            assert all(
+                not (
+                    isinstance(le, W_Const)
+                    and (le.name.syntactic_eq(dead1.name) or le.name.syntactic_eq(dead2.name))
+                )
+                for le in store.leaves
+            )
+        finally:
+            tc.free()

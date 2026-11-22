@@ -10447,6 +10447,26 @@ class Machine(object):
             return self.def_eq(n1, n2)
         return self._def_eq_core(h1, h2)
 
+    def _is_ctor_body_leaf(self, head):
+        """Whether ``head`` (already known `_LF_DELTA`) is a `W_Definition`
+        with a `_CtorBody` (so unfolding it in full inside `_proj_lazy_eq`
+        would materialize unused sibling/proof fields instead of letting
+        `try_proj` extract only the projected field lazily)."""
+        j = leaf_index(head)
+        e = self.store.leaves[j]
+        if not isinstance(e, W_Const):
+            return False
+        decl = self._leaf_decl(head, e)
+        if decl is None:
+            return False
+        wk = decl.w_kind
+        if not isinstance(wk, W_Definition):
+            return False
+        cb = wk._ctor_body
+        if cb is None:
+            cb = wk.init_ctor_body(self.tc.declarations)
+        return cb.m >= 0
+
     def _proj_lazy_eq(self, h1, h2, depth):
         """Bounded cheap definitional equality check for two projected
         structures (no full projection reduction, no unbounded recursion).
@@ -10501,6 +10521,10 @@ class Machine(object):
             f2 = self._leaf_flags(head2)
             d1 = (f1 & _LF_DELTA) != 0
             d2 = (f2 & _LF_DELTA) != 0
+            if d1 and self._is_ctor_body_leaf(head1):
+                d1 = False
+            if d2 and self._is_ctor_body_leaf(head2):
+                d2 = False
             if not d1 and not d2:
                 return False
             self._proj_rem -= 1
