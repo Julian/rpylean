@@ -817,3 +817,124 @@ class TestJointCheckAndInferExpected(object):
                 )
         finally:
             tc.free()
+
+    def test_inst_eq_inst_buf_and_nested_expected_pat(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import TermStore
+        from rpylean.objects import W_TypeError
+
+        # 1. Unit test TermStore.inst_eq_inst_buf across apps, binders, proj, let
+        store = TermStore(None, capacity=32)
+        try:
+            fh = store.import_term(f.const())
+            gh = store.import_term(g.const())
+            xh = store.import_term(x.const())
+            yh = store.import_term(y.const())
+            b0h = store.bvar(0)
+            b1h = store.bvar(1)
+            b2h = store.bvar(2)
+            m1 = store._spine_top
+            store.spine_push(yh)
+            store.spine_push(xh)
+            m2 = store._spine_top
+            store.spine_push(fh)
+            store.spine_push(yh)
+            store.spine_push(xh)
+            try:
+                # p1 = f #1 #0 (#2) with [y, x] -> f x y #0
+                # p2 = f #2 #1 (#3) with [f, y, x] -> f x y #0
+                p1 = store.cons_app(store.cons_app(store.cons_app(fh, b1h), b0h), b2h)
+                p2 = store.cons_app(
+                    store.cons_app(store.cons_app(fh, b2h), b1h), store.bvar(3),
+                )
+                p_bad = store.cons_app(
+                    store.cons_app(store.cons_app(fh, b1h), b1h), store.bvar(3),
+                )
+                # Nested forall with binders: forall (z : f #1), g #0 #1 vs forall (z : f #2), g #0 #2
+                binder = x.binder(type=NAT)
+                pi1 = store.forall(binder, store.cons_app(fh, b1h), store.cons_app(store.cons_app(gh, b0h), b1h))
+                pi2 = store.forall(binder, store.cons_app(fh, b2h), store.cons_app(store.cons_app(gh, b0h), b2h))
+                pi_bad = store.forall(binder, store.cons_app(fh, b2h), store.cons_app(store.cons_app(gh, b0h), b1h))
+                # Proj & Let
+                sname = Name.simple("S")
+                pr1 = store.proj(sname, 1, store.cons_app(fh, b0h))
+                pr2 = store.proj(sname, 1, store.cons_app(fh, b1h))
+                pr_bad = store.proj(sname, 0, store.cons_app(fh, b1h))
+                let1 = store.let(x, store.cons_app(fh, b1h), store.cons_app(gh, b0h), store.cons_app(b0h, b1h))
+                let2 = store.let(x, store.cons_app(fh, b2h), store.cons_app(gh, b1h), store.cons_app(b0h, b2h))
+                before = store.nrecs
+                assert store.inst_eq_inst_buf(p1, m1, 2, p2, m2, 3)
+                assert not store.inst_eq_inst_buf(p1, m1, 2, p_bad, m2, 3)
+                assert store.inst_eq_inst_buf(pi1, m1, 2, pi2, m2, 3)
+                assert not store.inst_eq_inst_buf(pi1, m1, 2, pi_bad, m2, 3)
+                assert store.inst_eq_inst_buf(pr1, m1, 2, pr2, m2, 3)
+                assert not store.inst_eq_inst_buf(pr1, m1, 2, pr_bad, m2, 3)
+                assert store.inst_eq_inst_buf(let1, m1, 2, let2, m2, 3)
+                assert store.nrecs == before
+            finally:
+                store.unapp_pop(m1)
+        finally:
+            store.free()
+
+        # 2. End-to-end nested Eq.trans proof chain + shared DAG subterm:
+        # verifies zero intermediate Eq type allocations AND safe DAG reuse.
+        eq_n = Name.simple("MyEq")
+        eq_decl = eq_n.axiom(
+            type=forall(x.binder(type=TYPE))(
+                forall(y.binder(type=b0))(forall(y.binder(type=b1))(PROP)),
+            ),
+        )
+        # trans : forall (A:Type) (a b c:A), MyEq A a b -> MyEq A b c -> MyEq A a c
+        trans_n = Name.simple("trans")
+        trans_ty = forall(x.binder(type=TYPE))(
+            forall(y.binder(type=b0))(
+                forall(y.binder(type=b1))(
+                    forall(y.binder(type=b2))(
+                        forall(y.binder(type=eq_n.const().app(b3_, b2, b1)))(
+                            forall(y.binder(type=eq_n.const().app(W_BVar(4), b2, b1)))(
+                                eq_n.const().app(W_BVar(5), W_BVar(4), b2),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        trans_decl = trans_n.axiom(type=trans_ty)
+        a_ty = Name.simple("A").axiom(type=TYPE)
+        a1 = Name.simple("a1").axiom(type=a_ty.name.const())
+        a2 = Name.simple("a2").axiom(type=a_ty.name.const())
+        a3 = Name.simple("a3").axiom(type=a_ty.name.const())
+        h12 = Name.simple("h12").axiom(type=eq_n.const().app(a_ty.name.const(), a1.name.const(), a2.name.const()))
+        h23 = Name.simple("h23").axiom(type=eq_n.const().app(a_ty.name.const(), a2.name.const(), a3.name.const()))
+        h11 = Name.simple("h11").axiom(type=eq_n.const().app(a_ty.name.const(), a1.name.const(), a1.name.const()))
+        env = Environment.having([eq_decl, trans_decl, a_ty, a1, a2, a3, h12, h23, h11])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            A, v1, v2, v3 = a_ty.name.const(), a1.name.const(), a2.name.const(), a3.name.const()
+            step1 = trans_n.const().app(A, v1, v1, v2, h11.name.const(), h12.name.const())
+            # Outer trans takes step1 (whose intermediate MyEq A a1 a2 is never needed!)
+            chain = trans_n.const().app(A, v1, v2, v3, step1, h23.name.const())
+            goal = eq_n.const().app(A, v1, v3)
+            # Pre-import leaves & terms so we can count purely type-checking allocations.
+            s = m.store
+            chain_h = s.import_term(chain)
+            goal_h = s.import_term(goal)
+            for c in [trans_n.const(), A, v1, v2, v3, h11.name.const(), h12.name.const(), h23.name.const()]:
+                m.infer(s.import_term(c), True)
+            before = s.nrecs
+            assert m.infer_expected(chain_h, goal_h) == goal_h
+            # Zero new records allocated for step1's intermediate type OR chain's return type!
+            assert s.nrecs == before
+
+            # Shared DAG: step1 was checked with M_INFER == 0; now infer(step1, True)
+            # must materialize its exact type cleanly without re-checking args.
+            step1_h = s.import_term(step1)
+            assert m.infer(step1_h, True) == s.import_term(eq_n.const().app(A, v1, v2))
+
+            # Mismatched proof still raises W_TypeError.
+            bad = trans_n.const().app(A, v1, v2, v3, step1, h12.name.const())
+            with pytest.raises(W_TypeError):
+                m.infer(s.import_term(bad), True)
+        finally:
+            tc.free()

@@ -3204,6 +3204,317 @@ class TermStore(object):
             return budget if pbody == tbody else -1
         return self._inst_eq_depth(pbody, buf, start, n, tbody, depth + 1, budget)
 
+    def inst_eq_inst_buf(self, p1, s1, n1, p2, s2, n2):
+        """Return True only when ``instantiate_multi_buf(p1, s1, n1, 0)`` and
+        ``instantiate_multi_buf(p2, s2, n2, 0)`` would produce the exact same
+        handle, without allocating records or probing consing tables. Bounded
+        by a step budget so heavily shared DAGs fall back cleanly."""
+        return self._inst_eq_inst_d0(
+            p1, self._spine_buf, s1, n1, p2, s2, n2, 512,
+        ) >= 0
+
+    def _inst_eq_inst_d0(self, p1, buf, s1, n1, p2, s2, n2, budget):
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        v1 = 0
+        b1 = 0
+        h1 = 0
+        if is_leaf(p1):
+            pm1 = _s32(leaf_meta[leaf_index(p1)])
+            if pm1 <= 1:
+                v1 = p1
+            else:
+                bid1 = (pm1 >> 1) - 1
+                if bid1 < n1:
+                    v1 = _s32(buf[s1 + bid1])
+                else:
+                    if not is_leaf(p2):
+                        return -1
+                    pm2 = _s32(leaf_meta[leaf_index(p2)])
+                    if pm2 <= 1:
+                        return -1
+                    bid2 = (pm2 >> 1) - 1
+                    tmeta = (bid1 - n1 + 1) << 1
+                    if bid2 < n2:
+                        v2 = _s32(buf[s2 + bid2])
+                        if is_leaf(v2) and _s32(leaf_meta[leaf_index(v2)]) == tmeta:
+                            return budget
+                        return -1
+                    return budget if (bid1 - n1) == (bid2 - n2) else -1
+        else:
+            b1 = rec_index(p1) << 2
+            h1 = _s32(recs[b1])
+            if h1 < 16:
+                v1 = p1
+        if v1 != 0:
+            if is_leaf(p2):
+                pm2 = _s32(leaf_meta[leaf_index(p2)])
+                if pm2 <= 1:
+                    return budget if v1 == p2 else -1
+                bid2 = (pm2 >> 1) - 1
+                if bid2 < n2:
+                    return budget if v1 == _s32(buf[s2 + bid2]) else -1
+                if (is_leaf(v1)
+                        and _s32(leaf_meta[leaf_index(v1)]) == ((bid2 - n2 + 1) << 1)):
+                    return budget
+                return -1
+            if _s32(recs[rec_index(p2) << 2]) < 16:
+                return budget if v1 == p2 else -1
+            return self._inst_eq_d0(p2, buf, s2, n2, v1, budget)
+        # p1 is an open record (`b1`, `h1` already loaded).
+        if is_leaf(p2):
+            pm2 = _s32(leaf_meta[leaf_index(p2)])
+            if pm2 <= 1:
+                return -1
+            bid2 = (pm2 >> 1) - 1
+            if bid2 < n2:
+                return self._inst_eq_d0(p1, buf, s1, n1, _s32(buf[s2 + bid2]), budget)
+            return -1
+        b2 = rec_index(p2) << 2
+        h2 = _s32(recs[b2])
+        if h2 < 16:
+            return self._inst_eq_d0(p1, buf, s1, n1, p2, budget)
+        k1 = h1 & _KIND_MASK
+        if k1 != (h2 & _KIND_MASK):
+            return -1
+        if k1 == KIND_APP:
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                pb1 = _s32(recs[b1 + F_B])
+                pb2 = _s32(recs[b2 + F_B])
+                if is_leaf(pb1) and is_leaf(pb2):
+                    pm1 = _s32(leaf_meta[leaf_index(pb1)])
+                    pm2 = _s32(leaf_meta[leaf_index(pb2)])
+                    if pm1 > 1 and pm2 > 1:
+                        bid1 = (pm1 >> 1) - 1
+                        bid2 = (pm2 >> 1) - 1
+                        if bid1 < n1 and bid2 < n2:
+                            if _s32(buf[s1 + bid1]) != _s32(buf[s2 + bid2]):
+                                return -1
+                        else:
+                            budget = self._inst_eq_inst_d0(
+                                pb1, buf, s1, n1, pb2, s2, n2, budget,
+                            )
+                            if budget < 0:
+                                return -1
+                    elif pm1 <= 1 and pm2 <= 1:
+                        if pb1 != pb2:
+                            return -1
+                    else:
+                        budget = self._inst_eq_inst_d0(
+                            pb1, buf, s1, n1, pb2, s2, n2, budget,
+                        )
+                        if budget < 0:
+                            return -1
+                else:
+                    budget = self._inst_eq_inst_d0(
+                        pb1, buf, s1, n1, pb2, s2, n2, budget,
+                    )
+                    if budget < 0:
+                        return -1
+                pa1 = _s32(recs[b1 + F_A])
+                pa2 = _s32(recs[b2 + F_A])
+                if not is_leaf(pa1) and not is_leaf(pa2):
+                    nb1 = rec_index(pa1) << 2
+                    nb2 = rec_index(pa2) << 2
+                    nh1 = _s32(recs[nb1])
+                    nh2 = _s32(recs[nb2])
+                    if nh1 >= 16 and nh2 >= 16:
+                        nk1 = nh1 & _KIND_MASK
+                        if nk1 != (nh2 & _KIND_MASK):
+                            return -1
+                        if nk1 == KIND_APP:
+                            b1 = nb1
+                            b2 = nb2
+                            continue
+                elif pa1 == pa2 and is_leaf(pa1):
+                    if _s32(leaf_meta[leaf_index(pa1)]) <= 1:
+                        return budget
+                return self._inst_eq_inst_d0(
+                    pa1, buf, s1, n1, pa2, s2, n2, budget,
+                )
+        if budget <= 0:
+            return -1
+        budget -= 1
+        if k1 == KIND_LAMBDA or k1 == KIND_FORALL:
+            budget = self._inst_eq_inst_d0(
+                _s32(recs[b1 + F_A]), buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, budget,
+            )
+            if budget < 0:
+                return -1
+            pb1 = _s32(recs[b1 + F_B])
+            pb2 = _s32(recs[b2 + F_B])
+            if self.loose_bvar_range(pb1) <= 1 and self.loose_bvar_range(pb2) <= 1:
+                return budget if pb1 == pb2 else -1
+            return self._inst_eq_inst_depth(
+                pb1, buf, s1, n1, pb2, s2, n2, 1, budget,
+            )
+        if k1 == KIND_PROJ:
+            if _s32(recs[b1 + F_B]) != _s32(recs[b2 + F_B]):
+                return -1
+            return self._inst_eq_inst_d0(
+                _s32(recs[b1 + F_A]), buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, budget,
+            )
+        assert k1 == KIND_LET
+        budget = self._inst_eq_inst_d0(
+            _s32(recs[b1 + F_A]), buf, s1, n1,
+            _s32(recs[b2 + F_A]), s2, n2, budget,
+        )
+        if budget < 0:
+            return -1
+        pp1 = _s32(recs[b1 + F_B])
+        pp2 = _s32(recs[b2 + F_B])
+        budget = self._inst_eq_inst_d0(
+            self.field_a(pp1), buf, s1, n1,
+            self.field_a(pp2), s2, n2, budget,
+        )
+        if budget < 0:
+            return -1
+        pbody1 = self.field_b(pp1)
+        pbody2 = self.field_b(pp2)
+        if self.loose_bvar_range(pbody1) <= 1 and self.loose_bvar_range(pbody2) <= 1:
+            return budget if pbody1 == pbody2 else -1
+        return self._inst_eq_inst_depth(
+            pbody1, buf, s1, n1, pbody2, s2, n2, 1, budget,
+        )
+
+    def _inst_eq_inst_depth(self, p1, buf, s1, n1, p2, s2, n2, depth, budget):
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        v1 = 0
+        b1 = 0
+        h1 = 0
+        if is_leaf(p1):
+            lo1 = _s32(leaf_meta[leaf_index(p1)]) >> 1
+            if lo1 <= depth:
+                v1 = p1
+            else:
+                id1 = lo1 - 1
+                rel1 = id1 - depth
+                if rel1 < n1:
+                    sub1 = _s32(buf[s1 + rel1])
+                    if self.loose_bvar_range(sub1) != 0:
+                        return -1
+                    v1 = sub1
+                else:
+                    if not is_leaf(p2):
+                        return -1
+                    lo2 = _s32(leaf_meta[leaf_index(p2)]) >> 1
+                    if lo2 <= depth:
+                        return -1
+                    id2 = lo2 - 1
+                    rel2 = id2 - depth
+                    if rel2 < n2:
+                        return -1
+                    return budget if (id1 - n1) == (id2 - n2) else -1
+        else:
+            b1 = rec_index(p1) << 2
+            h1 = _s32(recs[b1])
+            if (h1 >> 4) <= depth:
+                v1 = p1
+        if v1 != 0:
+            return self._inst_eq_depth(p2, buf, s2, n2, v1, depth, budget)
+        if is_leaf(p2):
+            lo2 = _s32(leaf_meta[leaf_index(p2)]) >> 1
+            if lo2 <= depth:
+                return -1
+            id2 = lo2 - 1
+            rel2 = id2 - depth
+            if rel2 < n2:
+                sub2 = _s32(buf[s2 + rel2])
+                if self.loose_bvar_range(sub2) != 0:
+                    return -1
+                return self._inst_eq_depth(p1, buf, s1, n1, sub2, depth, budget)
+            return -1
+        b2 = rec_index(p2) << 2
+        h2 = _s32(recs[b2])
+        if (h2 >> 4) <= depth:
+            return self._inst_eq_depth(p1, buf, s1, n1, p2, depth, budget)
+        k1 = h1 & _KIND_MASK
+        if k1 != (h2 & _KIND_MASK):
+            return -1
+        if k1 == KIND_APP:
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                budget = self._inst_eq_inst_depth(
+                    _s32(recs[b1 + F_B]), buf, s1, n1,
+                    _s32(recs[b2 + F_B]), s2, n2, depth, budget,
+                )
+                if budget < 0:
+                    return -1
+                pa1 = _s32(recs[b1 + F_A])
+                pa2 = _s32(recs[b2 + F_A])
+                if not is_leaf(pa1) and not is_leaf(pa2):
+                    nb1 = rec_index(pa1) << 2
+                    nb2 = rec_index(pa2) << 2
+                    nh1 = _s32(recs[nb1])
+                    nh2 = _s32(recs[nb2])
+                    if (nh1 >> 4) > depth and (nh2 >> 4) > depth:
+                        nk1 = nh1 & _KIND_MASK
+                        if nk1 != (nh2 & _KIND_MASK):
+                            return -1
+                        if nk1 == KIND_APP:
+                            b1 = nb1
+                            b2 = nb2
+                            continue
+                return self._inst_eq_inst_depth(
+                    pa1, buf, s1, n1, pa2, s2, n2, depth, budget,
+                )
+        if budget <= 0:
+            return -1
+        budget -= 1
+        if k1 == KIND_LAMBDA or k1 == KIND_FORALL:
+            budget = self._inst_eq_inst_depth(
+                _s32(recs[b1 + F_A]), buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, depth, budget,
+            )
+            if budget < 0:
+                return -1
+            pb1 = _s32(recs[b1 + F_B])
+            pb2 = _s32(recs[b2 + F_B])
+            if (self.loose_bvar_range(pb1) <= depth + 1
+                    and self.loose_bvar_range(pb2) <= depth + 1):
+                return budget if pb1 == pb2 else -1
+            return self._inst_eq_inst_depth(
+                pb1, buf, s1, n1, pb2, s2, n2, depth + 1, budget,
+            )
+        if k1 == KIND_PROJ:
+            if _s32(recs[b1 + F_B]) != _s32(recs[b2 + F_B]):
+                return -1
+            return self._inst_eq_inst_depth(
+                _s32(recs[b1 + F_A]), buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, depth, budget,
+            )
+        assert k1 == KIND_LET
+        budget = self._inst_eq_inst_depth(
+            _s32(recs[b1 + F_A]), buf, s1, n1,
+            _s32(recs[b2 + F_A]), s2, n2, depth, budget,
+        )
+        if budget < 0:
+            return -1
+        pp1 = _s32(recs[b1 + F_B])
+        pp2 = _s32(recs[b2 + F_B])
+        budget = self._inst_eq_inst_depth(
+            self.field_a(pp1), buf, s1, n1,
+            self.field_a(pp2), s2, n2, depth, budget,
+        )
+        if budget < 0:
+            return -1
+        pbody1 = self.field_b(pp1)
+        pbody2 = self.field_b(pp2)
+        if (self.loose_bvar_range(pbody1) <= depth + 1
+                and self.loose_bvar_range(pbody2) <= depth + 1):
+            return budget if pbody1 == pbody2 else -1
+        return self._inst_eq_inst_depth(
+            pbody1, buf, s1, n1, pbody2, s2, n2, depth + 1, budget,
+        )
+
     def instantiate_multi_buf(self, h, start, count, depth=0):
         """
         Like `instantiate_multi`, reading ``count`` substitutes directly from
@@ -6637,7 +6948,10 @@ class Machine(object):
         memos = store.memos
         if check:
             if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
-                return _s32(memos[mbase + M_INFER])
+                t = _s32(memos[mbase + M_INFER])
+                if t != 0:
+                    return t
+                return self._infer_miss(h, ri, mbase, False)
         else:
             t = _s32(memos[mbase + M_INFER])
             if t != 0:
@@ -6661,7 +6975,10 @@ class Machine(object):
         mbase = ri * MEMO_SLOTS
         memos = store.memos
         if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
-            return _s32(memos[mbase + M_INFER])
+            t = _s32(memos[mbase + M_INFER])
+            if t != 0:
+                return t
+            return self._infer_miss(h, ri, mbase, False)
         if (expected != 0
                 and not is_leaf(expected)
                 and not self._def_eq_hooked
@@ -6678,6 +6995,35 @@ class Machine(object):
         t = self._infer_app(h, True, expected)
         memos = self.store.memos
         memos[mbase + M_INFER] = _u32(t)
+        memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return t
+
+    @dont_inline
+    def _infer_app_expected_pat(self, h, exp_pat, exp_start, exp_n):
+        """Check `KIND_APP` record ``h`` expecting its return type to equal
+        ``instantiate_multi_buf(exp_pat, exp_start, exp_n, 0)``.
+
+        Returns 0 when ``h`` is verified well-typed and its return type matched
+        structurally without materializing either side (marking `M_CHECKED_GEN`
+        so a later shared visit computes `M_INFER` without re-checking args);
+        otherwise returns the materialized type handle."""
+        store = self.store
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
+        if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+            t = _s32(memos[mbase + M_INFER])
+            if t != 0:
+                return t
+            return self._infer_miss(h, ri, mbase, False)
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        t = self._infer_app(h, True, exp_pat, exp_start, exp_n)
+        memos = self.store.memos
+        if t != 0:
+            memos[mbase + M_INFER] = _u32(t)
         memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
 
@@ -6987,7 +7333,7 @@ class Machine(object):
             raise W_NotASort(self.tc, self.export(h), inferred_type=self.export(t))
         return sort.level
 
-    def _infer_app(self, h, check, expected=0):
+    def _infer_app(self, h, check, expected=0, exp_start=0, exp_n=0):
         store = self.store
         tc = self.tc
         fn = store.field_a(h)
@@ -7017,14 +7363,27 @@ class Machine(object):
             body = store.field_b(fn_type)
             if store.loose_bvar_range(body) == 0:
                 return body
-            if (expected != 0 and not is_leaf(expected)
-                    and not self._def_eq_hooked):
-                sm = store._spine_top
-                store.spine_push(arg)
-                ok_exp = store.inst_eq_buf(body, sm, 1, expected)
-                store.unapp_pop(sm)
-                if ok_exp:
-                    return expected
+            if is_leaf(body):
+                bid = (_s32(store.leaf_meta[leaf_index(body)]) >> 1) - 1
+                return arg if bid == 0 else store.bvar(bid - 1)
+            if expected != 0 and not self._def_eq_hooked:
+                if exp_n == 0:
+                    if not is_leaf(expected):
+                        sm = store._spine_top
+                        store.spine_push(arg)
+                        ok_exp = store.inst_eq_buf(body, sm, 1, expected)
+                        store.unapp_pop(sm)
+                        if ok_exp:
+                            return expected
+                else:
+                    sm = store._spine_top
+                    store.spine_push(arg)
+                    ok_exp = store.inst_eq_inst_buf(
+                        body, sm, 1, expected, exp_start, exp_n,
+                    )
+                    store.unapp_pop(sm)
+                    if ok_exp:
+                        return 0
             return store.instantiate(body, arg, 0)
         mark = store._spine_top
         head = store.unapp_push(h)
@@ -7062,7 +7421,22 @@ class Machine(object):
                         domain = store.bvar(bid - plen)
                     arg_type = self.infer_expected(arg, domain)
                 else:
-                    arg_type = self.infer(arg, True)
+                    if (not self._def_eq_hooked
+                            and not is_leaf(arg)
+                            and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_APP):
+                        arg_type = self._infer_app_expected_pat(
+                            arg, domain, mark + i + 1, plen,
+                        )
+                        if arg_type == 0:
+                            fn_type = store.field_b(fn_type)
+                            if store.loose_bvar_range(fn_type) == 0:
+                                plen = 0
+                            else:
+                                plen += 1
+                            i -= 1
+                            continue
+                    else:
+                        arg_type = self.infer(arg, True)
                     if (not is_leaf(arg_type)
                             and not self._def_eq_hooked
                             and store.inst_eq_buf(domain, mark + i + 1, plen, arg_type)):
@@ -7099,10 +7473,17 @@ class Machine(object):
                     plen += 1
                 i -= 1
             if plen > 0:
-                if (expected != 0 and not is_leaf(expected)
-                        and not self._def_eq_hooked
-                        and store.inst_eq_buf(fn_type, mark, plen, expected)):
-                    return expected
+                if is_leaf(fn_type):
+                    bid = (_s32(store.leaf_meta[leaf_index(fn_type)]) >> 1) - 1
+                    return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
+                if expected != 0 and not self._def_eq_hooked:
+                    if exp_n == 0:
+                        if (not is_leaf(expected)
+                                and store.inst_eq_buf(fn_type, mark, plen, expected)):
+                            return expected
+                    elif store.inst_eq_inst_buf(
+                            fn_type, mark, plen, expected, exp_start, exp_n):
+                        return 0
                 if plen == 1:
                     fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
                 else:
@@ -7141,6 +7522,9 @@ class Machine(object):
                 plen += 1
             i -= 1
         if plen > 0:
+            if is_leaf(fn_type):
+                bid = (_s32(store.leaf_meta[leaf_index(fn_type)]) >> 1) - 1
+                return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
             if plen == 1:
                 fn_type = store.instantiate(fn_type, store.spine_arg(mark), 0)
             else:
