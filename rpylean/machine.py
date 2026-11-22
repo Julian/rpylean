@@ -34,6 +34,7 @@ from rpylean.objects import (
     NAT,
     NAT_ZERO,
     PROP,
+    SAFETY_SAFE,
     STRING,
     Name,
     W_App,
@@ -410,6 +411,11 @@ _WARM_MAX_LEAVES = 1 << 16
 _WARM_MAX_EQV = 1 << 17
 _WARM_MAX_NEQ = 1 << 17
 _WARM_MAX_FAILED = 1 << 17
+#: Sentinel stored in `leaf_checked` and `M_CHECKED_GEN` for closed ground
+#: leaves/records proven well-typed under `SAFETY_SAFE`, `group < 0`, zero
+#: `W_LevelParam`s, and `decl.index < current.index`. Valid across all
+#: subsequent monotonic warm declarations even after `check_gen` bumps.
+_CHECKED_PERM = 0x7FFFFFFF
 
 
 @always_inline
@@ -5643,6 +5649,8 @@ class Machine(object):
         '_ld_h1', '_ld_h2', '_proj_rem',
         '_def_eq_hooked', '_stack_tick', '_fvar_reused',
         'check_gen', '_last_env', '_is_clean', 'recheck_on_error',
+        '_warm_max_index', '_warm_levels', '_warm_safe_cohort',
+        '_can_perm', '_saw_nonperm',
         'h_prop', 'h_true', 'h_false', 'h_nat', 'h_nat_zero', 'h_string',
     ]
 
@@ -5679,6 +5687,11 @@ class Machine(object):
         self._last_env = tc.env
         self._is_clean = True
         self.recheck_on_error = False
+        self._warm_max_index = -1
+        self._warm_levels = None
+        self._warm_safe_cohort = False
+        self._can_perm = False
+        self._saw_nonperm = False
         self._forget()
 
     @dont_inline
@@ -5696,6 +5709,7 @@ class Machine(object):
             and self._eqv_count < _WARM_MAX_EQV
             and self._neq.size < _WARM_MAX_NEQ
             and self._failed.size < _WARM_MAX_FAILED
+            and self.check_gen < 0x70000000
         )
 
     def _forget(self):
@@ -5732,6 +5746,11 @@ class Machine(object):
         self.check_gen = 1
         self._is_clean = True
         self.recheck_on_error = False
+        self._warm_max_index = -1
+        self._warm_levels = None
+        self._warm_safe_cohort = False
+        self._can_perm = False
+        self._saw_nonperm = False
         self._forget()
 
     def free(self):
@@ -6939,15 +6958,22 @@ class Machine(object):
             j = leaf_index(h)
             t = _s32(store.leaf_infer[j])
             if t != 0:
-                if check and _s32(store.leaf_checked[j]) != self.check_gen:
-                    return self._check_leaf(h, t)
+                if check:
+                    cg = _s32(store.leaf_checked[j])
+                    if cg < self.check_gen:
+                        return self._check_leaf(h, t)
+                    if cg != _CHECKED_PERM:
+                        self._saw_nonperm = True
                 return t
             return self._infer_leaf(h, check)
         ri = rec_index(h)
         mbase = ri * MEMO_SLOTS
         memos = store.memos
         if check:
-            if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+            cg = _s32(memos[mbase + M_CHECKED_GEN])
+            if cg >= self.check_gen:
+                if cg != _CHECKED_PERM:
+                    self._saw_nonperm = True
                 t = _s32(memos[mbase + M_INFER])
                 if t != 0:
                     return t
@@ -6967,14 +6993,20 @@ class Machine(object):
             j = leaf_index(h)
             t = _s32(store.leaf_infer[j])
             if t != 0:
-                if _s32(store.leaf_checked[j]) != self.check_gen:
+                cg = _s32(store.leaf_checked[j])
+                if cg < self.check_gen:
                     return self._check_leaf(h, t)
+                if cg != _CHECKED_PERM:
+                    self._saw_nonperm = True
                 return t
             return self._infer_leaf(h, True)
         ri = rec_index(h)
         mbase = ri * MEMO_SLOTS
         memos = store.memos
-        if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+        cg = _s32(memos[mbase + M_CHECKED_GEN])
+        if cg >= self.check_gen:
+            if cg != _CHECKED_PERM:
+                self._saw_nonperm = True
             t = _s32(memos[mbase + M_INFER])
             if t != 0:
                 return t
@@ -6992,10 +7024,20 @@ class Machine(object):
         self._stack_tick = tick
         if tick == 0:
             self._check_stack_slow("infer")
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
         t = self._infer_app(h, True, expected)
-        memos = self.store.memos
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        store = self.store
+        memos = store.memos
         memos[mbase + M_INFER] = _u32(t)
-        memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
 
     @dont_inline
@@ -7011,7 +7053,10 @@ class Machine(object):
         ri = rec_index(h)
         mbase = ri * MEMO_SLOTS
         memos = store.memos
-        if _s32(memos[mbase + M_CHECKED_GEN]) == self.check_gen:
+        cg = _s32(memos[mbase + M_CHECKED_GEN])
+        if cg >= self.check_gen:
+            if cg != _CHECKED_PERM:
+                self._saw_nonperm = True
             t = _s32(memos[mbase + M_INFER])
             if t != 0:
                 return t
@@ -7020,11 +7065,20 @@ class Machine(object):
         self._stack_tick = tick
         if tick == 0:
             self._check_stack_slow("infer")
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
         t = self._infer_app(h, True, exp_pat, exp_start, exp_n)
-        memos = self.store.memos
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
         if t != 0:
             memos[mbase + M_INFER] = _u32(t)
-        memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
 
     @dont_inline
@@ -7035,23 +7089,32 @@ class Machine(object):
             self._check_stack_slow("infer")
         store = self.store
         kind = _s32(store.recs[ri << 2]) & _KIND_MASK
+        prev_np = self._saw_nonperm
+        if check:
+            self._saw_nonperm = False
         if kind == KIND_APP:
             t = self._infer_app(h, check)
         elif kind == KIND_LAMBDA:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
                     and store.is_heavy(h)):
+                if check:
+                    self._saw_nonperm = True
                 t = self._infer_open_lambda(h, [], 0, check)
             else:
                 t = self._infer_lambda(h, check)
         elif kind == KIND_FORALL:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
                     and store.is_heavy(h)):
+                if check:
+                    self._saw_nonperm = True
                 t = self._infer_open_forall(h, [], 0, check)
             else:
                 t = self._infer_forall(h, check)
         elif kind == KIND_LET:
             if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
                     and store.is_heavy(h)):
+                if check:
+                    self._saw_nonperm = True
                 t = self._infer_open_let(h, [], 0, check)
             else:
                 t = self._infer_let(h, check)
@@ -7062,7 +7125,14 @@ class Machine(object):
         memos = store.memos
         memos[mbase + M_INFER] = _u32(t)
         if check:
-            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+            child_np = self._saw_nonperm
+            self._saw_nonperm = prev_np or child_np
+            if (not child_np
+                    and self._can_perm
+                    and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+            else:
+                memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
 
     # Under the binders of a heavy term nothing is substituted into it:
@@ -7272,19 +7342,39 @@ class Machine(object):
     def _check_leaf(self, h, t):
         store = self.store
         tc = self.tc
+        j = leaf_index(h)
         e = store.leaf(h)
         if isinstance(e, W_Const):
             decl = self._leaf_decl(h, e)
             if decl is None:
                 decl = get_decl(tc.declarations, e.name)
             tc.check_reference(e, decl)
-            for lvl in e.levels:
-                if lvl.has_param:
-                    tc.check_level(lvl)
+            if e.has_level_param():
+                for lvl in e.levels:
+                    if lvl.has_param:
+                        tc.check_level(lvl)
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+            elif (self._can_perm
+                    and decl.safety == SAFETY_SAFE
+                    and decl.index >= 0
+                    and decl.index < tc.decl.index):
+                store.leaf_checked[j] = _u32(_CHECKED_PERM)
+            else:
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
         elif isinstance(e, W_Sort):
             if e.level.has_param:
                 tc.check_level(e.level)
-        store.leaf_checked[leaf_index(h)] = _u32(self.check_gen)
+                store.leaf_checked[j] = _u32(self.check_gen)
+                self._saw_nonperm = True
+            else:
+                store.leaf_checked[j] = _u32(_CHECKED_PERM)
+        elif isinstance(e, W_LitNat) or isinstance(e, W_LitStr):
+            store.leaf_checked[j] = _u32(_CHECKED_PERM)
+        else:
+            store.leaf_checked[j] = _u32(self.check_gen)
+            self._saw_nonperm = True
         return t
 
     @dont_inline
@@ -7299,26 +7389,41 @@ class Machine(object):
                 decl = get_decl(tc.declarations, e.name)
             if check:
                 tc.check_reference(e, decl)
-                for lvl in e.levels:
-                    if lvl.has_param:
-                        tc.check_level(lvl)
-                store.leaf_checked[j] = _u32(self.check_gen)
+                if e.has_level_param():
+                    for lvl in e.levels:
+                        if lvl.has_param:
+                            tc.check_level(lvl)
+                    store.leaf_checked[j] = _u32(self.check_gen)
+                    self._saw_nonperm = True
+                elif (self._can_perm
+                        and decl.safety == SAFETY_SAFE
+                        and decl.index >= 0
+                        and decl.index < tc.decl.index):
+                    store.leaf_checked[j] = _u32(_CHECKED_PERM)
+                else:
+                    store.leaf_checked[j] = _u32(self.check_gen)
+                    self._saw_nonperm = True
             t = store.import_const_term(e, decl, decl.type)
         elif isinstance(e, W_Sort):
             if check:
                 if e.level.has_param:
                     tc.check_level(e.level)
-                store.leaf_checked[j] = _u32(self.check_gen)
+                    store.leaf_checked[j] = _u32(self.check_gen)
+                    self._saw_nonperm = True
+                else:
+                    store.leaf_checked[j] = _u32(_CHECKED_PERM)
             t = store.leaf_for(e.level.succ().sort())
         elif isinstance(e, W_LitNat):
             t = self.h_nat
-            store.leaf_checked[j] = _u32(self.check_gen)
+            store.leaf_checked[j] = _u32(_CHECKED_PERM)
         elif isinstance(e, W_LitStr):
             t = self.h_string
-            store.leaf_checked[j] = _u32(self.check_gen)
+            store.leaf_checked[j] = _u32(_CHECKED_PERM)
         elif isinstance(e, W_FVar):
             t = store.import_term(e.binder.type)
             store.leaf_checked[j] = _u32(self.check_gen)
+            if check:
+                self._saw_nonperm = True
         else:
             raise LooseBoundVariable((_s32(store.leaf_meta[j]) >> 1) - 1)
         store.leaf_infer[j] = _u32(t)
@@ -9053,14 +9158,78 @@ class _Spare(object):
 _SPARE = _Spare()
 
 
+def _levels_subset(prev, cur):
+    """Whether every universe parameter Name in ``prev`` is present in ``cur``."""
+    if prev is cur:
+        return True
+    if prev is None:
+        return False
+    n = len(prev)
+    if n == 0:
+        return True
+    if cur is None:
+        return False
+    m = len(cur)
+    if n > m:
+        return False
+    if n == 1:
+        p0 = prev[0]
+        if m == 1:
+            return cur[0] is p0
+        i = 0
+        while i < m:
+            if cur[i] is p0:
+                return True
+            i += 1
+        return False
+    i = 0
+    while i < n:
+        p = prev[i]
+        found = False
+        j = 0
+        while j < m:
+            if cur[j] is p:
+                found = True
+                break
+            j += 1
+        if not found:
+            return False
+        i += 1
+    return True
+
+
+def _init_warm_cohort(machine, tc, allow_warm):
+    decl = tc.decl
+    if (allow_warm
+            and decl is not None
+            and decl.index >= 0
+            and decl.group < 0
+            and decl.safety == SAFETY_SAFE
+            and not tc.def_eq_hooked):
+        machine._warm_max_index = decl.index
+        machine._warm_levels = decl.levels
+        machine._warm_safe_cohort = True
+        machine._can_perm = True
+    else:
+        machine._warm_max_index = (
+            decl.index if (decl is not None and decl.index >= 0) else -1
+        )
+        machine._warm_levels = None
+        machine._warm_safe_cohort = False
+        machine._can_perm = False
+    machine._saw_nonperm = False
+
+
 def acquire(tc, allow_warm=False):
     """A machine for ``tc``'s declaration: the spare one, if there is one.
 
     When ``allow_warm`` is true and the spare machine belongs to the same
-    `Environment` and is below its warm-cache caps, it is reused without
-    resetting — bumping `check_gen` so every `check=True` check (ordering,
-    safety, universe params) still runs fresh while pure whnf/infer/def_eq
-    and import caches stay warm across consecutive declarations.
+    `Environment`, is below its warm-cache caps, and declarations arrive in
+    monotonic index order with ``group < 0``, it is reused without resetting.
+    Safe consecutive declarations with compatible `decl.levels` share
+    `check_gen` so verified subterms skip redundant re-checking; incompatible
+    cohorts bump `check_gen` while preserving `_CHECKED_PERM` entries for
+    closed, zero-level-param, safe subterms.
     """
     machine = _SPARE.machine
     if machine is None:
@@ -9069,17 +9238,33 @@ def acquire(tc, allow_warm=False):
         machine._is_clean = False
         machine.store.record_nodes = (not allow_warm) or tc.tracer.writes
         machine.recheck_on_error = not machine.store.record_nodes
+        _init_warm_cohort(machine, tc, allow_warm)
         return machine
     _SPARE.machine = None
     machine.tc = tc
     machine.store.tc = tc
     machine._def_eq_hooked = tc.def_eq_hooked
+    decl = tc.decl
     if (allow_warm
+            and decl is not None
+            and decl.index >= machine._warm_max_index
+            and decl.group < 0
             and machine._last_env is tc.env
             and not machine._is_clean
             and (machine.store.record_nodes or not tc.tracer.writes)
             and machine.is_warm_ready()):
-        machine.check_gen += 1
+        safe_cur = (decl.safety == SAFETY_SAFE and not tc.def_eq_hooked)
+        if (safe_cur
+                and machine._warm_safe_cohort
+                and _levels_subset(machine._warm_levels, decl.levels)):
+            machine._warm_levels = decl.levels
+        else:
+            machine.check_gen += 1
+            machine._warm_safe_cohort = safe_cur
+            machine._warm_levels = decl.levels if safe_cur else None
+        machine._warm_max_index = decl.index
+        machine._can_perm = safe_cur
+        machine._saw_nonperm = False
         machine._open_memo.clear()
         machine._decl_start_recs = machine.store.nrecs
         machine.store.record_nodes = tc.tracer.writes
@@ -9092,6 +9277,7 @@ def acquire(tc, allow_warm=False):
     machine._is_clean = False
     machine.store.record_nodes = (not allow_warm) or tc.tracer.writes
     machine.recheck_on_error = not machine.store.record_nodes
+    _init_warm_cohort(machine, tc, allow_warm)
     return machine
 
 

@@ -938,3 +938,102 @@ class TestJointCheckAndInferExpected(object):
                 m.infer(s.import_term(bad), True)
         finally:
             tc.free()
+
+    def test_warm_check_gen_reuse_and_soundness_boundaries(self):
+        from rpylean.environment import Environment
+        from rpylean.exceptions import UndeclaredLevelParam, W_InvalidDeclaration
+        from rpylean.machine import M_CHECKED_GEN, MEMO_SLOTS, _CHECKED_PERM, rec_index, _s32
+        from rpylean.objects import (
+            SAFETY_SAFE,
+            SAFETY_UNSAFE,
+            W_NotYetDeclared,
+            W_UnsafeReference,
+        )
+
+        u_n = Name.simple("u")
+        v_n = Name.simple("v")
+        u_l = u_n.as_level_param()
+        v_l = v_n.as_level_param()
+        nat_d = Name.simple("Nat").inductive(type=TYPE)
+        fn_n = Name.simple("fn")
+        fn_d = fn_n.axiom(type=forall(x.binder(type=NAT))(NAT))
+        zero_n = Name.simple("z")
+        zero_d = zero_n.axiom(type=NAT)
+        unsafe_n = Name.simple("bad_unsafe")
+        unsafe_d = unsafe_n.axiom(type=NAT, is_unsafe=True)
+        later_n = Name.simple("later")
+        later_d = later_n.axiom(type=NAT)
+
+        # 1. Level-param shrinkage: D1 has [u, v], D2 has [u] and mentions Type v.
+        poly_fn = Name.simple("pfn").axiom(
+            levels=[u_n],
+            type=forall(x.binder(type=u_l.succ().sort()))(u_l.succ().sort()),
+        )
+        d1 = Name.simple("d1").definition(
+            levels=[u_n, v_n],
+            type=v_l.succ().sort(),
+            value=poly_fn.name.const([v_l]).app(v_l.sort()),
+        )
+        # Same term in d2 which only declares [u] must FAIL with UndeclaredLevelParam(v)!
+        d2_bad = Name.simple("d2_bad").definition(
+            levels=[u_n],
+            type=v_l.succ().sort(),
+            value=poly_fn.name.const([v_l]).app(v_l.sort()),
+        )
+        # Valid d3 & d4 both with [u] share check_gen and mark closed ground subterm _CHECKED_PERM.
+        shared_ground = fn_n.const().app(zero_n.const())
+        d3 = Name.simple("d3").definition(
+            levels=[u_n], type=NAT, value=shared_ground,
+        )
+        d4 = Name.simple("d4").definition(
+            levels=[u_n], type=NAT, value=fn_n.const().app(shared_ground),
+        )
+        d5_mono = Name.simple("d5_mono").definition(
+            levels=[], type=NAT, value=shared_ground,
+        )
+        # 2. Unsafe -> Safe boundary: unsafe d6 uses bad_unsafe; safe d7 uses same term -> must reject!
+        unsafe_term = fn_n.const().app(unsafe_n.const())
+        d6_unsafe = Name.simple("d6_unsafe").definition(
+            type=NAT, value=unsafe_term, safety=SAFETY_UNSAFE,
+        )
+        d7_safe_bad = Name.simple("d7_safe_bad").definition(
+            type=NAT, value=unsafe_term, safety=SAFETY_SAFE,
+        )
+        # 3. Out-of-order check: d_early (index < later_d) referencing later_d after d_late checked it!
+        later_term = fn_n.const().app(later_n.const())
+        d_early_bad = Name.simple("d_early_bad").definition(type=NAT, value=later_term)
+        d_late_ok = Name.simple("d_late_ok").definition(type=NAT, value=later_term)
+
+        env = Environment.having([
+            nat_d, fn_d, zero_d, unsafe_d, poly_fn,
+            d1, d2_bad, d3, d4, d5_mono, d6_unsafe, d7_safe_bad,
+            d_early_bad, later_d, d_late_ok,
+        ])
+        assert env.type_check_one(d1, measure=False).error is None
+        res_lvl = env.type_check_one(d2_bad, measure=False)
+        assert isinstance(res_lvl.error, W_InvalidDeclaration)
+        assert isinstance(res_lvl.error.inner, UndeclaredLevelParam)
+
+        # Safe cohort reuse & _CHECKED_PERM preservation across check_gen bump
+        assert env.type_check_one(d3, measure=False).error is None
+        from rpylean.machine import _SPARE
+        m = _SPARE.machine
+        assert m is not None
+        g_after_d3 = m.check_gen
+        h_ground = m.store.import_term(shared_ground)
+        assert _s32(m.store.memos[rec_index(h_ground) * MEMO_SLOTS + M_CHECKED_GEN]) == _CHECKED_PERM
+        assert env.type_check_one(d4, measure=False).error is None
+        assert _SPARE.machine.check_gen == g_after_d3  # Same [u] cohort kept check_gen!
+        assert env.type_check_one(d5_mono, measure=False).error is None
+        assert _SPARE.machine.check_gen == g_after_d3 + 1  # [u] -> [] bumped check_gen
+        assert _s32(_SPARE.machine.store.memos[rec_index(h_ground) * MEMO_SLOTS + M_CHECKED_GEN]) == _CHECKED_PERM
+
+        # Unsafe -> Safe boundary must reject W_UnsafeReference
+        assert env.type_check_one(d6_unsafe, measure=False).error is None
+        res_unsafe = env.type_check_one(d7_safe_bad, measure=False)
+        assert isinstance(res_unsafe.error, W_UnsafeReference)
+
+        # Out-of-order check must reset and reject W_NotYetDeclared
+        assert env.type_check_one(d_late_ok, measure=False).error is None
+        res_order = env.type_check_one(d_early_bad, measure=False)
+        assert isinstance(res_order.error, W_NotYetDeclared)
