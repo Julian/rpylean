@@ -1088,7 +1088,7 @@ class TermStore(object):
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
         'rec_node', '_rec_node_dirty', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
-        '_call_memo', '_bind_lo', '_bind_span',
+        '_call_memo', '_bind_lo', '_bind_span', '_inst_all_closed',
         '_freed', 'initial_cap',
     ]
 
@@ -1108,6 +1108,7 @@ class TermStore(object):
         self._subst_top = 0
         self._bind_lo = 0
         self._bind_span = r_uint(0)
+        self._inst_all_closed = -1
         #: Leaves by index; `leaf_meta` mirrors `(loose_bvar_range << 1) | has_fvar`
         #: in 32 bits (for a `W_BVar(id)`, `leaf_meta == (id + 1) << 1 > 1`, so
         #: `id == (leaf_meta >> 1) - 1` without a separate `leaf_bvar` array).
@@ -2589,7 +2590,7 @@ class TermStore(object):
                 return h
             id = lo - 1
             if id == depth:
-                return sub if (sub_closed or depth == 0) else self.shift(sub, depth, 0)
+                return sub if sub_closed else self.shift(sub, depth, 0)
             return self.bvar(id - 1)
         ri = rec_index(h)
         recs = self.recs
@@ -2627,7 +2628,7 @@ class TermStore(object):
                 else:
                     aid = alo - 1
                     if aid == depth:
-                        na = sub if (sub_closed or depth == 0) else self.shift(sub, depth, 0)
+                        na = sub if sub_closed else self.shift(sub, depth, 0)
                     else:
                         na = self.bvar(aid - 1)
             else:
@@ -2636,8 +2637,9 @@ class TermStore(object):
                 if (ahdr >> 4) <= depth:
                     na = a
                 elif (ahdr & _KIND_MASK) != KIND_APP:
-                    if tag != 0 and (self.call_slot[ari] >> 32) == tag:
-                        na = self.call_slot[ari] & _TABLE_SLOT_MASK
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
                     else:
                         na = self._inst_oneshot(a, sub, depth, gen, sub_closed, nr)
                 else:
@@ -2653,7 +2655,7 @@ class TermStore(object):
                             else:
                                 cid = clo - 1
                                 if cid == depth:
-                                    na = sub if (sub_closed or depth == 0) else self.shift(sub, depth, 0)
+                                    na = sub if sub_closed else self.shift(sub, depth, 0)
                                 else:
                                     na = self.bvar(cid - 1)
                             break
@@ -2688,11 +2690,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -2705,17 +2705,20 @@ class TermStore(object):
                             else:
                                 bid2 = blo2 - 1
                                 if bid2 == depth:
-                                    nb2 = sub if (sub_closed or depth == 0) else self.shift(sub, depth, 0)
+                                    nb2 = sub if sub_closed else self.shift(sub, depth, 0)
                                 else:
                                     nb2 = self.bvar(bid2 - 1)
                         else:
                             bri2 = rec_index(old_b)
                             if (_s32(recs[bri2 << 2]) >> 4) <= depth:
                                 nb2 = old_b
-                            elif tag != 0 and (self.call_slot[bri2] >> 32) == tag:
-                                nb2 = self.call_slot[bri2] & _TABLE_SLOT_MASK
                             else:
-                                nb2 = self._inst_oneshot(old_b, sub, depth, gen, sub_closed, nr)
+                                bentry2 = self.call_slot[bri2] if tag != 0 else 0
+                                if tag != 0 and (bentry2 >> 32) == tag:
+                                    nb2 = bentry2 & _TABLE_SLOT_MASK
+                                else:
+                                    self._subst_top = stop
+                                    nb2 = self._inst_oneshot(old_b, sub, depth, gen, sub_closed, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
                         if tag != 0:
                             call_slot = self.call_slot
@@ -2725,6 +2728,7 @@ class TermStore(object):
                                 self._call_memo.set((node << 16) | depth, na)
                         elif depth < (1 << 16):
                             self._call_memo.set((node << 16) | depth, na)
+                    self._subst_top = smark
             if is_leaf(b):
                 blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
                 if blo <= depth:
@@ -2732,21 +2736,54 @@ class TermStore(object):
                 else:
                     bid = blo - 1
                     if bid == depth:
-                        nb = sub if (sub_closed or depth == 0) else self.shift(sub, depth, 0)
+                        nb = sub if sub_closed else self.shift(sub, depth, 0)
                     else:
                         nb = self.bvar(bid - 1)
             else:
                 bri = rec_index(b)
                 if (_s32(self.recs[bri << 2]) >> 4) <= depth:
                     nb = b
-                elif tag != 0 and (self.call_slot[bri] >> 32) == tag:
-                    nb = self.call_slot[bri] & _TABLE_SLOT_MASK
                 else:
-                    nb = self._inst_oneshot(b, sub, depth, gen, sub_closed, nr)
+                    bentry = self.call_slot[bri] if tag != 0 else 0
+                    if tag != 0 and (bentry >> 32) == tag:
+                        nb = bentry & _TABLE_SLOT_MASK
+                    else:
+                        nb = self._inst_oneshot(b, sub, depth, gen, sub_closed, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._inst_oneshot(a, sub, depth, gen, sub_closed, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_oneshot(b, sub, depth + 1, gen, sub_closed, nr)
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    if aid == depth:
+                        na = sub if sub_closed else self.shift(sub, depth, 0)
+                    else:
+                        na = self.bvar(aid - 1)
+            else:
+                ari = rec_index(a)
+                if (_s32(recs[ari << 2]) >> 4) <= depth:
+                    na = a
+                else:
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_oneshot(a, sub, depth, gen, sub_closed, nr)
+            d1 = depth + 1
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= d1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    if bid == d1:
+                        nb = sub if sub_closed else self.shift(sub, d1, 0)
+                    else:
+                        nb = self.bvar(bid - 1)
+            else:
+                nb = b if (_s32(self.recs[rec_index(b) << 2]) >> 4) <= d1 else self._inst_oneshot(b, sub, d1, gen, sub_closed, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
             na = self._inst_oneshot(a, sub, depth, gen, sub_closed, nr)
@@ -3600,6 +3637,7 @@ class TermStore(object):
                 return sub if (depth == 0 or self.loose_bvar_range(sub) == 0) else self.shift(sub, depth, 0)
             return self.bvar(id - count)
         gen = self._next_call_epoch()
+        self._inst_all_closed = -1
         try:
             if depth == 0:
                 return self._inst_multi_buf_d0(h, buf, start, count, gen, 0)
@@ -3755,12 +3793,27 @@ class TermStore(object):
                         na = aentry & _TABLE_SLOT_MASK
                     else:
                         na = self._inst_multi_buf_d0(a, buf, start, n, gen, nr)
-            if self.loose_bvar_range(b) <= 1:
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= 1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - 1
+                    if brel < n:
+                        bsub = _s32(buf[start + brel])
+                        nb = bsub if self.loose_bvar_range(bsub) == 0 else self.shift(bsub, 1, 0)
+                    else:
+                        nb = self.bvar(bid - n)
+            elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= 1:
                 nb = b
             else:
+                ac = self._inst_all_closed
+                if ac < 0:
+                    ac = 1 if self._buf_all_closed(buf, start, n) else 0
+                    self._inst_all_closed = ac
                 nb = self._inst_multi_buf_oneshot(
-                    b, buf, start, n, 1, gen,
-                    self._buf_all_closed(buf, start, n), nr,
+                    b, buf, start, n, 1, gen, ac != 0, nr,
                 )
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
@@ -3775,9 +3828,12 @@ class TermStore(object):
             if self.loose_bvar_range(body) <= 1:
                 nbody = body
             else:
+                ac = self._inst_all_closed
+                if ac < 0:
+                    ac = 1 if self._buf_all_closed(buf, start, n) else 0
+                    self._inst_all_closed = ac
                 nbody = self._inst_multi_buf_oneshot(
-                    body, buf, start, n, 1, gen,
-                    self._buf_all_closed(buf, start, n), nr,
+                    body, buf, start, n, 1, gen, ac != 0, nr,
                 )
             if na == a and nv == value and nbody == body:
                 r = h
@@ -3796,7 +3852,7 @@ class TermStore(object):
             rel = id - depth
             if rel < n:
                 sub = _s32(buf[start + rel])
-                return sub if (all_closed or depth == 0) else self.shift(sub, depth, 0)
+                return sub if all_closed else self.shift(sub, depth, 0)
             return self.bvar(id - n)
         ri = rec_index(h)
         recs = self.recs
@@ -3836,7 +3892,7 @@ class TermStore(object):
                     arel = aid - depth
                     if arel < n:
                         asub = _s32(buf[start + arel])
-                        na = asub if (all_closed or depth == 0) else self.shift(asub, depth, 0)
+                        na = asub if all_closed else self.shift(asub, depth, 0)
                     else:
                         na = self.bvar(aid - n)
             else:
@@ -3845,8 +3901,9 @@ class TermStore(object):
                 if (ahdr >> 4) <= depth:
                     na = a
                 elif (ahdr & _KIND_MASK) != KIND_APP:
-                    if tag != 0 and (self.call_slot[ari] >> 32) == tag:
-                        na = self.call_slot[ari] & _TABLE_SLOT_MASK
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
                     else:
                         na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, all_closed, nr)
                 else:
@@ -3864,7 +3921,7 @@ class TermStore(object):
                                 crel = cid - depth
                                 if crel < n:
                                     csub = _s32(buf[start + crel])
-                                    na = csub if (all_closed or depth == 0) else self.shift(csub, depth, 0)
+                                    na = csub if all_closed else self.shift(csub, depth, 0)
                                 else:
                                     na = self.bvar(cid - n)
                             break
@@ -3899,11 +3956,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -3918,17 +3973,20 @@ class TermStore(object):
                                 brel2 = bid2 - depth
                                 if brel2 < n:
                                     bsub2 = _s32(buf[start + brel2])
-                                    nb2 = bsub2 if (all_closed or depth == 0) else self.shift(bsub2, depth, 0)
+                                    nb2 = bsub2 if all_closed else self.shift(bsub2, depth, 0)
                                 else:
                                     nb2 = self.bvar(bid2 - n)
                         else:
                             bri2 = rec_index(old_b)
                             if (_s32(recs[bri2 << 2]) >> 4) <= depth:
                                 nb2 = old_b
-                            elif tag != 0 and (self.call_slot[bri2] >> 32) == tag:
-                                nb2 = self.call_slot[bri2] & _TABLE_SLOT_MASK
                             else:
-                                nb2 = self._inst_multi_buf_oneshot(old_b, buf, start, n, depth, gen, all_closed, nr)
+                                bentry2 = self.call_slot[bri2] if tag != 0 else 0
+                                if tag != 0 and (bentry2 >> 32) == tag:
+                                    nb2 = bentry2 & _TABLE_SLOT_MASK
+                                else:
+                                    self._subst_top = stop
+                                    nb2 = self._inst_multi_buf_oneshot(old_b, buf, start, n, depth, gen, all_closed, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
                         if tag != 0:
                             call_slot = self.call_slot
@@ -3938,6 +3996,7 @@ class TermStore(object):
                                 self._call_memo.set((node << 16) | depth, na)
                         elif depth < (1 << 16):
                             self._call_memo.set((node << 16) | depth, na)
+                    self._subst_top = smark
             if is_leaf(b):
                 blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
                 if blo <= depth:
@@ -3947,21 +4006,58 @@ class TermStore(object):
                     brel = bid - depth
                     if brel < n:
                         bsub = _s32(buf[start + brel])
-                        nb = bsub if (all_closed or depth == 0) else self.shift(bsub, depth, 0)
+                        nb = bsub if all_closed else self.shift(bsub, depth, 0)
                     else:
                         nb = self.bvar(bid - n)
             else:
                 bri = rec_index(b)
                 if (_s32(self.recs[bri << 2]) >> 4) <= depth:
                     nb = b
-                elif tag != 0 and (self.call_slot[bri] >> 32) == tag:
-                    nb = self.call_slot[bri] & _TABLE_SLOT_MASK
                 else:
-                    nb = self._inst_multi_buf_oneshot(b, buf, start, n, depth, gen, all_closed, nr)
+                    bentry = self.call_slot[bri] if tag != 0 else 0
+                    if tag != 0 and (bentry >> 32) == tag:
+                        nb = bentry & _TABLE_SLOT_MASK
+                    else:
+                        nb = self._inst_multi_buf_oneshot(b, buf, start, n, depth, gen, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, all_closed, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_buf_oneshot(b, buf, start, n, depth + 1, gen, all_closed, nr)
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    if arel < n:
+                        asub = _s32(buf[start + arel])
+                        na = asub if all_closed else self.shift(asub, depth, 0)
+                    else:
+                        na = self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                if (_s32(recs[ari << 2]) >> 4) <= depth:
+                    na = a
+                else:
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, all_closed, nr)
+            d1 = depth + 1
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= d1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - d1
+                    if brel < n:
+                        bsub = _s32(buf[start + brel])
+                        nb = bsub if all_closed else self.shift(bsub, d1, 0)
+                    else:
+                        nb = self.bvar(bid - n)
+            else:
+                nb = b if (_s32(self.recs[rec_index(b) << 2]) >> 4) <= d1 else self._inst_multi_buf_oneshot(b, buf, start, n, d1, gen, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
             na = self._inst_multi_buf_oneshot(a, buf, start, n, depth, gen, all_closed, nr)
@@ -4010,6 +4106,7 @@ class TermStore(object):
                 return sub if (depth == 0 or self.loose_bvar_range(sub) == 0) else self.shift(sub, depth, 0)
             return self.bvar(id - count)
         gen = self._next_call_epoch()
+        self._inst_all_closed = -1
         try:
             if depth == 0:
                 return self._inst_multi_rev_d0(h, substs, count, gen, 0)
@@ -4165,12 +4262,27 @@ class TermStore(object):
                         na = aentry & _TABLE_SLOT_MASK
                     else:
                         na = self._inst_multi_rev_d0(a, substs, n, gen, nr)
-            if self.loose_bvar_range(b) <= 1:
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= 1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - 1
+                    if brel < n:
+                        bsub = substs[n - 1 - brel]
+                        nb = bsub if self.loose_bvar_range(bsub) == 0 else self.shift(bsub, 1, 0)
+                    else:
+                        nb = self.bvar(bid - n)
+            elif (_s32(self.recs[rec_index(b) << 2]) >> 4) <= 1:
                 nb = b
             else:
+                ac = self._inst_all_closed
+                if ac < 0:
+                    ac = 1 if self._list_all_closed(substs, n) else 0
+                    self._inst_all_closed = ac
                 nb = self._inst_multi_rev_oneshot(
-                    b, substs, n, 1, gen,
-                    self._list_all_closed(substs, n), nr,
+                    b, substs, n, 1, gen, ac != 0, nr,
                 )
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
@@ -4185,9 +4297,12 @@ class TermStore(object):
             if self.loose_bvar_range(body) <= 1:
                 nbody = body
             else:
+                ac = self._inst_all_closed
+                if ac < 0:
+                    ac = 1 if self._list_all_closed(substs, n) else 0
+                    self._inst_all_closed = ac
                 nbody = self._inst_multi_rev_oneshot(
-                    body, substs, n, 1, gen,
-                    self._list_all_closed(substs, n), nr,
+                    body, substs, n, 1, gen, ac != 0, nr,
                 )
             if na == a and nv == value and nbody == body:
                 r = h
@@ -4206,7 +4321,7 @@ class TermStore(object):
             rel = id - depth
             if rel < n:
                 sub = substs[n - 1 - rel]
-                return sub if (all_closed or depth == 0) else self.shift(sub, depth, 0)
+                return sub if all_closed else self.shift(sub, depth, 0)
             return self.bvar(id - n)
         ri = rec_index(h)
         recs = self.recs
@@ -4246,7 +4361,7 @@ class TermStore(object):
                     arel = aid - depth
                     if arel < n:
                         asub = substs[n - 1 - arel]
-                        na = asub if (all_closed or depth == 0) else self.shift(asub, depth, 0)
+                        na = asub if all_closed else self.shift(asub, depth, 0)
                     else:
                         na = self.bvar(aid - n)
             else:
@@ -4255,8 +4370,9 @@ class TermStore(object):
                 if (ahdr >> 4) <= depth:
                     na = a
                 elif (ahdr & _KIND_MASK) != KIND_APP:
-                    if tag != 0 and (self.call_slot[ari] >> 32) == tag:
-                        na = self.call_slot[ari] & _TABLE_SLOT_MASK
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
                     else:
                         na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, all_closed, nr)
                 else:
@@ -4274,7 +4390,7 @@ class TermStore(object):
                                 crel = cid - depth
                                 if crel < n:
                                     csub = substs[n - 1 - crel]
-                                    na = csub if (all_closed or depth == 0) else self.shift(csub, depth, 0)
+                                    na = csub if all_closed else self.shift(csub, depth, 0)
                                 else:
                                     na = self.bvar(cid - n)
                             break
@@ -4309,11 +4425,9 @@ class TermStore(object):
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
-                    self._subst_top = stop
                     while stop > smark:
                         stop -= 1
                         node = _s32(self._subst_stack[stop])
-                        self._subst_top = stop
                         nri = rec_index(node)
                         recs = self.recs
                         nbase = nri << 2
@@ -4328,17 +4442,20 @@ class TermStore(object):
                                 brel2 = bid2 - depth
                                 if brel2 < n:
                                     bsub2 = substs[n - 1 - brel2]
-                                    nb2 = bsub2 if (all_closed or depth == 0) else self.shift(bsub2, depth, 0)
+                                    nb2 = bsub2 if all_closed else self.shift(bsub2, depth, 0)
                                 else:
                                     nb2 = self.bvar(bid2 - n)
                         else:
                             bri2 = rec_index(old_b)
                             if (_s32(recs[bri2 << 2]) >> 4) <= depth:
                                 nb2 = old_b
-                            elif tag != 0 and (self.call_slot[bri2] >> 32) == tag:
-                                nb2 = self.call_slot[bri2] & _TABLE_SLOT_MASK
                             else:
-                                nb2 = self._inst_multi_rev_oneshot(old_b, substs, n, depth, gen, all_closed, nr)
+                                bentry2 = self.call_slot[bri2] if tag != 0 else 0
+                                if tag != 0 and (bentry2 >> 32) == tag:
+                                    nb2 = bentry2 & _TABLE_SLOT_MASK
+                                else:
+                                    self._subst_top = stop
+                                    nb2 = self._inst_multi_rev_oneshot(old_b, substs, n, depth, gen, all_closed, nr)
                         na = node if (na == old_a and nb2 == old_b) else self.cons_app(na, nb2)
                         if tag != 0:
                             call_slot = self.call_slot
@@ -4348,6 +4465,7 @@ class TermStore(object):
                                 self._call_memo.set((node << 16) | depth, na)
                         elif depth < (1 << 16):
                             self._call_memo.set((node << 16) | depth, na)
+                    self._subst_top = smark
             if is_leaf(b):
                 blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
                 if blo <= depth:
@@ -4357,21 +4475,58 @@ class TermStore(object):
                     brel = bid - depth
                     if brel < n:
                         bsub = substs[n - 1 - brel]
-                        nb = bsub if (all_closed or depth == 0) else self.shift(bsub, depth, 0)
+                        nb = bsub if all_closed else self.shift(bsub, depth, 0)
                     else:
                         nb = self.bvar(bid - n)
             else:
                 bri = rec_index(b)
                 if (_s32(self.recs[bri << 2]) >> 4) <= depth:
                     nb = b
-                elif tag != 0 and (self.call_slot[bri] >> 32) == tag:
-                    nb = self.call_slot[bri] & _TABLE_SLOT_MASK
                 else:
-                    nb = self._inst_multi_rev_oneshot(b, substs, n, depth, gen, all_closed, nr)
+                    bentry = self.call_slot[bri] if tag != 0 else 0
+                    if tag != 0 and (bentry >> 32) == tag:
+                        nb = bentry & _TABLE_SLOT_MASK
+                    else:
+                        nb = self._inst_multi_rev_oneshot(b, substs, n, depth, gen, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons_app(na, nb)
         elif kind == KIND_LAMBDA or kind == KIND_FORALL:
-            na = a if self.loose_bvar_range(a) <= depth else self._inst_multi_rev_oneshot(a, substs, n, depth, gen, all_closed, nr)
-            nb = b if self.loose_bvar_range(b) <= depth + 1 else self._inst_multi_rev_oneshot(b, substs, n, depth + 1, gen, all_closed, nr)
+            if is_leaf(a):
+                alo = _s32(self.leaf_meta[leaf_index(a)]) >> 1
+                if alo <= depth:
+                    na = a
+                else:
+                    aid = alo - 1
+                    arel = aid - depth
+                    if arel < n:
+                        asub = substs[n - 1 - arel]
+                        na = asub if all_closed else self.shift(asub, depth, 0)
+                    else:
+                        na = self.bvar(aid - n)
+            else:
+                ari = rec_index(a)
+                if (_s32(recs[ari << 2]) >> 4) <= depth:
+                    na = a
+                else:
+                    aentry = self.call_slot[ari] if tag != 0 else 0
+                    if tag != 0 and (aentry >> 32) == tag:
+                        na = aentry & _TABLE_SLOT_MASK
+                    else:
+                        na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, all_closed, nr)
+            d1 = depth + 1
+            if is_leaf(b):
+                blo = _s32(self.leaf_meta[leaf_index(b)]) >> 1
+                if blo <= d1:
+                    nb = b
+                else:
+                    bid = blo - 1
+                    brel = bid - d1
+                    if brel < n:
+                        bsub = substs[n - 1 - brel]
+                        nb = bsub if all_closed else self.shift(bsub, d1, 0)
+                    else:
+                        nb = self.bvar(bid - n)
+            else:
+                nb = b if (_s32(self.recs[rec_index(b) << 2]) >> 4) <= d1 else self._inst_multi_rev_oneshot(b, substs, n, d1, gen, all_closed, nr)
             r = h if (na == a and nb == b) else self.cons(kind, na, nb, info)
         elif kind == KIND_PROJ:
             na = self._inst_multi_rev_oneshot(a, substs, n, depth, gen, all_closed, nr)
