@@ -2452,5 +2452,19 @@ class TestJointCheckAndInferExpected(object):
             assert m.try_proj(p2, False) == store.import_term(fn2.name.const().app(B, A))
             cached_fh = m._proj_field_cache.get(pkey, 0)
             assert 0 < cached_fh < _LEAF_INFER_SEEN
+
+            # 4. ast_inst_eq_buf comparing W_LitNat / W_LitStr against a different
+            #    leaf class (e.g. W_Const) must return False rather than asserting.
+            from rpython.rlib.rbigint import rbigint
+            from rpylean.objects import W_LitNat, W_LitStr
+            lit0 = W_LitNat(rbigint.fromint(0))
+            lits = W_LitStr("hi")
+            h_lit0 = store.import_term(lit0)
+            h_lits = store.import_term(lits)
+            assert not store.ast_inst_eq_buf(lit0, [], [], 0, 0, h_a)
+            assert not store.ast_inst_eq_buf(lits, [], [], 0, 0, h_a)
+            assert not store.ast_inst_eq_buf(lit0, [], [], 0, 0, h_lits)
+            assert store.ast_inst_eq_buf(lit0, [], [], 0, 0, h_lit0)
+            assert store.ast_inst_eq_buf(lits, [], [], 0, 0, h_lits)
         finally:
             tc.free()

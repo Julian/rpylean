@@ -3313,7 +3313,8 @@ class TermStore(object):
         if cls is W_LitNat or cls is W_LitStr:
             if not is_leaf(target):
                 return -1
-            if pat.syntactic_eq(self.leaves[leaf_index(target)]):
+            te = self.leaves[leaf_index(target)]
+            if te.__class__ is cls and pat.syntactic_eq(te):
                 return budget
             return -1
         return -1
