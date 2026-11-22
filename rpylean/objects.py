@@ -348,6 +348,29 @@ class W_InvalidConstructorResult(W_CheckError):
         )
 
 
+class W_InvalidQuotient(W_CheckError):
+    """
+    A quotient declaration does not match Lean's fixed quotient signatures
+    or prerequisites.
+    """
+
+    _attrs_ = ['environment', 'reason', 'quot_type']
+
+    def __init__(self, environment, reason, quot_type, name=None):
+        self.environment = environment
+        self.reason = reason
+        self.quot_type = quot_type
+        self.name = name
+
+    def as_diagnostic(self):
+        declarations = self.environment.declarations
+        message = [MESSAGE.emit("\n" + self.reason)]
+        return _error_diagnostic(
+            self.declaration, self.name, self.quot_type,
+            "Invalid quotient ", message, declarations,
+        )
+
+
 class W_ConstructorFieldCountMismatch(W_CheckError):
     """
     A constructor's declared num_fields does not match its type's binders.
@@ -4878,6 +4901,70 @@ class W_Axiom(W_DeclarationKind):
             return W_NotASort(tc, type, inferred_type=type_type, name=None)
 
 
+_QUOT_NAME = Name.simple("Quot")
+_QUOT_MK_NAME = _QUOT_NAME.child("mk")
+_QUOT_LIFT_NAME = _QUOT_NAME.child("lift")
+_QUOT_IND_NAME = _QUOT_NAME.child("ind")
+_EQ_NAME = Name.simple("Eq")
+
+
+def _pi(binders, body):
+    result = body
+    i = len(binders) - 1
+    while i >= 0:
+        result = _mk_w_forall(binders[i], result)
+        i -= 1
+    return result
+
+
+def _check_eq_for_quot(tc):
+    """Verify ``Eq`` and its single constructor match Lean's prelude ``Eq``,
+    as required by Lean's kernel before introducing ``Quot.lift``."""
+    eq_decl = find_decl(tc.declarations, _EQ_NAME)
+    if eq_decl is None or not isinstance(eq_decl.w_kind, W_Inductive):
+        return "missing inductive `Eq`"
+    if len(eq_decl.levels) != 1:
+        return "`Eq` must have 1 universe parameter"
+    eq_u = eq_decl.levels[0].as_level_param()
+    tc.check_reference(_EQ_NAME.const([eq_u]), eq_decl)
+    eq_ind = eq_decl.w_kind
+    if len(eq_ind.ctor_names) != 1:
+        return "`Eq` must have 1 constructor"
+    alpha = Name.simple("α")
+    anon = Name.ANONYMOUS
+    expected_eq_type = _pi(
+        [
+            alpha.implicit_binder(eq_u.sort()),
+            anon.binder(_mk_w_bvar(0)),
+            anon.binder(_mk_w_bvar(1)),
+        ],
+        PROP,
+    )
+    if not tc.def_eq(eq_decl.type, expected_eq_type):
+        return "`Eq` does not have the expected type"
+    eq_refl = find_decl(tc.declarations, eq_ind.ctor_names[0])
+    if eq_refl is None or not isinstance(eq_refl.w_kind, W_Constructor):
+        return "missing constructor for `Eq`"
+    if len(eq_refl.levels) != 1:
+        return "`Eq` constructor must have 1 universe parameter"
+    refl_u = eq_refl.levels[0].as_level_param()
+    a = Name.simple("a")
+    eq_refl_ret = _mk_app(
+        _mk_app(_mk_app(_EQ_NAME.const([refl_u]), _mk_w_bvar(1)), _mk_w_bvar(0)),
+        _mk_w_bvar(0),
+    )
+    expected_refl_type = _pi(
+        [
+            alpha.implicit_binder(refl_u.sort()),
+            a.binder(_mk_w_bvar(0)),
+        ],
+        eq_refl_ret,
+    )
+    if not tc.def_eq(eq_refl.type, expected_refl_type):
+        return "`Eq` constructor does not have the expected type"
+    return None
+
+
 class W_Quotient(W_DeclarationKind):
     """
     A Quot kernel axiom. Lean's `Quot`, `Quot.mk`, `Quot.lift`, `Quot.ind`
@@ -4930,6 +5017,160 @@ class W_Quotient(W_DeclarationKind):
         type_type = type.infer(tc)
         if not isinstance(type_type.whnf(tc), W_Sort):
             return W_NotASort(tc, type, inferred_type=type_type, name=None)
+        decl = tc.decl
+        if decl is None:
+            return None
+        kind = self.kind
+        if kind == W_Quotient.KIND_TYPE:
+            expected_name = _QUOT_NAME
+            expected_nlevels = 1
+        elif kind == W_Quotient.KIND_CTOR:
+            expected_name = _QUOT_MK_NAME
+            expected_nlevels = 1
+        elif kind == W_Quotient.KIND_LIFT:
+            expected_name = _QUOT_LIFT_NAME
+            expected_nlevels = 2
+        elif kind == W_Quotient.KIND_IND:
+            expected_name = _QUOT_IND_NAME
+            expected_nlevels = 1
+        else:
+            return W_InvalidQuotient(tc, "unknown quotient kind", type)
+
+        if not name_eq(decl.name, expected_name):
+            return W_InvalidQuotient(
+                tc, "quotient kind does not match declaration name", type,
+            )
+        if len(decl.levels) != expected_nlevels:
+            return W_InvalidQuotient(
+                tc, "unexpected number of universe parameters", type,
+            )
+
+        u = decl.levels[0].as_level_param()
+        sort_u = u.sort()
+        alpha = Name.simple("α")
+        r = Name.simple("r")
+        a = Name.simple("a")
+        anon = Name.ANONYMOUS
+        # r : α → α → Prop (under binder α)
+        r_type = _pi(
+            [anon.binder(_mk_w_bvar(0)), anon.binder(_mk_w_bvar(1))],
+            PROP,
+        )
+
+        if kind == W_Quotient.KIND_TYPE:
+            # Quot.{u} : ∀ {α : Sort u} (r : α → α → Prop), Sort u
+            expected = _pi(
+                [alpha.implicit_binder(sort_u), r.binder(r_type)],
+                sort_u,
+            )
+        else:
+            quot_decl = find_decl(tc.declarations, _QUOT_NAME)
+            if (
+                quot_decl is None
+                or not isinstance(quot_decl.w_kind, W_Quotient)
+                or quot_decl.w_kind.kind != W_Quotient.KIND_TYPE
+            ):
+                return W_InvalidQuotient(
+                    tc, "missing quotient type declaration `Quot`", type,
+                )
+            quot_u = _QUOT_NAME.const([u])
+            tc.check_reference(quot_u, quot_decl)
+            if kind == W_Quotient.KIND_CTOR:
+                # Quot.mk.{u} : ∀ {α : Sort u} (r : α → α → Prop) (a : α), @Quot.{u} α r
+                expected = _pi(
+                    [
+                        alpha.implicit_binder(sort_u),
+                        r.binder(r_type),
+                        a.binder(_mk_w_bvar(1)),
+                    ],
+                    _mk_app(_mk_app(quot_u, _mk_w_bvar(2)), _mk_w_bvar(1)),
+                )
+            elif kind == W_Quotient.KIND_LIFT:
+                eq_err = _check_eq_for_quot(tc)
+                if eq_err is not None:
+                    return W_InvalidQuotient(tc, eq_err, type)
+                v = decl.levels[1].as_level_param()
+                sort_v = v.sort()
+                beta = Name.simple("β")
+                f = Name.simple("f")
+                b = Name.simple("b")
+                # f : α → β (under α, r, β)
+                f_type = _pi([anon.binder(_mk_w_bvar(2))], _mk_w_bvar(1))
+                # ∀ (a b : α), r a b → @Eq.{v} β (f a) (f b) (under α, r, β, f)
+                eq_v = _EQ_NAME.const([v])
+                r_a_b = _mk_app(_mk_app(_mk_w_bvar(4), _mk_w_bvar(1)), _mk_w_bvar(0))
+                fa = _mk_app(_mk_w_bvar(3), _mk_w_bvar(2))
+                fb = _mk_app(_mk_w_bvar(3), _mk_w_bvar(1))
+                eq_fa_fb = _mk_app(_mk_app(_mk_app(eq_v, _mk_w_bvar(4)), fa), fb)
+                sanity = _pi(
+                    [
+                        a.binder(_mk_w_bvar(3)),
+                        b.binder(_mk_w_bvar(4)),
+                        anon.binder(r_a_b),
+                    ],
+                    eq_fa_fb,
+                )
+                quot_a_r = _mk_app(_mk_app(quot_u, _mk_w_bvar(4)), _mk_w_bvar(3))
+                # Quot.lift.{u, v} : ∀ {α : Sort u} {r : α → α → Prop} {β : Sort v}
+                #   (f : α → β), (∀ a b, r a b → f a = f b) → @Quot.{u} α r → β
+                expected = _pi(
+                    [
+                        alpha.implicit_binder(sort_u),
+                        r.implicit_binder(r_type),
+                        beta.implicit_binder(sort_v),
+                        f.binder(f_type),
+                        anon.binder(sanity),
+                        anon.binder(quot_a_r),
+                    ],
+                    _mk_w_bvar(3),
+                )
+            else:
+                # KIND_IND
+                mk_decl = find_decl(tc.declarations, _QUOT_MK_NAME)
+                if (
+                    mk_decl is None
+                    or not isinstance(mk_decl.w_kind, W_Quotient)
+                    or mk_decl.w_kind.kind != W_Quotient.KIND_CTOR
+                ):
+                    return W_InvalidQuotient(
+                        tc, "missing quotient constructor `Quot.mk`", type,
+                    )
+                quot_mk_u = _QUOT_MK_NAME.const([u])
+                tc.check_reference(quot_mk_u, mk_decl)
+                beta = Name.simple("β")
+                q = Name.simple("q")
+                # β : @Quot.{u} α r → Prop (under α, r)
+                beta_type = _pi(
+                    [anon.binder(_mk_app(_mk_app(quot_u, _mk_w_bvar(1)), _mk_w_bvar(0)))],
+                    PROP,
+                )
+                # ∀ (a : α), β (@Quot.mk.{u} α r a) (under α, r, β)
+                quot_mk_a = _mk_app(
+                    _mk_app(_mk_app(quot_mk_u, _mk_w_bvar(3)), _mk_w_bvar(2)),
+                    _mk_w_bvar(0),
+                )
+                mk_hyp = _pi(
+                    [a.binder(_mk_w_bvar(2))],
+                    _mk_app(_mk_w_bvar(1), quot_mk_a),
+                )
+                quot_a_r = _mk_app(_mk_app(quot_u, _mk_w_bvar(3)), _mk_w_bvar(2))
+                # Quot.ind.{u} : ∀ {α : Sort u} {r : α → α → Prop} {β : @Quot.{u} α r → Prop},
+                #   (∀ a, β (@Quot.mk.{u} α r a)) → ∀ (q : @Quot.{u} α r), β q
+                expected = _pi(
+                    [
+                        alpha.implicit_binder(sort_u),
+                        r.implicit_binder(r_type),
+                        beta.implicit_binder(beta_type),
+                        anon.binder(mk_hyp),
+                        q.binder(quot_a_r),
+                    ],
+                    _mk_app(_mk_w_bvar(2), _mk_w_bvar(0)),
+                )
+
+        if not tc.def_eq(type, expected):
+            return W_InvalidQuotient(
+                tc, "quotient type does not match Lean's specification", type,
+            )
 
     def decl_format(self, name, levels, type, constants, marker):
         # rpylean displays quot decls as ordinary axioms.

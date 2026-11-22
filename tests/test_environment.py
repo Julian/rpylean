@@ -19,6 +19,7 @@ from rpylean.objects import (
     W_BVar,
     W_ConstructorFieldCountMismatch,
     W_InvalidConstructorResult,
+    W_InvalidQuotient,
     W_InvalidRecursorRule,
     W_LEVEL_ZERO,
     W_LevelParam,
@@ -28,6 +29,7 @@ from rpylean.objects import (
     W_NotAProp,
     W_NotASort,
     W_NotYetDeclared,
+    W_Quotient,
     W_RecRule,
     W_UnsafeReference,
     SAFETY_PARTIAL,
@@ -1982,3 +1984,166 @@ class TestWarmCacheSoundness(object):
             warm_errors[0].as_diagnostic().format_with(FORMAT_PLAIN)
             == cold_error.as_diagnostic().format_with(FORMAT_PLAIN)
         )
+
+
+def _valid_eq_decls():
+    u_name = Name.simple("u")
+    u = u_name.as_level_param()
+    alpha, a_name = names("α", "a")
+    Eq = Name.simple("Eq")
+    eq_type = forall(
+        alpha.implicit_binder(u.sort()),
+        Name.ANONYMOUS.binder(W_BVar(0)),
+        Name.ANONYMOUS.binder(W_BVar(1)),
+    )(PROP)
+    eq_refl = Eq.child("refl").constructor(
+        levels=[u_name],
+        type=forall(alpha.implicit_binder(u.sort()), a_name.binder(W_BVar(0)))(
+            Eq.const([u]).app(W_BVar(1), W_BVar(0), W_BVar(0)),
+        ),
+        num_params=2,
+        num_fields=0,
+        cidx=0,
+        induct=Eq,
+    )
+    eq_ind = Eq.inductive(
+        levels=[u_name],
+        type=eq_type,
+        constructors=[eq_refl],
+        num_params=2,
+        num_indices=1,
+    )
+    return [eq_ind, eq_refl]
+
+
+def _valid_quot_decls(u_name=None, v_name=None):
+    u_name = u_name or Name.simple("u")
+    v_name = v_name or Name.simple("v")
+    u = u_name.as_level_param()
+    v = v_name.as_level_param()
+    alpha, r, a_name, b_name, beta, q = names("α", "r", "a", "b", "β", "q")
+    anon = Name.ANONYMOUS
+    r_type = forall(anon.binder(W_BVar(0)), anon.binder(W_BVar(1)))(PROP)
+    Quot = Name.simple("Quot")
+    Quot_u = Quot.const([u])
+    Quot_mk = Quot.child("mk")
+    Quot_mk_u = Quot_mk.const([u])
+    Eq_v = Name.simple("Eq").const([v])
+
+    quot_decl = Quot.quotient(
+        levels=[u_name],
+        kind=W_Quotient.KIND_TYPE,
+        type=forall(alpha.implicit_binder(u.sort()), r.binder(r_type))(u.sort()),
+    )
+    mk_decl = Quot_mk.quotient(
+        levels=[u_name],
+        kind=W_Quotient.KIND_CTOR,
+        type=forall(
+            alpha.implicit_binder(u.sort()),
+            r.binder(r_type),
+            a_name.binder(W_BVar(1)),
+        )(Quot_u.app(W_BVar(2), W_BVar(1))),
+    )
+    f_type = forall(anon.binder(W_BVar(2)))(W_BVar(1))
+    sanity = forall(
+        a_name.binder(W_BVar(3)),
+        b_name.binder(W_BVar(4)),
+        anon.binder(W_BVar(4).app(W_BVar(1), W_BVar(0))),
+    )(Eq_v.app(W_BVar(4), W_BVar(3).app(W_BVar(2)), W_BVar(3).app(W_BVar(1))))
+    lift_decl = Quot.child("lift").quotient(
+        levels=[u_name, v_name],
+        kind=W_Quotient.KIND_LIFT,
+        type=forall(
+            alpha.implicit_binder(u.sort()),
+            r.implicit_binder(r_type),
+            beta.implicit_binder(v.sort()),
+            f.binder(f_type),
+            anon.binder(sanity),
+            anon.binder(Quot_u.app(W_BVar(4), W_BVar(3))),
+        )(W_BVar(3)),
+    )
+    beta_type = forall(anon.binder(Quot_u.app(W_BVar(1), W_BVar(0))))(PROP)
+    mk_hyp = forall(a_name.binder(W_BVar(2)))(
+        W_BVar(1).app(Quot_mk_u.app(W_BVar(3), W_BVar(2), W_BVar(0))),
+    )
+    ind_decl = Quot.child("ind").quotient(
+        levels=[u_name],
+        kind=W_Quotient.KIND_IND,
+        type=forall(
+            alpha.implicit_binder(u.sort()),
+            r.implicit_binder(r_type),
+            beta.implicit_binder(beta_type),
+            anon.binder(mk_hyp),
+            q.binder(Quot_u.app(W_BVar(3), W_BVar(2))),
+        )(W_BVar(2).app(W_BVar(0))),
+    )
+    return quot_decl, mk_decl, lift_decl, ind_decl
+
+
+class TestQuotientValidation(object):
+    def test_valid_quot_declarations_accepted(self):
+        # Also verify non-default universe param names (`u1`, `u2`) are accepted.
+        quot_d, mk_d, lift_d, ind_d = _valid_quot_decls(
+            Name.simple("u1"), Name.simple("u2"),
+        )
+        env = Environment.having(_valid_eq_decls() + [quot_d, mk_d, lift_d, ind_d])
+        assert list(env.type_check([quot_d, mk_d, lift_d, ind_d])) == []
+
+    def test_forged_quot_type_rejected(self):
+        False_ind = Name.simple("False").inductive(type=PROP)
+        u_name = Name.simple("u")
+        forged = Name.simple("Quot").quotient(
+            levels=[u_name],
+            kind=W_Quotient.KIND_TYPE,
+            type=False_ind.const(),
+        )
+        env = Environment.having(_valid_eq_decls() + [False_ind, forged])
+        err = env.check_decl(forged)
+        assert isinstance(err, W_InvalidQuotient)
+
+    def test_mismatched_quot_kind_rejected(self):
+        quot_d, _, _, _ = _valid_quot_decls()
+        wrong_kind = Name.simple("Quot").quotient(
+            levels=quot_d.levels,
+            kind=W_Quotient.KIND_CTOR,
+            type=quot_d.type,
+        )
+        env = Environment.having([wrong_kind])
+        err = env.check_decl(wrong_kind)
+        assert isinstance(err, W_InvalidQuotient)
+
+    def test_wrong_universe_arity_rejected(self):
+        quot_d, _, _, _ = _valid_quot_decls()
+        bad_arity = Name.simple("Quot").quotient(
+            levels=[Name.simple("u"), Name.simple("v")],
+            kind=W_Quotient.KIND_TYPE,
+            type=quot_d.type,
+        )
+        env = Environment.having([bad_arity])
+        err = env.check_decl(bad_arity)
+        assert isinstance(err, W_InvalidQuotient)
+
+    def test_quot_lift_without_eq_rejected(self):
+        quot_d, mk_d, lift_d, _ = _valid_quot_decls()
+        # Declare an axiom `Eq` (not an inductive) so `type.infer` sees `Eq`,
+        # then verify `_check_eq_for_quot` rejects the fake `Eq`.
+        u_name = Name.simple("u")
+        u = u_name.as_level_param()
+        fake_eq = Name.simple("Eq").axiom(
+            levels=[u_name],
+            type=forall(
+                Name.simple("α").implicit_binder(u.sort()),
+                Name.ANONYMOUS.binder(W_BVar(0)),
+                Name.ANONYMOUS.binder(W_BVar(1)),
+            )(PROP),
+        )
+        env = Environment.having([fake_eq, quot_d, mk_d, lift_d])
+        err = env.check_decl(lift_d)
+        assert isinstance(err, W_InvalidQuotient)
+
+    def test_quot_ind_requires_real_quot_mk(self):
+        quot_d, mk_d, _, ind_d = _valid_quot_decls()
+        fake_mk = mk_d.name.axiom(levels=mk_d.levels, type=mk_d.type)
+        env = Environment.having([quot_d, fake_mk, ind_d])
+        err = env.check_decl(ind_d)
+        assert isinstance(err, W_InvalidQuotient)
