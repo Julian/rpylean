@@ -3,7 +3,7 @@ from rpython.rlib.jit import (
 )
 from rpython.rlib.objectmodel import (
     always_inline, compute_hash, dont_inline, newlist_hint,
-    not_rpython, specialize,
+    not_rpython, specialize, we_are_translated,
 )
 from rpython.rlib.rbigint import rbigint
 
@@ -3746,9 +3746,11 @@ class W_FunBase(W_Expr):
     # lambdas and foralls don't collide in the content hash.
     _hash_tag = 0
 
+    @always_inline
     def __init__(self, binder, body):
-        assert body is not None
-        assert isinstance(binder, Binder)
+        if not we_are_translated():
+            assert body is not None
+            assert isinstance(binder, Binder)
         self.binder = binder
         self.body = body
         tp = binder.type._packed
@@ -4311,6 +4313,7 @@ class W_App(W_Expr):
     _attrs_ = ['fn', 'arg']
     _immutable_fields_ = ['fn', 'arg']
 
+    @always_inline
     def __init__(self, fn, arg):
         self.fn = fn
         self.arg = arg

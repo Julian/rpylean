@@ -98,6 +98,12 @@ class RefCountTable(object):
             rffi.UINT, rffi.cast(lltype.Signed, self.data[idx]) + 1,
         )
 
+    @dont_inline
+    def _record2_slow(self, eidx, a, b):
+        self.ensure(eidx)
+        self.bump(a)
+        self.bump(b)
+
     @always_inline
     def bump(self, idx):
         if r_uint(idx) < r_uint(self.length):
@@ -246,7 +252,7 @@ class EnvironmentBuilder(object):
         self._refcount = counts
         n = counts.length
         if not self.exprs and n > 0:
-            self.exprs = newlist_hint(n)
+            self.exprs = [None] * n
         if len(self.names) == 1 and n > 16384:
             nhint = n >> 4
             names = newlist_hint(nhint if nhint >= 1024 else 1024)
@@ -318,7 +324,9 @@ class EnvironmentBuilder(object):
             self._refcount.set_zero(eidx)
             return
         exprs = self.exprs
-        if eidx == len(exprs):
+        if eidx >= 0 and eidx < len(exprs):
+            exprs[eidx] = w_expr
+        elif eidx == len(exprs):
             exprs.append(w_expr)
         else:
             _register_at(exprs, eidx, w_expr, objects.PROP)
@@ -689,7 +697,7 @@ def _match_binfo_at(line, p, end):
 
 @always_inline
 def _match_close_ie_eol(line, q, end):
-    """Match ``},"ie":E}\\n`` starting at ``q``. Returns ``(eidx, next_pos)`` or ``(-1, -1)``."""
+    """Match ``},"ie":E}\\n`` starting at ``q``. Returns ``(eidx, next_pos)`` or ``(q, -1)``."""
     if (q + 7 <= end
             and _load_u32(line, q) == _W4_IE_0
             and _load_u32(line, q + 3) == _W4_IE_1):
@@ -698,13 +706,15 @@ def _match_close_ie_eol(line, q, end):
             np = _at_eol_pos(line, q + 1, end)
             if np >= 0:
                 return eidx, np
-    return -1, -1
+    # Include dynamic `q` so RPython doesn't constant-fold the failure tuple
+    # (merging a static constant tuple with a fresh one defeats malloc_removal).
+    return q, -1
 
 
 @always_inline
 def _match_binder_fields(line, q, end):
     """Match ``,"body":B,"name":N,"type":T`` starting at ``q``.
-    Returns ``(body_eidx, name_idx, type_eidx, q)`` or ``(-1, -1, -1, -1)``."""
+    Returns ``(body_eidx, name_idx, type_eidx, q)`` or ``(q, -1, -1, -1)``."""
     if q + 8 <= end and _load_u64(line, q) == _W8_BODY:
         body_eidx, q = _read_uint(line, q + 8, end)
         if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
@@ -713,13 +723,13 @@ def _match_binder_fields(line, q, end):
                 type_eidx, q = _read_uint(line, q + 8, end)
                 if type_eidx >= 0:
                     return body_eidx, name_idx, type_eidx, q
-    return -1, -1, -1, -1
+    return q, -1, -1, -1
 
 
 @always_inline
 def _match_type_value_eol(line, q, end):
     """Match ``,"type":T,"value":V}}\\n`` starting at ``q``.
-    Returns ``(type_eidx, value_eidx, next_pos)`` or ``(-1, -1, -1)``."""
+    Returns ``(type_eidx, value_eidx, next_pos)`` or ``(q, -1, -1)``."""
     if q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
         type_eidx, q = _read_uint(line, q + 8, end)
         if (type_eidx >= 0 and q + 9 <= end
@@ -731,7 +741,7 @@ def _match_type_value_eol(line, q, end):
                 np = _at_eol_pos(line, q + 2, end)
                 if np >= 0:
                     return type_eidx, value_eidx, np
-    return -1, -1, -1
+    return q, -1, -1
 
 
 @always_inline
@@ -748,7 +758,7 @@ def _skip_optional_all(line, q, end):
 
 @always_inline
 def _match_pair_close_eol(line, q, end):
-    """Match ``L,R]}\\n`` starting at ``q``. Returns ``(lhs, rhs, next_pos)`` or ``(-1, -1, -1)``."""
+    """Match ``L,R]}\\n`` starting at ``q``. Returns ``(lhs, rhs, next_pos)`` or ``(q, -1, -1)``."""
     lhs, q = _read_uint(line, q, end)
     if lhs >= 0 and q < end and _load_u8(line, q) == 44:
         rhs, q = _read_uint(line, q + 1, end)
@@ -758,7 +768,7 @@ def _match_pair_close_eol(line, q, end):
             np = _at_eol_pos(line, q + 2, end)
             if np >= 0:
                 return lhs, rhs, np
-    return -1, -1, -1
+    return q, -1, -1
 
 
 @always_inline
@@ -788,13 +798,13 @@ def _read_level_names(line, q, end, builder):
     while True:
         lidx, q = _read_uint(line, q, end)
         if lidx < 0 or q >= end:
-            return None, -1
+            return None, q
         levels.append(builder.names[lidx])
         ch = _load_u8(line, q)
         if ch == 93:
             return levels, q + 1
         if ch != 44:
-            return None, -1
+            return None, q
         q += 1
 
 
@@ -811,12 +821,17 @@ def _ref_expr_rc(exprs, rc_data, eidx):
     return e
 
 
+@dont_inline
+def _reg_expr_slow(builder, eidx, w_expr):
+    builder.register_expr(eidx, w_expr)
+
+
 @always_inline
 def _reg_expr_rc(builder, exprs, eidx, w_expr):
-    if eidx == len(exprs):
-        exprs.append(w_expr)
+    if eidx >= 0 and eidx < len(exprs):
+        exprs[eidx] = w_expr
     else:
-        builder.register_expr(eidx, w_expr)
+        _reg_expr_slow(builder, eidx, w_expr)
 
 
 @always_inline
@@ -858,7 +873,7 @@ def _scan_plain_str(line, start, end):
 @always_inline
 def _match_def_hint(line, q, end):
     if q + 8 > end:
-        return -1, -1
+        return q, -1
     hw = _load_u64(line, q)
     if hw == _W8_H_ABBREV:
         return objects.HINT_ABBREV, q + 8
@@ -869,7 +884,7 @@ def _match_def_hint(line, q, end):
         hint, q = _read_uint(line, q + 11, end)
         if hint >= 0 and q < end and _load_u8(line, q) == 125:
             return hint, q + 1
-    return -1, -1
+    return q, -1
 
 
 @always_inline
@@ -881,7 +896,7 @@ def _match_def_safety(line, q, end):
     if (q + 7 <= end and _load_u32(line, q) == _W4_UNSA
             and _load_u32(line, q + 3) == _W4_AFE_Q):
         return objects.SAFETY_UNSAFE, q + 7
-    return -1, -1
+    return q, -1
 
 
 @always_inline
@@ -1398,8 +1413,14 @@ def _make_chunk_fast(mode):
             rc_data = counts.data
             exprs = target.exprs
             names = target.names
+        if is_prescan:
+            rc_data = target.data
+            rc_len = target.length
+            rc_cap = target.cap
         while pos < end:
             if pos + 8 > end:
+                if is_prescan:
+                    target.length = rc_len
                 return ~pos
             w0 = _load_u64(line, pos)
             if w0 == _W8_APP_0:
@@ -1414,9 +1435,24 @@ def _make_chunk_fast(mode):
                             eidx, np = _match_close_ie_eol(line, q, end)
                             if np >= 0:
                                 if is_prescan:
-                                    target.ensure(eidx)
-                                    target.bump(fn_eidx)
-                                    target.bump(arg_eidx)
+                                    if (eidx == rc_len and eidx < rc_cap
+                                            and r_uint(fn_eidx) < r_uint(rc_len)
+                                            and r_uint(arg_eidx) < r_uint(rc_len)):
+                                        rc_len = eidx + 1
+                                        rc_data[fn_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[fn_eidx]) + 1,
+                                        )
+                                        rc_data[arg_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[arg_eidx]) + 1,
+                                        )
+                                    else:
+                                        target.length = rc_len
+                                        target._record2_slow(eidx, fn_eidx, arg_eidx)
+                                        rc_data = target.data
+                                        rc_len = target.length
+                                        rc_cap = target.cap
                                 elif is_rc:
                                     _reg_expr_rc(
                                         target, exprs, eidx,
@@ -1435,6 +1471,8 @@ def _make_chunk_fast(mode):
                                     )
                                 pos = np
                                 continue
+                if is_prescan:
+                    target.length = rc_len
                 return ~pos
             w6 = w0 & _MASK48
             if w6 == _W6_IE:
@@ -1454,9 +1492,24 @@ def _make_chunk_fast(mode):
                             np = _at_eol_pos(line, q + 2, end)
                             if np >= 0:
                                 if is_prescan:
-                                    target.ensure(eidx)
-                                    target.bump(type_eidx)
-                                    target.bump(body_eidx)
+                                    if (eidx == rc_len and eidx < rc_cap
+                                            and r_uint(type_eidx) < r_uint(rc_len)
+                                            and r_uint(body_eidx) < r_uint(rc_len)):
+                                        rc_len = eidx + 1
+                                        rc_data[type_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[type_eidx]) + 1,
+                                        )
+                                        rc_data[body_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[body_eidx]) + 1,
+                                        )
+                                    else:
+                                        target.length = rc_len
+                                        target._record2_slow(eidx, type_eidx, body_eidx)
+                                        rc_data = target.data
+                                        rc_len = target.length
+                                        rc_cap = target.cap
                                 elif is_rc:
                                     bound = _binder_from_code(
                                         names[name_idx],
@@ -1486,7 +1539,11 @@ def _make_chunk_fast(mode):
                                 pos = np
                                 continue
                 if is_prescan:
+                    target.length = rc_len
                     np = _try_prescan_compact_rare(line, pos, end, target)
+                    rc_data = target.data
+                    rc_len = target.length
+                    rc_cap = target.cap
                     if np >= 0:
                         pos = np
                         continue
@@ -1497,6 +1554,8 @@ def _make_chunk_fast(mode):
                         if (rr & 1) and stop_on_decl:
                             return pos
                         continue
+                if is_prescan:
+                    target.length = rc_len
                 return ~pos
             if w0 == _W8_FORALL_0:
                 # {"forallE":{"binderInfo":"...","body":B,"name":N,"type":T},"ie":E}
@@ -1513,9 +1572,24 @@ def _make_chunk_fast(mode):
                             eidx, np = _match_close_ie_eol(line, q, end)
                             if np >= 0:
                                 if is_prescan:
-                                    target.ensure(eidx)
-                                    target.bump(type_eidx)
-                                    target.bump(body_eidx)
+                                    if (eidx == rc_len and eidx < rc_cap
+                                            and r_uint(type_eidx) < r_uint(rc_len)
+                                            and r_uint(body_eidx) < r_uint(rc_len)):
+                                        rc_len = eidx + 1
+                                        rc_data[type_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[type_eidx]) + 1,
+                                        )
+                                        rc_data[body_eidx] = rffi.cast(
+                                            rffi.UINT,
+                                            rffi.cast(lltype.Signed, rc_data[body_eidx]) + 1,
+                                        )
+                                    else:
+                                        target.length = rc_len
+                                        target._record2_slow(eidx, type_eidx, body_eidx)
+                                        rc_data = target.data
+                                        rc_len = target.length
+                                        rc_cap = target.cap
                                 elif is_rc:
                                     bound = _binder_from_code(
                                         names[name_idx],
@@ -1544,13 +1618,19 @@ def _make_chunk_fast(mode):
                                     )
                                 pos = np
                                 continue
+                if is_prescan:
+                    target.length = rc_len
                 return ~pos
             if is_prescan and (w6 == _W6_IN or w6 == _W6_IL):
                 # Name / Level lines have zero expr definitions and zero expr refs.
                 pos = _find_nl(line, pos + 6, end)
                 continue
             if is_prescan:
+                target.length = rc_len
                 np = _try_prescan_compact_rare(line, pos, end, target)
+                rc_data = target.data
+                rc_len = target.length
+                rc_cap = target.cap
                 if np >= 0:
                     pos = np
                     continue
@@ -1561,7 +1641,11 @@ def _make_chunk_fast(mode):
                     if (rr & 1) and stop_on_decl:
                         return pos
                     continue
+            if is_prescan:
+                target.length = rc_len
             return ~pos
+        if is_prescan:
+            target.length = rc_len
         return pos
 
     if is_rc:
