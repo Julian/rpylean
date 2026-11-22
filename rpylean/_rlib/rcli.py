@@ -63,6 +63,11 @@ def _extract_jit(argv):
     i = 1
     while i < len(argv):
         a = argv[i]
+        if a == "--":
+            while i < len(argv):
+                result.append(argv[i])
+                i += 1
+            break
         if a == "--jit":
             if i + 1 >= len(argv):
                 raise UsageError("Option --jit requires an argument")
@@ -150,6 +155,12 @@ class Command(_CommandLike):
         i = 0
         while i < len(args):
             arg = args[i]
+            if arg == "--":
+                i += 1
+                while i < len(args):
+                    positional.append(args[i])
+                    i += 1
+                break
             if arg.startswith("--"):
                 opt = arg[2:]
                 if opt == "help":
@@ -378,6 +389,8 @@ class SubCLI(_CommandLike):
             a = args[i]
             if a == "--help":
                 raise self.help(executable)
+            if a == "--":
+                break
             if a.startswith("--"):
                 # Unknown options before the subcommand could be either ours
                 # or the child's; we conservatively skip ahead by 2 only when

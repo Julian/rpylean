@@ -150,6 +150,9 @@ CHECK_FLAGS = [
     flags=CHECK_FLAGS,
 )
 def check(self, args, stdin, stdout, stderr):
+    if not args.varargs:
+        self.usage_error("Expected an EXPORT_FILE")
+
     stdoutw = writer_from_arg(args.options["color"], stdout)
     stderrw = writer_from_arg(args.options["color"], stderr)
     apply_width(args.options["width"], stdout)

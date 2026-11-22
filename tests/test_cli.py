@@ -5,7 +5,7 @@ from rpylean._rlib.rcli import CLI, Args, UsageError
 from rpylean._tokens import FORMAT_COLOR, FORMAT_PLAIN, TokenWriter
 from rpylean.cli import (
     Printer, _HEAT_LEVELS, _heat_level, _json_escape, _parse_bytes,
-    _parse_seconds,
+    _parse_seconds, cli as rpylean_cli,
 )
 from rpylean.environment import CheckResult, Environment
 from rpylean.objects import TYPE, Name
@@ -302,6 +302,109 @@ class TestJitOption(object):
     def test_jit_invalid_optstring(self):
         _, err = run(self.cli, ["prog", "--jit", "nopesuchparam=1", "echo", "x"], exit=1)
         assert "Invalid --jit options" in err
+
+    def test_jit_ignored_after_double_dash(self):
+        out, _ = run(self.cli, ["prog", "echo", "--", "--jit=off"])
+        assert "ran with --jit=off" in out
+
+    def test_jit_before_double_dash_still_applies(self):
+        out, _ = run(self.cli, ["prog", "--jit=off", "echo", "--", "--jit"])
+        assert "ran with --jit" in out
+
+
+class TestEndOfOptions(object):
+    cli = CLI(default="echo")
+
+    @cli.subcommand(
+        ["*ARGS"],
+        options=[("opt", "Option with argument.")],
+        flags=[("flag", "A flag.", "", "yes")],
+        help="Echo positional args.",
+    )
+    def echo(self, args, stdin, stdout, stderr):
+        stdout.write("varargs=%r opt=%r flag=%r\n" % (
+            args.varargs, args.options["opt"], args.options["flag"],
+        ))
+        return 0
+
+    @cli.subcommand([], help="Another subcommand.")
+    def other(self, args, stdin, stdout, stderr):
+        stdout.write("ran other\n")
+        return 0
+
+    def test_option_like_args_after_double_dash(self):
+        out, err = run(
+            self.cli,
+            ["prog", "echo", "--opt", "v", "--", "--help", "--flag", "--", "--opt"],
+        )
+        assert "varargs=['--help', '--flag', '--', '--opt']" in out
+        assert "opt='v'" in out
+        assert "flag=''" in out
+        assert err == ""
+
+    def test_option_still_requires_value_before_double_dash(self):
+        out, err = run(self.cli, ["prog", "echo", "--opt", "--", "x"], exit=1)
+        assert "Option --opt requires an argument" in err
+        assert out == ""
+
+    def test_double_dash_with_default_command_and_subcommand_name(self):
+        out, err = run(self.cli, ["prog", "--", "other", "--help"])
+        assert "varargs=['other', '--help']" in out
+        assert err == ""
+
+    def test_subcli_double_dash_passes_to_child(self):
+        cli = CLI()
+        grp = cli.subcli("grp", help="A group.", options=[("shared", "shared")])
+
+        @grp.subcommand(["*ARGS"], help="Leaf.")
+        def leaf(self, args, stdin, stdout, stderr):
+            stdout.write("shared=%r varargs=%r\n" % (
+                args.options["shared"], args.varargs,
+            ))
+            return 0
+
+        out, _ = run(cli, ["prog", "grp", "--shared", "S", "leaf", "--", "--help"])
+        assert "shared='S' varargs=['--help']" in out
+
+        _, err = run(cli, ["prog", "grp", "--", "leaf"], exit=1)
+        assert "Missing subcommand for grp" in err
+
+
+class TestCheckCLI(object):
+    def test_check_no_files_exits_nonzero(self):
+        out, err = run(rpylean_cli, ["rpylean", "check"], exit=1)
+        assert "Expected an EXPORT_FILE" in err
+        assert out == ""
+
+    def test_check_only_options_no_files_exits_nonzero(self):
+        out, err = run(rpylean_cli, ["rpylean", "check", "--color=no"], exit=1)
+        assert "Expected an EXPORT_FILE" in err
+        assert out == ""
+
+    def test_check_bare_double_dash_exits_nonzero(self):
+        out, err = run(rpylean_cli, ["rpylean", "check", "--"], exit=1)
+        assert "Expected an EXPORT_FILE" in err
+        assert out == ""
+
+    def test_default_bare_double_dash_exits_nonzero(self):
+        out, err = run(rpylean_cli, ["rpylean", "--"], exit=1)
+        assert "Expected an EXPORT_FILE" in err
+        assert out == ""
+
+    def test_check_option_like_filename_after_double_dash(self):
+        out, err = run(
+            rpylean_cli,
+            ["rpylean", "check", "--", "--no-such-export.ndjson"],
+            exit=1,
+        )
+        assert "`--no-such-export.ndjson` does not exist." in err
+        assert "Unknown option" not in err
+        assert out == ""
+
+    def test_default_check_filename_matching_subcommand_after_double_dash(self):
+        out, err = run(rpylean_cli, ["rpylean", "--", "dump"], exit=1)
+        assert "`dump` does not exist." in err
+        assert out == ""
 
 
 class TestPrinter(object):
