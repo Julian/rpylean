@@ -29,24 +29,6 @@ class ExportError(Exception):
         """
         raise NotImplementedError
 
-    def at(self, source_pos):
-        """
-        Pair this error with a source position.
-        """
-        return ErrorAtSource(self, source_pos)
-
-
-class ErrorAtSource(Exception):
-    """
-    An ExportError paired with a source position.
-    """
-
-    _attrs_ = ['error', 'source_pos']
-
-    def __init__(self, error, source_pos):
-        self.error = error
-        self.source_pos = source_pos
-
 
 class MalformedLine(ExportError):
     """
@@ -205,20 +187,21 @@ class W_InvalidDeclaration(W_Error):
         """Return this error as a ``Diagnostic`` with declaration context."""
         return self.inner.diagnostic_in(self.declaration, self.declarations)
 
-    def tokens(self):
+    def _render_diagnostic(self):
         from rpylean.objects import _RENDER_BUDGET, _DIAGNOSTIC_RENDER_LIMIT
         _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
-        result = self.as_diagnostic().tokens + self.as_diagnostic().message
-        _RENDER_BUDGET.remaining = -1
-        return result
+        try:
+            return self.as_diagnostic()
+        finally:
+            _RENDER_BUDGET.remaining = -1
+
+    def tokens(self):
+        d = self._render_diagnostic()
+        return d.tokens + d.message
 
     def write_to(self, writer):
         """Write this error as a diagnostic with declaration context."""
-        from rpylean.objects import _RENDER_BUDGET, _DIAGNOSTIC_RENDER_LIMIT
-        _RENDER_BUDGET.remaining = _DIAGNOSTIC_RENDER_LIMIT
-        d = self.as_diagnostic()
-        _RENDER_BUDGET.remaining = -1
-        writer.writeline_diagnostic(d)
+        writer.writeline_diagnostic(self._render_diagnostic())
 
 
 class UnknownDeclaration(W_Error):
@@ -416,9 +399,6 @@ class InvalidProjection(W_Error):
                 )
             ],
         )
-
-    def _suffix_tokens(self):
-        return self._suffix
 
 
 class WallTimeExceeded(W_Error):
