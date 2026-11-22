@@ -1845,3 +1845,123 @@ class TestJointCheckAndInferExpected(object):
                 m.infer(h_f2, True)
         finally:
             tc.free()
+
+    def test_check_value_joint_ast_skips_bvar_records_and_reuses_top_fvars(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import KIND_FORALL, KIND_LAMBDA
+        from rpylean.objects import (
+            SAFETY_SAFE,
+            SAFETY_UNSAFE,
+            W_BVar,
+            W_TypeError,
+            W_UnsafeReference,
+        )
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        fn2 = Name.simple("fn2").axiom(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+        )
+        eq_n = Name.simple("MyEq")
+        eq_decl = eq_n.axiom(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0), Name.simple("z").binder(type=b1))(PROP),
+        )
+        rfl_n = Name.simple("myRfl")
+        rfl_decl = rfl_n.axiom(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0))(
+                eq_n.const().app(b1, b0, b0),
+            ),
+        )
+        bad_unsafe = Name.simple("badU").axiom(type=NAT, is_unsafe=True)
+
+        # 1. Outer telescope + inner lambda/let referencing both outer & inner vars
+        z = Name.simple("z")
+        ty_outer = forall(x.binder(type=NAT), y.binder(type=NAT))(
+            eq_n.const().app(
+                NAT,
+                fn2.name.const().app(b1, b0),
+                fn2.name.const().app(b1, b0),
+            ),
+        )
+        val_outer = fun(x.binder(type=NAT), y.binder(type=NAT))(
+            rfl_n.const().app(NAT, fn2.name.const().app(b1, b0)),
+        )
+        # Inner lambda/let with shared subexpression referencing both depth=0 and depth=1
+        inner_shared = fn2.name.const().app(b2, b0)
+        ty_inner = forall(x.binder(type=NAT), y.binder(type=NAT))(
+            forall(z.binder(type=NAT))(
+                eq_n.const().app(NAT, inner_shared, inner_shared),
+            ),
+        )
+        val_inner = fun(x.binder(type=NAT), y.binder(type=NAT))(
+            fun(z.binder(type=NAT))(
+                Name.simple("w").let(
+                    type=NAT,
+                    value=inner_shared,
+                    body=rfl_n.const().app(NAT, b0),
+                ),
+            ),
+        )
+        # Consecutive declarations sharing telescope prefix with unsafe -> safe boundary
+        d_unsafe = Name.simple("dUnsafe").definition(
+            type=forall(x.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT))(fn2.name.const().app(b0, bad_unsafe.name.const())),
+            safety=SAFETY_UNSAFE,
+        )
+        d_safe_bad = Name.simple("dSafeBad").definition(
+            type=forall(x.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT))(fn2.name.const().app(b0, bad_unsafe.name.const())),
+            safety=SAFETY_SAFE,
+        )
+        d_safe_ok1 = Name.simple("dSafeOk1").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(fn2.name.const().app(b1, b0)),
+        )
+        d_safe_ok2 = Name.simple("dSafeOk2").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(NAT),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(fn2.name.const().app(b1, b0)),
+        )
+
+        env = Environment.having([
+            nat_decl, fn2, eq_decl, rfl_decl, bad_unsafe,
+            d_unsafe, d_safe_bad, d_safe_ok1, d_safe_ok2,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            # Checking ty_outer/val_outer directly on AST creates ZERO outer
+            # KIND_LAMBDA records and imports ZERO W_BVar leaves for the body!
+            assert m.check_value(ty_outer, val_outer, True) is None
+            for i in range(1, store.nrecs):
+                assert store.kind(i << 1) != KIND_LAMBDA
+            # Two top-level fvars exist for (0, Nat) and (1, Nat) and are distinct.
+            assert m._top_fvars.size == 2
+
+            # Soundness: binder 0 and binder 1 are NEVER conflated even with same domain.
+            bad_eq = m.check_value(
+                forall(x.binder(type=NAT), y.binder(type=NAT))(
+                    eq_n.const().app(NAT, b1, b0),
+                ),
+                fun(x.binder(type=NAT), y.binder(type=NAT))(
+                    rfl_n.const().app(NAT, b1),
+                ),
+                True,
+            )
+            assert isinstance(bad_eq, W_TypeError)
+
+            # Inner lambda/let with shared depth>0 DAG nodes works cleanly.
+            assert m.check_value(ty_inner, val_inner, True) is None
+            assert store._fvar_gens_len == 0
+        finally:
+            tc.free()
+
+        # Cross-declaration warm reuse & safety boundary
+        assert env.type_check_one(d_unsafe, measure=False).error is None
+        res_bad = env.type_check_one(d_safe_bad, measure=False)
+        assert isinstance(res_bad.error, W_UnsafeReference)
+        assert env.type_check_one(d_safe_ok1, measure=False).error is None
+        from rpylean.machine import _SPARE
+        recs_after_1 = _SPARE.machine.store.nrecs
+        assert env.type_check_one(d_safe_ok2, measure=False).error is None
+        # Second declaration with identical prefix & body allocates ZERO new records!
+        assert _SPARE.machine.store.nrecs == recs_after_1

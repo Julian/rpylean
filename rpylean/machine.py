@@ -1110,6 +1110,7 @@ class TermStore(object):
         'infos', 'names', '_name_ids', '_proj_overflow',
         '_bvar_arr', '_bvar_max', '_bvar_leaves', '_fvar_uid', '_content_head',
         '_store_gen', '_import_spine', '_import_spine_len',
+        '_fvar_gens', '_fvar_gens_len', '_fvar_base_gen', '_fvar_multi',
         '_lgen1_p', '_lgen1_l', '_lgen1_g', '_lgen1_dirty',
         '_lgen2_p0', '_lgen2_p1', '_lgen2_l0', '_lgen2_l1', '_lgen2_g', '_lgen2_dirty',
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
@@ -1173,6 +1174,10 @@ class TermStore(object):
         self._store_gen = _next_cache_gen()
         self._import_spine = []
         self._import_spine_len = 0
+        self._fvar_gens = [0] * 64
+        self._fvar_gens_len = 0
+        self._fvar_base_gen = 0
+        self._fvar_multi = None
         #: Direct-mapped per-epoch level-substitution generation caches so
         #: polymorphic DAG subterms shared across declarations at the same
         #: concrete universe levels reuse `W_Expr._cache` hits.
@@ -1307,6 +1312,7 @@ class TermStore(object):
         self._fvar_uid.clear()
         self._content_head.clear()
         self._store_gen = _next_cache_gen()
+        self.clear_fvar_gens()
         if self._lgen1_dirty:
             p = self._lgen1_p
             l = self._lgen1_l
@@ -5924,6 +5930,317 @@ class TermStore(object):
             self.set_node(h, e)
         return h
 
+    def clear_fvar_gens(self):
+        n = self._fvar_gens_len
+        if n > 0:
+            gens = self._fvar_gens
+            i = 0
+            while i < n:
+                gens[i] = 0
+                i += 1
+            self._fvar_gens_len = 0
+        self._fvar_base_gen = 0
+        if self._fvar_multi is not None:
+            self._fvar_multi = None
+
+    def _fvar_gen_for_depth(self, depth):
+        gens = self._fvar_gens
+        while depth >= len(gens):
+            gens.append(0)
+        g = gens[depth]
+        if g == 0:
+            g = _next_cache_gen()
+            gens[depth] = g
+            if depth + 1 > self._fvar_gens_len:
+                self._fvar_gens_len = depth + 1
+        return g
+
+    def _fvar_cache_put(self, e, depth, dgen, h):
+        if dgen > 0:
+            base = self._fvar_base_gen
+            if base > 0 and (e._cache >> 32) >= base and (e._cache >> 32) != dgen:
+                mm = self._fvar_multi
+                if mm is None:
+                    mm = self._fvar_multi = {}
+                mm[(e, depth)] = h
+                return
+            e._cache = (dgen << 32) | h
+
+    def import_term_fvars(self, e, fvars, nf, fgen):
+        """Import ``e`` while substituting outer telescope bound variables
+        ``BVar(k) -> fvars[nf - 1 - k]`` (all closed `W_FVar` leaves) directly
+        on the AST, avoiding allocating throwaway `BVar`-bearing records."""
+        if nf == 0 or e.loose_bvar_range() == 0:
+            return self.import_term(e)
+        if e.__class__ is W_BVar:
+            assert isinstance(e, W_BVar)
+            bid = e.id
+            return fvars[nf - 1 - bid] if bid < nf else self.bvar(bid - nf)
+        if fgen > 0:
+            c = e._cache
+            if (c >> 32) == fgen:
+                return c & _TABLE_SLOT_MASK
+            if self._fvar_base_gen == 0:
+                self._fvar_base_gen = fgen
+        mark = self._import_spine_len
+        try:
+            return self._import_fvars_rec(e, fvars, nf, 0, fgen, 0)
+        finally:
+            if self._import_spine_len > mark:
+                self._clear_import_spine(mark)
+
+    def _import_fvars_rec(self, e, fvars, nf, depth, dgen, rdepth):
+        sgen = self._store_gen
+        if e.loose_bvar_range() <= depth:
+            c = e._cache
+            if (c >> 32) == sgen:
+                return c & _TABLE_SLOT_MASK
+            return self._import_rec(e, sgen, rdepth)
+        if dgen > 0:
+            c = e._cache
+            if (c >> 32) == dgen:
+                return c & _TABLE_SLOT_MASK
+            mm = self._fvar_multi
+            if mm is not None:
+                mh = mm.get((e, depth), 0)
+                if mh != 0:
+                    return mh
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        cls = e.__class__
+        nr = rdepth + 1
+        if cls is W_BVar:
+            assert isinstance(e, W_BVar)
+            rel = e.id - depth
+            if rel < nf:
+                return fvars[nf - 1 - rel]
+            return self.bvar(e.id - nf)
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            fn_h = 0
+            if fn.loose_bvar_range() <= depth:
+                fc = fn._cache
+                if (fc >> 32) == sgen:
+                    fn_h = fc & _TABLE_SLOT_MASK
+                else:
+                    fn_h = self._import_rec(fn, sgen, nr)
+            elif dgen > 0 and (fn._cache >> 32) == dgen:
+                fn_h = fn._cache & _TABLE_SLOT_MASK
+            elif not isinstance(fn, W_App):
+                if fn.__class__ is W_BVar:
+                    assert isinstance(fn, W_BVar)
+                    rel = fn.id - depth
+                    fn_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(fn.id - nf)
+                else:
+                    fn_h = self._import_fvars_rec(fn, fvars, nf, depth, dgen, nr)
+            if fn_h != 0:
+                arg = e.arg
+                if arg.loose_bvar_range() <= depth:
+                    ac = arg._cache
+                    if (ac >> 32) == sgen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._import_rec(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    arg_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(arg.id - nf)
+                elif dgen > 0 and (arg._cache >> 32) == dgen:
+                    arg_h = arg._cache & _TABLE_SLOT_MASK
+                else:
+                    arg_h = self._import_fvars_rec(arg, fvars, nf, depth, dgen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                if dgen > 0:
+                    if (self._fvar_base_gen > 0
+                            and (e._cache >> 32) >= self._fvar_base_gen
+                            and (e._cache >> 32) != dgen):
+                        self._fvar_cache_put(e, depth, dgen, head)
+                    else:
+                        e._cache = (dgen << 32) | head
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                spine.append(e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if cur.loose_bvar_range() <= depth:
+                    self._import_spine_len = top
+                    cc = cur._cache
+                    head = (
+                        cc & _TABLE_SLOT_MASK
+                        if (cc >> 32) == sgen
+                        else self._import_rec(cur, sgen, nr)
+                    )
+                    break
+                if dgen > 0 and (cur._cache >> 32) == dgen:
+                    head = cur._cache & _TABLE_SLOT_MASK
+                    break
+                if self._fvar_multi is not None:
+                    mh = self._fvar_multi.get((cur, depth), 0)
+                    if mh != 0:
+                        head = mh
+                        break
+                if not isinstance(cur, W_App):
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        rel = cur.id - depth
+                        head = fvars[nf - 1 - rel] if rel < nf else self.bvar(cur.id - nf)
+                    else:
+                        self._import_spine_len = top
+                        head = self._import_fvars_rec(cur, fvars, nf, depth, dgen, nr)
+                    break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    spine.append(cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.loose_bvar_range() <= depth:
+                    ac = arg._cache
+                    if (ac >> 32) == sgen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        self._import_spine_len = top
+                        arg_h = self._import_rec(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    arg_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(arg.id - nf)
+                elif dgen > 0 and (arg._cache >> 32) == dgen:
+                    arg_h = arg._cache & _TABLE_SLOT_MASK
+                else:
+                    self._import_spine_len = top
+                    arg_h = self._import_fvars_rec(arg, fvars, nf, depth, dgen, nr)
+                head = self.cons_app(head, arg_h)
+                if dgen > 0:
+                    if (self._fvar_base_gen > 0
+                            and (app._cache >> 32) >= self._fvar_base_gen
+                            and (app._cache >> 32) != dgen):
+                        self._fvar_cache_put(app, depth, dgen, head)
+                    else:
+                        app._cache = (dgen << 32) | head
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            binder = e.binder
+            btype = binder.type
+            if btype.loose_bvar_range() <= depth:
+                tc = btype._cache
+                type_h = (
+                    tc & _TABLE_SLOT_MASK
+                    if (tc >> 32) == sgen
+                    else self._import_rec(btype, sgen, nr)
+                )
+            else:
+                type_h = self._import_fvars_rec(btype, fvars, nf, depth, dgen, nr)
+            ebody = e.body
+            ndepth = depth + 1
+            if ebody.loose_bvar_range() <= ndepth:
+                bc = ebody._cache
+                body_h = (
+                    bc & _TABLE_SLOT_MASK
+                    if (bc >> 32) == sgen
+                    else self._import_rec(ebody, sgen, nr)
+                )
+            else:
+                ndgen = self._fvar_gen_for_depth(ndepth)
+                body_h = self._import_fvars_rec(ebody, fvars, nf, ndepth, ndgen, nr)
+            if cls is W_Lambda:
+                h = self.lam(binder, type_h, body_h)
+            else:
+                h = self.forall(binder, type_h, body_h)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index,
+                self._import_fvars_rec(e.struct_expr, fvars, nf, depth, dgen, nr),
+            )
+        elif cls is W_Let:
+            assert isinstance(e, W_Let)
+            et = e.type
+            if et.loose_bvar_range() <= depth:
+                tc = et._cache
+                th = (
+                    tc & _TABLE_SLOT_MASK
+                    if (tc >> 32) == sgen
+                    else self._import_rec(et, sgen, nr)
+                )
+            else:
+                th = self._import_fvars_rec(et, fvars, nf, depth, dgen, nr)
+            ev = e.value
+            if ev.loose_bvar_range() <= depth:
+                vc = ev._cache
+                vh = (
+                    vc & _TABLE_SLOT_MASK
+                    if (vc >> 32) == sgen
+                    else self._import_rec(ev, sgen, nr)
+                )
+            else:
+                vh = self._import_fvars_rec(ev, fvars, nf, depth, dgen, nr)
+            eb = e.body
+            ndepth = depth + 1
+            if eb.loose_bvar_range() <= ndepth:
+                bc = eb._cache
+                bh = (
+                    bc & _TABLE_SLOT_MASK
+                    if (bc >> 32) == sgen
+                    else self._import_rec(eb, sgen, nr)
+                )
+            else:
+                ndgen = self._fvar_gen_for_depth(ndepth)
+                bh = self._import_fvars_rec(eb, fvars, nf, ndepth, ndgen, nr)
+            h = self.let(e.name, th, vh, bh)
+        else:
+            return self.leaf_for(e)
+        if dgen > 0:
+            if (self._fvar_base_gen > 0
+                    and (e._cache >> 32) >= self._fvar_base_gen
+                    and (e._cache >> 32) != dgen):
+                self._fvar_cache_put(e, depth, dgen, h)
+            else:
+                e._cache = (dgen << 32) | h
+        return h
+
     def import_const_term(self, const, decl, target):
         """Import ``target`` (a declaration's type, body, or recursor rule)
         instantiated with ``const.levels`` directly into record handles,
@@ -6351,7 +6668,7 @@ class Machine(object):
     """
 
     _attrs_ = [
-        'tc', 'store', '_rule_memo', '_fvars',
+        'tc', 'store', '_rule_memo', '_fvars', '_top_fvars',
         '_open_memo', '_decl_start_recs',
         '_eqv_count', '_neq', '_failed',
         '_ld_h1', '_ld_h2', '_proj_rem',
@@ -6382,6 +6699,8 @@ class Machine(object):
         self._proj_popped = 0
         #: (binder record, domain) -> the free-variable leaf opening it
         self._fvars = IntMap(1 << 8, keep_cap=1 << 13)
+        #: (top-level telescope idx + 1, domain) -> canonical FVar leaf
+        self._top_fvars = IntMap(1 << 8, keep_cap=1 << 12)
         #: number of union-find merges recorded in `store.memos[M_EQV]`/`leaf_eqv`
         self._eqv_count = 0
         #: pairs proven NOT def-eq (packed symmetric keys, 8 B/slot, capped at 32 MiB)
@@ -6455,6 +6774,7 @@ class Machine(object):
         self._proj_field_cache.clear()
         self._proj_fidx_top = 0
         self._fvars.clear()
+        self._top_fvars.clear()
         self._eqv_count = 0
         self._neq.clear()
         self._failed.clear()
@@ -6475,6 +6795,7 @@ class Machine(object):
         self._rule_memo.free()
         self._proj_field_cache.free()
         self._fvars.free()
+        self._top_fvars.free()
         self._neq.free()
         self._failed.free()
         self._open_memo.free()
@@ -8161,6 +8482,30 @@ class Machine(object):
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
+        return fv
+
+    def _top_fvar(self, idx, binder, domain):
+        """Canonical free variable for top-level telescope position ``idx``
+        with domain handle ``domain``. Reused across declarations in the same
+        warm epoch so shared file-level `variable` prefixes share their
+        checked domain, WHNF, infer, and def_eq memos."""
+        key = self._pair_key(idx + 1, domain)
+        if key != 0:
+            fv = self._top_fvars.get(key, 0)
+            if fv != 0:
+                self.store.leaf_checked[leaf_index(fv)] = _u32(self.check_gen)
+                return fv
+        store = self.store
+        own = binder.fvar()
+        if store.has_fvar_leaf(own):
+            fv = store._new_fvar_leaf(W_FVar(binder))
+        else:
+            fv = store._new_fvar_leaf(own)
+        j = leaf_index(fv)
+        store.leaf_infer[j] = _u32(domain)
+        store.leaf_checked[j] = _u32(self.check_gen)
+        if key != 0:
+            self._top_fvars.set(key, fv)
         return fv
 
     def infer(self, h, check):
@@ -10863,67 +11208,95 @@ class Machine(object):
 
     # ---- checking --------------------------------------------------------
 
-    def _check_value_joint(self, ty, val, prop):
-        """Jointly check a leading `KIND_FORALL` / `KIND_LAMBDA` telescope with
-        identical domain handles: validates each binder domain once, shares the
-        opened FVars between type and value, avoids `bind_fvars` and `KIND_FORALL`
-        re-wrapping, and passes the opened codomain as the expected type.
+    def _check_value_joint_ast(self, type, value, prop):
+        """Jointly check a leading `W_ForAll` / `W_Lambda` telescope directly
+        on the raw AST: imports binder domains, codomain, and proof body with
+        canonical `_top_fvar` handles substituted inline (eliminating both
+        throwaway `BVar`-bearing records and `instantiate_multi_rev`).
 
         Returns True when accepted, False to fall back to the general path for
         diagnostics (top-level NotASort / NotAProp / TypeError)."""
         store = self.store
         levels = []
         fvars = []
-        tcur = ty
-        vcur = val
-        while (store.kind(tcur) == KIND_FORALL
-                and store.kind(vcur) == KIND_LAMBDA):
-            orig_dt = store.field_a(tcur)
-            if store.field_a(vcur) != orig_dt:
-                break
-            nf = len(fvars)
-            if nf > 0 and store.loose_bvar_range(orig_dt) > 0:
-                if is_leaf(orig_dt):
-                    bid = (_s32(store.leaf_meta[leaf_index(orig_dt)]) >> 1) - 1
-                    dom = fvars[nf - 1 - bid] if bid < nf else store.bvar(bid - nf)
+        tcur = type
+        vcur = value
+        try:
+            while isinstance(tcur, W_ForAll) and isinstance(vcur, W_Lambda):
+                t_dom_ast = tcur.binder.type
+                v_dom_ast = vcur.binder.type
+                nf = len(fvars)
+                if t_dom_ast is v_dom_ast:
+                    if nf == 0 or t_dom_ast.loose_bvar_range() == 0:
+                        dom = store.import_term(t_dom_ast)
+                    elif t_dom_ast.__class__ is W_BVar:
+                        assert isinstance(t_dom_ast, W_BVar)
+                        bid = t_dom_ast.id
+                        dom = (
+                            fvars[nf - 1 - bid]
+                            if bid < nf
+                            else store.bvar(bid - nf)
+                        )
+                    else:
+                        dom = store.import_term_fvars(
+                            t_dom_ast, fvars, nf, _next_cache_gen(),
+                        )
+                        if store._fvar_base_gen != 0:
+                            store.clear_fvar_gens()
                 else:
-                    dom = store.instantiate_multi_rev(orig_dt, fvars, nf, 0)
+                    if nf == 0:
+                        dom = store.import_term(t_dom_ast)
+                        vdom = store.import_term(v_dom_ast)
+                    else:
+                        fg = _next_cache_gen()
+                        dom = store.import_term_fvars(t_dom_ast, fvars, nf, fg)
+                        vdom = store.import_term_fvars(v_dom_ast, fvars, nf, fg)
+                        if store._fvar_base_gen != 0:
+                            store.clear_fvar_gens()
+                    if vdom != dom:
+                        break
+                levels.append(self._ensure_sort(dom, True))
+                tnxt = tcur.body
+                vnxt = vcur.body
+                if (tnxt.loose_bvar_range() == 0
+                        and vnxt.loose_bvar_range() == 0):
+                    if nf > 0:
+                        fvars = []
+                else:
+                    fvars.append(self._top_fvar(nf, vcur.binder, dom))
+                tcur = tnxt
+                vcur = vnxt
+            if len(levels) == 0:
+                return False
+            nf = len(fvars)
+            fgen = 0
+            if nf > 0 and (
+                    tcur.loose_bvar_range() > 0 or vcur.loose_bvar_range() > 0):
+                fgen = _next_cache_gen()
+            if nf > 0 and tcur.loose_bvar_range() > 0:
+                tcur_h = store.import_term_fvars(tcur, fvars, nf, fgen)
             else:
-                dom = orig_dt
-            levels.append(self._ensure_sort(dom, True))
-            tnxt = store.field_b(tcur)
-            vnxt = store.field_b(vcur)
-            if (store.loose_bvar_range(tnxt) == 0
-                    and store.loose_bvar_range(vnxt) == 0):
-                if nf > 0:
-                    fvars = []
+                tcur_h = store.import_term(tcur)
+            t_ty = self.infer(tcur_h, True)
+            t_sort = store.sort_leaf(self.whnf(t_ty))
+            if t_sort is None:
+                return False
+            level = t_sort.level
+            i = len(levels) - 1
+            while i >= 0:
+                level = levels[i].imax(level)
+                i -= 1
+            if prop and not level.eq(W_LEVEL_ZERO):
+                return False
+            if nf > 0 and vcur.loose_bvar_range() > 0:
+                vcur_h = store.import_term_fvars(vcur, fvars, nf, fgen)
             else:
-                fvars.append(self.fvar_for_domain(vcur, dom))
-            tcur = tnxt
-            vcur = vnxt
-        nf = len(fvars)
-        if nf > 0 and store.loose_bvar_range(tcur) > 0:
-            tcur = store.instantiate_multi_rev(tcur, fvars, nf, 0)
-        t_ty = self.infer(tcur, True)
-        t_sort = store.sort_leaf(self.whnf(t_ty))
-        if t_sort is None:
-            return False
-        level = t_sort.level
-        i = len(levels) - 1
-        while i >= 0:
-            level = levels[i].imax(level)
-            i -= 1
-        sort_h = store.leaf_for(level.sort())
-        tbase = rec_index(ty) * MEMO_SLOTS
-        memos = store.memos
-        memos[tbase + M_INFER] = _u32(sort_h)
-        memos[tbase + M_CHECKED_GEN] = _u32(self.check_gen)
-        if prop and not level.eq(W_LEVEL_ZERO):
-            return False
-        if nf > 0 and store.loose_bvar_range(vcur) > 0:
-            vcur = store.instantiate_multi_rev(vcur, fvars, nf, 0)
-        val_ty = self.infer_expected(vcur, tcur)
-        return self.def_eq(tcur, val_ty)
+                vcur_h = store.import_term(vcur)
+        finally:
+            if store._fvar_base_gen != 0 or store._fvar_gens_len > 0:
+                store.clear_fvar_gens()
+        val_ty = self.infer_expected(vcur_h, tcur_h)
+        return self.def_eq(tcur_h, val_ty)
 
     def check_value(self, type, value, prop):
         """
@@ -10936,18 +11309,17 @@ class Machine(object):
         tc = self.tc
         if value.loose_bvar_range() > 0:
             raise LooseBoundVariable(value.loose_bvar_range() - 1)
+        if (not self._def_eq_hooked
+                and isinstance(type, W_ForAll)
+                and isinstance(value, W_Lambda)
+                and type.loose_bvar_range() == 0
+                and not type.has_fvar()
+                and not value.has_fvar()
+                and store.nrecs - self._decl_start_recs < _OPEN_RECORDS):
+            if self._check_value_joint_ast(type, value, prop):
+                return None
         ty = store.import_term(type)
         val = store.import_term(value)
-        if (not self._def_eq_hooked
-                and store.kind(ty) == KIND_FORALL
-                and store.kind(val) == KIND_LAMBDA
-                and store.field_a(ty) == store.field_a(val)
-                and store.loose_bvar_range(ty) == 0
-                and not store.has_fvar(ty)
-                and not store.has_fvar(val)
-                and store.nrecs - self._decl_start_recs < _OPEN_RECORDS):
-            if self._check_value_joint(ty, val, prop):
-                return None
         ty_ty = self.infer(ty, True)
         ty_ty_whnf = self.whnf(ty_ty)
         sort = store.sort_leaf(ty_ty_whnf)
