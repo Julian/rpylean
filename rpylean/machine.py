@@ -63,6 +63,8 @@ from rpylean.objects import (
     _BOOL_TRUE,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
+    _PROP_MASK_DONE,
+    _PROP_MASK_PLANS,
     _mk_w_const1,
     _mk_w_const2,
     _mk_w_litnat,
@@ -399,9 +401,6 @@ _LF_NAT_SUCC = 512
 _LF_NAT_ZERO = 1024
 _LF_HINT_SHIFT = 16
 _LF_HINT_OVF = 65535
-#: Bit 62 marks `TermStore.leaf_prop_mask[j]` as computed; bits `0..61`
-#: indicate that argument `k` of the leaf's type lives in `Prop`.
-_PROP_MASK_DONE = 1 << 62
 #: Tag bits (60..61) of `TermStore.leaf_delta_body[j]` for fast unfolds that
 #: bypass `import_const_term` and `instantiate`:
 #:   0 = generic stripped body `(arity << 32) | body_handle`
@@ -6050,10 +6049,21 @@ class Machine(object):
         # for the same head sees mask 0 and terminates soundly.
         store.leaf_prop_mask[j] = _PROP_MASK_DONE
         e = store.leaves[j]
+        decl = None
         if isinstance(e, W_Const):
             decl = self._leaf_decl(head, e)
             if decl is None or len(e.levels) != len(decl.levels):
                 return _PROP_MASK_DONE
+            dm = decl._prop_mask
+            if dm == 0:
+                dm = decl.init_prop_mask(self.tc.declarations)
+            if dm > 0:
+                store.leaf_prop_mask[j] = dm
+                return dm
+            if dm <= -2:
+                res = _PROP_MASK_PLANS[(-dm) - 2].eval(decl.levels, e.levels)
+                store.leaf_prop_mask[j] = res
+                return res
         elif isinstance(e, W_FVar):
             if _s32(store.leaf_infer[j]) == 0:
                 return _PROP_MASK_DONE
@@ -6092,6 +6102,8 @@ class Machine(object):
             k += 1
         res = _PROP_MASK_DONE | mask
         store.leaf_prop_mask[j] = res
+        if decl is not None and len(decl.levels) == 0:
+            decl._prop_mask = res
         return res
 
     @dont_inline

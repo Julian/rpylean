@@ -1384,3 +1384,155 @@ class TestJointCheckAndInferExpected(object):
             assert m.try_proj(p_wrap, False) == h_a
         finally:
             tc.free()
+
+    def test_static_prop_mask_soundness_and_plans(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import (
+            PROP,
+            W_LEVEL_ZERO,
+            _PROP_MASK_DONE,
+        )
+
+        u_name = Name.simple("u")
+        u_lvl = u_name.as_level_param()
+        sort_u = u_lvl.sort()
+        type_u = u_lvl.succ().sort()
+        l0 = W_LEVEL_ZERO
+        l1 = W_LEVEL_ZERO.succ()
+        b3 = W_BVar(3)
+        b4 = W_BVar(4)
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        # Transparent identity wrapper `outParam.{u} (α : Sort u) : Sort u := α`
+        out_name = Name.simple("outParam")
+        out_decl = out_name.definition(
+            type=forall(x.binder(type=sort_u))(sort_u),
+            value=fun(x.binder(type=sort_u))(b0),
+            levels=[u_name],
+        )
+        # Polymorphic `Eq.{u} : ∀ {α : Sort u}, α → α → Prop`
+        eq_name = Name.simple("Eq")
+        eq_decl = eq_name.inductive(
+            type=forall(x.binder(type=sort_u), y.binder(type=b0), Name.simple("z").binder(type=b1))(PROP),
+            levels=[u_name],
+        )
+        # Higher-order Prop binders + Type u + outParam + Eq:
+        # `ho.{u} : ∀ (α : outParam (Type u)) (P : α → Prop) (a : α) (h : P a) (hall : ∀ y, P y) (heq : Eq α a a), Nat`
+        ho_name = Name.simple("ho")
+        ho_decl = ho_name.axiom(
+            type=forall(
+                x.binder(type=out_name.const([u_lvl.succ().succ()]).app(type_u)),
+                Name.simple("P").binder(type=forall(y.binder(type=b0))(PROP)),
+                Name.simple("a").binder(type=b1),
+                Name.simple("h").binder(type=b1.app(b0)),
+                Name.simple("hall").binder(type=forall(y.binder(type=b3))(b3.app(b0))),
+                Name.simple("heq").binder(type=eq_name.const([u_lvl.succ()]).app(b4, b2, b2)),
+            )(NAT),
+            levels=[u_name],
+        )
+        # Shadowed inner BVar: `shadow : ∀ (α : Type), (∀ (P : Prop), P) → Nat`
+        # Inner `P` is a Prop, so `(∀ P : Prop, P) : Prop` (bit 1 = 1),
+        # while `shadow2 : ∀ (p : Prop), (∀ (T : Type), T) → Nat` has bit 1 = 0!
+        shadow1_name = Name.simple("shadow1")
+        shadow1_decl = shadow1_name.axiom(
+            type=forall(
+                x.binder(type=TYPE),
+                y.binder(type=forall(Name.simple("P").binder(type=PROP))(b0)),
+            )(NAT),
+        )
+        shadow2_name = Name.simple("shadow2")
+        shadow2_decl = shadow2_name.axiom(
+            type=forall(
+                x.binder(type=PROP),
+                y.binder(type=forall(Name.simple("T").binder(type=TYPE))(b0)),
+            )(NAT),
+        )
+        # Tail definition returning a W_ForAll with a Prop binder:
+        # `NeedsProp (P : Prop) : Type := P → Nat`
+        # `useNeeds (P : Prop) : NeedsProp P` -> bit 0 = 0 (P : Prop is in Type 0), bit 1 = 1!
+        needs_name = Name.simple("NeedsProp")
+        needs_decl = needs_name.definition(
+            type=forall(x.binder(type=PROP))(TYPE),
+            value=fun(x.binder(type=PROP))(forall(y.binder(type=b0))(NAT)),
+        )
+        use_needs_name = Name.simple("useNeeds")
+        use_needs_decl = use_needs_name.axiom(
+            type=forall(x.binder(type=PROP))(needs_name.const().app(b0)),
+        )
+        # `Set`-like alias `MySet.{u} (α : Type u) : Type u := α → Prop`
+        # `mkSet.{u} (α : Type u) (p : α → Prop) : MySet α` -> no Prop args!
+        myset_name = Name.simple("MySet")
+        myset_decl = myset_name.definition(
+            type=forall(x.binder(type=type_u))(type_u),
+            value=fun(x.binder(type=type_u))(forall(y.binder(type=b0))(PROP)),
+            levels=[u_name],
+        )
+        mkset_name = Name.simple("mkSet")
+        mkset_decl = mkset_name.axiom(
+            type=forall(
+                x.binder(type=type_u),
+                y.binder(type=forall(Name.simple("z").binder(type=b0))(PROP)),
+            )(myset_name.const([u_lvl]).app(b1)),
+            levels=[u_name],
+        )
+        # Transparent inductive alias `AliasNat := Nat`
+        alias_name = Name.simple("AliasNat")
+        alias_decl = alias_name.definition(type=TYPE, value=NAT)
+        use_alias_name = Name.simple("useAlias")
+        use_alias_decl = use_alias_name.axiom(
+            type=forall(x.binder(type=PROP), y.binder(type=b0))(alias_name.const()),
+        )
+
+        env = Environment.having([
+            nat_decl, out_decl, eq_decl, ho_decl,
+            shadow1_decl, shadow2_decl,
+            needs_decl, use_needs_decl,
+            myset_decl, mkset_decl,
+            alias_decl, use_alias_decl,
+        ])
+        tc = TypeChecker(env, nat_decl)
+        m = tc.machine
+        try:
+            store = m.store
+            # 1. `ho.{0}`: static level-independent mask, bits 3, 4, 5 set, zero records allocated!
+            h_ho = store.import_term(ho_name.const([l0]))
+            nrecs_before = store.nrecs
+            pm_ho = m._prop_mask_for(h_ho)
+            assert pm_ho == (_PROP_MASK_DONE | (1 << 3) | (1 << 4) | (1 << 5))
+            assert store.nrecs == nrecs_before
+            assert ho_decl._prop_mask == pm_ho
+
+            # 2. `Eq.{0}` vs `Eq.{1}`: level-dependent static plan (`-2`), zero records allocated!
+            h_eq0 = store.import_term(eq_name.const([l0]))
+            h_eq1 = store.import_term(eq_name.const([l1]))
+            nrecs_before = store.nrecs
+            assert m._prop_mask_for(h_eq0) == (_PROP_MASK_DONE | (1 << 1) | (1 << 2))
+            assert m._prop_mask_for(h_eq1) == _PROP_MASK_DONE
+            assert store.nrecs == nrecs_before
+            assert eq_decl._prop_mask <= -2
+
+            # 3. Shadowed inner BVars fall back to dynamic and compute exact masks:
+            h_sh1 = store.import_term(shadow1_name.const())
+            h_sh2 = store.import_term(shadow2_name.const())
+            assert m._prop_mask_for(h_sh1) == (_PROP_MASK_DONE | (1 << 1))
+            assert m._prop_mask_for(h_sh2) == _PROP_MASK_DONE
+            # Monomorphic dynamic results are cached permanently on the decl:
+            assert shadow1_decl._prop_mask == (_PROP_MASK_DONE | (1 << 1))
+            assert shadow2_decl._prop_mask == _PROP_MASK_DONE
+
+            # 4. Tail def returning `P → Nat` falls back to dynamic and detects bit 1!
+            h_needs = store.import_term(use_needs_name.const())
+            assert m._prop_mask_for(h_needs) == (_PROP_MASK_DONE | (1 << 1))
+            assert use_needs_decl._prop_mask == (_PROP_MASK_DONE | (1 << 1))
+
+            # 5. `MySet` & `AliasNat` tails resolve statically with zero records!
+            h_mkset = store.import_term(mkset_name.const([l0]))
+            h_alias = store.import_term(use_alias_name.const())
+            nrecs_before = store.nrecs
+            assert m._prop_mask_for(h_mkset) == _PROP_MASK_DONE
+            assert m._prop_mask_for(h_alias) == (_PROP_MASK_DONE | (1 << 1))
+            assert store.nrecs == nrecs_before
+            assert mkset_decl._prop_mask == _PROP_MASK_DONE
+            assert use_alias_decl._prop_mask == (_PROP_MASK_DONE | (1 << 1))
+        finally:
+            tc.free()

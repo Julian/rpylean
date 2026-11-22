@@ -4590,10 +4590,227 @@ STAGE_ALL = 0
 STAGE_PRE_BLOCK = 1
 STAGE_IND_ONLY = 2
 
+#: Bit 62 marks a computed prop-argument bitmask; bits `0..61` indicate that
+#: argument `k` of a declaration's type lives in `Prop`.
+_PROP_MASK_DONE = 1 << 62
+
+_PM_SORT_UNKNOWN = 0
+_PM_SORT_PROP = 1
+_PM_SORT_NON_PROP = 2
+_PM_SORT_LEVEL = 3
+
+#: Side table of level-dependent `_PropMaskPlan`s indexed by `(-_prop_mask) - 2`
+#: so `W_Declaration` avoids carrying an extra GC pointer slot for the ~95% of
+#: declarations whose prop mask is level-independent.
+_PROP_MASK_PLANS = []
+
+#: Reusable scratch arrays for non-reentrant `W_Declaration.init_prop_mask`,
+#: avoiding per-declaration list allocations.
+_PM_BINDER_ARITY = [0] * 62
+_PM_BINDER_SORT = [0] * 62
+_PM_BINDER_LVL = [None] * 62
+
+
+class _PropMaskPlan(object):
+    """Level-parameter-dependent prop-argument bitmask plan for a
+    `W_Declaration`. Bits in `base_mask` (with `_PROP_MASK_DONE` set) are
+    unconditionally `Prop`; each entry `(bits[i], param_idxs[i], levels[i])`
+    adds `1 << bits[i]` when the instantiated universe level normalizes to
+    zero (`param_idxs[i] >= 0` indexes `e_levels` directly without
+    substitution)."""
+
+    _attrs_ = ['base_mask', 'bits', 'param_idxs', 'levels']
+    _immutable_fields_ = ['base_mask', 'bits', 'param_idxs', 'levels']
+
+    def __init__(self, base_mask, bits, param_idxs, levels):
+        self.base_mask = base_mask
+        self.bits = bits
+        self.param_idxs = param_idxs
+        self.levels = levels
+
+    def eval(self, decl_levels, e_levels):
+        mask = self.base_mask
+        bits = self.bits
+        pidxs = self.param_idxs
+        lvls = self.levels
+        i = 0
+        n = len(bits)
+        while i < n:
+            pi = pidxs[i]
+            if pi >= 0:
+                slvl = e_levels[pi]
+            else:
+                slvl = lvls[i].subst_levels_lists(decl_levels, e_levels)
+            if (isinstance(slvl, W_LevelZero)
+                    or isinstance(slvl.normalize(), W_LevelZero)):
+                mask |= (1 << bits[i])
+            i += 1
+        return mask
+
+
+def _pm_level_sort_class(lvl):
+    if isinstance(lvl, W_LevelZero):
+        return _PM_SORT_PROP
+    if lvl.is_not_zero():
+        return _PM_SORT_NON_PROP
+    if isinstance(lvl.normalize(), W_LevelZero):
+        return _PM_SORT_PROP
+    return _PM_SORT_LEVEL
+
+
+def _pm_decl_ret_sort(decl):
+    cur = decl.type
+    m = 0
+    while isinstance(cur, W_ForAll):
+        cur = cur.body
+        m += 1
+    if isinstance(cur, W_Sort):
+        return m, cur.level
+    return -1, None
+
+
+def _pm_unwrap_id_wrapper(e, declarations):
+    """Unwrap transparent identity wrappers such as `outParam A`,
+    `semiOutParam A`, `optParam A v`, and `autoParam A t`."""
+    depth = 0
+    while isinstance(e, W_App) and depth < 4:
+        fn = e.fn
+        if isinstance(fn, W_Const):
+            hd = find_decl(declarations, fn.name)
+            if hd is not None:
+                wk = hd.w_kind
+                if isinstance(wk, W_Definition):
+                    val = wk.value
+                    if isinstance(val, W_Lambda):
+                        body = val.body
+                        if isinstance(body, W_BVar) and body.id == 0:
+                            e = e.arg
+                            depth += 1
+                            continue
+        elif isinstance(fn, W_App):
+            fn2 = fn.fn
+            if isinstance(fn2, W_Const):
+                hd = find_decl(declarations, fn2.name)
+                if hd is not None:
+                    wk = hd.w_kind
+                    if isinstance(wk, W_Definition):
+                        val = wk.value
+                        if isinstance(val, W_Lambda):
+                            b1 = val.body
+                            if isinstance(b1, W_Lambda):
+                                b2 = b1.body
+                                if isinstance(b2, W_BVar) and b2.id == 1:
+                                    e = fn.arg
+                                    depth += 1
+                                    continue
+        break
+    return e
+
+
+def _pm_is_opaque_type_head(wk):
+    if (isinstance(wk, W_Inductive)
+            or isinstance(wk, W_Constructor)
+            or isinstance(wk, W_Axiom)
+            or isinstance(wk, W_Opaque)):
+        return True
+    if isinstance(wk, W_Quotient) and wk.kind == W_Quotient.KIND_TYPE:
+        return True
+    return False
+
+
+def _pm_const_tail_safe(const_e, nargs, declarations, depth):
+    hd = find_decl(declarations, const_e.name)
+    if hd is None:
+        return False
+    wk = hd.w_kind
+    if _pm_is_opaque_type_head(wk):
+        return True
+    if depth <= 0 or not isinstance(wk, W_Definition):
+        return False
+    val = wk.value
+    m = 0
+    while isinstance(val, W_Lambda):
+        val = val.body
+        m += 1
+    if nargs < m:
+        return False
+    if isinstance(val, W_Sort):
+        return nargs == m
+    vhead = val
+    vnargs = 0
+    while isinstance(vhead, W_App):
+        vhead = vhead.fn
+        vnargs += 1
+    if isinstance(vhead, W_Const):
+        return _pm_const_tail_safe(
+            vhead, vnargs + (nargs - m), declarations, depth - 1,
+        )
+    return False
+
+
+def _pm_tail_has_no_prop_args(cur, declarations, depth):
+    """Whether ``cur`` (the trailing return type after all syntactic
+    `W_ForAll`s) cannot WHNF to a `W_ForAll` with any `Prop`-typed argument."""
+    if isinstance(cur, W_Sort):
+        return True
+    head = cur
+    nargs = 0
+    while isinstance(head, W_App):
+        head = head.fn
+        nargs += 1
+    if isinstance(head, W_BVar):
+        return True
+    if not isinstance(head, W_Const):
+        return False
+    hd = find_decl(declarations, head.name)
+    if hd is None:
+        return False
+    wk = hd.w_kind
+    if _pm_is_opaque_type_head(wk):
+        return True
+    if depth <= 0 or not isinstance(wk, W_Definition):
+        return False
+    val = wk.value
+    m = 0
+    while isinstance(val, W_Lambda):
+        val = val.body
+        m += 1
+    if nargs < m:
+        return False
+    if isinstance(val, W_Sort):
+        return nargs == m
+    vhead = val
+    vnargs = 0
+    while isinstance(vhead, W_App):
+        vhead = vhead.fn
+        vnargs += 1
+    if isinstance(vhead, W_Const):
+        return _pm_const_tail_safe(
+            vhead, vnargs + (nargs - m), declarations, depth - 1,
+        )
+    # Handle `Set`-like aliases (`def Set (α : Type u) := α → Prop`) whose
+    # sole unfolded binder domain is guaranteed non-Prop and ends in a Sort.
+    if nargs == m and isinstance(val, W_ForAll) and isinstance(val.body, W_Sort):
+        vdom = val.binder.type
+        if isinstance(vdom, W_BVar):
+            pidx = m - 1 - vdom.id
+            if 0 <= pidx < m:
+                tcur = hd.type
+                ti = 0
+                while ti < pidx and isinstance(tcur, W_ForAll):
+                    tcur = tcur.body
+                    ti += 1
+                if isinstance(tcur, W_ForAll):
+                    pdom = _pm_unwrap_id_wrapper(tcur.binder.type, declarations)
+                    if isinstance(pdom, W_Sort) and pdom.level.is_not_zero():
+                        return True
+    return False
+
 
 class W_Declaration(_Item):
     _attrs_ = [
         'name', 'type', 'w_kind', 'levels', 'safety', 'index', 'group',
+        '_prop_mask',
     ]
     _immutable_fields_ = ['name', 'type', 'w_kind', 'levels', 'safety']
 
@@ -4615,6 +4832,139 @@ class W_Declaration(_Item):
         #: mutual block, share a group and may use each other regardless
         #: of `index`. -1 when the declaration belongs to no block.
         self.group = -1
+        #: Cached prop-argument bitmask across store resets:
+        #:   0   = uncomputed
+        #:   >0  = permanent level-independent `_PROP_MASK_DONE | mask`
+        #:   -1  = requires dynamic computation
+        #:   <=-2 = level-dependent static plan at `_PROP_MASK_PLANS[(-m) - 2]`
+        self._prop_mask = 0
+
+    @dont_inline
+    def init_prop_mask(self, declarations):
+        """Statically analyze `self.type` once to cache which argument
+        positions (0..61) live in `Prop`, avoiding `TermStore` instantiation
+        and type inference in `Machine._compute_prop_mask`."""
+        cur = self.type
+        mask = 0
+        cond_bits = None
+        cond_pidxs = None
+        cond_lvls = None
+        binder_arity = _PM_BINDER_ARITY
+        binder_sort = _PM_BINDER_SORT
+        binder_lvl = _PM_BINDER_LVL
+        lvl_dirty = False
+        ok = True
+        k = 0
+        while isinstance(cur, W_ForAll) and k < 62:
+            dom = _pm_unwrap_id_wrapper(cur.binder.type, declarations)
+            inner = dom
+            p = 0
+            while isinstance(inner, W_ForAll):
+                inner = _pm_unwrap_id_wrapper(inner.body, declarations)
+                p += 1
+            if isinstance(inner, W_Sort):
+                sc = _pm_level_sort_class(inner.level)
+                binder_arity[k] = p
+                binder_sort[k] = sc
+                if sc == _PM_SORT_LEVEL:
+                    binder_lvl[k] = inner.level
+                    lvl_dirty = True
+                cls = _PM_SORT_NON_PROP
+                lvl = None
+            else:
+                binder_arity[k] = -1
+                binder_sort[k] = _PM_SORT_UNKNOWN
+                head = inner
+                nargs = 0
+                while isinstance(head, W_App):
+                    head = head.fn
+                    nargs += 1
+                if isinstance(head, W_BVar):
+                    bid = head.id
+                    if bid >= p:
+                        j = k - 1 - (bid - p)
+                        if 0 <= j < k and binder_arity[j] == nargs:
+                            cls = binder_sort[j]
+                            lvl = binder_lvl[j]
+                        else:
+                            ok = False
+                            break
+                    else:
+                        ok = False
+                        break
+                elif isinstance(head, W_Const):
+                    hd = find_decl(declarations, head.name)
+                    if hd is None:
+                        ok = False
+                        break
+                    m, rlvl = _pm_decl_ret_sort(hd)
+                    if m < 0 or nargs != m:
+                        ok = False
+                        break
+                    assert rlvl is not None
+                    cls = _pm_level_sort_class(rlvl)
+                    lvl = None
+                    if cls == _PM_SORT_LEVEL:
+                        if len(head.levels) != len(hd.levels):
+                            ok = False
+                            break
+                        slvl = rlvl.subst_levels_lists(hd.levels, head.levels)
+                        cls = _pm_level_sort_class(slvl)
+                        if cls == _PM_SORT_LEVEL:
+                            lvl = slvl
+                else:
+                    ok = False
+                    break
+            if cls == _PM_SORT_UNKNOWN:
+                ok = False
+                break
+            if cls == _PM_SORT_PROP:
+                mask |= (1 << k)
+            elif cls == _PM_SORT_LEVEL:
+                assert lvl is not None
+                if cond_bits is None:
+                    cond_bits = []
+                    cond_pidxs = []
+                    cond_lvls = []
+                pidx = -1
+                if isinstance(lvl, W_LevelParam):
+                    dlevels = self.levels
+                    pi = 0
+                    nl = len(dlevels)
+                    while pi < nl:
+                        if dlevels[pi].syntactic_eq(lvl.name):
+                            pidx = pi
+                            break
+                        pi += 1
+                cond_bits.append(k)
+                cond_pidxs.append(pidx)
+                cond_lvls.append(W_LEVEL_ZERO if pidx >= 0 else lvl)
+            cur = cur.body
+            k += 1
+        if lvl_dirty:
+            ci = 0
+            while ci < k:
+                binder_lvl[ci] = None
+                ci += 1
+        if not ok:
+            self._prop_mask = -1
+            return -1
+        if k < 62:
+            tail = _pm_unwrap_id_wrapper(cur, declarations)
+            if not _pm_tail_has_no_prop_args(tail, declarations, 3):
+                self._prop_mask = -1
+                return -1
+        base = _PROP_MASK_DONE | mask
+        if cond_bits is None:
+            self._prop_mask = base
+            return base
+        idx = len(_PROP_MASK_PLANS)
+        _PROP_MASK_PLANS.append(
+            _PropMaskPlan(base, cond_bits, cond_pidxs, cond_lvls),
+        )
+        dm = -(idx + 2)
+        self._prop_mask = dm
+        return dm
 
     @not_rpython
     def __eq__(self, other):
