@@ -2292,6 +2292,11 @@ class TermStore(object):
     def unapp_pop(self, mark):
         self._spine_top = mark
 
+    def ensure_spine_room(self, count):
+        top = self._spine_top
+        while top + count > self._spine_cap:
+            self._grow_spine(top)
+
     @always_inline
     def spine_arg(self, idx):
         return _s32(self._spine_buf[idx])
@@ -7212,6 +7217,16 @@ class Machine(object):
             self._fvars.set(key, fv)
         return fv
 
+    def _fresh_fvar(self, h, domain):
+        """Allocate a guaranteed-fresh free variable for binder ``h`` with
+        domain ``domain`` without touching the reuse cache."""
+        store = self.store
+        fv = store._new_fvar_leaf(W_FVar(store.binder_of(h)))
+        j = leaf_index(fv)
+        store.leaf_infer[j] = _u32(domain)
+        store.leaf_checked[j] = _u32(self.check_gen)
+        return fv
+
     def infer(self, h, check):
         """
         The type of ``h``. In ``check`` mode every application argument
@@ -7278,12 +7293,151 @@ class Machine(object):
             if t != 0:
                 return t
             return self._infer_miss(h, ri, mbase, False)
-        if (expected != 0
-                and not is_leaf(expected)
-                and not self._def_eq_hooked
-                and (_s32(store.recs[ri << 2]) & _KIND_MASK) == KIND_APP):
-            return self._infer_app_miss_expected(h, ri, mbase, expected)
+        if expected != 0 and not is_leaf(expected) and not self._def_eq_hooked:
+            hk = _s32(store.recs[ri << 2]) & _KIND_MASK
+            if hk == KIND_APP:
+                return self._infer_app_miss_expected(h, ri, mbase, expected)
+            if hk == KIND_LET:
+                if not (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
+                        and store.is_heavy(h)):
+                    return self._infer_let_miss_expected(h, ri, mbase, expected)
+            elif hk == KIND_LAMBDA:
+                if (store.kind(expected) == KIND_FORALL
+                        and store.field_a(h) == store.field_a(expected)
+                        and store.loose_bvar_range(expected) == 0
+                        and not (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
+                                 and store.is_heavy(h))):
+                    return self._infer_lambda_miss_expected(h, ri, mbase, expected)
         return self._infer_miss(h, ri, mbase, True)
+
+    @dont_inline
+    def _infer_let_miss_expected(self, h, ri, mbase, expected):
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        store = self.store
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
+        type_h = store.field_a(h)
+        pair = store.field_b(h)
+        value = store.field_a(pair)
+        body = store.field_b(pair)
+        self._ensure_sort(type_h, True)
+        value_type = self.infer_expected(value, type_h)
+        if not self.def_eq(value_type, type_h):
+            raise W_TypeError(
+                self.tc, self.export(value), self.export(type_h),
+                inferred_type=self.export(value_type),
+            )
+        if store.loose_bvar_range(body) > 0:
+            body = store.instantiate(body, value, 0)
+        t = self.infer_expected(body, expected)
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
+        if t != expected or not store.has_fvar(expected):
+            memos[mbase + M_INFER] = _u32(t)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return t
+
+    @dont_inline
+    def _infer_lambda_miss_expected(self, h, ri, mbase, expected):
+        """Check `KIND_LAMBDA` ``h`` against matching `KIND_FORALL`
+        ``expected`` jointly, skipping `bind_fvars` and Pi re-wrapping when
+        the body's inferred type matches the opened codomain."""
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        store = self.store
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
+        has_fv = store.has_fvar(h) or store.has_fvar(expected)
+        vbody = store.field_b(h)
+        tbody = store.field_b(expected)
+        if (store.kind(vbody) != KIND_LAMBDA
+                or store.kind(tbody) != KIND_FORALL
+                or store.field_a(vbody) != store.field_a(tbody)):
+            domain = store.field_a(h)
+            self._ensure_sort(domain, True)
+            vb_open = store.loose_bvar_range(vbody) > 0
+            tb_open = store.loose_bvar_range(tbody) > 0
+            fvar = 0
+            if vb_open or tb_open:
+                fvar = self.fvar_for_domain(h, domain)
+                if self._fvar_reused and has_fv:
+                    fvar = self._fresh_fvar(h, domain)
+                if vb_open:
+                    vbody = store.instantiate(vbody, fvar, 0)
+                if tb_open:
+                    tbody = store.instantiate(tbody, fvar, 0)
+            r = self._cheap_beta(self.infer_expected(vbody, tbody))
+            if r == tbody or self.def_eq(tbody, r):
+                t = expected
+            else:
+                if fvar != 0:
+                    r = store.bind_fvar(r, fvar, 0)
+                t = store.cons(KIND_FORALL, domain, r, store.info(h))
+        else:
+            records = []
+            fvars = []
+            vcur = h
+            tcur = expected
+            while (store.kind(vcur) == KIND_LAMBDA
+                   and store.kind(tcur) == KIND_FORALL
+                   and store.field_a(vcur) == store.field_a(tcur)):
+                orig_d = store.field_a(vcur)
+                idx = len(fvars)
+                if idx > 0 and store.loose_bvar_range(orig_d) > 0:
+                    if is_leaf(orig_d):
+                        bid = (_s32(store.leaf_meta[leaf_index(orig_d)]) >> 1) - 1
+                        domain = fvars[idx - 1 - bid] if bid < idx else store.bvar(bid - idx)
+                    else:
+                        domain = store.instantiate_multi_rev(orig_d, fvars, idx, 0)
+                else:
+                    domain = orig_d
+                self._ensure_sort(domain, True)
+                fvar = self.fvar_for_domain(vcur, domain)
+                if self._fvar_reused and has_fv:
+                    fvar = self._fresh_fvar(vcur, domain)
+                records.append(vcur)
+                fvars.append(fvar)
+                vcur = store.field_b(vcur)
+                tcur = store.field_b(tcur)
+            n = len(fvars)
+            if store.loose_bvar_range(vcur) > 0:
+                vcur = store.instantiate_multi_rev(vcur, fvars, n, 0)
+            if store.loose_bvar_range(tcur) > 0:
+                tcur = store.instantiate_multi_rev(tcur, fvars, n, 0)
+            r = self._cheap_beta(self.infer_expected(vcur, tcur))
+            if r == tcur or self.def_eq(tcur, r):
+                t = expected
+            else:
+                r = store.bind_fvars(r, fvars, 0, n)
+                i = n - 1
+                while i >= 0:
+                    rec = records[i]
+                    r = store.cons(KIND_FORALL, store.field_a(rec), r, store.info(rec))
+                    i -= 1
+                t = r
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
+        if t != expected or not store.has_fvar(expected):
+            memos[mbase + M_INFER] = _u32(t)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return t
 
     @dont_inline
     def _infer_app_miss_expected(self, h, ri, mbase, expected):
@@ -7347,6 +7501,356 @@ class Machine(object):
         else:
             memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
         return t
+
+    @dont_inline
+    def _infer_let_expected_pat(self, h, exp_pat, exp_start, exp_n):
+        """Check `KIND_LET` record ``h`` expecting its type to match
+        ``instantiate_multi_buf(exp_pat, exp_start, exp_n, 0)``.
+        Returns 0 on verified match without materializing the expected type,
+        else returns the materialized type handle."""
+        store = self.store
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
+        cg = _s32(memos[mbase + M_CHECKED_GEN])
+        if cg >= self.check_gen:
+            if cg != _CHECKED_PERM:
+                self._saw_nonperm = True
+            t = _s32(memos[mbase + M_INFER])
+            if t != 0:
+                return t
+            return self._infer_miss(h, ri, mbase, False)
+        if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
+                and store.is_heavy(h)):
+            return self._infer_miss(h, ri, mbase, True)
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
+        type_h = store.field_a(h)
+        pair = store.field_b(h)
+        value = store.field_a(pair)
+        body = store.field_b(pair)
+        self._ensure_sort(type_h, True)
+        value_type = self.infer_expected(value, type_h)
+        if not self.def_eq(value_type, type_h):
+            raise W_TypeError(
+                self.tc, self.export(value), self.export(type_h),
+                inferred_type=self.export(value_type),
+            )
+        if store.loose_bvar_range(body) > 0:
+            body = store.instantiate(body, value, 0)
+        if not is_leaf(body):
+            bk = _s32(store.recs[rec_index(body) << 2]) & _KIND_MASK
+            if bk == KIND_APP:
+                t = self._infer_app_expected_pat(body, exp_pat, exp_start, exp_n)
+            elif bk == KIND_LAMBDA and store.kind(exp_pat) == KIND_FORALL:
+                t = self._infer_lambda_expected_pat(body, exp_pat, exp_start, exp_n)
+            elif bk == KIND_LET:
+                t = self._infer_let_expected_pat(body, exp_pat, exp_start, exp_n)
+            else:
+                t = self.infer(body, True)
+        else:
+            t = self.infer(body, True)
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
+        if t != 0:
+            memos[mbase + M_INFER] = _u32(t)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return t
+
+    @dont_inline
+    def _infer_lambda_expected_pat(self, h, exp_pat, exp_start, exp_n):
+        """Check `KIND_LAMBDA` record ``h`` expecting its type to equal
+        ``instantiate_multi_buf(exp_pat, exp_start, exp_n, 0)`` where
+        ``exp_pat`` is a `KIND_FORALL`, matching leading domains structurally
+        against `_spine_buf` and forwarding the open expected codomain to the
+        body without instantiating `exp_pat` or running `bind_fvars`.
+
+        Returns 0 on verified match (leaving `M_INFER == 0` and marking
+        `M_CHECKED_GEN`), else returns the materialized type handle."""
+        store = self.store
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
+        cg = _s32(memos[mbase + M_CHECKED_GEN])
+        if cg >= self.check_gen:
+            if cg != _CHECKED_PERM:
+                self._saw_nonperm = True
+            t = _s32(memos[mbase + M_INFER])
+            if t != 0:
+                return t
+            return self._infer_miss(h, ri, mbase, False)
+        if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
+                and store.is_heavy(h)):
+            return self._infer_miss(h, ri, mbase, True)
+        # Quick reject before touching _spine_buf if the outermost domain
+        # doesn't match the open domain pattern structurally.
+        if not store.inst_eq_buf(
+                store.field_a(exp_pat), exp_start, exp_n, store.field_a(h)):
+            return self._infer_miss(h, ri, mbase, True)
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
+        vc = store.field_b(h)
+        tc = store.field_b(exp_pat)
+        # Fast path for single-binder lambda (no records/fvars lists, and zero
+        # _spine_buf copy when the expected codomain is closed or a BVar leaf).
+        if store.kind(vc) != KIND_LAMBDA or store.kind(tc) != KIND_FORALL:
+            domain = store.field_a(h)
+            self._ensure_sort(domain, True)
+            if store.loose_bvar_range(tc) == 0 or is_leaf(tc):
+                vb_open = store.loose_bvar_range(vc) > 0
+                if store.loose_bvar_range(tc) == 0:
+                    exp_body = tc
+                    tb_needs_fv = False
+                else:
+                    bid = (_s32(store.leaf_meta[leaf_index(tc)]) >> 1) - 1
+                    if bid == 0:
+                        exp_body = 0
+                        tb_needs_fv = True
+                    else:
+                        exp_body = (
+                            store.spine_arg(exp_start + bid - 1)
+                            if bid - 1 < exp_n
+                            else store.bvar(bid - 1 - exp_n)
+                        )
+                        tb_needs_fv = False
+                fvar = 0
+                if vb_open or tb_needs_fv:
+                    fvar = self.fvar_for_domain(h, domain)
+                    if self._fvar_reused and (
+                            store.has_fvar(h)
+                            or (exp_body != 0 and store.has_fvar(exp_body))):
+                        fvar = self._fresh_fvar(h, domain)
+                    if vb_open:
+                        vc = store.instantiate(vc, fvar, 0)
+                    if tb_needs_fv:
+                        exp_body = fvar
+                r = self._cheap_beta(self.infer_expected(vc, exp_body))
+                matched = (r == exp_body or self.def_eq(exp_body, r))
+                child_np = self._saw_nonperm
+                self._saw_nonperm = prev_np or child_np
+                memos = store.memos
+                if matched:
+                    if (not child_np
+                            and self._can_perm
+                            and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                        memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+                    else:
+                        memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+                    return 0
+                if fvar != 0:
+                    r = store.bind_fvar(r, fvar, 0)
+                r = store.cons(KIND_FORALL, domain, r, store.info(h))
+                memos = store.memos
+                memos[mbase + M_INFER] = _u32(r)
+                if (not child_np
+                        and self._can_perm
+                        and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                    memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+                else:
+                    memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+                return r
+            # Single-binder lambda with compound open expected codomain.
+            smark = store._spine_top
+            total = 1 + exp_n
+            store.ensure_spine_room(total)
+            buf = store._spine_buf
+            has_fv = store.has_fvar(h) or store.has_fvar(exp_pat)
+            j = 0
+            while j < exp_n:
+                a = _s32(buf[exp_start + j])
+                if not has_fv and store.has_fvar(a):
+                    has_fv = True
+                buf[smark + 1 + j] = _u32(a)
+                j += 1
+            fvar = self.fvar_for_domain(h, domain)
+            if self._fvar_reused and has_fv:
+                fvar = self._fresh_fvar(h, domain)
+            buf[smark] = _u32(fvar)
+            store._spine_top = smark + total
+            matched = False
+            r = 0
+            try:
+                if store.loose_bvar_range(vc) > 0:
+                    vc = store.instantiate(vc, fvar, 0)
+                if not is_leaf(vc):
+                    vk = _s32(store.recs[rec_index(vc) << 2]) & _KIND_MASK
+                    if vk == KIND_APP:
+                        r = self._infer_app_expected_pat(vc, tc, smark, total)
+                    elif vk == KIND_LET:
+                        r = self._infer_let_expected_pat(vc, tc, smark, total)
+                    else:
+                        r = self.infer(vc, True)
+                else:
+                    r = self.infer(vc, True)
+                if r == 0:
+                    matched = True
+                else:
+                    r = self._cheap_beta(r)
+                    if store.inst_eq_buf(tc, smark, total, r):
+                        matched = True
+                    else:
+                        exp_body = store.instantiate_multi_buf(tc, smark, total, 0)
+                        matched = self.def_eq(exp_body, r)
+            finally:
+                store.unapp_pop(smark)
+            child_np = self._saw_nonperm
+            self._saw_nonperm = prev_np or child_np
+            memos = store.memos
+            if matched:
+                if (not child_np
+                        and self._can_perm
+                        and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                    memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+                else:
+                    memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+                return 0
+            r = store.bind_fvar(r, fvar, 0)
+            r = store.cons(KIND_FORALL, domain, r, store.info(h))
+            memos = store.memos
+            memos[mbase + M_INFER] = _u32(r)
+            if (not child_np
+                    and self._can_perm
+                    and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+            else:
+                memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+            return r
+        # Multi-binder telescope: reserve `[fvars_rev..., outer_args...]` on
+        # `_spine_buf` so each inner domain and the codomain check directly
+        # against the open pattern.
+        k = 2
+        vc = store.field_b(vc)
+        tc = store.field_b(tc)
+        while store.kind(vc) == KIND_LAMBDA and store.kind(tc) == KIND_FORALL:
+            k += 1
+            vc = store.field_b(vc)
+            tc = store.field_b(tc)
+        smark = store._spine_top
+        total = k + exp_n
+        store.ensure_spine_room(total)
+        buf = store._spine_buf
+        has_fv = store.has_fvar(h) or store.has_fvar(exp_pat)
+        j = 0
+        while j < exp_n:
+            a = _s32(buf[exp_start + j])
+            if not has_fv and store.has_fvar(a):
+                has_fv = True
+            buf[smark + k + j] = _u32(a)
+            j += 1
+        store._spine_top = smark + total
+        records = []
+        fvars = []
+        m = 0
+        matched = False
+        r = 0
+        try:
+            vcur = h
+            tcur = exp_pat
+            while m < k:
+                orig_d = store.field_a(vcur)
+                if m > 0 and store.loose_bvar_range(orig_d) > 0:
+                    if is_leaf(orig_d):
+                        bid = (_s32(store.leaf_meta[leaf_index(orig_d)]) >> 1) - 1
+                        domain = fvars[m - 1 - bid] if bid < m else store.bvar(bid - m)
+                    else:
+                        domain = store.instantiate_multi_rev(orig_d, fvars, m, 0)
+                else:
+                    domain = orig_d
+                if m > 0:
+                    if not store.inst_eq_buf(
+                            store.field_a(tcur), smark + k - m, m + exp_n, domain):
+                        break
+                self._ensure_sort(domain, True)
+                fvar = self.fvar_for_domain(vcur, domain)
+                if self._fvar_reused and has_fv:
+                    fvar = self._fresh_fvar(vcur, domain)
+                records.append(vcur)
+                fvars.append(fvar)
+                m += 1
+                store._spine_buf[smark + k - m] = _u32(fvar)
+                vcur = store.field_b(vcur)
+                tcur = store.field_b(tcur)
+            if store.loose_bvar_range(vcur) > 0:
+                if m == 1:
+                    vcur = store.instantiate(vcur, fvars[0], 0)
+                else:
+                    vcur = store.instantiate_multi_rev(vcur, fvars, m, 0)
+            cur_start = smark + k - m
+            cur_n = m + exp_n
+            if store.loose_bvar_range(tcur) == 0:
+                r = self._cheap_beta(self.infer_expected(vcur, tcur))
+                matched = (r == tcur or self.def_eq(tcur, r))
+            elif is_leaf(tcur):
+                bid = (_s32(store.leaf_meta[leaf_index(tcur)]) >> 1) - 1
+                exp_body = (
+                    store.spine_arg(cur_start + bid)
+                    if bid < cur_n
+                    else store.bvar(bid - cur_n)
+                )
+                r = self._cheap_beta(self.infer_expected(vcur, exp_body))
+                matched = (r == exp_body or self.def_eq(exp_body, r))
+            else:
+                if not is_leaf(vcur):
+                    vk = _s32(store.recs[rec_index(vcur) << 2]) & _KIND_MASK
+                    if vk == KIND_APP:
+                        r = self._infer_app_expected_pat(vcur, tcur, cur_start, cur_n)
+                    elif vk == KIND_LET:
+                        r = self._infer_let_expected_pat(vcur, tcur, cur_start, cur_n)
+                    else:
+                        r = self.infer(vcur, True)
+                else:
+                    r = self.infer(vcur, True)
+                if r == 0:
+                    matched = True
+                else:
+                    r = self._cheap_beta(r)
+                    if store.inst_eq_buf(tcur, cur_start, cur_n, r):
+                        matched = True
+                    else:
+                        exp_body = store.instantiate_multi_buf(tcur, cur_start, cur_n, 0)
+                        matched = self.def_eq(exp_body, r)
+        finally:
+            store.unapp_pop(smark)
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
+        if matched:
+            if (not child_np
+                    and self._can_perm
+                    and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+            else:
+                memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+            return 0
+        r = store.bind_fvars(r, fvars, 0, m)
+        i = m - 1
+        while i >= 0:
+            rec = records[i]
+            r = store.cons(KIND_FORALL, store.field_a(rec), r, store.info(rec))
+            i -= 1
+        memos = store.memos
+        memos[mbase + M_INFER] = _u32(r)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return r
 
     @dont_inline
     def _infer_miss(self, h, ri, mbase, check):
@@ -7793,12 +8297,22 @@ class Machine(object):
                         domain = store.bvar(bid - plen)
                     arg_type = self.infer_expected(arg, domain)
                 else:
-                    if (not self._def_eq_hooked
-                            and not is_leaf(arg)
-                            and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_APP):
-                        arg_type = self._infer_app_expected_pat(
-                            arg, domain, mark + i + 1, plen,
-                        )
+                    if not self._def_eq_hooked and not is_leaf(arg):
+                        ak = _s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK
+                        if ak == KIND_APP:
+                            arg_type = self._infer_app_expected_pat(
+                                arg, domain, mark + i + 1, plen,
+                            )
+                        elif ak == KIND_LAMBDA and store.kind(domain) == KIND_FORALL:
+                            arg_type = self._infer_lambda_expected_pat(
+                                arg, domain, mark + i + 1, plen,
+                            )
+                        elif ak == KIND_LET:
+                            arg_type = self._infer_let_expected_pat(
+                                arg, domain, mark + i + 1, plen,
+                            )
+                        else:
+                            arg_type = self.infer(arg, True)
                         if arg_type == 0:
                             fn_type = store.field_b(fn_type)
                             if store.loose_bvar_range(fn_type) == 0:

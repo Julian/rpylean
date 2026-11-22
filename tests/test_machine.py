@@ -1114,3 +1114,131 @@ class TestJointCheckAndInferExpected(object):
             assert m.try_unfold_head(h_lam) == 0
         finally:
             tc.free()
+
+    def test_infer_expected_let_and_lambda_closed_and_open(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_TypeError
+
+        nat_decl = Name.simple("Nat").inductive(type=TYPE)
+        a_decl = Name.simple("a").axiom(type=NAT)
+        b_decl = Name.simple("b").axiom(type=NAT)
+        box_name = Name.simple("Box")
+        box_decl = box_name.axiom(type=forall(x.binder(type=TYPE))(TYPE))
+        mk_name = Name.simple("mk")
+        mk_decl = mk_name.axiom(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0))(box_name.const().app(b1)),
+        )
+        # Higher-order polymorphic combinator:
+        #   apply1 : ∀ (α β : Type), (α → β) → α → β
+        apply1_name = Name.simple("apply1")
+        apply1_decl = apply1_name.axiom(
+            type=forall(
+                x.binder(type=TYPE),
+                y.binder(type=TYPE),
+                f.binder(type=forall(Name.simple("u").binder(type=b1))(b1)),
+                Name.simple("v").binder(type=b2),
+            )(b2),
+        )
+        # Multi-binder dependent combinator:
+        #   dep2 : ∀ (α : Type) (P : α → Type), (∀ (x : α), Box2 α x → P x) → Nat
+        box2_name = Name.simple("Box2")
+        box2_decl = box2_name.axiom(
+            type=forall(x.binder(type=TYPE), y.binder(type=b0))(TYPE),
+        )
+        dep2_name = Name.simple("dep2")
+        p_name = Name.simple("P")
+        dep2_decl = dep2_name.axiom(
+            type=forall(
+                x.binder(type=TYPE),
+                p_name.binder(type=forall(y.binder(type=b0))(TYPE)),
+                f.binder(
+                    type=forall(
+                        y.binder(type=b1),
+                        Name.simple("bx").binder(type=box2_name.const().app(b2, b0)),
+                    )(b2.app(b1)),
+                ),
+            )(NAT),
+        )
+        # Def-eq alias `IdNat (_ : Nat) : Type := Nat` to test FVar non-leakage
+        idnat_name = Name.simple("IdNat")
+        idnat_decl = idnat_name.definition(
+            type=forall(x.binder(type=NAT))(TYPE),
+            value=fun(x.binder(type=NAT))(NAT),
+        )
+        env = Environment.having([
+            nat_decl, a_decl, b_decl, box_decl, mk_decl,
+            apply1_decl, box2_decl, dep2_decl, idnat_decl,
+        ])
+        tc = TypeChecker(env, None)
+        m = tc.machine
+        try:
+            store = m.store
+            # 1. Closed infer_expected through KIND_LET -> KIND_APP
+            let_expr = x.let(
+                type=NAT, value=a_decl.name.const(),
+                body=mk_name.const().app(NAT, b0),
+            )
+            box_nat = store.import_term(box_name.const().app(NAT))
+            h_let = store.import_term(let_expr)
+            assert m.infer_expected(h_let, box_nat) == box_nat
+
+            # 2. Closed infer_expected on KIND_LAMBDA matching KIND_FORALL
+            lam_expr = fun(x.binder(type=NAT))(mk_name.const().app(NAT, b0))
+            pi_expr = forall(x.binder(type=NAT))(box_name.const().app(NAT))
+            h_lam = store.import_term(lam_expr)
+            h_pi = store.import_term(pi_expr)
+            assert m.infer_expected(h_lam, h_pi) == h_pi
+
+            # 3. Open-pattern KIND_LAMBDA in _infer_app (1-binder & 2-binder dependent)
+            h_app1 = store.import_term(
+                apply1_name.const().app(
+                    NAT, box_name.const().app(NAT),
+                    fun(x.binder(type=NAT))(mk_name.const().app(NAT, b0)),
+                    a_decl.name.const(),
+                ),
+            )
+            assert m.infer(h_app1, True) == box_nat
+
+            h_dep = store.import_term(
+                dep2_name.const().app(
+                    NAT,
+                    fun(x.binder(type=NAT))(box2_name.const().app(NAT, b0)),
+                    fun(
+                        x.binder(type=NAT),
+                        y.binder(type=box2_name.const().app(NAT, b0)),
+                    )(b0),
+                ),
+            )
+            assert m.infer(h_dep, True) == store.import_term(NAT)
+
+            # 4. Soundness: FVar from expected def-eq alias MUST NOT leak into M_INFER
+            #    of a closed lambda `fun (_ : Nat) => a`!
+            outer = fun(y.binder(type=NAT))(
+                x.let(
+                    type=forall(Name.simple("z").binder(type=NAT))(
+                        idnat_name.const().app(b1),
+                    ),
+                    value=fun(Name.simple("z").binder(type=NAT))(a_decl.name.const()),
+                    body=b0.app(b1),
+                ),
+            )
+            h_outer = store.import_term(outer)
+            m.infer(h_outer, True)
+            h_closed_lam = store.import_term(
+                fun(Name.simple("z").binder(type=NAT))(a_decl.name.const()),
+            )
+            inferred_closed = m.infer(h_closed_lam, True)
+            assert not store.has_fvar(inferred_closed)
+
+            # 5. Soundness: ill-typed lambda body under open pattern must still reject
+            bad_app = store.import_term(
+                apply1_name.const().app(
+                    NAT, box_name.const().app(NAT),
+                    fun(x.binder(type=NAT))(b0),
+                    a_decl.name.const(),
+                ),
+            )
+            with pytest.raises(W_TypeError):
+                m.infer(bad_app, True)
+        finally:
+            tc.free()
