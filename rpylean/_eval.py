@@ -152,6 +152,7 @@ TAG_QUOT_LIFT = 9
 TAG_OPAQUE = 10
 TAG_NAT_OP = 11
 TAG_FULL_CTOR = 12
+TAG_THUNK = 13
 
 
 # ---- Runtime slots (Values and Thunks) -----------------------------------
@@ -186,6 +187,8 @@ _NAT_ZERO_VAL = _SMALL_NATS[0]
 
 
 def mk_small_nat(n):
+    if not jit.we_are_jitted() and 0 <= n < 256:
+        return _SMALL_NATS[n]
     return VSmallNat(n)
 
 
@@ -315,6 +318,7 @@ class Thunk(Slot):
     """A call-by-need suspension, updated in place when first forced."""
 
     _attrs_ = ['val', 'code', 'env']
+    _immutable_fields_ = ['code', 'env']
 
     def __init__(self, code, env):
         self.val = None
@@ -492,6 +496,17 @@ class CVal(CodeNode):
         self.val = val
 
 
+class CThunk(CodeNode):
+    """A closed expression pre-wrapped in a single shared call-by-need Thunk."""
+
+    _attrs_ = ['thunk']
+    _immutable_fields_ = ['thunk']
+
+    def __init__(self, thunk):
+        self.tag = TAG_THUNK
+        self.thunk = thunk
+
+
 class CBVar(CodeNode):
     _attrs_ = ['idx']
     _immutable_fields_ = ['idx']
@@ -502,12 +517,13 @@ class CBVar(CodeNode):
 
 
 class CLam(CodeNode):
-    _attrs_ = ['body']
-    _immutable_fields_ = ['body']
+    _attrs_ = ['body', 'closed_val']
+    _immutable_fields_ = ['body', 'closed_val']
 
-    def __init__(self, body):
+    def __init__(self, body, is_closed=False):
         self.tag = TAG_LAM
         self.body = body
+        self.closed_val = VClosure(self, None) if is_closed else None
 
 
 class CApp(CodeNode):
@@ -598,13 +614,17 @@ class CNatOp(CodeNode):
         self.op_id = op_id
 
 
-_NAT_OP_BODIES = [CLam(CLam(CNatOp(op_id))) for op_id in range(15)]
+_NAT_OP_BODIES = [CLam(CLam(CNatOp(op_id)), True) for op_id in range(15)]
 
 
 class CDef(CodeNode):
-    _attrs_ = ['const', 'decl', 'nat_op', 'body', 'is_compiled', 'name_str']
+    _attrs_ = [
+        'const', 'decl', 'nat_op', 'body', 'is_compiled', 'name_str',
+        'self_thunk',
+    ]
     _immutable_fields_ = [
         'const', 'decl', 'nat_op', 'body?', 'is_compiled?', 'name_str',
+        'self_thunk',
     ]
 
     def __init__(self, const, decl, nat_op):
@@ -619,6 +639,7 @@ class CDef(CodeNode):
             self.body = None
             self.is_compiled = False
         self.name_str = const.name.str()
+        self.self_thunk = Thunk(self, None)
 
 
 class CRec(CodeNode):
@@ -931,6 +952,9 @@ def _code_has_rec(root):
             assert isinstance(n, CFullCtor)
             for a in n.field_codes:
                 stack.append(a)
+        elif tag == TAG_THUNK:
+            assert isinstance(n, CThunk)
+            stack.append(n.thunk.code)
     return False
 
 
@@ -954,8 +978,13 @@ def _compile_full_ctor(fn_node, cargs, fields_closed):
             an = field_codes[i]
             if isinstance(an, CVal):
                 slots[i] = an.val
+            elif isinstance(an, CThunk):
+                slots[i] = an.thunk
+            elif isinstance(an, CDef):
+                slots[i] = an.self_thunk
             elif isinstance(an, CLam):
-                slots[i] = VClosure(an, None)
+                cv = an.closed_val
+                slots[i] = cv if cv is not None else VClosure(an, None)
             else:
                 slots[i] = Thunk(an, None)
         if nf == 1:
@@ -1256,16 +1285,31 @@ class CodeCache(object):
                             fn_node, cargs, fields_closed,
                         )
                     else:
-                        memo[e] = CApp(fn_node, cargs)
+                        node = CApp(fn_node, cargs)
+                        if e.loose_bvar_range() == 0 and not e.has_fvar():
+                            memo[e] = CThunk(Thunk(node, None))
+                        else:
+                            memo[e] = node
                 elif cls is W_Lambda:
                     assert isinstance(e, W_Lambda)
-                    memo[e] = CLam(memo[e.body])
+                    is_closed = (
+                        e.loose_bvar_range() == 0 and not e.has_fvar()
+                    )
+                    memo[e] = CLam(memo[e.body], is_closed)
                 elif cls is W_Let:
                     assert isinstance(e, W_Let)
-                    memo[e] = CLet(memo[e.value], memo[e.body])
+                    node = CLet(memo[e.value], memo[e.body])
+                    if e.loose_bvar_range() == 0 and not e.has_fvar():
+                        memo[e] = CThunk(Thunk(node, None))
+                    else:
+                        memo[e] = node
                 elif cls is W_Proj:
                     assert isinstance(e, W_Proj)
-                    memo[e] = CProj(memo[e.struct_expr], e.field_index)
+                    node = CProj(memo[e.struct_expr], e.field_index)
+                    if e.loose_bvar_range() == 0 and not e.has_fvar():
+                        memo[e] = CThunk(Thunk(node, None))
+                    else:
+                        memo[e] = node
         return memo[root]
 
     @jit.dont_look_inside
@@ -1376,16 +1420,38 @@ class CodeCache(object):
                             fn_node, cargs, fields_closed,
                         )
                     else:
-                        memo[h] = CApp(fn_node, cargs)
+                        node = CApp(fn_node, cargs)
+                        if (h != root_h
+                                and store.loose_bvar_range(h) == 0
+                                and not store.has_fvar(h)):
+                            memo[h] = CThunk(Thunk(node, None))
+                        else:
+                            memo[h] = node
                 elif kind == KIND_LAMBDA:
-                    memo[h] = CLam(memo[store.field_b(h)])
+                    is_closed = (
+                        store.loose_bvar_range(h) == 0
+                        and not store.has_fvar(h)
+                    )
+                    memo[h] = CLam(memo[store.field_b(h)], is_closed)
                 elif kind == KIND_LET:
                     pair = store.field_b(h)
-                    memo[h] = CLet(
+                    node = CLet(
                         memo[store.field_a(pair)], memo[store.field_b(pair)],
                     )
+                    if (h != root_h
+                            and store.loose_bvar_range(h) == 0
+                            and not store.has_fvar(h)):
+                        memo[h] = CThunk(Thunk(node, None))
+                    else:
+                        memo[h] = node
                 elif kind == KIND_PROJ:
-                    memo[h] = CProj(memo[store.field_a(h)], store.proj_index(h))
+                    node = CProj(memo[store.field_a(h)], store.proj_index(h))
+                    if (h != root_h
+                            and store.loose_bvar_range(h) == 0
+                            and not store.has_fvar(h)):
+                        memo[h] = CThunk(Thunk(node, None))
+                    else:
+                        memo[h] = node
         return memo[root_h]
 
 
@@ -1415,6 +1481,8 @@ def _printable_location(rec_edge, code):
         return "full_ctor"
     if tag == TAG_NAT_OP:
         return "nat_op"
+    if tag == TAG_THUNK:
+        return "thunk"
     return "eval:%d" % tag
 
 
@@ -1451,8 +1519,25 @@ def _arg_to_slot(arg_code, env):
     if tag == TAG_BVAR:
         assert isinstance(arg_code, CBVar)
         return lookup_env(env, arg_code.idx)
+    if tag == TAG_THUNK:
+        assert isinstance(arg_code, CThunk)
+        th = arg_code.thunk
+        cached = th.val
+        if cached is not None:
+            return cached
+        return th
+    if tag == TAG_DEF:
+        assert isinstance(arg_code, CDef)
+        th = arg_code.self_thunk
+        cached = th.val
+        if cached is not None:
+            return cached
+        return th
     if tag == TAG_LAM:
         assert isinstance(arg_code, CLam)
+        cv = arg_code.closed_val
+        if cv is not None:
+            return cv
         return VClosure(arg_code, env)
     if tag == TAG_CTOR:
         assert isinstance(arg_code, CCtor)
@@ -1587,24 +1672,59 @@ def eval_whnf(root_code, cache, tc):
 
         if tag == TAG_APP:
             assert isinstance(code, CApp)
-            args = _push_spine(code.args, env, args)
-            code = code.fn
-            continue
+            fn = code.fn
+            cargs = code.args
+            fn_tag = fn.tag
+            if fn_tag == TAG_DEF:
+                assert isinstance(fn, CDef)
+                op_id = fn.nat_op
+                if op_id != OP_NONE and len(cargs) == 2:
+                    rec_edge = False
+                    arg1 = _arg_to_slot(cargs[0], env)
+                    arg2 = _arg_to_slot(cargs[1], env)
+                    cont = KNatOp1(op_id, arg2, args, cont)
+                    args = None
+                    env = None
+                    slot = arg1
+                else:
+                    args = _push_spine(cargs, env, args)
+                    code = fn
+                    continue
+            elif fn_tag == TAG_LAM and len(cargs) == 1:
+                assert isinstance(fn, CLam)
+                base_env = None if fn.closed_val is not None else env
+                env = extend_env(base_env, _arg_to_slot(cargs[0], env))
+                code = fn.body
+                continue
+            else:
+                args = _push_spine(cargs, env, args)
+                code = fn
+                continue
 
-        if tag == TAG_LAM:
+        elif tag == TAG_LAM:
             assert isinstance(code, CLam)
             if args is not None:
-                env = extend_env(env, args.slot)
+                base_env = None if code.closed_val is not None else env
+                env = extend_env(base_env, args.slot)
                 args = args.tail
                 code = code.body
                 continue
             rec_edge = False
-            slot = VClosure(code, env)
+            cv = code.closed_val
+            if cv is not None:
+                slot = cv
+            else:
+                slot = VClosure(code, env)
             env = None
 
         elif tag == TAG_BVAR:
             assert isinstance(code, CBVar)
             slot = lookup_env(env, code.idx)
+            env = None
+
+        elif tag == TAG_THUNK:
+            assert isinstance(code, CThunk)
+            slot = code.thunk
             env = None
 
         elif tag == TAG_VAL:
