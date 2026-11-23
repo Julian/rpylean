@@ -20,7 +20,7 @@ from rpython.rlib import rposix, streamio
 from rpython.rlib.objectmodel import (
     always_inline, dont_inline, newlist_hint, specialize, we_are_translated,
 )
-from rpython.rlib.rarithmetic import r_uint
+from rpython.rlib.rarithmetic import intmask, r_uint
 from rpython.rlib.rbigint import rbigint
 from rpython.rtyper.lltypesystem import llmemory, lltype, rffi
 from rpython.rtyper.lltypesystem.lloperation import llop
@@ -424,17 +424,23 @@ _w2 = _w4 = _w6 = _w8 = _w
 
 
 _MASK48 = r_uint(0xffffffffffff) if _IS_64BIT else r_uint(0)
+_MASK56 = r_uint(0xffffffffffffff) if _IS_64BIT else r_uint(0)
 _U64_NL = r_uint(0x0a0a0a0a0a0a0a0a) if _IS_64BIT else r_uint(0)
 _U64_01 = r_uint(0x0101010101010101) if _IS_64BIT else r_uint(0)
+_U64_30 = r_uint(0x3030303030303030) if _IS_64BIT else r_uint(0)
+_U64_46 = r_uint(0x4646464646464646) if _IS_64BIT else r_uint(0)
 _U64_80 = r_uint(0x8080808080808080) if _IS_64BIT else r_uint(0)
+_U64_00FF = r_uint(0x00ff00ff00ff00ff) if _IS_64BIT else r_uint(0)
+_U64_0000FFFF = r_uint(0x0000ffff0000ffff) if _IS_64BIT else r_uint(0)
 
 # Compile-time packed little-endian word literals for canonical compact lines.
 _W8_APP_0 = _w8('{"app":{')
 _W8_APP_1 = _w8(':{"arg":')
-_W4_FN_0 = _w4(',"fn')
+_W6_FN = _w6(',"fn":')
 _W2_COLON = _w2('":')
-_W4_IE_0 = _w4('},"i')
-_W4_IE_1 = _w4('ie":')
+_W7_IE = _w('},"ie":')
+_W2_CLOSE_NL = _w2('}\n')
+_W3_CLOSE2_NL = _w('}}\n')
 
 _W6_IE = _w6('{"ie":')
 _W6_IN = _w6('{"in":')
@@ -634,11 +640,14 @@ def _grow_raw_buf(buf, used, min_cap):
 @always_inline
 def _find_nl(line, p, end):
     """Return the index right after the next '\\n' in line[p:end], or ``end``."""
-    while p + 8 <= end:
-        x = _load_u64(line, p) ^ _U64_NL
-        if ((x - _U64_01) & (~x) & _U64_80) != r_uint(0):
-            break
-        p += 8
+    if _USE_FAST_WORDS:
+        while p + 8 <= end:
+            x = _load_u64(line, p) ^ _U64_NL
+            m = (x - _U64_01) & (~x) & _U64_80
+            if m != r_uint(0):
+                u = (m - r_uint(1)) ^ m
+                return p + intmask((((u >> 8) & _U64_01) * _U64_01) >> 56) + 1
+            p += 8
     while p < end:
         if _load_u8(line, p) == 10:
             return p + 1
@@ -646,13 +655,16 @@ def _find_nl(line, p, end):
     return end
 
 
-@always_inline
-def _read_uint(line, p, end):
+@dont_inline
+def _read_uint_tail_val(line, p, end):
+    """Scalar fallback returning the parsed uint (or ``-1``) for the last 7
+    bytes of a buffer or >=9-digit integers. Returning a bare scalar keeps
+    `_read_uint`'s 2-tuple return 100% unboxed by RPython malloc_removal."""
     if p >= end:
-        return -1, p
+        return -1
     d = _load_u8(line, p) - 48
     if r_uint(d) > r_uint(9):
-        return -1, p
+        return -1
     val = d
     p += 1
     while p < end:
@@ -661,7 +673,72 @@ def _read_uint(line, p, end):
             break
         val = val * 10 + d
         p += 1
-    return val, p
+    return val
+
+
+@always_inline
+def _read_uint(line, p, end):
+    """Parse an unsigned ASCII decimal integer starting at ``p``.
+
+    On 64-bit little-endian targets with >= 8 bytes remaining, uses a
+    branchless SWAR 8-byte detector and parallel decimal multiply-add
+    conversion (eliminating variable-length loop exit mispredictions).
+    """
+    if _USE_FAST_WORDS and p + 8 <= end:
+        w = _load_u64(line, p)
+        a = w - _U64_30
+        b = w + _U64_46
+        non_digit = (a | b) & _U64_80
+        if non_digit != r_uint(0):
+            if (non_digit & r_uint(0x80)) != r_uint(0):
+                return -1, p
+            u = (non_digit - r_uint(1)) ^ non_digit
+            k = intmask((((u >> 8) & _U64_01) * _U64_01) >> 56)
+            a = a << ((8 - k) << 3)
+            p += k
+            ok = True
+        elif p + 8 == end or r_uint(_load_u8(line, p + 8) - 48) > r_uint(9):
+            p += 8
+            ok = True
+        else:
+            ok = False
+        if ok:
+            v = ((a * r_uint(0x0A01)) >> 8) & _U64_00FF
+            v = ((v * r_uint(0x00640001)) >> 16) & _U64_0000FFFF
+            return intmask((v & r_uint(0xFFFF)) * r_uint(10000) + (v >> 32)), p
+    val = _read_uint_tail_val(line, p, end)
+    if val < 0:
+        return -1, p
+    return val, _skip_uint_tail(line, p, end)
+
+
+@dont_inline
+def _skip_uint_tail(line, p, end):
+    if p >= end or r_uint(_load_u8(line, p) - 48) > r_uint(9):
+        return -1
+    p += 1
+    while p < end and r_uint(_load_u8(line, p) - 48) <= r_uint(9):
+        p += 1
+    return p
+
+
+@always_inline
+def _skip_uint(line, p, end):
+    """Skip one or more ASCII decimal digits starting at ``p``.
+    Returns the new position, or ``-1`` if ``p`` is not a digit."""
+    if _USE_FAST_WORDS and p + 8 <= end:
+        w = _load_u64(line, p)
+        non_digit = ((w - _U64_30) | (w + _U64_46)) & _U64_80
+        if non_digit != r_uint(0):
+            if (non_digit & r_uint(0x80)) != r_uint(0):
+                return -1
+            u = (non_digit - r_uint(1)) ^ non_digit
+            return p + intmask((((u >> 8) & _U64_01) * _U64_01) >> 56)
+        p += 8
+        while p < end and r_uint(_load_u8(line, p) - 48) <= r_uint(9):
+            p += 1
+        return p
+    return _skip_uint_tail(line, p, end)
 
 
 @always_inline
@@ -674,6 +751,16 @@ def _at_eol_pos(line, p, end):
             return p + 2
         return -1
     return p
+
+
+@always_inline
+def _match_close2_eol(line, q, end):
+    """Match ``}}\\n`` (or ``}}\\r\\n`` / ``}}`` at EOF) starting at ``q``."""
+    if q + 4 <= end and (_load_u32(line, q) & r_uint(0xffffff)) == _W3_CLOSE2_NL:
+        return q + 3
+    if q + 2 <= end and _load_u16(line, q) == _W2_CLOSE2:
+        return _at_eol_pos(line, q + 2, end)
+    return -1
 
 
 @always_inline
@@ -698,14 +785,15 @@ def _match_binfo_at(line, p, end):
 @always_inline
 def _match_close_ie_eol(line, q, end):
     """Match ``},"ie":E}\\n`` starting at ``q``. Returns ``(eidx, next_pos)`` or ``(q, -1)``."""
-    if (q + 7 <= end
-            and _load_u32(line, q) == _W4_IE_0
-            and _load_u32(line, q + 3) == _W4_IE_1):
+    if q + 8 <= end and (_load_u64(line, q) & _MASK56) == _W7_IE:
         eidx, q = _read_uint(line, q + 7, end)
-        if eidx >= 0 and q < end and _load_u8(line, q) == 125:
-            np = _at_eol_pos(line, q + 1, end)
-            if np >= 0:
-                return eidx, np
+        if eidx >= 0:
+            if q + 2 <= end and _load_u16(line, q) == _W2_CLOSE_NL:
+                return eidx, q + 2
+            if q < end and _load_u8(line, q) == 125:
+                np = _at_eol_pos(line, q + 1, end)
+                if np >= 0:
+                    return eidx, np
     # Include dynamic `q` so RPython doesn't constant-fold the failure tuple
     # (merging a static constant tuple with a fresh one defeats malloc_removal).
     return q, -1
@@ -727,6 +815,21 @@ def _match_binder_fields(line, q, end):
 
 
 @always_inline
+def _match_binder_fields_prescan(line, q, end):
+    """Prescan variant of ``_match_binder_fields``: skips ``name`` digits without
+    decimal conversion. Returns ``(body_eidx, type_eidx, q)`` or ``(q, -1, -1)``."""
+    if q + 8 <= end and _load_u64(line, q) == _W8_BODY:
+        body_eidx, q = _read_uint(line, q + 8, end)
+        if body_eidx >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_NAME:
+            q = _skip_uint(line, q + 8, end)
+            if q >= 0 and q + 8 <= end and _load_u64(line, q) == _W8_TYPE:
+                type_eidx, q = _read_uint(line, q + 8, end)
+                if type_eidx >= 0:
+                    return body_eidx, type_eidx, q
+    return q, -1, -1
+
+
+@always_inline
 def _match_type_value_eol(line, q, end):
     """Match ``,"type":T,"value":V}}\\n`` starting at ``q``.
     Returns ``(type_eidx, value_eidx, next_pos)`` or ``(q, -1, -1)``."""
@@ -736,9 +839,8 @@ def _match_type_value_eol(line, q, end):
                 and _load_u64(line, q) == _W8_VAL0
                 and _load_u8(line, q + 8) == 58):
             value_eidx, q = _read_uint(line, q + 9, end)
-            if (value_eidx >= 0 and q + 2 <= end
-                    and _load_u16(line, q) == _W2_CLOSE2):
-                np = _at_eol_pos(line, q + 2, end)
+            if value_eidx >= 0:
+                np = _match_close2_eol(line, q, end)
                 if np >= 0:
                     return type_eidx, value_eidx, np
     return q, -1, -1
@@ -778,8 +880,8 @@ def _skip_uint_array(line, q, end):
     if q < end and _load_u8(line, q) == 93:
         return q + 1
     while True:
-        v, q = _read_uint(line, q, end)
-        if v < 0 or q >= end:
+        q = _skip_uint(line, q, end)
+        if q < 0 or q >= end:
             return -1
         ch = _load_u8(line, q)
         if ch == 93:
@@ -1039,8 +1141,12 @@ def _make_compact_rare(prescan):
             if (pos + 17 <= end
                     and _load_u64(line, pos + 8) == _W8_CONST_1
                     and _load_u8(line, pos + 16) == 58):
-                nidx, q = _read_uint(line, pos + 17, end)
-                if (nidx >= 0 and q + 7 <= end
+                if prescan:
+                    q = _skip_uint(line, pos + 17, end)
+                    nidx = 0
+                else:
+                    nidx, q = _read_uint(line, pos + 17, end)
+                if (q >= 0 and nidx >= 0 and q + 7 <= end
                         and _load_u32(line, q) == _W4_US_0
                         and _load_u32(line, q + 3) == _W4_US_1):
                     q += 7
@@ -1186,18 +1292,25 @@ def _make_compact_rare(prescan):
             if dw == _W8_PROJ_0:
                 # ,"proj":{"idx":I,"struct":S,"typeName":N}}
                 if q + 15 <= end and _load_u64(line, q + 7) == _W8_PROJ_1:
-                    idx, q = _read_uint(line, q + 15, end)
-                    if (idx >= 0 and q + 10 <= end
+                    if prescan:
+                        q = _skip_uint(line, q + 15, end)
+                        idx = 0
+                    else:
+                        idx, q = _read_uint(line, q + 15, end)
+                    if (q >= 0 and idx >= 0 and q + 10 <= end
                             and _load_u64(line, q) == _W8_STRUCT_0
                             and _load_u32(line, q + 6) == _W4_STRUCT_1):
                         struct_eidx, q = _read_uint(line, q + 10, end)
                         if (struct_eidx >= 0 and q + 12 <= end
                                 and _load_u64(line, q) == _W8_TNAME_0
                                 and _load_u32(line, q + 8) == _W4_TNAME_1):
-                            tname_idx, q = _read_uint(line, q + 12, end)
-                            if (tname_idx >= 0 and q + 2 <= end
-                                    and _load_u16(line, q) == _W2_CLOSE2):
-                                np = _at_eol_pos(line, q + 2, end)
+                            if prescan:
+                                q = _skip_uint(line, q + 12, end)
+                                tname_idx = 0
+                            else:
+                                tname_idx, q = _read_uint(line, q + 12, end)
+                            if q >= 0 and tname_idx >= 0:
+                                np = _match_close2_eol(line, q, end)
                                 if np >= 0:
                                     if prescan:
                                         target.ensure(eidx)
@@ -1422,9 +1535,8 @@ def _make_chunk_fast(mode):
                 # {"app":{"arg":A,"fn":F},"ie":E}  (~73% of all lines)
                 if pos + 14 <= end and _load_u64(line, pos + 6) == _W8_APP_1:
                     arg_eidx, q = _read_uint(line, pos + 14, end)
-                    if (arg_eidx >= 0 and q + 6 <= end
-                            and _load_u32(line, q) == _W4_FN_0
-                            and _load_u16(line, q + 4) == _W2_COLON):
+                    if (arg_eidx >= 0 and q + 8 <= end
+                            and (_load_u64(line, q) & _MASK48) == _W6_FN):
                         fn_eidx, q = _read_uint(line, q + 6, end)
                         if fn_eidx >= 0:
                             eidx, np = _match_close_ie_eol(line, q, end)
@@ -1479,12 +1591,17 @@ def _make_chunk_fast(mode):
                         and _load_u64(line, q + 14) == _W8_LAM_2):
                     bcode, q = _match_binfo_at(line, q + 22, end)
                     if bcode >= 0:
-                        body_eidx, name_idx, type_eidx, q = _match_binder_fields(
-                            line, q, end,
-                        )
-                        if (q >= 0 and q + 2 <= end
-                                and _load_u16(line, q) == _W2_CLOSE2):
-                            np = _at_eol_pos(line, q + 2, end)
+                        if is_prescan:
+                            body_eidx, type_eidx, q = _match_binder_fields_prescan(
+                                line, q, end,
+                            )
+                            name_idx = 0
+                        else:
+                            body_eidx, name_idx, type_eidx, q = _match_binder_fields(
+                                line, q, end,
+                            )
+                        if q >= 0:
+                            np = _match_close2_eol(line, q, end)
                             if np >= 0:
                                 if is_prescan:
                                     if (eidx == rc_len and eidx < rc_cap
@@ -1554,9 +1671,15 @@ def _make_chunk_fast(mode):
                         and _load_u16(line, pos + 24) == _W2_COL_Q):
                     bcode, q = _match_binfo_at(line, pos + 26, end)
                     if bcode >= 0:
-                        body_eidx, name_idx, type_eidx, q = _match_binder_fields(
-                            line, q, end,
-                        )
+                        if is_prescan:
+                            body_eidx, type_eidx, q = _match_binder_fields_prescan(
+                                line, q, end,
+                            )
+                            name_idx = 0
+                        else:
+                            body_eidx, name_idx, type_eidx, q = _match_binder_fields(
+                                line, q, end,
+                            )
                         if q >= 0:
                             eidx, np = _match_close_ie_eol(line, q, end)
                             if np >= 0:

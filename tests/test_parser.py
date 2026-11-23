@@ -472,3 +472,61 @@ def test_mutual_inductive_wires_recursors():
 def test_disc_first_expr_with_spaces_around_colon():
     builder = parse(' { "bvar" : 3 , "ie" : 0 } ')
     assert builder.exprs == [W_BVar(id=3)]
+
+
+def test_swar_read_and_skip_uint_edge_cases():
+    # Cover 1..10 digits, leading zeros, all delimiter byte classes (<0x30,
+    # 0x3A..0x7F, 0x80..0xFF), and near-EOF lengths (p + 8 > end).
+    cases = [
+        ("0,xxxxxxx", 0, 1),
+        ("9}xxxxxxx", 9, 1),
+        ("42,xxxxxx", 42, 2),
+        ("123}xxxxx", 123, 3),
+        ("9876,xxxx", 9876, 4),
+        ("54321}xxx", 54321, 5),
+        ("123456,xx", 123456, 6),
+        ("7654321}x", 7654321, 7),
+        ("12345678,", 12345678, 8),
+        ("99999999}", 99999999, 8),
+        ("123456789,", 123456789, 9),
+        ("1234567890}", 1234567890, 10),
+        ("0007,xxxx", 7, 4),
+        # Near-EOF (< 8 bytes remaining)
+        ("0", 0, 1),
+        ("7}", 7, 1),
+        ("1234567", 1234567, 7),
+        ("12345678", 12345678, 8),
+        # High-bit & low-byte delimiters right after digits
+        ("5\x00xxxxxxx", 5, 1),
+        ("5\x2fxxxxxxx", 5, 1),
+        ("5\x3axxxxxxx", 5, 1),
+        ("5\x7fxxxxxxx", 5, 1),
+        ("5\x80xxxxxxx", 5, 1),
+        ("5\xafxxxxxxx", 5, 1),
+        ("5\xb0xxxxxxx", 5, 1),
+        ("5\xffxxxxxxx", 5, 1),
+        ("123\xff56789", 123, 3),
+    ]
+    for buf, expected_val, expected_pos in cases:
+        val, pos = parser._read_uint(buf, 0, len(buf))
+        assert (val, pos) == (expected_val, expected_pos), (buf, val, pos)
+        spos = parser._skip_uint(buf, 0, len(buf))
+        assert spos == expected_pos, (buf, spos)
+
+    # Non-digit at offset 0 across every byte value outside '0'..'9'
+    for b in range(256):
+        if 48 <= b <= 57:
+            continue
+        buf = chr(b) + "12345678"
+        assert parser._read_uint(buf, 0, len(buf)) == (-1, 0), hex(b)
+        assert parser._skip_uint(buf, 0, len(buf)) == -1, hex(b)
+    assert parser._read_uint("", 0, 0) == (-1, 0)
+    assert parser._skip_uint("", 0, 0) == -1
+
+
+def test_swar_find_nl_every_offset():
+    for off in range(17):
+        buf = ("a" * off) + "\n" + ("b" * 16)
+        assert parser._find_nl(buf, 0, len(buf)) == off + 1
+    buf_no_nl = "x" * 20
+    assert parser._find_nl(buf_no_nl, 0, len(buf_no_nl)) == len(buf_no_nl)
