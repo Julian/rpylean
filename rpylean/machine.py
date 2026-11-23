@@ -68,6 +68,7 @@ from rpylean.objects import (
     _PROP_MASK_DONE,
     _PROP_MASK_PLANS,
     _expr_has_bvar_lt,
+    _mk_w_const,
     _mk_w_const1,
     _mk_w_const2,
     _mk_w_litnat,
@@ -375,6 +376,24 @@ _LGEN_MASK = _LGEN_SIZE - 1
 def _check_stack_store(label):
     if stack_almost_full():
         raise W_DeepRecursion(label)
+
+
+@always_inline
+def _subst_lvl_inline(lvl, params, clevels, np):
+    if not lvl.has_param:
+        return lvl
+    if lvl.__class__ is W_LevelParam:
+        assert isinstance(lvl, W_LevelParam)
+        lname = lvl.name
+        if np == 1:
+            return clevels[0] if lname is params[0] else lvl
+        if np == 2:
+            if lname is params[0]:
+                return clevels[0]
+            if lname is params[1]:
+                return clevels[1]
+            return lvl
+    return _subst_level_fast(lvl, params, clevels)
 
 
 def _subst_level_fast(lvl, params, clevels):
@@ -1207,7 +1226,7 @@ class TermStore(object):
         self._content_head = U32Map(1 << 11, keep_cap=1 << 15)
         #: Unique generation tag stamping `W_Expr._cache` for this store epoch.
         self._store_gen = _next_cache_gen()
-        self._import_spine = []
+        self._import_spine = [None] * 64
         self._import_spine_len = 0
         self._fvar_gens = [0] * 64
         self._fvar_gens_len = 0
@@ -2381,6 +2400,170 @@ class TermStore(object):
     @dont_inline
     def _const_leaf2_miss(self, name, nl0, nl1):
         return self.leaf_for(_mk_w_const2(name, nl0, nl1))
+
+    def _const_leaf3(self, name, l0, l1, l2):
+        """Canonical leaf handle for `W_Const(name, [l0, l1, l2])` without
+        allocating a list or `W_Const` on hits."""
+        nl0 = l0._normal
+        if nl0 is None:
+            nl0 = l0.normalize()
+        nl1 = l1._normal
+        if nl1 is None:
+            nl1 = l1.normalize()
+        nl2 = l2._normal
+        if nl2 is None:
+            nl2 = l2.normalize()
+        h = (((name.hash() * 1000003) ^ nl0.hash()) * 1000003) ^ nl1.hash()
+        h = ((h * 1000003) ^ nl2.hash())
+        h31 = (((h * 1000003) ^ 0xC057) & 0x7FFFFFFF)
+        key = h31 if h31 != 0 else 1
+        cur = self._content_head.get(key, 0)
+        while cur != 0:
+            j = leaf_index(cur)
+            le = self.leaves[j]
+            if le.__class__ is W_Const:
+                assert isinstance(le, W_Const)
+                if le.name is name:
+                    el = le.levels
+                    if len(el) == 3 and el[0] is nl0 and el[1] is nl1 and el[2] is nl2:
+                        return cur
+            cur = _s32(self.leaf_next[j])
+        return self._const_leaf3_miss(name, nl0, nl1, nl2)
+
+    @dont_inline
+    def _const_leaf3_miss(self, name, nl0, nl1, nl2):
+        return self.leaf_for(_mk_w_const(name, [nl0, nl1, nl2]))
+
+    def _const_leaf4(self, name, l0, l1, l2, l3):
+        """Canonical leaf handle for `W_Const(name, [l0, l1, l2, l3])` without
+        allocating a list or `W_Const` on hits."""
+        nl0 = l0._normal
+        if nl0 is None:
+            nl0 = l0.normalize()
+        nl1 = l1._normal
+        if nl1 is None:
+            nl1 = l1.normalize()
+        nl2 = l2._normal
+        if nl2 is None:
+            nl2 = l2.normalize()
+        nl3 = l3._normal
+        if nl3 is None:
+            nl3 = l3.normalize()
+        h = (((name.hash() * 1000003) ^ nl0.hash()) * 1000003) ^ nl1.hash()
+        h = (((h * 1000003) ^ nl2.hash()) * 1000003) ^ nl3.hash()
+        h31 = (((h * 1000003) ^ 0xC057) & 0x7FFFFFFF)
+        key = h31 if h31 != 0 else 1
+        cur = self._content_head.get(key, 0)
+        while cur != 0:
+            j = leaf_index(cur)
+            le = self.leaves[j]
+            if le.__class__ is W_Const:
+                assert isinstance(le, W_Const)
+                if le.name is name:
+                    el = le.levels
+                    if (len(el) == 4 and el[0] is nl0 and el[1] is nl1
+                            and el[2] is nl2 and el[3] is nl3):
+                        return cur
+            cur = _s32(self.leaf_next[j])
+        return self._const_leaf4_miss(name, nl0, nl1, nl2, nl3)
+
+    @dont_inline
+    def _const_leaf4_miss(self, name, nl0, nl1, nl2, nl3):
+        return self.leaf_for(_mk_w_const(name, [nl0, nl1, nl2, nl3]))
+
+    @dont_inline
+    def _const_leaf_many(self, e, params, clevels):
+        """Slow path for `W_Const` with >= 5 universe levels."""
+        lvls = e.levels
+        nlvls = len(lvls)
+        new_lvls = None
+        i = 0
+        while i < nlvls:
+            lvl = lvls[i]
+            nl = _subst_level_fast(lvl, params, clevels)
+            if nl is not lvl:
+                if new_lvls is None:
+                    new_lvls = list(lvls)
+                new_lvls[i] = nl
+            i += 1
+        leaf_e = e.name.const(new_lvls) if new_lvls is not None else e
+        lc = leaf_e._cache
+        if (lc >> 32) == self._store_gen:
+            return lc & _TABLE_SLOT_MASK
+        return self.leaf_for(leaf_e)
+
+    @dont_inline
+    def _import_const_levels(self, e, params, clevels, lgen):
+        """Non-recursive fast path for importing a polymorphic `W_Const` under
+        `params -> clevels`: avoids recursive frame/stack-check overhead and
+        heap allocations for 1–4 level arguments."""
+        assert isinstance(e, W_Const)
+        lvls = e.levels
+        nlvls = len(lvls)
+        np = len(params)
+        h = 0
+        if nlvls == 1:
+            l0 = lvls[0]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            if nl0 is not l0:
+                h = self._const_leaf1(e.name, nl0)
+        elif nlvls == 2:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1:
+                h = self._const_leaf2(e.name, nl0, nl1)
+        elif nlvls == 3:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            l2 = lvls[2]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            nl2 = _subst_lvl_inline(l2, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1 or nl2 is not l2:
+                h = self._const_leaf3(e.name, nl0, nl1, nl2)
+        elif nlvls == 4:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            l2 = lvls[2]
+            l3 = lvls[3]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            nl2 = _subst_lvl_inline(l2, params, clevels, np)
+            nl3 = _subst_lvl_inline(l3, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1 or nl2 is not l2 or nl3 is not l3:
+                h = self._const_leaf4(e.name, nl0, nl1, nl2, nl3)
+        elif nlvls > 4:
+            h = self._const_leaf_many(e, params, clevels)
+        if h == 0:
+            lc = e._cache
+            if (lc >> 32) == self._store_gen:
+                h = lc & _TABLE_SLOT_MASK
+            else:
+                h = self.leaf_for(e)
+        if lgen > 0:
+            e._cache = (lgen << 32) | h
+        return h
+
+    @dont_inline
+    def _import_sort_levels(self, e, params, clevels, lgen):
+        """Non-recursive slow path for importing a polymorphic `W_Sort`."""
+        assert isinstance(e, W_Sort)
+        leaf_e = e
+        lvl = e.level
+        if lvl.has_param:
+            nl = _subst_lvl_inline(lvl, params, clevels, len(params))
+            if nl is not lvl:
+                leaf_e = nl.sort()
+        lc = leaf_e._cache
+        if (lc >> 32) == self._store_gen:
+            h = lc & _TABLE_SLOT_MASK
+        else:
+            h = self.leaf_for(leaf_e)
+        if lgen > 0:
+            e._cache = (lgen << 32) | h
+        return h
 
     # ---- spines ----------------------------------------------------------
 
@@ -6081,6 +6264,15 @@ class TermStore(object):
         self.rec_node[rec_index(h)] = _u32(len(self.nodes))
 
     @dont_inline
+    def _grow_import_spine(self, top, e):
+        spine = self._import_spine
+        new_cap = len(spine) * 2
+        if new_cap <= top:
+            new_cap = top + 64
+        spine.extend([None] * (new_cap - len(spine)))
+        spine[top] = e
+
+    @dont_inline
     def _clear_import_spine(self, mark):
         spine = self._import_spine
         top = self._import_spine_len
@@ -6102,6 +6294,21 @@ class TermStore(object):
             if self._import_spine_len > mark:
                 self._clear_import_spine(mark)
 
+    @dont_inline
+    def _import_let_rec(self, e, gen, nr):
+        assert isinstance(e, W_Let)
+        h = self.let(
+            e.name,
+            self._import_rec(e.type, gen, nr),
+            self._import_rec(e.value, gen, nr),
+            self._import_rec(e.body, gen, nr),
+        )
+        if gen > 0:
+            e._cache = (gen << 32) | h
+        if self.record_nodes:
+            self.set_node(h, e)
+        return h
+
     def _import_rec(self, e, gen, rdepth):
         c = e._cache
         if (c >> 32) == gen:
@@ -6120,6 +6327,8 @@ class TermStore(object):
                     self._bvar_max = id + 1
                 return h
             return self.leaf_for(e)
+        if cls is W_Const:
+            return self.leaf_for(e)
         if (rdepth & 31) == 31:
             _check_stack_store("import_term")
         nr = rdepth + 1
@@ -6130,7 +6339,11 @@ class TermStore(object):
             if (fc >> 32) == gen:
                 fn_h = fc & _TABLE_SLOT_MASK
             elif not isinstance(fn, W_App):
-                fn_h = self._import_rec(fn, gen, nr)
+                fn_h = (
+                    self.leaf_for(fn)
+                    if fn.__class__ is W_Const
+                    else self._import_rec(fn, gen, nr)
+                )
             else:
                 fn_h = 0
             if fn_h != 0:
@@ -6150,6 +6363,8 @@ class TermStore(object):
                                 self._bvar_max = bid + 1
                     else:
                         arg_h = self.leaf_for(arg)
+                elif arg.__class__ is W_Const:
+                    arg_h = self.leaf_for(arg)
                 else:
                     arg_h = self._import_rec(arg, gen, nr)
                 head = self.cons_app(fn_h, arg_h)
@@ -6169,7 +6384,7 @@ class TermStore(object):
             if top < len(spine):
                 spine[top] = e
             else:
-                spine.append(e)
+                self._grow_import_spine(top, e)
             top += 1
             cur = fn
             head = 0
@@ -6179,6 +6394,8 @@ class TermStore(object):
                     cc = cur._cache
                     if (cc >> 32) == gen:
                         head = cc & _TABLE_SLOT_MASK
+                    elif cur.__class__ is W_Const:
+                        head = self.leaf_for(cur)
                     else:
                         head = self._import_rec(cur, gen, nr)
                     break
@@ -6190,7 +6407,7 @@ class TermStore(object):
                 if top < len(spine):
                     spine[top] = cur
                 else:
-                    spine.append(cur)
+                    self._grow_import_spine(top, cur)
                 top += 1
                 cur = cur.fn
             while top > mark:
@@ -6214,6 +6431,8 @@ class TermStore(object):
                                 self._bvar_max = bid + 1
                     else:
                         arg_h = self.leaf_for(arg)
+                elif arg.__class__ is W_Const:
+                    arg_h = self.leaf_for(arg)
                 else:
                     self._import_spine_len = top
                     arg_h = self._import_rec(arg, gen, nr)
@@ -6250,13 +6469,7 @@ class TermStore(object):
                 e.struct_name, e.field_index, self._import_rec(e.struct_expr, gen, nr),
             )
         elif cls is W_Let:
-            assert isinstance(e, W_Let)
-            h = self.let(
-                e.name,
-                self._import_rec(e.type, gen, nr),
-                self._import_rec(e.value, gen, nr),
-                self._import_rec(e.body, gen, nr),
-            )
+            return self._import_let_rec(e, gen, nr)
         else:
             return self.leaf_for(e)
         if gen > 0:
@@ -6331,24 +6544,78 @@ class TermStore(object):
             if self._import_spine_len > mark:
                 self._clear_import_spine(mark)
 
+    @dont_inline
+    def _fvar_multi_get(self, e, depth):
+        mm = self._fvar_multi
+        if mm is not None and depth < len(mm):
+            dm = mm[depth]
+            if dm is not None:
+                return dm.get(e, 0)
+        return 0
+
+    @dont_inline
+    def _import_let_fvars(self, e, fvars, nf, depth, dgen, nr):
+        assert isinstance(e, W_Let)
+        sgen = self._store_gen
+        et = e.type
+        if et.loose_bvar_range() <= depth:
+            tc = et._cache
+            th = (
+                tc & _TABLE_SLOT_MASK
+                if (tc >> 32) == sgen
+                else self._import_rec(et, sgen, nr)
+            )
+        else:
+            th = self._import_fvars_rec(et, fvars, nf, depth, dgen, nr)
+        ev = e.value
+        if ev.loose_bvar_range() <= depth:
+            vc = ev._cache
+            vh = (
+                vc & _TABLE_SLOT_MASK
+                if (vc >> 32) == sgen
+                else self._import_rec(ev, sgen, nr)
+            )
+        else:
+            vh = self._import_fvars_rec(ev, fvars, nf, depth, dgen, nr)
+        eb = e.body
+        ndepth = depth + 1
+        if eb.loose_bvar_range() <= ndepth:
+            bc = eb._cache
+            bh = (
+                bc & _TABLE_SLOT_MASK
+                if (bc >> 32) == sgen
+                else self._import_rec(eb, sgen, nr)
+            )
+        else:
+            ndgen = self._fvar_gen_for_depth(ndepth)
+            bh = self._import_fvars_rec(eb, fvars, nf, ndepth, ndgen, nr)
+        h = self.let(e.name, th, vh, bh)
+        if dgen > 0:
+            if (self._fvar_base_gen > 0
+                    and (e._cache >> 32) >= self._fvar_base_gen
+                    and (e._cache >> 32) != dgen):
+                self._fvar_cache_put(e, depth, dgen, h)
+            else:
+                e._cache = (dgen << 32) | h
+        return h
+
     def _import_fvars_rec(self, e, fvars, nf, depth, dgen, rdepth):
         sgen = self._store_gen
         if e.loose_bvar_range() <= depth:
             c = e._cache
             if (c >> 32) == sgen:
                 return c & _TABLE_SLOT_MASK
+            if e.__class__ is W_Const:
+                return self.leaf_for(e)
             return self._import_rec(e, sgen, rdepth)
         if dgen > 0:
             c = e._cache
             if (c >> 32) == dgen:
                 return c & _TABLE_SLOT_MASK
-            mm = self._fvar_multi
-            if mm is not None and depth < len(mm):
-                dm = mm[depth]
-                if dm is not None:
-                    mh = dm.get(e, 0)
-                    if mh != 0:
-                        return mh
+            if self._fvar_multi is not None:
+                mh = self._fvar_multi_get(e, depth)
+                if mh != 0:
+                    return mh
         if (rdepth & 31) == 31:
             _check_stack_store("import_term")
         cls = e.__class__
@@ -6367,6 +6634,8 @@ class TermStore(object):
                 fc = fn._cache
                 if (fc >> 32) == sgen:
                     fn_h = fc & _TABLE_SLOT_MASK
+                elif fn.__class__ is W_Const:
+                    fn_h = self.leaf_for(fn)
                 else:
                     fn_h = self._import_rec(fn, sgen, nr)
             elif dgen > 0 and (fn._cache >> 32) == dgen:
@@ -6396,6 +6665,8 @@ class TermStore(object):
                                     self._bvar_max = bid + 1
                         else:
                             arg_h = self.leaf_for(arg)
+                    elif arg.__class__ is W_Const:
+                        arg_h = self.leaf_for(arg)
                     else:
                         arg_h = self._import_rec(arg, sgen, nr)
                 elif arg.__class__ is W_BVar:
@@ -6422,31 +6693,29 @@ class TermStore(object):
             if top < len(spine):
                 spine[top] = e
             else:
-                spine.append(e)
+                self._grow_import_spine(top, e)
             top += 1
             cur = fn
             head = 0
             while True:
                 if cur.loose_bvar_range() <= depth:
-                    self._import_spine_len = top
                     cc = cur._cache
-                    head = (
-                        cc & _TABLE_SLOT_MASK
-                        if (cc >> 32) == sgen
-                        else self._import_rec(cur, sgen, nr)
-                    )
+                    if (cc >> 32) == sgen:
+                        head = cc & _TABLE_SLOT_MASK
+                    elif cur.__class__ is W_Const:
+                        head = self.leaf_for(cur)
+                    else:
+                        self._import_spine_len = top
+                        head = self._import_rec(cur, sgen, nr)
                     break
                 if dgen > 0 and (cur._cache >> 32) == dgen:
                     head = cur._cache & _TABLE_SLOT_MASK
                     break
-                mm = self._fvar_multi
-                if mm is not None and depth < len(mm):
-                    dm = mm[depth]
-                    if dm is not None:
-                        mh = dm.get(cur, 0)
-                        if mh != 0:
-                            head = mh
-                            break
+                if self._fvar_multi is not None:
+                    mh = self._fvar_multi_get(cur, depth)
+                    if mh != 0:
+                        head = mh
+                        break
                 if not isinstance(cur, W_App):
                     if cur.__class__ is W_BVar:
                         assert isinstance(cur, W_BVar)
@@ -6460,7 +6729,7 @@ class TermStore(object):
                 if top < len(spine):
                     spine[top] = cur
                 else:
-                    spine.append(cur)
+                    self._grow_import_spine(top, cur)
                 top += 1
                 cur = cur.fn
             while top > mark:
@@ -6485,6 +6754,8 @@ class TermStore(object):
                                     self._bvar_max = bid + 1
                         else:
                             arg_h = self.leaf_for(arg)
+                    elif arg.__class__ is W_Const:
+                        arg_h = self.leaf_for(arg)
                     else:
                         self._import_spine_len = top
                         arg_h = self._import_rec(arg, sgen, nr)
@@ -6542,40 +6813,7 @@ class TermStore(object):
                 self._import_fvars_rec(e.struct_expr, fvars, nf, depth, dgen, nr),
             )
         elif cls is W_Let:
-            assert isinstance(e, W_Let)
-            et = e.type
-            if et.loose_bvar_range() <= depth:
-                tc = et._cache
-                th = (
-                    tc & _TABLE_SLOT_MASK
-                    if (tc >> 32) == sgen
-                    else self._import_rec(et, sgen, nr)
-                )
-            else:
-                th = self._import_fvars_rec(et, fvars, nf, depth, dgen, nr)
-            ev = e.value
-            if ev.loose_bvar_range() <= depth:
-                vc = ev._cache
-                vh = (
-                    vc & _TABLE_SLOT_MASK
-                    if (vc >> 32) == sgen
-                    else self._import_rec(ev, sgen, nr)
-                )
-            else:
-                vh = self._import_fvars_rec(ev, fvars, nf, depth, dgen, nr)
-            eb = e.body
-            ndepth = depth + 1
-            if eb.loose_bvar_range() <= ndepth:
-                bc = eb._cache
-                bh = (
-                    bc & _TABLE_SLOT_MASK
-                    if (bc >> 32) == sgen
-                    else self._import_rec(eb, sgen, nr)
-                )
-            else:
-                ndgen = self._fvar_gen_for_depth(ndepth)
-                bh = self._import_fvars_rec(eb, fvars, nf, ndepth, ndgen, nr)
-            h = self.let(e.name, th, vh, bh)
+            return self._import_let_fvars(e, fvars, nf, depth, dgen, nr)
         else:
             return self.leaf_for(e)
         if dgen > 0:
@@ -6687,19 +6925,38 @@ class TermStore(object):
             if self._import_spine_len > mark:
                 self._clear_import_spine(mark)
 
+    @dont_inline
+    def _import_let_levels(self, e, params, clevels, lgen, nr):
+        assert isinstance(e, W_Let)
+        h = self.let(
+            e.name,
+            self._import_with_levels(e.type, params, clevels, lgen, nr),
+            self._import_with_levels(e.value, params, clevels, lgen, nr),
+            self._import_with_levels(e.body, params, clevels, lgen, nr),
+        )
+        if lgen > 0:
+            e._cache = (lgen << 32) | h
+        return h
+
     def _import_with_levels(self, e, params, clevels, lgen, rdepth):
         sgen = self._store_gen
         if not e.has_level_param():
             c = e._cache
             if (c >> 32) == sgen:
                 return c & _TABLE_SLOT_MASK
+            if e.__class__ is W_Const:
+                return self.leaf_for(e)
             return self._import_rec(e, sgen, rdepth)
         c = e._cache
         if (c >> 32) == lgen:
             return c & _TABLE_SLOT_MASK
+        cls = e.__class__
+        if cls is W_Const:
+            return self._import_const_levels(e, params, clevels, lgen)
+        if cls is W_Sort:
+            return self._import_sort_levels(e, params, clevels, lgen)
         if (rdepth & 31) == 31:
             _check_stack_store("import_term")
-        cls = e.__class__
         nr = rdepth + 1
         if cls is W_App:
             assert isinstance(e, W_App)
@@ -6710,22 +6967,29 @@ class TermStore(object):
                 if (fc >> 32) == lgen:
                     fn_h = fc & _TABLE_SLOT_MASK
                 elif not isinstance(fn, W_App):
-                    fn_h = self._import_with_levels(fn, params, clevels, lgen, nr)
+                    fn_h = (
+                        self._import_const_levels(fn, params, clevels, lgen)
+                        if fn.__class__ is W_Const
+                        else self._import_with_levels(fn, params, clevels, lgen, nr)
+                    )
             else:
                 fc = fn._cache
                 if (fc >> 32) == sgen:
                     fn_h = fc & _TABLE_SLOT_MASK
+                elif fn.__class__ is W_Const:
+                    fn_h = self.leaf_for(fn)
                 else:
                     fn_h = self._import_rec(fn, sgen, nr)
             if fn_h != 0:
                 arg = e.arg
                 if arg.has_level_param():
                     ac = arg._cache
-                    arg_h = (
-                        ac & _TABLE_SLOT_MASK
-                        if (ac >> 32) == lgen
-                        else self._import_with_levels(arg, params, clevels, lgen, nr)
-                    )
+                    if (ac >> 32) == lgen:
+                        arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_Const:
+                        arg_h = self._import_const_levels(arg, params, clevels, lgen)
+                    else:
+                        arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
                 else:
                     ac = arg._cache
                     if (ac >> 32) == sgen:
@@ -6742,6 +7006,8 @@ class TermStore(object):
                                     self._bvar_max = bid + 1
                         else:
                             arg_h = self.leaf_for(arg)
+                    elif arg.__class__ is W_Const:
+                        arg_h = self.leaf_for(arg)
                     else:
                         arg_h = self._import_rec(arg, sgen, nr)
                 head = self.cons_app(fn_h, arg_h)
@@ -6755,30 +7021,32 @@ class TermStore(object):
             if top < len(spine):
                 spine[top] = e
             else:
-                spine.append(e)
+                self._grow_import_spine(top, e)
             top += 1
             cur = fn
             head = 0
             while True:
                 if not cur.has_level_param():
-                    self._import_spine_len = top
                     cc = cur._cache
-                    head = (
-                        cc & _TABLE_SLOT_MASK
-                        if (cc >> 32) == sgen
-                        else self._import_rec(cur, sgen, nr)
-                    )
+                    if (cc >> 32) == sgen:
+                        head = cc & _TABLE_SLOT_MASK
+                    elif cur.__class__ is W_Const:
+                        head = self.leaf_for(cur)
+                    else:
+                        self._import_spine_len = top
+                        head = self._import_rec(cur, sgen, nr)
                     break
                 if not isinstance(cur, W_App):
-                    self._import_spine_len = top
                     cc = cur._cache
-                    head = (
-                        cc & _TABLE_SLOT_MASK
-                        if (cc >> 32) == lgen
-                        else self._import_with_levels(
+                    if (cc >> 32) == lgen:
+                        head = cc & _TABLE_SLOT_MASK
+                    elif cur.__class__ is W_Const:
+                        head = self._import_const_levels(cur, params, clevels, lgen)
+                    else:
+                        self._import_spine_len = top
+                        head = self._import_with_levels(
                             cur, params, clevels, lgen, nr,
                         )
-                    )
                     break
                 cc = cur._cache
                 if (cc >> 32) == lgen:
@@ -6788,7 +7056,7 @@ class TermStore(object):
                 if top < len(spine):
                     spine[top] = cur
                 else:
-                    spine.append(cur)
+                    self._grow_import_spine(top, cur)
                 top += 1
                 cur = cur.fn
             while top > mark:
@@ -6801,6 +7069,8 @@ class TermStore(object):
                     ac = arg._cache
                     if (ac >> 32) == lgen:
                         arg_h = ac & _TABLE_SLOT_MASK
+                    elif arg.__class__ is W_Const:
+                        arg_h = self._import_const_levels(arg, params, clevels, lgen)
                     else:
                         self._import_spine_len = top
                         arg_h = self._import_with_levels(
@@ -6822,6 +7092,8 @@ class TermStore(object):
                                     self._bvar_max = bid + 1
                         else:
                             arg_h = self.leaf_for(arg)
+                    elif arg.__class__ is W_Const:
+                        arg_h = self.leaf_for(arg)
                     else:
                         self._import_spine_len = top
                         arg_h = self._import_rec(arg, sgen, nr)
@@ -6875,72 +7147,7 @@ class TermStore(object):
                 ),
             )
         elif cls is W_Let:
-            assert isinstance(e, W_Let)
-            h = self.let(
-                e.name,
-                self._import_with_levels(e.type, params, clevels, lgen, nr),
-                self._import_with_levels(e.value, params, clevels, lgen, nr),
-                self._import_with_levels(e.body, params, clevels, lgen, nr),
-            )
-        elif cls is W_Const:
-            assert isinstance(e, W_Const)
-            lvls = e.levels
-            nlvls = len(lvls)
-            h = 0
-            leaf_e = e
-            if nlvls == 1:
-                l0 = lvls[0]
-                if l0.has_param:
-                    if l0.__class__ is W_LevelParam and len(params) == 1:
-                        assert isinstance(l0, W_LevelParam)
-                        nl0 = clevels[0] if l0.name is params[0] else l0
-                    else:
-                        nl0 = _subst_level_fast(l0, params, clevels)
-                    if nl0 is not l0:
-                        h = self._const_leaf1(e.name, nl0)
-            elif nlvls == 2:
-                l0 = lvls[0]
-                l1 = lvls[1]
-                nl0 = _subst_level_fast(l0, params, clevels) if l0.has_param else l0
-                nl1 = _subst_level_fast(l1, params, clevels) if l1.has_param else l1
-                if nl0 is not l0 or nl1 is not l1:
-                    h = self._const_leaf2(e.name, nl0, nl1)
-            elif nlvls > 2:
-                new_lvls = None
-                i = 0
-                while i < nlvls:
-                    lvl = lvls[i]
-                    nl = _subst_level_fast(lvl, params, clevels)
-                    if nl is not lvl:
-                        if new_lvls is None:
-                            new_lvls = list(lvls)
-                        new_lvls[i] = nl
-                    i += 1
-                if new_lvls is not None:
-                    leaf_e = e.name.const(new_lvls)
-            if h == 0:
-                lc = leaf_e._cache
-                if (lc >> 32) == sgen:
-                    h = lc & _TABLE_SLOT_MASK
-                else:
-                    h = self.leaf_for(leaf_e)
-        elif cls is W_Sort:
-            assert isinstance(e, W_Sort)
-            leaf_e = e
-            lvl = e.level
-            if lvl.has_param:
-                if lvl.__class__ is W_LevelParam and len(params) == 1:
-                    assert isinstance(lvl, W_LevelParam)
-                    nl = clevels[0] if lvl.name is params[0] else lvl
-                else:
-                    nl = _subst_level_fast(lvl, params, clevels)
-                if nl is not lvl:
-                    leaf_e = nl.sort()
-            lc = leaf_e._cache
-            if (lc >> 32) == sgen:
-                h = lc & _TABLE_SLOT_MASK
-            else:
-                h = self.leaf_for(leaf_e)
+            return self._import_let_levels(e, params, clevels, lgen, nr)
         else:
             h = self.leaf_for(e)
         if lgen > 0:
@@ -7054,6 +7261,95 @@ class TermStore(object):
                 self._clear_import_spine(mark)
             self._clear_cs_state()
 
+    @dont_inline
+    def _cs_multi_get(self, e, depth):
+        mm = self._cs_multi
+        if mm is not None and depth < len(mm):
+            dm = mm[depth]
+            if dm is not None:
+                return dm.get(e, 0)
+        return 0
+
+    @dont_inline
+    def _import_let_cs(self, e, depth, dgen, nr):
+        assert isinstance(e, W_Let)
+        sgen = self._store_gen
+        has_lp = self._cs_has_lp
+        et = e.type
+        if et.loose_bvar_range() <= depth:
+            if has_lp and et.has_level_param():
+                lgen = self._cs_lgen
+                tc = et._cache
+                if (tc >> 32) == lgen:
+                    th = tc & _TABLE_SLOT_MASK
+                else:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    th = self._import_with_levels(et, params, clevels, lgen, nr)
+            else:
+                tc = et._cache
+                th = (
+                    tc & _TABLE_SLOT_MASK
+                    if (tc >> 32) == sgen
+                    else self._import_rec(et, sgen, nr)
+                )
+        else:
+            th = self._import_const_subst_rec(et, depth, dgen, nr)
+        ev = e.value
+        if ev.loose_bvar_range() <= depth:
+            if has_lp and ev.has_level_param():
+                lgen = self._cs_lgen
+                vc = ev._cache
+                if (vc >> 32) == lgen:
+                    vh = vc & _TABLE_SLOT_MASK
+                else:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    vh = self._import_with_levels(ev, params, clevels, lgen, nr)
+            else:
+                vc = ev._cache
+                vh = (
+                    vc & _TABLE_SLOT_MASK
+                    if (vc >> 32) == sgen
+                    else self._import_rec(ev, sgen, nr)
+                )
+        else:
+            vh = self._import_const_subst_rec(ev, depth, dgen, nr)
+        eb = e.body
+        ndepth = depth + 1
+        if eb.loose_bvar_range() <= ndepth:
+            if has_lp and eb.has_level_param():
+                lgen = self._cs_lgen
+                bc = eb._cache
+                if (bc >> 32) == lgen:
+                    bh = bc & _TABLE_SLOT_MASK
+                else:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    bh = self._import_with_levels(eb, params, clevels, lgen, nr)
+            else:
+                bc = eb._cache
+                bh = (
+                    bc & _TABLE_SLOT_MASK
+                    if (bc >> 32) == sgen
+                    else self._import_rec(eb, sgen, nr)
+                )
+        else:
+            ndgen = self._cs_gen_for_depth(ndepth)
+            bh = self._import_const_subst_rec(eb, ndepth, ndgen, nr)
+        h = self.let(e.name, th, vh, bh)
+        if dgen > 0:
+            if (self._cs_base_gen > 0
+                    and (e._cache >> 32) >= self._cs_base_gen
+                    and (e._cache >> 32) != dgen):
+                self._cs_cache_put(e, depth, dgen, h)
+            else:
+                e._cache = (dgen << 32) | h
+        return h
+
     def _import_const_subst_rec(self, e, depth, dgen, rdepth):
         sgen = self._store_gen
         has_lp = self._cs_has_lp
@@ -7066,22 +7362,23 @@ class TermStore(object):
                 params = self._cs_params
                 clevels = self._cs_clevels
                 assert params is not None and clevels is not None
+                if e.__class__ is W_Const:
+                    return self._import_const_levels(e, params, clevels, lgen)
                 return self._import_with_levels(e, params, clevels, lgen, rdepth)
             c = e._cache
             if (c >> 32) == sgen:
                 return c & _TABLE_SLOT_MASK
+            if e.__class__ is W_Const:
+                return self.leaf_for(e)
             return self._import_rec(e, sgen, rdepth)
         if dgen > 0:
             c = e._cache
             if (c >> 32) == dgen:
                 return c & _TABLE_SLOT_MASK
-            mm = self._cs_multi
-            if mm is not None and depth < len(mm):
-                dm = mm[depth]
-                if dm is not None:
-                    mh = dm.get(e, 0)
-                    if mh != 0:
-                        return mh
+            if self._cs_multi is not None:
+                mh = self._cs_multi_get(e, depth)
+                if mh != 0:
+                    return mh
         if (rdepth & 31) == 31:
             _check_stack_store("import_term")
         cls = e.__class__
@@ -7110,11 +7407,16 @@ class TermStore(object):
                         params = self._cs_params
                         clevels = self._cs_clevels
                         assert params is not None and clevels is not None
-                        fn_h = self._import_with_levels(fn, params, clevels, lgen, nr)
+                        if fn.__class__ is W_Const:
+                            fn_h = self._import_const_levels(fn, params, clevels, lgen)
+                        else:
+                            fn_h = self._import_with_levels(fn, params, clevels, lgen, nr)
                 else:
                     fc = fn._cache
                     if (fc >> 32) == sgen:
                         fn_h = fc & _TABLE_SLOT_MASK
+                    elif fn.__class__ is W_Const:
+                        fn_h = self.leaf_for(fn)
                     else:
                         fn_h = self._import_rec(fn, sgen, nr)
             elif dgen > 0 and (fn._cache >> 32) == dgen:
@@ -7146,7 +7448,10 @@ class TermStore(object):
                             params = self._cs_params
                             clevels = self._cs_clevels
                             assert params is not None and clevels is not None
-                            arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
+                            if arg.__class__ is W_Const:
+                                arg_h = self._import_const_levels(arg, params, clevels, lgen)
+                            else:
+                                arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
                     else:
                         ac = arg._cache
                         if (ac >> 32) == sgen:
@@ -7163,6 +7468,8 @@ class TermStore(object):
                                         self._bvar_max = bid + 1
                             else:
                                 arg_h = self.leaf_for(arg)
+                        elif arg.__class__ is W_Const:
+                            arg_h = self.leaf_for(arg)
                         else:
                             arg_h = self._import_rec(arg, sgen, nr)
                 elif arg.__class__ is W_BVar:
@@ -7197,7 +7504,7 @@ class TermStore(object):
             if top < len(spine):
                 spine[top] = e
             else:
-                spine.append(e)
+                self._grow_import_spine(top, e)
             top += 1
             cur = fn
             head = 0
@@ -7209,15 +7516,20 @@ class TermStore(object):
                         if (cc >> 32) == lgen:
                             head = cc & _TABLE_SLOT_MASK
                         else:
-                            self._import_spine_len = top
                             params = self._cs_params
                             clevels = self._cs_clevels
                             assert params is not None and clevels is not None
-                            head = self._import_with_levels(cur, params, clevels, lgen, nr)
+                            if cur.__class__ is W_Const:
+                                head = self._import_const_levels(cur, params, clevels, lgen)
+                            else:
+                                self._import_spine_len = top
+                                head = self._import_with_levels(cur, params, clevels, lgen, nr)
                     else:
                         cc = cur._cache
                         if (cc >> 32) == sgen:
                             head = cc & _TABLE_SLOT_MASK
+                        elif cur.__class__ is W_Const:
+                            head = self.leaf_for(cur)
                         else:
                             self._import_spine_len = top
                             head = self._import_rec(cur, sgen, nr)
@@ -7225,14 +7537,11 @@ class TermStore(object):
                 if dgen > 0 and (cur._cache >> 32) == dgen:
                     head = cur._cache & _TABLE_SLOT_MASK
                     break
-                mm = self._cs_multi
-                if mm is not None and depth < len(mm):
-                    dm = mm[depth]
-                    if dm is not None:
-                        mh = dm.get(cur, 0)
-                        if mh != 0:
-                            head = mh
-                            break
+                if self._cs_multi is not None:
+                    mh = self._cs_multi_get(cur, depth)
+                    if mh != 0:
+                        head = mh
+                        break
                 if not isinstance(cur, W_App):
                     if cur.__class__ is W_BVar:
                         assert isinstance(cur, W_BVar)
@@ -7254,7 +7563,7 @@ class TermStore(object):
                 if top < len(spine):
                     spine[top] = cur
                 else:
-                    spine.append(cur)
+                    self._grow_import_spine(top, cur)
                 top += 1
                 cur = cur.fn
             while top > mark:
@@ -7270,11 +7579,14 @@ class TermStore(object):
                         if (ac >> 32) == lgen:
                             arg_h = ac & _TABLE_SLOT_MASK
                         else:
-                            self._import_spine_len = top
                             params = self._cs_params
                             clevels = self._cs_clevels
                             assert params is not None and clevels is not None
-                            arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
+                            if arg.__class__ is W_Const:
+                                arg_h = self._import_const_levels(arg, params, clevels, lgen)
+                            else:
+                                self._import_spine_len = top
+                                arg_h = self._import_with_levels(arg, params, clevels, lgen, nr)
                     else:
                         ac = arg._cache
                         if (ac >> 32) == sgen:
@@ -7291,6 +7603,8 @@ class TermStore(object):
                                         self._bvar_max = bid + 1
                             else:
                                 arg_h = self.leaf_for(arg)
+                        elif arg.__class__ is W_Const:
+                            arg_h = self.leaf_for(arg)
                         else:
                             self._import_spine_len = top
                             arg_h = self._import_rec(arg, sgen, nr)
@@ -7378,73 +7692,7 @@ class TermStore(object):
                 self._import_const_subst_rec(e.struct_expr, depth, dgen, nr),
             )
         elif cls is W_Let:
-            assert isinstance(e, W_Let)
-            et = e.type
-            if et.loose_bvar_range() <= depth:
-                if has_lp and et.has_level_param():
-                    lgen = self._cs_lgen
-                    tc = et._cache
-                    if (tc >> 32) == lgen:
-                        th = tc & _TABLE_SLOT_MASK
-                    else:
-                        params = self._cs_params
-                        clevels = self._cs_clevels
-                        assert params is not None and clevels is not None
-                        th = self._import_with_levels(et, params, clevels, lgen, nr)
-                else:
-                    tc = et._cache
-                    th = (
-                        tc & _TABLE_SLOT_MASK
-                        if (tc >> 32) == sgen
-                        else self._import_rec(et, sgen, nr)
-                    )
-            else:
-                th = self._import_const_subst_rec(et, depth, dgen, nr)
-            ev = e.value
-            if ev.loose_bvar_range() <= depth:
-                if has_lp and ev.has_level_param():
-                    lgen = self._cs_lgen
-                    vc = ev._cache
-                    if (vc >> 32) == lgen:
-                        vh = vc & _TABLE_SLOT_MASK
-                    else:
-                        params = self._cs_params
-                        clevels = self._cs_clevels
-                        assert params is not None and clevels is not None
-                        vh = self._import_with_levels(ev, params, clevels, lgen, nr)
-                else:
-                    vc = ev._cache
-                    vh = (
-                        vc & _TABLE_SLOT_MASK
-                        if (vc >> 32) == sgen
-                        else self._import_rec(ev, sgen, nr)
-                    )
-            else:
-                vh = self._import_const_subst_rec(ev, depth, dgen, nr)
-            eb = e.body
-            ndepth = depth + 1
-            if eb.loose_bvar_range() <= ndepth:
-                if has_lp and eb.has_level_param():
-                    lgen = self._cs_lgen
-                    bc = eb._cache
-                    if (bc >> 32) == lgen:
-                        bh = bc & _TABLE_SLOT_MASK
-                    else:
-                        params = self._cs_params
-                        clevels = self._cs_clevels
-                        assert params is not None and clevels is not None
-                        bh = self._import_with_levels(eb, params, clevels, lgen, nr)
-                else:
-                    bc = eb._cache
-                    bh = (
-                        bc & _TABLE_SLOT_MASK
-                        if (bc >> 32) == sgen
-                        else self._import_rec(eb, sgen, nr)
-                    )
-            else:
-                ndgen = self._cs_gen_for_depth(ndepth)
-                bh = self._import_const_subst_rec(eb, ndepth, ndgen, nr)
-            h = self.let(e.name, th, vh, bh)
+            return self._import_let_cs(e, depth, dgen, nr)
         else:
             return self.leaf_for(e)
         if dgen > 0:
