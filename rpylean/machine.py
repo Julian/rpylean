@@ -63,6 +63,7 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     _BOOL_FALSE,
     _BOOL_TRUE,
+    pack_proj_chain_key,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
     _PROP_MASK_DONE,
@@ -9208,132 +9209,6 @@ class Machine(object):
                 return store.field_b(h)
         return 0
 
-    def _peel_nested_ctor_field(self, raw_field, fidxs, pbase, ptop):
-        """Follow pending outer projection indices `fidxs[pbase .. ptop - 1)`
-        directly through inline nested `W_Constructor` applications (and
-        `W_Definition` constructor-bodied applications whose projected field
-        selects an argument `W_BVar`) on the AST, setting `self._proj_popped`
-        to the total number of projection layers consumed (at least 1)."""
-        popped = 1
-        rem = ptop - 1
-        decls = self.tc.declarations
-        while rem > pbase and isinstance(raw_field, W_App):
-            node = raw_field
-            n_app = 0
-            while isinstance(node, W_App):
-                node = node.fn
-                n_app += 1
-            if not isinstance(node, W_Const):
-                break
-            c2_decl = find_decl(decls, node.name)
-            if c2_decl is None:
-                break
-            c2_kind = c2_decl.w_kind
-            if isinstance(c2_kind, W_Constructor):
-                idx2 = c2_kind.num_params + fidxs[rem - 1]
-                if idx2 >= n_app:
-                    break
-                steps = n_app - 1 - idx2
-                cur_app = raw_field
-                while steps > 0:
-                    assert isinstance(cur_app, W_App)
-                    cur_app = cur_app.fn
-                    steps -= 1
-                assert isinstance(cur_app, W_App)
-                raw_field = cur_app.arg
-                rem -= 1
-                popped += 1
-                continue
-            if isinstance(c2_kind, W_Definition):
-                if len(node.levels) != len(c2_decl.levels):
-                    break
-                cb2 = c2_kind._ctor_body
-                if cb2 is None:
-                    cb2 = c2_kind.init_ctor_body(decls)
-                m2 = cb2.m
-                if m2 < 0 or n_app < m2:
-                    break
-                if cb2.delegate_const is None or n_app == m2:
-                    bid2 = cb2.bvar_field(fidxs[rem - 1])
-                    if bid2 >= 0:
-                        steps = n_app - m2 + bid2
-                        cur_app = raw_field
-                        while steps > 0:
-                            assert isinstance(cur_app, W_App)
-                            cur_app = cur_app.fn
-                            steps -= 1
-                        assert isinstance(cur_app, W_App)
-                        raw_field = cur_app.arg
-                        rem -= 1
-                        popped += 1
-                        continue
-                if cb2.let_vals is not None or cb2.delegate_const is not None:
-                    break
-                idx2 = cb2.num_params + fidxs[rem - 1]
-                nargs2 = len(cb2.args)
-                if idx2 >= nargs2 + (n_app - m2):
-                    break
-                if idx2 >= nargs2:
-                    arg_idx = m2 + (idx2 - nargs2)
-                    steps = n_app - 1 - arg_idx
-                    cur_app = raw_field
-                    while steps > 0:
-                        assert isinstance(cur_app, W_App)
-                        cur_app = cur_app.fn
-                        steps -= 1
-                    assert isinstance(cur_app, W_App)
-                    raw_field = cur_app.arg
-                    rem -= 1
-                    popped += 1
-                    continue
-                f2 = cb2.args[idx2]
-                r2 = rem - 1
-                step2 = 1
-                while r2 > pbase and isinstance(f2, W_App):
-                    n2 = f2
-                    na2 = 0
-                    while isinstance(n2, W_App):
-                        n2 = n2.fn
-                        na2 += 1
-                    if not isinstance(n2, W_Const):
-                        break
-                    d3 = find_decl(decls, n2.name)
-                    if d3 is None:
-                        break
-                    k3 = d3.w_kind
-                    if not isinstance(k3, W_Constructor):
-                        break
-                    ix3 = k3.num_params + fidxs[r2 - 1]
-                    if ix3 >= na2:
-                        break
-                    st3 = na2 - 1 - ix3
-                    ca3 = f2
-                    while st3 > 0:
-                        assert isinstance(ca3, W_App)
-                        ca3 = ca3.fn
-                        st3 -= 1
-                    assert isinstance(ca3, W_App)
-                    f2 = ca3.arg
-                    r2 -= 1
-                    step2 += 1
-                if isinstance(f2, W_BVar):
-                    bid2 = f2.id
-                    if 0 <= bid2 < m2:
-                        steps = n_app - m2 + bid2
-                        cur_app = raw_field
-                        while steps > 0:
-                            assert isinstance(cur_app, W_App)
-                            cur_app = cur_app.fn
-                            steps -= 1
-                        assert isinstance(cur_app, W_App)
-                        raw_field = cur_app.arg
-                        rem = r2
-                        popped += step2
-                        continue
-            break
-        self._proj_popped = popped
-        return raw_field
-
     def _import_proj_field(self, j, popped, fidxs, ptop, const, decl, raw_field):
         """Import ``raw_field`` instantiated at ``const.levels``, memoized per
         `(const_leaf_index, projection_chain)` for the current store epoch."""
@@ -9341,18 +9216,28 @@ class Machine(object):
         if popped == 1:
             f0 = fidxs[ptop - 1]
             if 0 <= f0 < 1024:
-                key = ((j + 1) << 22) | (1 << 20) | f0
+                key = ((j + 1) << 28) | (1 << 24) | f0
         elif popped == 2:
             f0 = fidxs[ptop - 1]
             f1 = fidxs[ptop - 2]
             if 0 <= f0 < 1024 and 0 <= f1 < 1024:
-                key = ((j + 1) << 22) | (2 << 20) | (f0 << 10) | f1
+                key = ((j + 1) << 28) | (2 << 24) | (f0 << 10) | f1
         elif popped == 3:
             f0 = fidxs[ptop - 1]
             f1 = fidxs[ptop - 2]
             f2 = fidxs[ptop - 3]
             if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64:
-                key = ((j + 1) << 22) | (3 << 20) | (f0 << 12) | (f1 << 6) | f2
+                key = ((j + 1) << 28) | (3 << 24) | (f0 << 12) | (f1 << 6) | f2
+        elif popped == 4:
+            f0 = fidxs[ptop - 1]
+            f1 = fidxs[ptop - 2]
+            f2 = fidxs[ptop - 3]
+            f3 = fidxs[ptop - 4]
+            if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64 and 0 <= f3 < 64:
+                key = (
+                    ((j + 1) << 28) | (4 << 24)
+                    | (f0 << 18) | (f1 << 12) | (f2 << 6) | f3
+                )
         if key != 0:
             fh = self._proj_field_cache.get(key, 0)
             if 0 < fh < _LEAF_INFER_SEEN:
@@ -9400,18 +9285,28 @@ class Machine(object):
                 if popped == 1:
                     f0 = fidxs[ptop - 1]
                     if 0 <= f0 < 1024:
-                        key = ((j + 1) << 22) | (1 << 20) | f0
+                        key = ((j + 1) << 28) | (1 << 24) | f0
                 elif popped == 2:
                     f0 = fidxs[ptop - 1]
                     f1 = fidxs[ptop - 2]
                     if 0 <= f0 < 1024 and 0 <= f1 < 1024:
-                        key = ((j + 1) << 22) | (2 << 20) | (f0 << 10) | f1
+                        key = ((j + 1) << 28) | (2 << 24) | (f0 << 10) | f1
                 elif popped == 3:
                     f0 = fidxs[ptop - 1]
                     f1 = fidxs[ptop - 2]
                     f2 = fidxs[ptop - 3]
                     if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64:
-                        key = ((j + 1) << 22) | (3 << 20) | (f0 << 12) | (f1 << 6) | f2
+                        key = ((j + 1) << 28) | (3 << 24) | (f0 << 12) | (f1 << 6) | f2
+                elif popped == 4:
+                    f0 = fidxs[ptop - 1]
+                    f1 = fidxs[ptop - 2]
+                    f2 = fidxs[ptop - 3]
+                    f3 = fidxs[ptop - 4]
+                    if 0 <= f0 < 64 and 0 <= f1 < 64 and 0 <= f2 < 64 and 0 <= f3 < 64:
+                        key = (
+                            ((j + 1) << 28) | (4 << 24)
+                            | (f0 << 18) | (f1 << 12) | (f2 << 6) | f3
+                        )
                 if key != 0:
                     fh = self._proj_field_cache.get(key, 0)
                     if fh == 0:
@@ -9425,6 +9320,9 @@ class Machine(object):
                     if m == 1:
                         return store.instantiate(fh, store.spine_arg(arg_base), 0)
                     return store.instantiate_multi_buf(fh, arg_base, m, 0)
+                return store.import_const_subst_buf(
+                    const, decl, raw_field, arg_base, m,
+                )
             fh = self._import_proj_field(
                 j, popped, fidxs, ptop, const, decl, raw_field,
             )
@@ -9591,7 +9489,9 @@ class Machine(object):
         idx = cb.num_params + fidx
         if idx >= len(cb.args):
             return 0
-        if cb.let_vals is None:
+        raw = cb.args[idx]
+        let_vals = cb.let_vals
+        if let_vals is None and ptop == pbase + 1:
             rule = cb.proj_field_rule(fidx, self.tc.declarations)
             if rule is not None and rule.req_extra == 0 and rule.target_bvar >= 0:
                 res = self.store.spine_arg(arg_base + rule.target_bvar)
@@ -9604,37 +9504,55 @@ class Machine(object):
                     i += 1
                 self._proj_popped = 1
                 return res
-        raw = cb.args[idx]
-        cur_nlets = -1
-        let_vals = cb.let_vals
-        if let_vals is not None:
-            cur_nlets = len(let_vals)
-            while cur_nlets > 0 and isinstance(raw, W_BVar):
-                bid = raw.id
-                if 0 <= bid < cur_nlets:
-                    li = cur_nlets - 1 - bid
-                    raw = let_vals[li]
-                    cur_nlets = li
-                else:
-                    break
-        raw_field = self._peel_nested_ctor_field(
-            raw, fidxs, pbase, ptop,
-        )
+            self._proj_popped = 1
+            return self._eval_raw_field(
+                j, const, decl, cb, idx, raw, 1, arg_base, m, ptop, 0,
+            )
+        ckey = pack_proj_chain_key(fidxs, pbase, ptop)
+        if ckey != 0:
+            peel = cb.get_peel_result(
+                ckey, fidxs, ptop - (ckey & 7), ptop, self.tc.declarations,
+            )
+            raw_field = peel.raw_field
+            if raw_field is None:
+                return 0
+            popped = peel.popped
+            if peel.bvar_id >= 0 and peel.bvar_id < m:
+                self._proj_popped = popped
+                return self.store.spine_arg(arg_base + peel.bvar_id)
+            cur_nlets = peel.cur_nlets
+            extra = popped - 1
+        else:
+            cur_nlets = 0 if let_vals is None else len(let_vals)
+            raw_field, cur_nlets, extra = cb._peel_ast_expr(
+                raw, cur_nlets, fidxs, pbase, ptop - 1, self.tc.declarations,
+            )
+            popped = 1 + extra
+        if extra == 0 and let_vals is None:
+            rule = cb.proj_field_rule(fidx, self.tc.declarations)
+            if rule is not None and rule.req_extra == 0 and rule.target_bvar >= 0:
+                res = self.store.spine_arg(arg_base + rule.target_bvar)
+                names = rule.struct_names
+                indices = rule.field_indices
+                i = 0
+                nchain = len(names)
+                while i < nchain:
+                    res = self.store.proj(names[i], indices[i], res)
+                    i += 1
+                self._proj_popped = 1
+                return res
+        self._proj_popped = popped
         return self._eval_raw_field(
             j, const, decl, cb, idx, raw_field,
-            self._proj_popped, arg_base, m, ptop, cur_nlets,
+            popped, arg_base, m, ptop, cur_nlets,
         )
 
     def _eval_delegate_ctor_proj(self, j, const, decl, cb, arg_base, m, pbase, ptop):
-        """Evaluate a delegating `_CtorBody` (`Outer := Inner a_0 ... a_{k-1}`):
-        if ``Inner``'s field ``fidx`` selects a single BVar, jump directly to
-        that AST argument and peel any pending outer projections through it;
-        otherwise materialize ONLY the proper subset of ``Inner``'s arguments
-        actually referenced by field ``fidx`` (returning 0 when all arguments
-        are needed so normal DAG-shared unfolding wins)."""
+        """Evaluate a delegating `_CtorBody` (`Outer := Inner a_0 ... a_{k-1}`)
+        using cached static projection-chain peel/mask analysis on `_CtorBody`."""
         store = self.store
         fidxs = self._proj_fidxs
-        fidx = fidxs[ptop - 1]
+        decls = self.tc.declarations
         inner_decl = cb.delegate_decl
         assert inner_decl is not None
         inner_kind = inner_decl.w_kind
@@ -9642,49 +9560,54 @@ class Machine(object):
         inner_cb = inner_kind._ctor_body
         assert inner_cb is not None
         inner_m = inner_cb.m
-        # Fast path: Inner selects a single lambda argument `BVar(ibid)` for
-        # field `fidx` — peel pending outer projections directly on the AST
-        # argument `cb.args[inner_m - 1 - ibid]` without materializing Inner!
-        ibid = inner_cb.bvar_field(fidx)
-        if ibid >= 0:
-            arg_idx = inner_m - 1 - ibid
-            raw = cb.args[arg_idx]
-            cur_nlets = -1
-            let_vals = cb.let_vals
-            if let_vals is not None:
-                cur_nlets = len(let_vals)
-                while cur_nlets > 0 and isinstance(raw, W_BVar):
-                    bid = raw.id
-                    if 0 <= bid < cur_nlets:
-                        li = cur_nlets - 1 - bid
-                        raw = let_vals[li]
-                        cur_nlets = li
-                    else:
-                        break
-            raw_field = self._peel_nested_ctor_field(
-                raw, fidxs, pbase, ptop,
-            )
-            return self._eval_raw_field(
-                j, const, decl, cb, arg_idx, raw_field,
-                self._proj_popped, arg_base, m, ptop, cur_nlets,
-            )
-        inner_mask = inner_cb.field_mask(fidx)
-        if inner_mask < 0:
-            return 0
-        # Only materialize a partial argument subset individually when it
-        # skips at least half of Inner's arguments; otherwise normal unfolding
-        # wins via single-pass DAG sharing across arguments and `M_WHNF` memo.
-        if inner_m <= 62:
-            if inner_mask == ((1 << inner_m) - 1):
+        ckey = pack_proj_chain_key(fidxs, pbase, ptop)
+        if ckey != 0:
+            pbase_eff = ptop - (ckey & 7)
+            peel = cb.get_peel_result(ckey, fidxs, pbase_eff, ptop, decls)
+            raw_field = peel.raw_field
+            if raw_field is not None:
+                popped = peel.popped
+                self._proj_popped = popped
+                if peel.bvar_id >= 0 and peel.bvar_id < m:
+                    return store.spine_arg(arg_base + peel.bvar_id)
+                return self._eval_raw_field(
+                    j, const, decl, cb, peel.arg_idx, raw_field,
+                    popped, arg_base, m, ptop, peel.cur_nlets,
+                )
+            inner_mask = peel.inner_mask
+            if inner_mask < 0:
                 return 0
-            used_cnt = 0
-            tmp_m = inner_mask
-            while tmp_m != 0:
-                tmp_m &= tmp_m - 1
-                used_cnt += 1
-            if used_cnt > 8 and used_cnt * 2 > inner_m:
+        else:
+            pbase_eff = pbase
+            ibid, ipop = inner_cb.bvar_field_chain(fidxs, pbase, ptop, decls)
+            if ibid >= 0:
+                arg_idx = inner_m - 1 - ibid
+                raw = cb.args[arg_idx]
+                let_vals = cb.let_vals
+                cur_nlets = 0 if let_vals is None else len(let_vals)
+                raw_field, cur_nlets, extra = cb._peel_ast_expr(
+                    raw, cur_nlets, fidxs, pbase, ptop - ipop, decls,
+                )
+                popped = ipop + extra
+                self._proj_popped = popped
+                return self._eval_raw_field(
+                    j, const, decl, cb, arg_idx, raw_field,
+                    popped, arg_base, m, ptop, cur_nlets,
+                )
+            inner_mask = inner_cb.field_mask_chain(fidxs, pbase, ptop, decls)
+            if inner_mask < 0:
                 return 0
-        dkey = ((j + 1) << 22) | 1023
+            if inner_m <= 62:
+                if inner_mask == ((1 << inner_m) - 1):
+                    return 0
+                used_cnt = 0
+                tmp_m = inner_mask
+                while tmp_m != 0:
+                    tmp_m &= tmp_m - 1
+                    used_cnt += 1
+                if used_cnt > 8 and used_cnt * 2 > inner_m:
+                    return 0
+        dkey = ((j + 1) << 28) | 1023
         inner_head = self._proj_field_cache.get(dkey, 0)
         if inner_head == 0:
             del_const = cb.delegate_const
@@ -9767,7 +9690,7 @@ class Machine(object):
                         ah = store.bvar(obid - env_total)
                 else:
                     if bid < 1023:
-                        akey = ((j + 1) << 22) | bid
+                        akey = ((j + 1) << 28) | bid
                         ah = self._proj_field_cache.get(akey, 0)
                         if ah == 0:
                             ah = store.import_const_term(const, decl, arg_ast)
@@ -9788,11 +9711,11 @@ class Machine(object):
             if inner_cb.delegate_const is not None:
                 return self._eval_delegate_ctor_proj(
                     inner_j, inner_const, inner_decl, inner_cb,
-                    imark, inner_m, pbase, ptop,
+                    imark, inner_m, pbase_eff, ptop,
                 )
             return self._eval_direct_ctor_proj(
                 inner_j, inner_const, inner_decl, inner_cb,
-                imark, inner_m, pbase, ptop,
+                imark, inner_m, pbase_eff, ptop,
             )
         finally:
             store.unapp_pop(save_top)
@@ -9886,6 +9809,48 @@ class Machine(object):
             return 0
         return self._extract_ctor_field(struct, head, store.proj_index(h))
 
+    @dont_inline
+    def _try_init_simple_proj_delta(self, ch, ch_j):
+        """Populate `store.leaf_delta_body[ch_j]` on first sight inside
+        `_try_proj_fused` when ``ch`` is a simple argument-picker or
+        projection-wrapper definition, returning the packed tag word or 0."""
+        store = self.store
+        const = store.leaves[ch_j]
+        assert isinstance(const, W_Const)
+        decl = self._leaf_decl(ch, const)
+        if decl is None or len(const.levels) != len(decl.levels):
+            return 0
+        wk = decl.w_kind
+        if not isinstance(wk, W_Definition):
+            return 0
+        sp = wk.simple_proj()
+        if sp < 0:
+            return 0
+        pm = (sp >> 10) & 0x3FF
+        pb = sp & 0x3FF
+        if (sp & (1 << 30)) == 0:
+            packed = _DB_BVAR_TAG | (pm << 32) | pb
+            store.leaf_delta_body[ch_j] = packed
+            return packed
+        if pm >= 256:
+            return 0
+        sname = wk._simple_proj_name
+        assert sname is not None
+        fidx = (sp >> 20) & 0x3FF
+        name_id = store._name_index(sname)
+        proj_packed = store._proj_pack(name_id, fidx)
+        if name_id < (1 << 20) and proj_packed < (1 << 24):
+            packed = (
+                _DB_PROJ_TAG
+                | (pm << 52)
+                | (pb << 44)
+                | (name_id << 24)
+                | proj_packed
+            )
+            store.leaf_delta_body[ch_j] = packed
+            return packed
+        return 0
+
     def _try_proj_fused(self, raw, fidx0):
         """Evaluate a projection (or chain of nested projections / projection
         wrappers) lazily, deferring intermediate `KIND_PROJ` materialization so
@@ -9926,10 +9891,6 @@ class Machine(object):
                     ptop += 1
                     self._proj_fidx_top = ptop
                     cur = store.field_a(cur)
-                if store.kind(cur) != KIND_PROJ:
-                    cur = self.whnf_core(cur)
-                    if store.kind(cur) == KIND_PROJ:
-                        continue
                 cached = 0
                 if cur != raw:
                     cached = (
@@ -9940,44 +9901,96 @@ class Machine(object):
                     if cached != 0:
                         cur = cached
                 k = store.kind(cur)
+                if k == KIND_LET:
+                    cur = self.whnf_core(cur)
+                    continue
                 if k == KIND_APP:
-                    if cached == 0:
-                        reduced = self.try_reduce_nat(cur)
-                        if reduced != 0:
-                            cur = reduced
-                            continue
                     ch = store.head(cur)
-                    flags = self._leaf_flags(ch)
-                    if (flags & _LF_CTOR) != 0:
-                        if ptop == pbase + 1 and cur != raw:
-                            if is_leaf(raw):
-                                store.leaf_whnf[leaf_index(raw)] = _u32(cur)
-                            else:
-                                store.set_memo(raw, M_WHNF, cur)
-                        fld = self._extract_ctor_field(
-                            cur, ch, self._proj_fidxs[ptop - 1],
-                        )
-                        if fld == 0:
-                            return 0
-                        ptop -= 1
-                        self._proj_fidx_top = ptop
-                        if ptop == pbase:
-                            return fld
-                        cur = fld
-                        continue
-                    if cached == 0 and (flags & _LF_DELTA) != 0:
-                        fld = self._try_lazy_ctor_proj(cur, ch, pbase, ptop)
-                        if fld != 0:
-                            ptop -= self._proj_popped
+                    if not is_leaf(ch):
+                        if cached == 0:
+                            next_cur = self.whnf_core(cur)
+                            if next_cur != cur:
+                                cur = next_cur
+                                continue
+                    else:
+                        flags = self._leaf_flags(ch)
+                        if cached == 0:
+                            if (flags & (_LF_RECURSOR | _LF_QUOT_LIFT)) != 0:
+                                next_cur = self.whnf_core(cur)
+                                if next_cur != cur:
+                                    cur = next_cur
+                                    continue
+                            elif (flags & _LF_NAT_BINOP) != 0:
+                                reduced = self.try_reduce_nat(cur)
+                                if reduced != 0:
+                                    cur = reduced
+                                    continue
+                        if (flags & _LF_CTOR) != 0:
+                            if ptop == pbase + 1 and cur != raw:
+                                if is_leaf(raw):
+                                    store.leaf_whnf[leaf_index(raw)] = _u32(cur)
+                                else:
+                                    store.set_memo(raw, M_WHNF, cur)
+                            fld = self._extract_ctor_field(
+                                cur, ch, self._proj_fidxs[ptop - 1],
+                            )
+                            if fld == 0:
+                                return 0
+                            ptop -= 1
                             self._proj_fidx_top = ptop
                             if ptop == pbase:
                                 return fld
                             cur = fld
                             continue
-                        unfolded = self.try_unfold_head(cur)
-                        if unfolded != 0:
-                            cur = unfolded
-                            continue
+                        if cached == 0 and (flags & _LF_DELTA) != 0:
+                            ch_j = leaf_index(ch)
+                            packed = store.leaf_delta_body[ch_j]
+                            if packed == 0:
+                                packed = self._try_init_simple_proj_delta(ch, ch_j)
+                            if packed > 0 and (packed >> _DB_TAG_SHIFT) != 0:
+                                tag = packed >> _DB_TAG_SHIFT
+                                if tag == 2:
+                                    pm = (packed >> 52) & 0xFF
+                                    pb = (packed >> 44) & 0xFF
+                                else:
+                                    pm = (packed >> 32) & 0xFFFFFFF
+                                    pb = packed & 0xFFFFFFFF
+                                fn = store.field_a(cur)
+                                parg = 0
+                                if pm == 2 and store.kind(fn) == KIND_APP and store.field_a(fn) == ch:
+                                    parg = store.field_b(cur) if pb == 0 else store.field_b(fn)
+                                elif pm == 1 and fn == ch:
+                                    parg = store.field_b(cur)
+                                else:
+                                    pmark = store._spine_top
+                                    store.unapp_push(cur)
+                                    if store._spine_top - pmark == pm:
+                                        parg = store.spine_arg(pmark + pb)
+                                    store.unapp_pop(pmark)
+                                if parg != 0:
+                                    if tag == 2:
+                                        fidxs = self._proj_fidxs
+                                        if ptop == len(fidxs):
+                                            fidxs = fidxs + ([0] * len(fidxs))
+                                            self._proj_fidxs = fidxs
+                                        fidxs[ptop] = store.proj_index_from_packed(packed & 0xFFFFFF)
+                                        ptop += 1
+                                        self._proj_fidx_top = ptop
+                                    cur = parg
+                                    continue
+                            else:
+                                fld = self._try_lazy_ctor_proj(cur, ch, pbase, ptop)
+                                if fld != 0:
+                                    ptop -= self._proj_popped
+                                    self._proj_fidx_top = ptop
+                                    if ptop == pbase:
+                                        return fld
+                                    cur = fld
+                                    continue
+                            unfolded = self.try_unfold_head(cur)
+                            if unfolded != 0:
+                                cur = unfolded
+                                continue
                 elif k == 0:
                     if cached == 0 and (self._leaf_flags(cur) & _LF_DELTA) != 0:
                         fld = self._try_lazy_ctor_proj(cur, cur, pbase, ptop)

@@ -393,6 +393,119 @@ class TestProj(object):
         result = proj.whnf(env)
         assert syntactic_eq(result, myVal_decl.const())
 
+    def test_multilayer_delegate_ctor_let_and_proj_wrapper_chain(self):
+        """
+        Exercise multi-layer `DelegateCB` peeling, inner `let_vals` wrapping a
+        nested `_CtorBody`, and zero-alloc `simple_proj` wrapper chains inside
+        `_try_proj_fused` (both reducing and stuck).
+        """
+        Inner = Name.simple("Inner")
+        Inner_mk = Inner.child("mk")
+        Mid = Name.simple("Mid")
+        Mid_mk = Mid.child("mk")
+        Outer = Name.simple("Outer")
+        Outer_mk = Outer.child("mk")
+
+        inner_mk = Inner_mk.constructor(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(Inner.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        inner_ty = Inner.structure(type=TYPE, constructor=inner_mk)
+        mid_mk = Mid_mk.constructor(
+            type=forall(x.binder(type=Inner.const()), y.binder(type=NAT))(Mid.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        mid_ty = Mid.structure(type=TYPE, constructor=mid_mk)
+        outer_mk = Outer_mk.constructor(
+            type=forall(x.binder(type=Mid.const()), y.binder(type=NAT))(Outer.const()),
+            num_params=0,
+            num_fields=2,
+        )
+        outer_ty = Outer.structure(type=TYPE, constructor=outer_mk)
+
+        # DirectCB with a let binding wrapping another DirectCB:
+        #   mkInner (x y : Nat) := Inner.mk x y
+        #   mkMidLet (x y z : Nat) := let i := mkInner x y; Mid.mk i z
+        #   mkOuterDel (x y z w : Nat) := Outer.mk (mkMidLet x y z) w
+        #   wrapOuter (x y z w : Nat) := mkOuterDel x y z w
+        mkInner = Name.simple("mkInner").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT))(Inner.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT))(
+                Inner_mk.const().app(b1, b0),
+            ),
+        )
+        mkMidLet = Name.simple("mkMidLet").definition(
+            type=forall(x.binder(type=NAT), y.binder(type=NAT), z.binder(type=NAT))(Mid.const()),
+            value=fun(x.binder(type=NAT), y.binder(type=NAT), z.binder(type=NAT))(
+                a.let(
+                    type=Inner.const(),
+                    value=mkInner.const().app(b2, b1),
+                    body=Mid_mk.const().app(b0, b1),
+                ),
+            ),
+        )
+        mkOuterDel = Name.simple("mkOuterDel").definition(
+            type=forall(
+                x.binder(type=NAT), y.binder(type=NAT),
+                z.binder(type=NAT), f.binder(type=NAT),
+            )(Outer.const()),
+            value=fun(
+                x.binder(type=NAT), y.binder(type=NAT),
+                z.binder(type=NAT), f.binder(type=NAT),
+            )(Outer_mk.const().app(mkMidLet.const().app(b3, b2, b1), b0)),
+        )
+        wrapOuter = Name.simple("wrapOuter").definition(
+            type=forall(
+                x.binder(type=NAT), y.binder(type=NAT),
+                z.binder(type=NAT), f.binder(type=NAT),
+            )(Outer.const()),
+            value=fun(
+                x.binder(type=NAT), y.binder(type=NAT),
+                z.binder(type=NAT), f.binder(type=NAT),
+            )(mkOuterDel.const().app(b3, b2, b1, b0)),
+        )
+        # Projection wrapper & identity argument-picker wrapper
+        toMid = Name.simple("toMid").definition(
+            type=forall(x.binder(type=Outer.const()))(Mid.const()),
+            value=fun(x.binder(type=Outer.const()))(Outer.proj(0, b0)),
+        )
+        toInner = Name.simple("toInner").definition(
+            type=forall(x.binder(type=Mid.const()))(Inner.const()),
+            value=fun(x.binder(type=Mid.const()))(Mid.proj(0, b0)),
+        )
+        idOuter = Name.simple("idOuter").definition(
+            type=forall(x.binder(type=Outer.const()))(Outer.const()),
+            value=fun(x.binder(type=Outer.const()))(b0),
+        )
+
+        a0 = Name.simple("a0").axiom(type=NAT)
+        a1 = Name.simple("a1").axiom(type=NAT)
+        a2 = Name.simple("a2").axiom(type=NAT)
+        a3 = Name.simple("a3").axiom(type=NAT)
+        stuck = Name.simple("stuck").axiom(type=Outer.const())
+
+        env = Environment.having([
+            inner_ty, inner_mk, mid_ty, mid_mk, outer_ty, outer_mk,
+            mkInner, mkMidLet, mkOuterDel, wrapOuter,
+            toMid, toInner, idOuter, a0, a1, a2, a3, stuck,
+        ])
+
+        w_app = wrapOuter.const().app(a0.const(), a1.const(), a2.const(), a3.const())
+        # Field 0 -> 0 -> 1 through wrapper chain: should pick a1
+        expr_f1 = Inner.proj(1, toInner.const().app(toMid.const().app(idOuter.const().app(w_app))))
+        assert syntactic_eq(expr_f1.whnf(env), a1.const())
+        # Field 0 -> 0 -> 0 through wrapper chain: should pick a0
+        expr_f0 = Inner.proj(0, toInner.const().app(toMid.const().app(w_app)))
+        assert syntactic_eq(expr_f0.whnf(env), a0.const())
+        # Field 0 -> 1: should pick a2 (bypasses inner let entirely)
+        expr_m1 = Mid.proj(1, toMid.const().app(w_app))
+        assert syntactic_eq(expr_m1.whnf(env), a2.const())
+        # Stuck projection through wrapper chain must stay stuck
+        stuck_proj = Inner.proj(0, toInner.const().app(toMid.const().app(idOuter.const().app(stuck.const()))))
+        assert stuck_proj.whnf(env) is stuck_proj
+
 
 class TestIotaReduction(object):
     """Iota reduction: recursor applied to a constructor."""

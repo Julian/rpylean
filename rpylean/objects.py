@@ -5356,6 +5356,51 @@ def _peel_proj_chain(expr, declarations, allow_eta_short, max_depth):
     return cur, eta_short, names, indices
 
 
+class _PeelResult(object):
+    """Cached static result of peeling a projection chain `(f0, f1, ...)` on a
+    `_CtorBody` (direct or delegating)."""
+
+    _attrs_ = ['raw_field', 'cur_nlets', 'popped', 'bvar_id', 'arg_idx', 'inner_mask']
+    _immutable_fields_ = [
+        'raw_field', 'cur_nlets', 'popped', 'bvar_id', 'arg_idx', 'inner_mask',
+    ]
+
+    def __init__(self, raw_field, cur_nlets, popped, bvar_id, arg_idx, inner_mask):
+        self.raw_field = raw_field
+        self.cur_nlets = cur_nlets
+        self.popped = popped
+        self.bvar_id = bvar_id
+        self.arg_idx = arg_idx
+        self.inner_mask = inner_mask
+
+
+_NO_PEEL = _PeelResult(None, 0, 0, -1, -1, -2)
+
+
+@always_inline
+def pack_proj_chain_key(fidxs, pbase, ptop):
+    """Pack up to 4 innermost projection indices `fidxs[ptop-1 .. ptop-d]` into
+    a positive 28-bit integer key whose low 3 bits hold ``d`` (1..4), or 0."""
+    d = ptop - pbase
+    if d <= 0:
+        return 0
+    if d > 4:
+        d = 4
+    key = d
+    shift = 3
+    i = 0
+    while i < d:
+        f = fidxs[ptop - 1 - i]
+        if f < 0 or f >= 64:
+            if i == 0:
+                return 0
+            return (key & ~7) | i
+        key |= f << shift
+        shift += 6
+        i += 1
+    return key
+
+
 class _CtorBody(object):
     """Pre-stripped constructor body for a `W_Definition` of the form
     `λ... => let... => Ctor p_0 ... p_{np-1} f_0 ...` (direct:
@@ -5366,6 +5411,7 @@ class _CtorBody(object):
     _attrs_ = [
         'm', 'num_params', 'let_vals', 'args', 'uses_lets',
         'delegate_const', 'delegate_decl', 'field_masks', 'proj_rules',
+        'peel_cache',
     ]
     _immutable_fields_ = [
         'm', 'num_params', 'let_vals', 'args', 'uses_lets',
@@ -5383,6 +5429,7 @@ class _CtorBody(object):
         self.delegate_decl = delegate_decl
         self.field_masks = None
         self.proj_rules = None
+        self.peel_cache = None
 
     def proj_field_rule(self, fidx, declarations, max_depth=4):
         """Return a `_ProjFieldRule` if this direct `_CtorBody`'s field
@@ -5525,6 +5572,342 @@ class _CtorBody(object):
         if ibid < 0:
             return -1
         return self._resolve_let_bvar(self.args[inner_cb.m - 1 - ibid])
+
+    def _peel_ast_expr(self, expr, cur_nlets, fidxs, pbase, rem, decls, depth=6):
+        """Follow ``let_vals`` bindings and pending outer projection indices
+        `fidxs[pbase .. rem)` on an AST expression ``expr`` in this
+        `_CtorBody`'s scope (with ``cur_nlets`` active lets below ``self.m``
+        lambda arguments).
+
+        Returns ``(expr, cur_nlets, popped_extra)`` where ``popped_extra`` is
+        the number of additional projection layers consumed beyond the
+        innermost one (``0 <= popped_extra <= rem - pbase``)."""
+        let_vals = self.let_vals
+        popped_extra = 0
+        while True:
+            while cur_nlets > 0 and isinstance(expr, W_BVar):
+                bid = expr.id
+                if 0 <= bid < cur_nlets:
+                    assert let_vals is not None
+                    li = cur_nlets - 1 - bid
+                    expr = let_vals[li]
+                    cur_nlets = li
+                else:
+                    break
+            if rem <= pbase or not isinstance(expr, W_App):
+                break
+            node = expr
+            n_app = 0
+            while isinstance(node, W_App):
+                node = node.fn
+                n_app += 1
+            if not isinstance(node, W_Const):
+                break
+            c2_decl = find_decl(decls, node.name)
+            if c2_decl is None:
+                break
+            c2_kind = c2_decl.w_kind
+            if isinstance(c2_kind, W_Constructor):
+                idx2 = c2_kind.num_params + fidxs[rem - 1]
+                if idx2 >= n_app:
+                    break
+                steps = n_app - 1 - idx2
+                cur_app = expr
+                while steps > 0:
+                    assert isinstance(cur_app, W_App)
+                    cur_app = cur_app.fn
+                    steps -= 1
+                assert isinstance(cur_app, W_App)
+                expr = cur_app.arg
+                rem -= 1
+                popped_extra += 1
+                continue
+            if isinstance(c2_kind, W_Definition):
+                if len(node.levels) != len(c2_decl.levels):
+                    break
+                sp = c2_kind.simple_proj()
+                if sp >= 0 and (sp & (1 << 30)) == 0:
+                    sm = (sp >> 10) & 0x3FF
+                    sb = sp & 0x3FF
+                    if n_app == sm:
+                        steps = sb
+                        cur_app = expr
+                        while steps > 0:
+                            assert isinstance(cur_app, W_App)
+                            cur_app = cur_app.fn
+                            steps -= 1
+                        assert isinstance(cur_app, W_App)
+                        expr = cur_app.arg
+                        continue
+                cb2 = c2_kind._ctor_body
+                if cb2 is None:
+                    cb2 = c2_kind.init_ctor_body(decls)
+                m2 = cb2.m
+                if m2 < 0 or n_app < m2:
+                    break
+                if depth > 0 and (cb2.delegate_const is None or n_app == m2):
+                    bid2, pop2 = cb2.bvar_field_chain(
+                        fidxs, pbase, rem, decls, depth - 1,
+                    )
+                    if bid2 >= 0:
+                        steps = n_app - m2 + bid2
+                        cur_app = expr
+                        while steps > 0:
+                            assert isinstance(cur_app, W_App)
+                            cur_app = cur_app.fn
+                            steps -= 1
+                        assert isinstance(cur_app, W_App)
+                        expr = cur_app.arg
+                        rem -= pop2
+                        popped_extra += pop2
+                        continue
+                if cb2.delegate_const is None and cb2.let_vals is None and n_app > m2:
+                    idx2 = cb2.num_params + fidxs[rem - 1]
+                    nargs2 = len(cb2.args)
+                    if nargs2 <= idx2 < nargs2 + (n_app - m2):
+                        arg_idx = m2 + (idx2 - nargs2)
+                        steps = n_app - 1 - arg_idx
+                        cur_app = expr
+                        while steps > 0:
+                            assert isinstance(cur_app, W_App)
+                            cur_app = cur_app.fn
+                            steps -= 1
+                        assert isinstance(cur_app, W_App)
+                        expr = cur_app.arg
+                        rem -= 1
+                        popped_extra += 1
+                        continue
+            break
+        return expr, cur_nlets, popped_extra
+
+    def bvar_field_chain(self, fidxs, pbase, ptop, decls, depth=6):
+        """When applying the projection chain `fidxs[pbase .. ptop)` (innermost
+        first at `ptop - 1`) to this `_CtorBody` statically selects one of its
+        lambda arguments ``BVar(bid)`` (chaining through `let_vals`, delegating
+        `_CtorBody`s, and inline nested constructors / `_CtorBody`s), return
+        ``(bid, popped)`` with ``1 <= popped <= ptop - pbase``; else ``(-1, 0)``."""
+        if ptop <= pbase:
+            return -1, 0
+        if ptop - pbase == 1:
+            bid = self.bvar_field(fidxs[ptop - 1])
+            if bid >= 0:
+                return bid, 1
+            return -1, 0
+        if depth <= 0:
+            return -1, 0
+        let_vals = self.let_vals
+        nlets = 0 if let_vals is None else len(let_vals)
+        if self.delegate_const is None:
+            fidx = fidxs[ptop - 1]
+            if fidx < 0:
+                return -1, 0
+            idx = self.num_params + fidx
+            if idx >= len(self.args):
+                return -1, 0
+            expr, cur_nlets, extra = self._peel_ast_expr(
+                self.args[idx], nlets, fidxs, pbase, ptop - 1, decls, depth - 1,
+            )
+            if isinstance(expr, W_BVar):
+                bid = expr.id
+                if cur_nlets <= bid < cur_nlets + self.m:
+                    return bid - cur_nlets, 1 + extra
+            return -1, 0
+        inner_decl = self.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        ibid, ipop = inner_cb.bvar_field_chain(
+            fidxs, pbase, ptop, decls, depth - 1,
+        )
+        if ibid < 0:
+            return -1, 0
+        expr, cur_nlets, extra = self._peel_ast_expr(
+            self.args[inner_cb.m - 1 - ibid], nlets,
+            fidxs, pbase, ptop - ipop, decls, depth - 1,
+        )
+        if isinstance(expr, W_BVar):
+            bid = expr.id
+            if cur_nlets <= bid < cur_nlets + self.m:
+                return bid - cur_nlets, ipop + extra
+        return -1, 0
+
+    def _expr_mask_at_nlets(self, expr, cur_nlets):
+        """Return the bitmask of this `_CtorBody`'s ``m`` lambda arguments
+        referenced by ``expr`` at ``cur_nlets`` active let bindings (or ``-1``)."""
+        if cur_nlets == 0:
+            return _expr_bvar_mask(expr, self.m, 0, {})
+        let_masks = self._compute_let_masks()
+        if let_masks is None:
+            return -1
+        em = _expr_bvar_mask(expr, self.m + cur_nlets, 0, {})
+        if em < 0:
+            return -1
+        rm = em >> cur_nlets
+        b = 0
+        while b < cur_nlets:
+            if (em & (1 << b)) != 0:
+                pm = let_masks[cur_nlets - 1 - b]
+                if pm < 0:
+                    return -1
+                rm |= pm
+            b += 1
+        return rm
+
+    def field_mask_chain(self, fidxs, pbase, ptop, decls, depth=6):
+        """Tight bitmask of this `_CtorBody`'s ``m`` lambda arguments needed to
+        evaluate the pending projection chain `fidxs[pbase .. ptop)`."""
+        if ptop <= pbase:
+            return -2
+        fidx = fidxs[ptop - 1]
+        if ptop - pbase == 1 or depth <= 0:
+            return self.field_mask(fidx)
+        if fidx < 0:
+            return -2
+        let_vals = self.let_vals
+        nlets = 0 if let_vals is None else len(let_vals)
+        if self.delegate_const is None:
+            idx = self.num_params + fidx
+            if idx >= len(self.args):
+                return -2
+            expr, cur_nlets, extra = self._peel_ast_expr(
+                self.args[idx], nlets, fidxs, pbase, ptop - 1, decls, depth - 1,
+            )
+            if extra == 0:
+                return self.field_mask(fidx)
+            return self._expr_mask_at_nlets(expr, cur_nlets)
+        inner_decl = self.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        ibid, ipop = inner_cb.bvar_field_chain(
+            fidxs, pbase, ptop, decls, depth - 1,
+        )
+        if ibid >= 0:
+            expr, cur_nlets, extra = self._peel_ast_expr(
+                self.args[inner_cb.m - 1 - ibid], nlets,
+                fidxs, pbase, ptop - ipop, decls, depth - 1,
+            )
+            return self._expr_mask_at_nlets(expr, cur_nlets)
+        inner_mask = inner_cb.field_mask_chain(
+            fidxs, pbase, ptop, decls, depth - 1,
+        )
+        if inner_mask < 0:
+            return inner_mask
+        inner_m = inner_cb.m
+        if inner_m > 62:
+            return -1
+        out_mask = 0
+        uses = self.uses_lets
+        let_masks = None
+        seen = {}
+        seen_lets = None
+        bid = 0
+        while bid < inner_m:
+            if (inner_mask & (1 << bid)) != 0:
+                arg_idx = inner_m - 1 - bid
+                if nlets > 0:
+                    assert uses is not None
+                    if uses[arg_idx] != 0:
+                        if let_masks is None:
+                            let_masks = self._compute_let_masks()
+                            if let_masks is None:
+                                return -1
+                            seen_lets = {}
+                        assert seen_lets is not None
+                        em = _expr_bvar_mask(
+                            self.args[arg_idx], self.m + nlets, 0, seen_lets,
+                        )
+                        if em < 0:
+                            return -1
+                        rm = em >> nlets
+                        b = 0
+                        while b < nlets:
+                            if (em & (1 << b)) != 0:
+                                pm = let_masks[nlets - 1 - b]
+                                if pm < 0:
+                                    return -1
+                                rm |= pm
+                            b += 1
+                        out_mask |= rm
+                        bid += 1
+                        continue
+                bm = _expr_bvar_mask(self.args[arg_idx], self.m, nlets, seen)
+                if bm < 0:
+                    return -1
+                out_mask |= bm
+            bid += 1
+        return out_mask
+
+    @dont_inline
+    def get_peel_result(self, ckey, fidxs, pbase, ptop, decls):
+        """Return the cached `_PeelResult` for packed chain ``ckey`` on this
+        `_CtorBody` (computing and caching it on first sight)."""
+        pc = self.peel_cache
+        if pc is not None:
+            res = pc.get(ckey, None)
+            if res is not None:
+                return res
+        else:
+            pc = {}
+            self.peel_cache = pc
+        res = self._compute_peel_result(fidxs, pbase, ptop, decls)
+        pc[ckey] = res
+        return res
+
+    def _compute_peel_result(self, fidxs, pbase, ptop, decls):
+        let_vals = self.let_vals
+        nlets = 0 if let_vals is None else len(let_vals)
+        if self.delegate_const is None:
+            fidx = fidxs[ptop - 1]
+            idx = self.num_params + fidx
+            if fidx < 0 or idx >= len(self.args):
+                return _NO_PEEL
+            raw_field, cur_nlets, extra = self._peel_ast_expr(
+                self.args[idx], nlets, fidxs, pbase, ptop - 1, decls,
+            )
+            bvar_id = -1
+            if isinstance(raw_field, W_BVar):
+                bid = raw_field.id
+                if cur_nlets <= bid < cur_nlets + self.m:
+                    bvar_id = bid - cur_nlets
+            return _PeelResult(raw_field, cur_nlets, 1 + extra, bvar_id, idx, -2)
+        inner_decl = self.delegate_decl
+        assert inner_decl is not None
+        inner_kind = inner_decl.w_kind
+        assert isinstance(inner_kind, W_Definition)
+        inner_cb = inner_kind._ctor_body
+        assert inner_cb is not None
+        inner_m = inner_cb.m
+        ibid, ipop = inner_cb.bvar_field_chain(fidxs, pbase, ptop, decls)
+        if ibid >= 0:
+            arg_idx = inner_m - 1 - ibid
+            raw_field, cur_nlets, extra = self._peel_ast_expr(
+                self.args[arg_idx], nlets, fidxs, pbase, ptop - ipop, decls,
+            )
+            bvar_id = -1
+            if isinstance(raw_field, W_BVar):
+                bid = raw_field.id
+                if cur_nlets <= bid < cur_nlets + self.m:
+                    bvar_id = bid - cur_nlets
+            return _PeelResult(raw_field, cur_nlets, ipop + extra, bvar_id, arg_idx, -2)
+        inner_mask = inner_cb.field_mask_chain(fidxs, pbase, ptop, decls)
+        if inner_mask < 0:
+            return _NO_PEEL
+        if inner_m <= 62:
+            if inner_mask == ((1 << inner_m) - 1):
+                return _NO_PEEL
+            used_cnt = 0
+            tmp_m = inner_mask
+            while tmp_m != 0:
+                tmp_m &= tmp_m - 1
+                used_cnt += 1
+            if used_cnt > 8 and used_cnt * 2 > inner_m:
+                return _NO_PEEL
+        return _PeelResult(None, 0, 0, -1, -1, inner_mask)
 
     def _compute_let_masks(self):
         """For each `let_vals[li]`, return the transitive bitmask of this
@@ -5709,7 +6092,10 @@ _NO_CASES_BODY = _CasesBody(-1, 0, None, None)
 
 
 class W_Definition(W_DeclarationKind):
-    _attrs_ = ['value', 'hint', 'all', '_ctor_body', '_cases_body']
+    _attrs_ = [
+        'value', 'hint', 'all', '_ctor_body', '_cases_body',
+        '_simple_proj', '_simple_proj_name',
+    ]
     _immutable_fields_ = ['value', 'hint', 'all']
 
     def __init__(self, value, hint, all=None):
@@ -5720,6 +6106,48 @@ class W_Definition(W_DeclarationKind):
         self.all = all
         self._ctor_body = None
         self._cases_body = None
+        self._simple_proj = -2
+        self._simple_proj_name = None
+
+    def simple_proj(self):
+        """Cached encoding for simple argument-picker (`λ... => BVar(b)`) or
+        projection-wrapper (`λ... => Proj(S, fidx, BVar(b))`) definitions.
+        Returns ``-1`` otherwise."""
+        v = self._simple_proj
+        if v != -2:
+            return v
+        return self._init_simple_proj()
+
+    @dont_inline
+    def _init_simple_proj(self):
+        target = self.get_delta_reduce_target()
+        if target is None:
+            self._simple_proj = -1
+            return -1
+        m = 0
+        cur = target
+        while isinstance(cur, W_Lambda):
+            cur = cur.body
+            m += 1
+        if 0 < m < 1024:
+            if isinstance(cur, W_BVar):
+                bid = cur.id
+                if 0 <= bid < m:
+                    v = (m << 10) | bid
+                    self._simple_proj = v
+                    return v
+            elif isinstance(cur, W_Proj):
+                inner = cur.struct_expr
+                fidx = cur.field_index
+                if isinstance(inner, W_BVar) and 0 <= fidx < 1024:
+                    bid = inner.id
+                    if 0 <= bid < m:
+                        v = (1 << 30) | (fidx << 20) | (m << 10) | bid
+                        self._simple_proj = v
+                        self._simple_proj_name = cur.struct_name
+                        return v
+        self._simple_proj = -1
+        return -1
 
     @dont_inline
     def init_cases_body(self, declarations, max_depth=2):

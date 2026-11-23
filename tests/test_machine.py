@@ -2444,7 +2444,7 @@ class TestJointCheckAndInferExpected(object):
             #    second projection promotes `_proj_field_cache` to a real handle!
             ms_head = store.import_term(mk_s.name.const())
             ms_j = leaf_index(ms_head)
-            pkey = ((ms_j + 1) << 22) | (1 << 20) | 0
+            pkey = ((ms_j + 1) << 28) | (1 << 24) | 0
             p1 = store.import_term(s_name.proj(0, mk_s.name.const().app(A, B)))
             p2 = store.import_term(s_name.proj(0, mk_s.name.const().app(B, A)))
             assert m.try_proj(p1, False) == store.import_term(fn2.name.const().app(A, B))
