@@ -1537,6 +1537,12 @@ class TermStore(object):
         return packed & _PROJ_MASK
 
     @always_inline
+    def proj_index_from_packed(self, packed):
+        if packed >= _PROJ_OVF_BASE:
+            return self._proj_overflow[packed - _PROJ_OVF_BASE][1]
+        return packed & _PROJ_MASK
+
+    @always_inline
     def meta(self, h):
         if is_leaf(h):
             return _s32(self.leaf_meta[leaf_index(h)])
@@ -7981,6 +7987,23 @@ class Machine(object):
                 finally:
                     store.unapp_pop(mark)
             if hk == KIND_PROJ or hk == KIND_LET:
+                if (hk == KIND_PROJ
+                        and not cheap_proj
+                        and not self.tc.tracer.recording):
+                    p_raw = store.field_a(head)
+                    p_hd = p_raw if is_leaf(p_raw) else store.head(p_raw)
+                    if (self._leaf_flags(p_hd) & _LF_DELTA) != 0:
+                        mark = store._spine_top
+                        store.unapp_push(h)
+                        try:
+                            fast = self._try_proj_app_rule(
+                                p_raw, store.proj_index(head),
+                                mark, store._spine_top - mark,
+                            )
+                            if fast != 0:
+                                return fast
+                        finally:
+                            store.unapp_pop(mark)
                 head_w = self.whnf_core(head, cheap_proj, False)
                 if head_w == head:
                     return 0
@@ -8218,6 +8241,15 @@ class Machine(object):
                         self.tc.tracer.beta()
                         k += 1
                 arg = store.spine_arg(mark + n - m + b)
+                if not self.tc.tracer.recording:
+                    arg_hd = arg if is_leaf(arg) else store.head(arg)
+                    if (self._leaf_flags(arg_hd) & _LF_DELTA) != 0:
+                        fast = self._try_proj_app_rule(
+                            arg, store.proj_index_from_packed(proj_packed),
+                            mark, n - m,
+                        )
+                        if fast != 0:
+                            return fast
                 res = store._cons_general(KIND_PROJ, arg, proj_packed, name_id)
                 return store.apply_buf_rev(res, mark, n - 1 - m)
             val = self._delta_value(head, const)
@@ -9038,6 +9070,92 @@ class Machine(object):
         finally:
             store.unapp_pop(smark)
 
+    @dont_inline
+    def _try_proj_app_rule(self, raw, fidx, mark, extra):
+        """Fast path for `Proj(S, fidx, raw)` applied to `extra` arguments at
+        `_spine_buf[mark .. mark + extra)` (outermost-first): when ``raw`` is
+        a saturated `DirectCB` whose field ``fidx`` statically collapses to a
+        pure projection chain (e.g. `LinearMap.instFunLike`,
+        `ContinuousLinearMap.funLike`, `instHAdd`, `instHSMul`,
+        `EquivLike.toFunLike`), emit that projection chain directly without
+        instantiating the wrapper body or unfolding intermediate projections."""
+        store = self.store
+        cur = raw
+        cur_fidx = fidx
+        cur_extra = extra
+        matched = False
+        last_name = None
+        last_idx = 0
+        hops = 0
+        while hops < 8:
+            hops += 1
+            head = cur if is_leaf(cur) else store.head(cur)
+            if (self._leaf_flags(head) & _LF_DELTA) == 0:
+                break
+            j = leaf_index(head)
+            const = store.leaves[j]
+            assert isinstance(const, W_Const)
+            decl = self._leaf_decl(head, const)
+            if decl is None or len(const.levels) != len(decl.levels):
+                break
+            wk = decl.w_kind
+            if not isinstance(wk, W_Definition):
+                break
+            cb = wk._ctor_body
+            if cb is None:
+                cb = wk.init_ctor_body(self.tc.declarations)
+            cm = cb.m
+            if cm < 0 or cb.delegate_const is not None or cb.let_vals is not None:
+                break
+            rule = cb.proj_field_rule(cur_fidx, self.tc.declarations)
+            if rule is None or cur_extra < rule.req_extra:
+                break
+            if rule.target_bvar >= 0:
+                if is_leaf(cur):
+                    break
+                amark = store._spine_top
+                store.unapp_push(cur)
+                na = store._spine_top - amark
+                if na < cm:
+                    store.unapp_pop(amark)
+                    break
+                base = store.spine_arg(amark + na - cm + rule.target_bvar)
+                store.unapp_pop(amark)
+            else:
+                if cm > 0:
+                    if is_leaf(cur):
+                        break
+                    na = 0
+                    t = cur
+                    while na < cm and store.kind(t) == KIND_APP:
+                        t = store.field_a(t)
+                        na += 1
+                    if na < cm:
+                        break
+                base = store.spine_arg(mark + cur_extra - 1 - rule.target_extra)
+            cur_extra -= rule.tail_start
+            names = rule.struct_names
+            indices = rule.field_indices
+            nchain = len(names)
+            if nchain == 1:
+                last_name = names[0]
+                last_idx = indices[0]
+                cur = base
+                cur_fidx = last_idx
+                matched = True
+                continue
+            res = base
+            i = 0
+            while i < nchain:
+                res = store.proj(names[i], indices[i], res)
+                i += 1
+            return store.apply_buf_rev(res, mark, cur_extra - 1)
+        if matched:
+            assert last_name is not None
+            res = store.proj(last_name, last_idx, cur)
+            return store.apply_buf_rev(res, mark, cur_extra - 1)
+        return 0
+
     def _eval_direct_ctor_proj(self, j, const, decl, cb, arg_base, m, pbase, ptop):
         """Evaluate a direct `_CtorBody` (``cb.delegate_const is None``) with
         its ``m`` lambda arguments sitting at `_spine_buf[arg_base:arg_base+m]`."""
@@ -9046,6 +9164,19 @@ class Machine(object):
         idx = cb.num_params + fidx
         if idx >= len(cb.args):
             return 0
+        if cb.let_vals is None:
+            rule = cb.proj_field_rule(fidx, self.tc.declarations)
+            if rule is not None and rule.req_extra == 0 and rule.target_bvar >= 0:
+                res = self.store.spine_arg(arg_base + rule.target_bvar)
+                names = rule.struct_names
+                indices = rule.field_indices
+                i = 0
+                nchain = len(names)
+                while i < nchain:
+                    res = self.store.proj(names[i], indices[i], res)
+                    i += 1
+                self._proj_popped = 1
+                return res
         raw_field = self._peel_nested_ctor_field(
             cb.args[idx], fidxs, pbase, ptop,
         )

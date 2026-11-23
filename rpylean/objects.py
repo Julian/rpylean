@@ -5201,6 +5201,161 @@ HINT_OPAQUE = -2
 HINT_ABBREV = -1
 
 
+class _ProjFieldRule(object):
+    """Static projection-chain shortcut for a `DirectCB` field
+    `cb.args[num_params + fidx]` whose beta/delta expansion on `req_extra`
+    applied arguments reduces directly to a pure chain of kernel projections
+    `Proj(S_r, i_r, ... Proj(S_1, i_1, target) ...)` (stored innermost-first)
+    applied to the remaining trailing arguments starting at `tail_start`.
+
+    Covers Mathlib `FunLike` / `SetLike` / `EquivLike` coercions (e.g.
+    `LinearMap.instFunLike`, `ContinuousLinearMap.funLike`,
+    `ContinuousMap.instFunLike`, `LinearIsometryEquiv.instEquivLike`,
+    `Submodule.setLike`) and Lean 4 heterogeneous operator bridges
+    (`instHAdd`, `instHMul`, `instHSub`, `instHSMul`, `instHPow`,
+    `EquivLike.toFunLike`)."""
+
+    _attrs_ = [
+        'req_extra', 'target_bvar', 'target_extra', 'tail_start',
+        'struct_names', 'field_indices',
+    ]
+    _immutable_fields_ = [
+        'req_extra', 'target_bvar', 'target_extra', 'tail_start',
+        'struct_names', 'field_indices',
+    ]
+
+    def __init__(self, req_extra, target_bvar, target_extra, tail_start,
+                 struct_names, field_indices):
+        self.req_extra = req_extra
+        self.target_bvar = target_bvar
+        self.target_extra = target_extra
+        self.tail_start = tail_start
+        self.struct_names = struct_names
+        self.field_indices = field_indices
+
+
+_NO_PROJ_RULE = _ProjFieldRule(-1, -1, -1, 0, [], [])
+
+
+def _match_proj_wrapper(decl):
+    """If ``decl`` is a transparent `W_Definition` of the form
+    `λ x_0 ... x_{m-1} => Proj(S, idx, BVar(b))` (with `0 <= b < m`),
+    return `(m, b, S, idx)`; otherwise return `(-1, -1, None, -1)`."""
+    wk = decl.w_kind
+    if not isinstance(wk, W_Definition):
+        return -1, -1, None, -1
+    target = wk.get_delta_reduce_target()
+    if target is None:
+        return -1, -1, None, -1
+    m = 0
+    cur = target
+    while isinstance(cur, W_Lambda):
+        cur = cur.body
+        m += 1
+    if m <= 0 or not isinstance(cur, W_Proj):
+        return -1, -1, None, -1
+    inner = cur.struct_expr
+    if not isinstance(inner, W_BVar):
+        return -1, -1, None, -1
+    bid = inner.id
+    if bid < 0 or bid >= m:
+        return -1, -1, None, -1
+    return m, bid, cur.struct_name, cur.field_index
+
+
+def _peel_proj_chain(expr, declarations, allow_eta_short, max_depth):
+    """Walk ``expr`` outside-in peeling `W_Proj` nodes and saturated (or
+    `DFunLike.coe`-style) projection-wrapper applications.
+
+    Returns `(end_expr, eta_short, names_innermost, indices_innermost)` where
+    `names_innermost` / `indices_innermost` are empty on failure."""
+    names_rev = []
+    indices_rev = []
+    cur = expr
+    eta_short = False
+    steps = 0
+    while steps < 16:
+        steps += 1
+        if isinstance(cur, W_Proj):
+            names_rev.append(cur.struct_name)
+            indices_rev.append(cur.field_index)
+            cur = cur.struct_expr
+            continue
+        if isinstance(cur, W_App):
+            rev_args = []
+            node = cur
+            while isinstance(node, W_App):
+                rev_args.append(node.arg)
+                node = node.fn
+            if not isinstance(node, W_Const):
+                break
+            g_decl = find_decl(declarations, node.name)
+            if g_decl is None or len(node.levels) != len(g_decl.levels):
+                break
+            mg, bg, sname, fidx = _match_proj_wrapper(g_decl)
+            if mg < 0 or sname is None:
+                break
+            na = len(rev_args)
+            if na == mg:
+                names_rev.append(sname)
+                indices_rev.append(fidx)
+                cur = rev_args[bg]
+                continue
+            if na == mg + 1 and max_depth > 0:
+                # e.g. `DFunLike.coe α β (LinearMap.instFunLike ...) x`
+                inst_ast = rev_args[1 + bg]
+                in_node = inst_ast
+                in_na = 0
+                while isinstance(in_node, W_App):
+                    in_node = in_node.fn
+                    in_na += 1
+                if not isinstance(in_node, W_Const):
+                    break
+                h_decl = find_decl(declarations, in_node.name)
+                if h_decl is None or len(in_node.levels) != len(h_decl.levels):
+                    break
+                h_wk = h_decl.w_kind
+                if not isinstance(h_wk, W_Definition):
+                    break
+                h_cb = h_wk._ctor_body
+                if h_cb is None:
+                    h_cb = h_wk.init_ctor_body(declarations)
+                if (h_cb.m < 0
+                        or h_cb.delegate_const is not None
+                        or h_cb.let_vals is not None
+                        or in_na < h_cb.m):
+                    break
+                sub = h_cb.proj_field_rule(fidx, declarations, max_depth - 1)
+                if (sub is None
+                        or sub.req_extra != 1
+                        or sub.target_extra != 0
+                        or sub.tail_start != 1):
+                    break
+                j = len(sub.struct_names) - 1
+                while j >= 0:
+                    names_rev.append(sub.struct_names[j])
+                    indices_rev.append(sub.field_indices[j])
+                    j -= 1
+                cur = rev_args[0]
+                continue
+            if (allow_eta_short
+                    and len(names_rev) == 0
+                    and na == mg - 1
+                    and bg == 0):
+                # e.g. `ContinuousMap.instFunLike.field[0] = ContinuousMap.toFun α β tα tβ`
+                names_rev.append(sname)
+                indices_rev.append(fidx)
+                eta_short = True
+                break
+        break
+    n = len(names_rev)
+    if n == 0:
+        return cur, False, [], []
+    names = [names_rev[n - 1 - i] for i in range(n)]
+    indices = [indices_rev[n - 1 - i] for i in range(n)]
+    return cur, eta_short, names, indices
+
+
 class _CtorBody(object):
     """Pre-stripped constructor body for a `W_Definition` of the form
     `λ... => let... => Ctor p_0 ... p_{np-1} f_0 ...` (direct:
@@ -5210,7 +5365,7 @@ class _CtorBody(object):
 
     _attrs_ = [
         'm', 'num_params', 'let_vals', 'args', 'uses_lets',
-        'delegate_const', 'delegate_decl', 'field_masks',
+        'delegate_const', 'delegate_decl', 'field_masks', 'proj_rules',
     ]
     _immutable_fields_ = [
         'm', 'num_params', 'let_vals', 'args', 'uses_lets',
@@ -5227,6 +5382,85 @@ class _CtorBody(object):
         self.delegate_const = delegate_const
         self.delegate_decl = delegate_decl
         self.field_masks = None
+        self.proj_rules = None
+
+    def proj_field_rule(self, fidx, declarations, max_depth=4):
+        """Return a `_ProjFieldRule` if this direct `_CtorBody`'s field
+        ``fidx`` statically collapses to a pure projection chain, else None."""
+        if fidx < 0 or self.delegate_const is not None or self.let_vals is not None:
+            return None
+        pr = self.proj_rules
+        if pr is not None and fidx < len(pr):
+            r = pr[fidx]
+            if r is not None:
+                return r if r.req_extra >= 0 else None
+        if pr is None:
+            pr = [None] * (fidx + 1)
+            self.proj_rules = pr
+        elif fidx >= len(pr):
+            pr.extend([None] * (fidx + 1 - len(pr)))
+        # Install negative sentinel before recursing so cycles terminate.
+        pr[fidx] = _NO_PROJ_RULE
+        rule = self._compute_proj_field_rule(fidx, declarations, max_depth)
+        if rule is not None:
+            pr[fidx] = rule
+        return rule
+
+    @dont_inline
+    def _compute_proj_field_rule(self, fidx, declarations, max_depth):
+        idx = self.num_params + fidx
+        if idx >= len(self.args):
+            return None
+        raw = self.args[idx]
+        k = 0
+        cur = raw
+        while isinstance(cur, W_Lambda):
+            cur = cur.body
+            k += 1
+        # Case 1: direct projection chain (k == 0 or k == 1).
+        if k <= 1:
+            end, eta_short, names, indices = _peel_proj_chain(
+                cur, declarations, k == 0, max_depth,
+            )
+            if len(names) > 0:
+                if eta_short:
+                    return _ProjFieldRule(1, -1, 0, 1, names, indices)
+                if isinstance(end, W_BVar):
+                    bid = end.id
+                    if k == 0 and 0 <= bid < self.m:
+                        return _ProjFieldRule(0, bid, -1, 0, names, indices)
+                    if k == 1 and bid == 0:
+                        return _ProjFieldRule(1, -1, 0, 1, names, indices)
+        # Case 2: k >= 1 lambdas whose trailing arguments pass through to a
+        # projection chain on a constructor-wrapper BVar (e.g. `instHAdd`,
+        # `instHMul`, `instHSub`, `instHPow`) or on the first lambda arg.
+        if k >= 1:
+            base_expr = cur
+            stripped = 0
+            while stripped < k and isinstance(base_expr, W_App):
+                arg = base_expr.arg
+                if not isinstance(arg, W_BVar) or arg.id != stripped:
+                    break
+                base_expr = base_expr.fn
+                stripped += 1
+            if stripped == k:
+                end, eta_short, names, indices = _peel_proj_chain(
+                    base_expr, declarations, False, max_depth,
+                )
+                if len(names) > 0 and not eta_short and isinstance(end, W_BVar):
+                    bid = end.id
+                    if k <= bid < k + self.m:
+                        return _ProjFieldRule(
+                            k, bid - k, -1, 0, names, indices,
+                        )
+            elif stripped == k - 1 and stripped > 0:
+                end, eta_short, names, indices = _peel_proj_chain(
+                    base_expr, declarations, False, max_depth,
+                )
+                if len(names) > 0 and not eta_short and isinstance(end, W_BVar):
+                    if end.id == stripped:
+                        return _ProjFieldRule(k, -1, 0, 1, names, indices)
+        return None
 
     def field_mask(self, fidx):
         """Bitmask of this definition's ``m`` lambda BVars (``0 .. m-1``,
