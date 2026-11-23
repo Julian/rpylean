@@ -954,14 +954,13 @@ def _measure_jit_run(
     pypylog_prefix: str | None,
 ) -> tuple[float, int | None, int | None, int | None, str]:
     env = os.environ.copy()
+    env["RPYLEAN_STACK_GROWN"] = "1"
     log_path: str | None = None
-    preexec = None
+    preexec = _grow_stack_preexec
     if pypylog_prefix is not None:
         fd, log_path = tempfile.mkstemp(prefix="rpylean-xray-jit-", suffix=".log")
         os.close(fd)
         env["PYPYLOG"] = f"{pypylog_prefix}:{log_path}"
-        env["RPYLEAN_STACK_GROWN"] = "1"
-        preexec = _grow_stack_preexec
     try:
         cmd = [str(binary), *jit_args, "check", str(corpus_path)]
         if platform.system() == "Darwin":

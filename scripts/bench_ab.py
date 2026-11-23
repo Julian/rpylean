@@ -250,14 +250,13 @@ def _run_darwin(
     track_jit: bool = True,
 ) -> RunMetrics:
     env = os.environ.copy()
+    env["RPYLEAN_STACK_GROWN"] = "1"
     jit_log: str | None = None
-    preexec = None
+    preexec = _grow_stack_preexec
     if track_jit and "--jit" not in pre_args:
         fd, jit_log = tempfile.mkstemp(prefix="rpylean-jit-", suffix=".log")
         os.close(fd)
         env["PYPYLOG"] = f"jit-summary:{jit_log}"
-        env["RPYLEAN_STACK_GROWN"] = "1"
-        preexec = _grow_stack_preexec
     try:
         r = subprocess.run(
             ["/usr/bin/time", "-l", str(binary), *pre_args, "check", *extra, str(corpus_path)],
@@ -313,14 +312,13 @@ def _run_linux(
 ) -> RunMetrics:
     cmd = [str(binary), *pre_args, "check", *extra, str(corpus_path)]
     env = os.environ.copy()
+    env["RPYLEAN_STACK_GROWN"] = "1"
     jit_log: str | None = None
-    preexec = None
+    preexec = _grow_stack_preexec
     if track_jit and "--jit" not in pre_args:
         fd, jit_log = tempfile.mkstemp(prefix="rpylean-jit-", suffix=".log")
         os.close(fd)
         env["PYPYLOG"] = f"jit-summary:{jit_log}"
-        env["RPYLEAN_STACK_GROWN"] = "1"
-        preexec = _grow_stack_preexec
     try:
         if shutil.which("perf"):
             r = subprocess.run(
