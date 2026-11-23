@@ -483,8 +483,9 @@ class KQuotLift(Cont):
 # ---- Immutable CodeNode graph --------------------------------------------
 
 class CodeNode(object):
-    _attrs_ = ['tag']
-    _immutable_fields_ = ['tag']
+    _attrs_ = ['tag', 'jit_hot']
+    _immutable_fields_ = ['tag', 'jit_hot?']
+    jit_hot = False
 
 
 class CVal(CodeNode):
@@ -1486,12 +1487,28 @@ def _printable_location(rec_edge, code):
     return "eval:%d" % tag
 
 
+_JIT_MIN_CALL_STEPS = 3000
+
 eval_jitdriver = jit.JitDriver(
     greens=['rec_edge', 'code'],
     reds=['steps', 'env', 'args', 'cont', 'cache', 'tc'],
     name='lean_eval',
     get_printable_location=_printable_location,
 )
+
+
+def configure_jit_defaults():
+    """Tune RPython JIT parameters for Lean kernel evaluation workloads.
+
+    Combined with per-CodeNode hot promotion (`_JIT_MIN_CALL_STEPS`), only
+    loops proven hot inside a single long evaluation call enter the JIT.
+    Disabling `function_threshold` avoids compiling cold entry bridges, while
+    moderate loop/bridge thresholds give fast warmup on proven-hot loops.
+    Users can still override any parameter via `--jit ...`.
+    """
+    jit.set_param(eval_jitdriver, 'threshold', 1500)
+    jit.set_param(eval_jitdriver, 'function_threshold', -1)
+    jit.set_param(eval_jitdriver, 'trace_eagerness', 1000)
 
 
 @jit.dont_look_inside
@@ -2111,6 +2128,10 @@ def eval_whnf(root_code, cache, tc):
             steps += 1
             if (steps & 16383) == 0:
                 _check_limits(tc)
+            if not code.jit_hot:
+                if steps < _JIT_MIN_CALL_STEPS:
+                    continue
+                code.jit_hot = True
             eval_jitdriver.can_enter_jit(
                 code=code, rec_edge=rec_edge,
                 steps=steps, env=env, args=args, cont=cont,

@@ -9,6 +9,7 @@ import sys
 import py
 
 from rpylean import _stack
+from rpylean._eval import configure_jit_defaults
 from rpylean.cli import cli
 import rpylean
 
@@ -86,6 +87,7 @@ STACK_BUDGET = 8.0
 
 def main(argv):
     _stack.grow(argv, STACK_BUDGET)
+    configure_jit_defaults()
     return cli.main(argv)
 
 
