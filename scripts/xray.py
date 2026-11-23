@@ -8,8 +8,8 @@
 # ///
 """Diagnostic profiler ("X-ray") for `rpylean`.
 
-Three complementary modes for discovering where time, TermStore records, and
-RPython GC heap allocations go:
+Four complementary modes for discovering where time, TermStore records,
+RPython GC heap allocations, and RPython JIT traces/bridges go:
 
   1. `native`: samples the translated `./rpylean-c` binary (via macOS `sample`)
      on one or more corpora and summarizes subsystem share, top self-time C
@@ -22,12 +22,16 @@ RPython GC heap allocations go:
      capturing stack traces on every entry to the nursery refill slow path
      (`pypy_g_IncrementalMiniMarkGC_collect_and_reserve`, via `perf` + `gdb` on
      Linux or batch `lldb` on macOS).
+  4. `jit`: measures RPython JIT impact (`--jit off` vs `JIT on` or custom
+     `--jit-opts`), compile time, loop/bridge/abort counts, and optional
+     `--traces` bridge-trigger & guard anatomy via `PYPYLOG=jit-log-opt:`.
 
 Examples:
   ./scripts/xray.py native navier-stokes-euler cslib
   ./scripts/xray.py allocs navier-stokes-euler --start 105000 --end 107500
   ./scripts/xray.py allocs cslib --start 220000 --end 225000 --count-cons-app
   ./scripts/xray.py gc-allocs cslib --sites
+  ./scripts/xray.py jit cslib perf/grind-ring-5 perf/magma-list-deep-n36 --traces
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import json
 import os
 import platform
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -147,9 +152,18 @@ def _classify_sym(sym: str) -> str:
         return "DefEq"
     if any(k in s for k in ("whnf", "unfold", "proj", "iota", "beta", "ctor_body", "_peel_nested")):
         return "WHNF / Unfold / Proj"
+    if any(k in s for k in (
+        "portal", "handle_jitexception", "execute_nonspec", "MetaInterp", "Blackhole",
+        "Jit", "Assembler", "Regalloc", "OptHeap", "Optimizer_", "eval_whnf",
+        "eval_closed_scalar", "CodeCache", "compile_handle", "dispatch_loop",
+    )):
+        return "JIT / Eval"
     if any(k in s for k in ("parse", "prescan", "read_", "EnvironmentBuilder", "Stream", "FDFile", "read")):
         return "Parser / IO"
-    if any(k in s for k in ("GC", "MiniMark", "malloc", "free", "gc_", "ll_arena", "memmove", "bzero", "memset")):
+    if any(k in s for k in (
+        "GC", "MiniMark", "malloc", "free", "gc_", "ll_arena", "memmove", "bzero", "memset",
+        "BaseWalker", "trace__", "visit_all_objects", "remember_young", "collect_ref_rec",
+    )):
         return "GC / Alloc / Mem"
     if "ll_dict_" in s:
         return "RPython Dict"
@@ -896,6 +910,257 @@ def _run_gc_allocs_linux(
     _summarize_gc_stacks(corpus_name, symbol, stacks, top_n, sites)
 
 
+# ---- JIT profiling mode ---------------------------------------------------
+
+DEFAULT_JIT_CORPORA = (
+    "init",
+    "std",
+    "cedar",
+    "cslib",
+    "navier-stokes-euler",
+    "perf/grind-ring-5",
+    "perf/magma-list-deep-n21",
+    "perf/magma-list-deep-n36",
+)
+
+_RE_TIME = re.compile(r"^\s*([\d.]+)\s+real\s+([\d.]+)\s+user\s+([\d.]+)\s+sys", re.M)
+_RE_INST = re.compile(r"^\s*(\d+)\s+instructions retired", re.M)
+_RE_CYC = re.compile(r"^\s*(\d+)\s+cycles elapsed", re.M)
+_RE_ICX = re.compile(r"^\s*(\d+)\s+involuntary context switches", re.M)
+_RE_JIT_TRACING = re.compile(r"^Tracing:\s+\d+\s+([\d.]+)", re.M)
+_RE_JIT_BACKEND = re.compile(r"^Backend:\s+\d+\s+([\d.]+)", re.M)
+_RE_JIT_LOOPS = re.compile(r"^Total # of loops:\s*(\d+)", re.M)
+_RE_JIT_BRIDGES = re.compile(r"^Total # of bridges:\s*(\d+)", re.M)
+_RE_JIT_ABORT = re.compile(r"^abort:[^:]+:\s*(\d+)", re.M)
+_RE_JIT_OPT_OPS = re.compile(r"^opt ops:\s*(\d+)", re.M)
+_RE_JIT_NVIRT = re.compile(r"^nvirtuals:\s*(\d+)", re.M)
+_RE_JIT_GUARDS = re.compile(r"^opt guards:\s*(\d+)", re.M)
+
+
+def _grow_stack_preexec() -> None:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        target = hard if hard != resource.RLIM_INFINITY else 1024 * 1024 * 1024
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
+    except (ValueError, OSError):
+        pass
+
+
+def _measure_jit_run(
+    binary: Path,
+    corpus_path: Path,
+    jit_args: tuple[str, ...],
+    pypylog_prefix: str | None,
+) -> tuple[float, int | None, int | None, int | None, str]:
+    env = os.environ.copy()
+    log_path: str | None = None
+    preexec = None
+    if pypylog_prefix is not None:
+        fd, log_path = tempfile.mkstemp(prefix="rpylean-xray-jit-", suffix=".log")
+        os.close(fd)
+        env["PYPYLOG"] = f"{pypylog_prefix}:{log_path}"
+        env["RPYLEAN_STACK_GROWN"] = "1"
+        preexec = _grow_stack_preexec
+    try:
+        cmd = [str(binary), *jit_args, "check", str(corpus_path)]
+        if platform.system() == "Darwin":
+            r = subprocess.run(
+                ["/usr/bin/time", "-l", *cmd],
+                capture_output=True,
+                text=True,
+                env=env,
+                preexec_fn=preexec,
+            )
+            if r.returncode != 0:
+                raise click.ClickException(f"{binary.name} failed on {corpus_path.name} (rc={r.returncode})")
+            err = r.stderr
+            m_t = _RE_TIME.search(err)
+            real_s = float(m_t.group(1)) if m_t else 0.0
+            m_i = _RE_INST.search(err)
+            m_c = _RE_CYC.search(err)
+            m_x = _RE_ICX.search(err)
+            inst = int(m_i.group(1)) if m_i else None
+            cyc = int(m_c.group(1)) if m_c else None
+            icx = int(m_x.group(1)) if m_x else None
+        else:
+            import time
+            t0 = time.perf_counter()
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, preexec_fn=preexec)
+            real_s = time.perf_counter() - t0
+            if r.returncode != 0:
+                raise click.ClickException(f"{binary.name} failed on {corpus_path.name} (rc={r.returncode})")
+            inst = cyc = icx = None
+        log_txt = Path(log_path).read_text(errors="replace") if log_path and os.path.exists(log_path) else ""
+        return real_s, inst, cyc, icx, log_txt
+    finally:
+        if log_path and os.path.exists(log_path):
+            os.unlink(log_path)
+
+
+def _parse_jit_metrics(txt: str) -> dict[str, float | int]:
+    m_tr = _RE_JIT_TRACING.search(txt)
+    m_be = _RE_JIT_BACKEND.search(txt)
+    m_lp = _RE_JIT_LOOPS.search(txt)
+    m_br = _RE_JIT_BRIDGES.search(txt)
+    m_op = _RE_JIT_OPT_OPS.search(txt)
+    m_nv = _RE_JIT_NVIRT.search(txt)
+    m_gd = _RE_JIT_GUARDS.search(txt)
+    return {
+        "tracing_s": float(m_tr.group(1)) if m_tr else 0.0,
+        "backend_s": float(m_be.group(1)) if m_be else 0.0,
+        "loops": int(m_lp.group(1)) if m_lp else 0,
+        "bridges": int(m_br.group(1)) if m_br else 0,
+        "aborts": sum(int(m.group(1)) for m in _RE_JIT_ABORT.finditer(txt)),
+        "opt_ops": int(m_op.group(1)) if m_op else 0,
+        "nvirtuals": int(m_nv.group(1)) if m_nv else 0,
+        "opt_guards": int(m_gd.group(1)) if m_gd else 0,
+    }
+
+
+_RE_TRACE_OFF = re.compile(r"^\+\d+:\s*")
+_RE_GUARD_HEX = re.compile(r"descr=<Guard(0x[0-9a-fA-F]+)>")
+_RE_BRIDGE_HDR = re.compile(r"^#\s*bridge out of Guard (0x[0-9a-fA-F]+) with (\d+) ops")
+_RE_CONST_CLASS = re.compile(r"ConstClass\(([^)]+)\)")
+_RE_FIELD_NAME = re.compile(r"Field[PRN]\s+([^\s>]+)")
+
+
+def _short_field(raw: str) -> str:
+    parts = raw.split(".")
+    if len(parts) >= 2:
+        return f"{parts[-2]}.{parts[-1].replace('inst_', '')}"
+    return raw
+
+
+def _summarize_jit_traces(corpus_name: str, log_txt: str, top_n: int) -> None:
+    """Summarize loops, bridges, and exact failing guards from `PYPYLOG=jit-log-opt:`."""
+    loop_dmps: collections.Counter[str] = collections.Counter()
+    bridge_dmps: collections.Counter[str] = collections.Counter()
+    total_ops: collections.Counter[str] = collections.Counter()
+    max_ops: dict[str, int] = {}
+    bridge_triggers: collections.Counter[tuple[str, str]] = collections.Counter()
+    bridge_trigger_ops: collections.Counter[tuple[str, str]] = collections.Counter()
+    guard_info: dict[str, tuple[str, str]] = {}
+
+    in_block = ""
+    first_dmp = ""
+    first_named = ""
+    last_dmp = ""
+    last_named = ""
+    last_op = ""
+    bridge_src_guard = ""
+    block_ops = 0
+    n_loops = 0
+    n_bridges = 0
+
+    for line in log_txt.splitlines():
+        if "{jit-log-opt-loop" in line:
+            in_block = "loop"
+            first_dmp = first_named = last_dmp = last_named = last_op = ""
+            bridge_src_guard = ""
+            block_ops = 0
+            continue
+        if "{jit-log-opt-bridge" in line:
+            in_block = "bridge"
+            first_dmp = first_named = last_dmp = last_named = last_op = ""
+            bridge_src_guard = ""
+            block_ops = 0
+            continue
+        if "jit-log-opt-loop}" in line and in_block == "loop":
+            lbl = first_named or first_dmp or "(no debug_merge_point)"
+            loop_dmps[lbl] += 1
+            total_ops[lbl] += block_ops
+            if block_ops > max_ops.get(lbl, 0):
+                max_ops[lbl] = block_ops
+            n_loops += 1
+            in_block = ""
+            continue
+        if "jit-log-opt-bridge}" in line and in_block == "bridge":
+            lbl = first_named or first_dmp or "(no debug_merge_point)"
+            bridge_dmps[lbl] += 1
+            total_ops[lbl] += block_ops
+            if block_ops > max_ops.get(lbl, 0):
+                max_ops[lbl] = block_ops
+            if bridge_src_guard:
+                gkey = guard_info.get(bridge_src_guard, ("(unseen guard)", lbl))
+                bridge_triggers[gkey] += 1
+                bridge_trigger_ops[gkey] += block_ops
+            n_bridges += 1
+            in_block = ""
+            continue
+        if not in_block:
+            continue
+
+        s = line.strip()
+        if not s or s.startswith("["):
+            continue
+        if s.startswith("#"):
+            bm = _RE_BRIDGE_HDR.match(s)
+            if bm:
+                bridge_src_guard = bm.group(1)
+            continue
+        if s.startswith("debug_merge_point("):
+            q1 = s.find("'")
+            q2 = s.rfind("'")
+            lbl = s[q1 + 1 : q2] if q1 >= 0 and q2 > q1 else s
+            if not first_dmp:
+                first_dmp = lbl
+            last_dmp = lbl
+            if lbl.startswith("def:") or lbl.startswith("rec:"):
+                if not first_named:
+                    first_named = lbl
+                last_named = lbl
+            continue
+
+        s_op = _RE_TRACE_OFF.sub("", s)
+        block_ops += 1
+        gm = _RE_GUARD_HEX.search(s_op)
+        if gm:
+            op = s_op.split("(", 1)[0]
+            detail = ""
+            cm = _RE_CONST_CLASS.search(s_op)
+            if cm:
+                detail = f"({cm.group(1)})"
+            elif op in ("guard_value", "guard_nonnull", "guard_isnull", "guard_true", "guard_false"):
+                fm = _RE_FIELD_NAME.search(last_op)
+                if fm:
+                    detail = f"({_short_field(fm.group(1))})"
+                elif "ConstPtr" in s_op:
+                    detail = "(ConstPtr)"
+                elif "int_eq" in last_op or "int_ne" in last_op or "int_lt" in last_op:
+                    detail = f"({last_op.split('=', 1)[-1].strip().split('(', 1)[0]})"
+            ctx = last_named or last_dmp or "(entry)"
+            guard_info[gm.group(1)] = (f"{op}{detail}", ctx)
+        else:
+            last_op = s_op
+
+    tbl = Table(
+        title=f"JIT Trace Anatomy — {corpus_name} ({n_loops} loops, {n_bridges} bridges)",
+        box=box.SIMPLE_HEAVY,
+    )
+    tbl.add_column("First Named def:/rec: (or merge point)", style="cyan", overflow="fold")
+    tbl.add_column("Loops", justify="right")
+    tbl.add_column("Bridges", justify="right")
+    tbl.add_column("Total Ops", justify="right")
+    tbl.add_column("Max Ops", justify="right")
+    all_keys = set(loop_dmps) | set(bridge_dmps)
+    ranked = sorted(all_keys, key=lambda k: (total_ops[k], bridge_dmps[k], loop_dmps[k]), reverse=True)
+    for k in ranked[:top_n]:
+        tbl.add_row(k, str(loop_dmps[k]), str(bridge_dmps[k]), f"{total_ops[k]:,}", f"{max_ops[k]:,}")
+    console.print()
+    console.print(tbl)
+
+    if bridge_triggers:
+        gtbl = Table(title=f"Top Bridge Triggers (Failing Guards) — {corpus_name}", box=box.SIMPLE_HEAVY)
+        gtbl.add_column("Failing Guard", style="cyan", overflow="fold")
+        gtbl.add_column("Context (nearest def:/rec:)", style="yellow", overflow="fold")
+        gtbl.add_column("Bridges", justify="right")
+        gtbl.add_column("Bridge Ops", justify="right")
+        for gkey, cnt in bridge_triggers.most_common(top_n):
+            gtbl.add_row(gkey[0], gkey[1], str(cnt), f"{bridge_trigger_ops[gkey]:,}")
+        console.print(gtbl)
+
+
 # ---- CLI ------------------------------------------------------------------
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -1037,6 +1302,103 @@ def gc_allocs(
             _run_gc_allocs_linux(bin_path, name, path, symbol, depth, top, sites)
         else:
             raise click.ClickException(f"Unsupported OS for gc-allocs: {sysname}")
+
+
+@cli.command("jit")
+@click.argument("corpora", nargs=-1)
+@click.option(
+    "--binary",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to rpylean-c binary (default: ./rpylean-c).",
+)
+@click.option(
+    "--jit-opts",
+    default=None,
+    help="Custom `--jit OPTS` string to evaluate against `--jit off` (default: binary default).",
+)
+@click.option(
+    "--traces",
+    is_flag=True,
+    help="Also inspect `PYPYLOG=jit-log-opt:` to rank bridge-spawning loops and guard ops.",
+)
+@click.option("--top", default=15, show_default=True, help="Rows per trace anatomy table.")
+@click.option("--tests-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None)
+def jit_cmd(
+    corpora: tuple[str, ...],
+    binary: Path | None,
+    jit_opts: str | None,
+    traces: bool,
+    top: int,
+    tests_dir: Path | None,
+) -> None:
+    """Measure RPython JIT impact (`--jit off` vs `JIT on`) and trace/bridge counts."""
+    bin_path = (binary or (repo_root() / "rpylean-c")).resolve()
+    if not bin_path.is_file():
+        raise click.ClickException(f"Binary not found: {bin_path} (run `just translate --batch`).")
+    tdir = find_tests_dir(tests_dir)
+    specs = corpora if corpora else DEFAULT_JIT_CORPORA
+    resolved = [resolve_corpus(spec, tdir) for spec in specs]
+    on_args: tuple[str, ...] = ("--jit", jit_opts) if jit_opts else ()
+    title = f"JIT Impact — {bin_path.name}" + (f" (--jit {jit_opts})" if jit_opts else " (default JIT)")
+
+    tbl = Table(title=title, box=box.SIMPLE_HEAVY)
+    tbl.add_column("Corpus", style="bold", no_wrap=True)
+    tbl.add_column("off inst", justify="right", no_wrap=True)
+    tbl.add_column("on inst", justify="right", no_wrap=True)
+    tbl.add_column("inst Δ", justify="right", no_wrap=True)
+    tbl.add_column("cyc Δ", justify="right", no_wrap=True)
+    tbl.add_column("wall off→on", justify="right", no_wrap=True)
+    tbl.add_column("wall Δ", justify="right", no_wrap=True)
+    tbl.add_column("L/B/Ab", justify="right", no_wrap=True)
+    tbl.add_column("Compile", justify="right", no_wrap=True)
+    tbl.add_column("Opt Ops", justify="right", no_wrap=True)
+    tbl.add_column("icx off/on", justify="right", no_wrap=True)
+
+    trace_logs: list[tuple[str, str]] = []
+    for name, path in resolved:
+        r_off, i_off, c_off, x_off, _ = _measure_jit_run(bin_path, path, ("--jit", "off"), None)
+        log_prefix = "jit-summary,jit-log-opt" if traces else "jit-summary"
+        r_on, i_on, c_on, x_on, log_txt = _measure_jit_run(bin_path, path, on_args, log_prefix)
+        jm = _parse_jit_metrics(log_txt)
+        if traces and (jm["loops"] or jm["bridges"]):
+            trace_logs.append((name, log_txt))
+
+        def _fmt_d(old: float | None, new: float | None, deadband: float = 0.5) -> str:
+            if not old or new is None:
+                return "n/a"
+            d = 100.0 * (new - old) / old
+            txt = f"{d:+6.2f}%"
+            if d <= -deadband:
+                return f"[green]{txt}[/green]"
+            if d >= deadband:
+                return f"[red]{txt}[/red]"
+            return f"[dim]{txt}[/dim]"
+
+        compile_ms = int(round((float(jm["tracing_s"]) + float(jm["backend_s"])) * 1000))
+        tbl.add_row(
+            name,
+            f"{i_off / 1e9:6.2f}G" if i_off is not None else "n/a",
+            f"{i_on / 1e9:6.2f}G" if i_on is not None else "n/a",
+            _fmt_d(i_off, i_on, 0.25),
+            _fmt_d(c_off, c_on, 0.5),
+            f"{r_off:5.2f}→{r_on:5.2f}s",
+            _fmt_d(r_off, r_on, 1.0),
+            f"{jm['loops']}/{jm['bridges']}/{jm['aborts']}",
+            f"{compile_ms}ms",
+            f"{int(jm['opt_ops']):,}",
+            f"{x_off}/{x_on}" if x_off is not None and x_on is not None else "n/a",
+        )
+
+    console.print()
+    console.print(tbl)
+    if traces:
+        console.print(
+            "[dim]Note: --traces enables PYPYLOG=jit-log-opt I/O on the 'on' run; "
+            "omit --traces for clean JIT timing.[/dim]"
+        )
+    for name, log_txt in trace_logs:
+        _summarize_jit_traces(name, log_txt, top)
 
 
 if __name__ == "__main__":

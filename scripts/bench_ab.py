@@ -43,10 +43,12 @@ import math
 import os
 import platform
 import re
+import resource
 import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -57,6 +59,7 @@ from rich.console import Console
 from rich.table import Table
 
 DEFAULT_CORPORA = ("init", "std", "cedar", "cslib", "navier-stokes-euler")
+JIT_PERF_FIXTURES = ("grind-ring-5.ndjson", "magma-list-deep-n21.ndjson", "magma-list-deep-n36.ndjson")
 
 RE_DARWIN_TIME = re.compile(
     r"^\s*([\d.]+)\s+real\s+([\d.]+)\s+user\s+([\d.]+)\s+sys", re.M
@@ -65,6 +68,7 @@ RE_DARWIN_RSS = re.compile(r"^\s*(\d+)\s+maximum resident set size", re.M)
 RE_DARWIN_INST = re.compile(r"^\s*(\d+)\s+instructions retired", re.M)
 RE_DARWIN_CYC = re.compile(r"^\s*(\d+)\s+cycles elapsed", re.M)
 RE_DARWIN_FOOT = re.compile(r"^\s*(\d+)\s+peak memory footprint", re.M)
+RE_DARWIN_ICX = re.compile(r"^\s*(\d+)\s+involuntary context switches", re.M)
 
 RE_LINUX_PERF_INST = re.compile(r"^\s*([\d,]+)\s+instructions(?::\S*)?", re.M)
 RE_LINUX_PERF_CYC = re.compile(r"^\s*([\d,]+)\s+cycles(?::\S*)?", re.M)
@@ -72,6 +76,14 @@ RE_LINUX_PERF_TIME = re.compile(r"^\s*([\d.]+)\s+seconds time elapsed", re.M)
 RE_LINUX_PERF_USER = re.compile(r"^\s*([\d.]+)\s+seconds user", re.M)
 RE_LINUX_PERF_SYS = re.compile(r"^\s*([\d.]+)\s+seconds sys", re.M)
 RE_LINUX_RSS_KB = re.compile(r"Maximum resident set size \(kbytes\):\s*(\d+)")
+RE_LINUX_ICX = re.compile(r"Involuntary context switches:\s*(\d+)")
+
+RE_JIT_TRACING = re.compile(r"^Tracing:\s+\d+\s+([\d.]+)", re.M)
+RE_JIT_BACKEND = re.compile(r"^Backend:\s+\d+\s+([\d.]+)", re.M)
+RE_JIT_LOOPS = re.compile(r"^Total # of loops:\s*(\d+)", re.M)
+RE_JIT_BRIDGES = re.compile(r"^Total # of bridges:\s*(\d+)", re.M)
+RE_JIT_ABORT = re.compile(r"^abort:[^:]+:\s*(\d+)", re.M)
+RE_JIT_OPT_OPS = re.compile(r"^opt ops:\s*(\d+)", re.M)
 
 STATS_KEYS = (
     "summary:",
@@ -85,10 +97,10 @@ STATS_KEYS = (
     "delta unfolds:",
 )
 
-_term = shutil.get_terminal_size((160, 25))
+_term = shutil.get_terminal_size((184, 25))
 console = Console(
     highlight=False,
-    width=max(160, _term.columns),
+    width=max(184, _term.columns),
     height=_term.lines or 25,
 )
 
@@ -103,6 +115,12 @@ class RunMetrics:
     foot_mib: float | None
     rss_mib: float | None
     summary_lines: list[str]
+    icx: int | None = None
+    jit_loops: int | None = None
+    jit_bridges: int | None = None
+    jit_aborts: int | None = None
+    jit_compile_s: float | None = None
+    jit_opt_ops: int | None = None
 
     @property
     def ipc(self) -> float | None:
@@ -195,46 +213,58 @@ def _extract_stats(stdout: str, stderr: str) -> list[str]:
     ]
 
 
-def _run_darwin(binary: Path, corpus_path: Path, extra: tuple[str, ...]) -> RunMetrics:
-    r = subprocess.run(
-        ["/usr/bin/time", "-l", str(binary), "check", *extra, str(corpus_path)],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        raise click.ClickException(
-            f"{binary.name} failed on {corpus_path.name} (rc={r.returncode}):\n"
-            f"{r.stderr[-600:]}"
-        )
-    err = r.stderr
-    m_time = RE_DARWIN_TIME.search(err)
-    if not m_time:
-        raise click.ClickException(
-            f"Could not parse `/usr/bin/time -l` output:\n{err[-400:]}"
-        )
-    m_rss = RE_DARWIN_RSS.search(err)
-    m_inst = RE_DARWIN_INST.search(err)
-    m_cyc = RE_DARWIN_CYC.search(err)
-    m_foot = RE_DARWIN_FOOT.search(err)
-    return RunMetrics(
-        real_s=float(m_time.group(1)),
-        user_s=float(m_time.group(2)),
-        sys_s=float(m_time.group(3)),
-        inst=int(m_inst.group(1)) if m_inst else None,
-        cyc=int(m_cyc.group(1)) if m_cyc else None,
-        foot_mib=int(m_foot.group(1)) / (1024 * 1024) if m_foot else None,
-        rss_mib=int(m_rss.group(1)) / (1024 * 1024) if m_rss else None,
-        summary_lines=_extract_stats(r.stdout, err),
-    )
+def _grow_stack_preexec() -> None:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        target = hard if hard != resource.RLIM_INFINITY else 1024 * 1024 * 1024
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_STACK, (target, hard))
+    except (ValueError, OSError):
+        pass
 
 
-def _run_linux(binary: Path, corpus_path: Path, extra: tuple[str, ...]) -> RunMetrics:
-    cmd = [str(binary), "check", *extra, str(corpus_path)]
-    if shutil.which("perf"):
+def _parse_jit_summary(path: str) -> tuple[int | None, int | None, int | None, float | None, int | None]:
+    if not os.path.exists(path):
+        return None, None, None, None, None
+    txt = Path(path).read_text(errors="replace")
+    if not txt.strip():
+        return 0, 0, 0, 0.0, 0
+    m_loops = RE_JIT_LOOPS.search(txt)
+    m_bridges = RE_JIT_BRIDGES.search(txt)
+    m_tr = RE_JIT_TRACING.search(txt)
+    m_be = RE_JIT_BACKEND.search(txt)
+    m_ops = RE_JIT_OPT_OPS.search(txt)
+    loops = int(m_loops.group(1)) if m_loops else 0
+    bridges = int(m_bridges.group(1)) if m_bridges else 0
+    aborts = sum(int(m.group(1)) for m in RE_JIT_ABORT.finditer(txt))
+    compile_s = (float(m_tr.group(1)) if m_tr else 0.0) + (float(m_be.group(1)) if m_be else 0.0)
+    opt_ops = int(m_ops.group(1)) if m_ops else 0
+    return loops, bridges, aborts, compile_s, opt_ops
+
+
+def _run_darwin(
+    binary: Path,
+    corpus_path: Path,
+    extra: tuple[str, ...],
+    pre_args: tuple[str, ...] = (),
+    track_jit: bool = True,
+) -> RunMetrics:
+    env = os.environ.copy()
+    jit_log: str | None = None
+    preexec = None
+    if track_jit and "--jit" not in pre_args:
+        fd, jit_log = tempfile.mkstemp(prefix="rpylean-jit-", suffix=".log")
+        os.close(fd)
+        env["PYPYLOG"] = f"jit-summary:{jit_log}"
+        env["RPYLEAN_STACK_GROWN"] = "1"
+        preexec = _grow_stack_preexec
+    try:
         r = subprocess.run(
-            ["perf", "stat", "-e", "instructions,cycles", "--", *cmd],
+            ["/usr/bin/time", "-l", str(binary), *pre_args, "check", *extra, str(corpus_path)],
             capture_output=True,
             text=True,
+            env=env,
+            preexec_fn=preexec,
         )
         if r.returncode != 0:
             raise click.ClickException(
@@ -242,43 +272,130 @@ def _run_linux(binary: Path, corpus_path: Path, extra: tuple[str, ...]) -> RunMe
                 f"{r.stderr[-600:]}"
             )
         err = r.stderr
-        m_inst = RE_LINUX_PERF_INST.search(err)
-        m_cyc = RE_LINUX_PERF_CYC.search(err)
-        m_real = RE_LINUX_PERF_TIME.search(err)
-        m_user = RE_LINUX_PERF_USER.search(err)
-        m_sys = RE_LINUX_PERF_SYS.search(err)
+        m_time = RE_DARWIN_TIME.search(err)
+        if not m_time:
+            raise click.ClickException(
+                f"Could not parse `/usr/bin/time -l` output:\n{err[-400:]}"
+            )
+        m_rss = RE_DARWIN_RSS.search(err)
+        m_inst = RE_DARWIN_INST.search(err)
+        m_cyc = RE_DARWIN_CYC.search(err)
+        m_foot = RE_DARWIN_FOOT.search(err)
+        m_icx = RE_DARWIN_ICX.search(err)
+        jl, jb, ja, jc, jo = _parse_jit_summary(jit_log) if jit_log else (None, None, None, None, None)
         return RunMetrics(
-            real_s=float(m_real.group(1)) if m_real else 0.0,
-            user_s=float(m_user.group(1)) if m_user else 0.0,
-            sys_s=float(m_sys.group(1)) if m_sys else 0.0,
-            inst=int(m_inst.group(1).replace(",", "")) if m_inst else None,
-            cyc=int(m_cyc.group(1).replace(",", "")) if m_cyc else None,
-            foot_mib=None,
-            rss_mib=None,
+            real_s=float(m_time.group(1)),
+            user_s=float(m_time.group(2)),
+            sys_s=float(m_time.group(3)),
+            inst=int(m_inst.group(1)) if m_inst else None,
+            cyc=int(m_cyc.group(1)) if m_cyc else None,
+            foot_mib=int(m_foot.group(1)) / (1024 * 1024) if m_foot else None,
+            rss_mib=int(m_rss.group(1)) / (1024 * 1024) if m_rss else None,
             summary_lines=_extract_stats(r.stdout, err),
+            icx=int(m_icx.group(1)) if m_icx else None,
+            jit_loops=jl,
+            jit_bridges=jb,
+            jit_aborts=ja,
+            jit_compile_s=jc,
+            jit_opt_ops=jo,
         )
-    t0 = time.perf_counter()
-    if Path("/usr/bin/time").exists():
-        r = subprocess.run(["/usr/bin/time", "-v", *cmd], capture_output=True, text=True)
-    else:
-        r = subprocess.run(cmd, capture_output=True, text=True)
-    real_s = time.perf_counter() - t0
-    if r.returncode != 0:
-        raise click.ClickException(
-            f"{binary.name} failed on {corpus_path.name} (rc={r.returncode}):\n"
-            f"{r.stderr[-600:]}"
+    finally:
+        if jit_log and os.path.exists(jit_log):
+            os.unlink(jit_log)
+
+
+def _run_linux(
+    binary: Path,
+    corpus_path: Path,
+    extra: tuple[str, ...],
+    pre_args: tuple[str, ...] = (),
+    track_jit: bool = True,
+) -> RunMetrics:
+    cmd = [str(binary), *pre_args, "check", *extra, str(corpus_path)]
+    env = os.environ.copy()
+    jit_log: str | None = None
+    preexec = None
+    if track_jit and "--jit" not in pre_args:
+        fd, jit_log = tempfile.mkstemp(prefix="rpylean-jit-", suffix=".log")
+        os.close(fd)
+        env["PYPYLOG"] = f"jit-summary:{jit_log}"
+        env["RPYLEAN_STACK_GROWN"] = "1"
+        preexec = _grow_stack_preexec
+    try:
+        if shutil.which("perf"):
+            r = subprocess.run(
+                ["perf", "stat", "-e", "instructions,cycles", "--", *cmd],
+                capture_output=True,
+                text=True,
+                env=env,
+                preexec_fn=preexec,
+            )
+            if r.returncode != 0:
+                raise click.ClickException(
+                    f"{binary.name} failed on {corpus_path.name} (rc={r.returncode}):\n"
+                    f"{r.stderr[-600:]}"
+                )
+            err = r.stderr
+            m_inst = RE_LINUX_PERF_INST.search(err)
+            m_cyc = RE_LINUX_PERF_CYC.search(err)
+            m_real = RE_LINUX_PERF_TIME.search(err)
+            m_user = RE_LINUX_PERF_USER.search(err)
+            m_sys = RE_LINUX_PERF_SYS.search(err)
+            jl, jb, ja, jc, jo = _parse_jit_summary(jit_log) if jit_log else (None, None, None, None, None)
+            return RunMetrics(
+                real_s=float(m_real.group(1)) if m_real else 0.0,
+                user_s=float(m_user.group(1)) if m_user else 0.0,
+                sys_s=float(m_sys.group(1)) if m_sys else 0.0,
+                inst=int(m_inst.group(1).replace(",", "")) if m_inst else None,
+                cyc=int(m_cyc.group(1).replace(",", "")) if m_cyc else None,
+                foot_mib=None,
+                rss_mib=None,
+                summary_lines=_extract_stats(r.stdout, err),
+                jit_loops=jl,
+                jit_bridges=jb,
+                jit_aborts=ja,
+                jit_compile_s=jc,
+                jit_opt_ops=jo,
+            )
+        t0 = time.perf_counter()
+        if Path("/usr/bin/time").exists():
+            r = subprocess.run(
+                ["/usr/bin/time", "-v", *cmd],
+                capture_output=True,
+                text=True,
+                env=env,
+                preexec_fn=preexec,
+            )
+        else:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, preexec_fn=preexec)
+        real_s = time.perf_counter() - t0
+        if r.returncode != 0:
+            raise click.ClickException(
+                f"{binary.name} failed on {corpus_path.name} (rc={r.returncode}):\n"
+                f"{r.stderr[-600:]}"
+            )
+        m_rss = RE_LINUX_RSS_KB.search(r.stderr)
+        m_icx = RE_LINUX_ICX.search(r.stderr)
+        jl, jb, ja, jc, jo = _parse_jit_summary(jit_log) if jit_log else (None, None, None, None, None)
+        return RunMetrics(
+            real_s=real_s,
+            user_s=real_s,
+            sys_s=0.0,
+            inst=None,
+            cyc=None,
+            foot_mib=None,
+            rss_mib=int(m_rss.group(1)) / 1024.0 if m_rss else None,
+            summary_lines=_extract_stats(r.stdout, r.stderr),
+            icx=int(m_icx.group(1)) if m_icx else None,
+            jit_loops=jl,
+            jit_bridges=jb,
+            jit_aborts=ja,
+            jit_compile_s=jc,
+            jit_opt_ops=jo,
         )
-    m_rss = RE_LINUX_RSS_KB.search(r.stderr)
-    return RunMetrics(
-        real_s=real_s,
-        user_s=real_s,
-        sys_s=0.0,
-        inst=None,
-        cyc=None,
-        foot_mib=None,
-        rss_mib=int(m_rss.group(1)) / 1024.0 if m_rss else None,
-        summary_lines=_extract_stats(r.stdout, r.stderr),
-    )
+    finally:
+        if jit_log and os.path.exists(jit_log):
+            os.unlink(jit_log)
 
 
 def run_one(
@@ -287,12 +404,14 @@ def run_one(
     corpus_name: str,
     corpus_path: Path,
     extra: tuple[str, ...] = (),
+    pre_args: tuple[str, ...] = (),
     quiet: bool = False,
+    track_jit: bool = True,
 ) -> RunMetrics:
     if platform.system() == "Darwin":
-        m = _run_darwin(binary, corpus_path, extra)
+        m = _run_darwin(binary, corpus_path, extra, pre_args, track_jit)
     else:
-        m = _run_linux(binary, corpus_path, extra)
+        m = _run_linux(binary, corpus_path, extra, pre_args, track_jit)
     if not quiet:
         parts = [
             f"{label:14s}",
@@ -309,6 +428,11 @@ def run_one(
             parts.append(f"foot={m.foot_mib:7.1f}MiB")
         if m.rss_mib is not None:
             parts.append(f"rss={m.rss_mib:6.1f}MiB")
+        if m.icx is not None:
+            parts.append(f"icx={m.icx}")
+        if m.jit_loops is not None and (m.jit_loops > 0 or (m.jit_bridges or 0) > 0):
+            ms = int(round((m.jit_compile_s or 0.0) * 1000))
+            parts.append(f"jit={m.jit_loops}L/{m.jit_bridges}B({ms}ms)")
         console.print("  ".join(parts))
         for line in m.summary_lines:
             console.print(f"    [dim]{line}[/dim]")
@@ -322,6 +446,12 @@ def aggregate(runs: list[RunMetrics]) -> AggregateMetrics:
     cycs = [r.cyc for r in runs if r.cyc is not None]
     foots = [r.foot_mib for r in runs if r.foot_mib is not None]
     rsss = [r.rss_mib for r in runs if r.rss_mib is not None]
+    icxs = [r.icx for r in runs if r.icx is not None]
+    jloops = [r.jit_loops for r in runs if r.jit_loops is not None]
+    jbridges = [r.jit_bridges for r in runs if r.jit_bridges is not None]
+    jaborts = [r.jit_aborts for r in runs if r.jit_aborts is not None]
+    jcomps = [r.jit_compile_s for r in runs if r.jit_compile_s is not None]
+    jops = [r.jit_opt_ops for r in runs if r.jit_opt_ops is not None]
     med = RunMetrics(
         real_s=statistics.median(r.real_s for r in runs),
         user_s=statistics.median(r.user_s for r in runs),
@@ -331,6 +461,12 @@ def aggregate(runs: list[RunMetrics]) -> AggregateMetrics:
         foot_mib=statistics.median(foots) if foots else None,
         rss_mib=statistics.median(rsss) if rsss else None,
         summary_lines=runs[-1].summary_lines,
+        icx=int(statistics.median(icxs)) if icxs else None,
+        jit_loops=int(statistics.median(jloops)) if jloops else None,
+        jit_bridges=int(statistics.median(jbridges)) if jbridges else None,
+        jit_aborts=int(statistics.median(jaborts)) if jaborts else None,
+        jit_compile_s=statistics.median(jcomps) if jcomps else None,
+        jit_opt_ops=int(statistics.median(jops)) if jops else None,
     )
     return AggregateMetrics(median=med, runs=runs)
 
@@ -343,16 +479,22 @@ def run_perf_fixtures(binary: Path, tests_dir: Path | None) -> None:
     if not perf_files:
         console.print(f"[yellow]WARNING:[/yellow] no perf fixtures under {tests_dir / 'perf'}")
         return
+    jit_notes: list[str] = []
     for f in perf_files:
         base = os.path.basename(f)
         expect = 1 if base.startswith("refute-") else 0
+        t0 = time.perf_counter()
         r = subprocess.run([str(binary), "check", f], capture_output=True)
+        dt = time.perf_counter() - t0
         if r.returncode != expect:
             msg = r.stderr.decode("utf-8", "replace")[:400]
             raise click.ClickException(
                 f"PERF FIXTURE FAIL {base}: rc={r.returncode} expected={expect}\n{msg}"
             )
-    console.print(f"[green]Perf fixtures:[/green] {len(perf_files)}/{len(perf_files)} PASSED")
+        if base in JIT_PERF_FIXTURES:
+            jit_notes.append(f"{base[:-7]}={dt:.2f}s")
+    extra_note = f"  [dim]({', '.join(jit_notes)})[/dim]" if jit_notes else ""
+    console.print(f"[green]Perf fixtures:[/green] {len(perf_files)}/{len(perf_files)} PASSED{extra_note}")
 
 
 def run_translated_tests(candidate: Path) -> None:
@@ -437,6 +579,12 @@ def render_summary(
     table.add_column("wall Δ", justify="right", no_wrap=True)
     table.add_column("IPC", justify="right", no_wrap=True)
     table.add_column("foot Δ", justify="right", no_wrap=True)
+    has_jit = any(
+        (n.median.jit_loops or 0) > 0 or (o.median.jit_loops or 0) > 0
+        for o, n in results.values()
+    )
+    if has_jit:
+        table.add_column("JIT L/B", justify="right", no_wrap=True)
     if runs > 1:
         table.add_column("cyc spread", justify="right", no_wrap=True)
 
@@ -501,6 +649,15 @@ def render_summary(
             foot_d = "n/a"
 
         row = [corpus, inst_str, inst_d, cyc_str, cyc_d, wall_str, wall_d, ipc_str, foot_d]
+        if has_jit:
+            if new.jit_loops is not None:
+                ms = int(round((new.jit_compile_s or 0.0) * 1000))
+                if old.jit_loops is not None and (old.jit_loops != new.jit_loops or old.jit_bridges != new.jit_bridges):
+                    row.append(f"{old.jit_loops}/{old.jit_bridges}->{new.jit_loops}/{new.jit_bridges} ({ms}ms)")
+                else:
+                    row.append(f"{new.jit_loops}/{new.jit_bridges} ({ms}ms)")
+            else:
+                row.append("n/a")
         if runs > 1:
             s_old = old_agg.cyc_spread_pct
             s_new = new_agg.cyc_spread_pct
@@ -584,6 +741,11 @@ def render_summary(
     help="Shorthand for `--skip-perf --skip-translated`.",
 )
 @click.option(
+    "--jit-ab",
+    is_flag=True,
+    help="Also measure candidate `--jit off` vs `JIT on` on the benchmarked corpora.",
+)
+@click.option(
     "--stats",
     is_flag=True,
     help="Also run candidate with `--stats` on the last corpus.",
@@ -628,6 +790,7 @@ def main(
     skip_perf: bool,
     skip_translated: bool,
     only_bench: bool,
+    jit_ab: bool,
     stats: bool,
     max_inst_regression: float | None,
     max_cyc_regression: float | None,
@@ -712,6 +875,14 @@ def main(
         max_cyc_regression,
         max_foot_regression,
     )
+
+    if jit_ab:
+        jit_results: dict[str, tuple[AggregateMetrics, AggregateMetrics]] = {}
+        console.print("\n[bold]JIT Impact Check (`--jit off` vs `JIT on` on candidate):[/bold]")
+        for corpus_name, corpus_path in resolved_corpora:
+            off_m = run_one(f"{new_label}:off", new_bin, corpus_name, corpus_path, pre_args=("--jit", "off"), track_jit=False)
+            jit_results[corpus_name] = (aggregate([off_m]), results[corpus_name][1])
+        render_summary(f"{new_label} (--jit off)", f"{new_label} (JIT on)", jit_results, 1, None, None, None)
 
     if json_out is not None:
         payload = {
