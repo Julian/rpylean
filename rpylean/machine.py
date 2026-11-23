@@ -2841,9 +2841,7 @@ class TermStore(object):
                             na = self._inst_d0(cur, sub, tag, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cri)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -3045,9 +3043,7 @@ class TermStore(object):
                             na = self._inst_oneshot(cur, sub, depth, gen, sub_closed, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -3304,9 +3300,7 @@ class TermStore(object):
                             na = self._inst_multi_oneshot(cur, substs, n, depth, gen, all_closed, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -3401,6 +3395,12 @@ class TermStore(object):
         elif depth < (1 << 16):
             self._call_memo.set((h << 16) | depth, r)
         return r
+
+    @dont_inline
+    def _grow_subst_stack(self, stop):
+        ncap = self._subst_cap * 2
+        self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
+        self._subst_cap = ncap
 
     @dont_inline
     def inst_eq_buf(self, pat, start, n, target):
@@ -3555,6 +3555,14 @@ class TermStore(object):
                 pat.body, params, clevels, buf, start, n,
                 _s32(recs[tbase + F_B]), depth + 1, budget,
             )
+        return self._ast_inst_eq_cold(
+            pat, params, clevels, buf, start, n, target, depth, budget,
+        )
+
+    @dont_inline
+    def _ast_inst_eq_cold(self, pat, params, clevels, buf, start, n, target, depth, budget):
+        cls = pat.__class__
+        recs = self.recs
         if cls is W_Proj:
             if is_leaf(target) or budget <= 0:
                 return -1
@@ -3603,6 +3611,169 @@ class TermStore(object):
             if te.__class__ is cls and pat.syntactic_eq(te):
                 return budget
             return -1
+        return -1
+
+    @dont_inline
+    def ast_inst_eq_inst_buf(self, pat, params, clevels, s1, n1, h2, s2, n2):
+        """Return True only when instantiating raw AST ``pat`` with levels
+        ``params -> clevels`` and ``_spine_buf[s1:s1+n1]`` produces a term
+        structurally equal to ``instantiate_multi_buf(h2, s2, n2, 0)`` (modulo
+        binder names/info), without importing ``pat`` or allocating records."""
+        return self._ast_inst_eq_inst(
+            pat, params, clevels, self._spine_buf, s1, n1, h2, s2, n2, 0, 512,
+        ) >= 0
+
+    def _ast_inst_eq_inst(self, pat, params, clevels, buf, s1, n1, h2, s2, n2, depth, budget):
+        if n2 == 0:
+            return self._ast_inst_eq(
+                pat, params, clevels, buf, s1, n1, h2, depth, budget,
+            )
+        recs = self.recs
+        leaf_meta = self.leaf_meta
+        if is_leaf(h2):
+            lo2 = _s32(leaf_meta[leaf_index(h2)]) >> 1
+            if lo2 <= depth:
+                return self._ast_inst_eq(
+                    pat, params, clevels, buf, s1, n1, h2, depth, budget,
+                )
+            bid2 = lo2 - 1
+            rel2 = bid2 - depth
+            if rel2 < n2:
+                sub2 = _s32(buf[s2 + rel2])
+                if depth == 0 or self.loose_bvar_range(sub2) == 0:
+                    return self._ast_inst_eq(
+                        pat, params, clevels, buf, s1, n1, sub2, depth, budget,
+                    )
+                return -1
+            if pat.__class__ is W_BVar:
+                assert isinstance(pat, W_BVar)
+                bid1 = pat.id
+                if bid1 < depth:
+                    return -1
+                rel1 = bid1 - depth
+                if rel1 < n1:
+                    sub1 = _s32(buf[s1 + rel1])
+                    if ((depth == 0 or self.loose_bvar_range(sub1) == 0)
+                            and is_leaf(sub1)
+                            and _s32(leaf_meta[leaf_index(sub1)]) == ((bid2 - n2 + 1) << 1)):
+                        return budget
+                    return -1
+                return budget if (bid1 - n1) == (bid2 - n2) else -1
+            return -1
+        b2 = rec_index(h2) << 2
+        hdr2 = _s32(recs[b2])
+        if (hdr2 >> 4) <= depth:
+            return self._ast_inst_eq(
+                pat, params, clevels, buf, s1, n1, h2, depth, budget,
+            )
+        if not pat.has_level_param() and pat.loose_bvar_range() <= depth:
+            c = pat._cache
+            if (c >> 32) == self._store_gen:
+                v1 = c & _TABLE_SLOT_MASK
+                if depth == 0:
+                    return self._inst_eq_d0(h2, buf, s2, n2, v1, budget)
+                return self._inst_eq_depth(h2, buf, s2, n2, v1, depth, budget)
+        cls = pat.__class__
+        if cls is W_BVar:
+            assert isinstance(pat, W_BVar)
+            bid1 = pat.id
+            if bid1 < depth:
+                return -1
+            rel1 = bid1 - depth
+            if rel1 < n1:
+                sub1 = _s32(buf[s1 + rel1])
+                if depth == 0:
+                    return self._inst_eq_d0(h2, buf, s2, n2, sub1, budget)
+                if self.loose_bvar_range(sub1) == 0:
+                    return self._inst_eq_depth(h2, buf, s2, n2, sub1, depth, budget)
+            return -1
+        if cls is W_App:
+            if (hdr2 & _KIND_MASK) != KIND_APP:
+                return -1
+            cur = pat
+            while True:
+                if budget <= 0:
+                    return -1
+                budget -= 1
+                assert isinstance(cur, W_App)
+                pa = cur.arg
+                tb = _s32(recs[b2 + F_B])
+                if pa.__class__ is W_BVar and is_leaf(tb):
+                    assert isinstance(pa, W_BVar)
+                    bid1 = pa.id
+                    tm = _s32(leaf_meta[leaf_index(tb)])
+                    if bid1 >= depth and bid1 - depth < n1:
+                        sub1 = _s32(buf[s1 + bid1 - depth])
+                        if (tm >> 1) <= depth:
+                            if sub1 != tb or (depth > 0 and self.loose_bvar_range(sub1) != 0):
+                                return -1
+                        else:
+                            tbid = (tm >> 1) - 1
+                            trel = tbid - depth
+                            if trel < n2:
+                                sub2 = _s32(buf[s2 + trel])
+                                if sub1 != sub2 or (depth > 0 and self.loose_bvar_range(sub1) != 0):
+                                    return -1
+                            else:
+                                if ((depth > 0 and self.loose_bvar_range(sub1) != 0)
+                                        or not is_leaf(sub1)
+                                        or _s32(leaf_meta[leaf_index(sub1)]) != ((tbid - n2 + 1) << 1)):
+                                    return -1
+                    else:
+                        budget = self._ast_inst_eq_inst(
+                            pa, params, clevels, buf, s1, n1, tb, s2, n2, depth, budget,
+                        )
+                        if budget < 0:
+                            return -1
+                else:
+                    budget = self._ast_inst_eq_inst(
+                        pa, params, clevels, buf, s1, n1, tb, s2, n2, depth, budget,
+                    )
+                    if budget < 0:
+                        return -1
+                pf = cur.fn
+                ta = _s32(recs[b2 + F_A])
+                if pf.__class__ is W_App and not is_leaf(ta):
+                    b2 = rec_index(ta) << 2
+                    hdr2 = _s32(recs[b2])
+                    if (hdr2 >> 4) <= depth:
+                        return self._ast_inst_eq(
+                            pf, params, clevels, buf, s1, n1, ta, depth, budget,
+                        )
+                    if (hdr2 & _KIND_MASK) != KIND_APP:
+                        return -1
+                    cur = pf
+                    continue
+                return self._ast_inst_eq_inst(
+                    pf, params, clevels, buf, s1, n1, ta, s2, n2, depth, budget,
+                )
+        if cls is W_ForAll or cls is W_Lambda:
+            want = KIND_FORALL if cls is W_ForAll else KIND_LAMBDA
+            if (hdr2 & _KIND_MASK) != want or budget <= 0:
+                return -1
+            assert isinstance(pat, W_ForAll) or isinstance(pat, W_Lambda)
+            budget = self._ast_inst_eq_inst(
+                pat.type, params, clevels, buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, depth, budget - 1,
+            )
+            if budget < 0:
+                return -1
+            return self._ast_inst_eq_inst(
+                pat.body, params, clevels, buf, s1, n1,
+                _s32(recs[b2 + F_B]), s2, n2, depth + 1, budget,
+            )
+        if cls is W_Proj:
+            if (hdr2 & _KIND_MASK) != KIND_PROJ or budget <= 0:
+                return -1
+            assert isinstance(pat, W_Proj)
+            if self.proj_index(h2) != pat.field_index:
+                return -1
+            if not self.name_of(h2).syntactic_eq(pat.struct_name):
+                return -1
+            return self._ast_inst_eq_inst(
+                pat.struct_expr, params, clevels, buf, s1, n1,
+                _s32(recs[b2 + F_A]), s2, n2, depth, budget - 1,
+            )
         return -1
 
     def _inst_eq_d0(self, pat, buf, start, n, target, budget):
@@ -4278,9 +4449,7 @@ class TermStore(object):
                             na = self._inst_multi_buf_d0(cur, buf, start, n, tag, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cri)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -4384,33 +4553,35 @@ class TermStore(object):
             else:
                 r = self.cons(KIND_PROJ, na, b, _s32(self.recs[(ri << 2) + F_INFO]))
         else:
-            assert kind == KIND_LET
-            value = self.field_a(b)
-            body = self.field_b(b)
-            na = self._inst_multi_buf_d0(a, buf, start, n, tag, nr)
-            nv = self._inst_multi_buf_d0(value, buf, start, n, tag, nr)
-            if self.loose_bvar_range(body) <= 1:
-                nbody = body
-            else:
-                ac = self._inst_all_closed
-                if ac < 0:
-                    ac = 1 if self._buf_all_closed(buf, start, n) else 0
-                    self._inst_all_closed = ac
-                if ac != 0:
-                    nbody = self._inst_multi_buf_closed(
-                        body, buf, start, n, tag | 1, nr,
-                    )
-                else:
-                    nbody = self._inst_multi_buf_oneshot(
-                        body, buf, start, n, 1, tag >> 8, False, nr,
-                    )
-            if na == a and nv == value and nbody == body:
-                r = h
-            else:
-                pair = self.cons(KIND_PAIR, nv, nbody)
-                r = self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
+            r = self._inst_multi_buf_d0_let(h, ri, a, b, buf, start, n, tag, nr)
         self.call_slot[ri] = (tag << 32) | r
         return r
+
+    @dont_inline
+    def _inst_multi_buf_d0_let(self, h, ri, a, b, buf, start, n, tag, nr):
+        value = self.field_a(b)
+        body = self.field_b(b)
+        na = self._inst_multi_buf_d0(a, buf, start, n, tag, nr)
+        nv = self._inst_multi_buf_d0(value, buf, start, n, tag, nr)
+        if self.loose_bvar_range(body) <= 1:
+            nbody = body
+        else:
+            ac = self._inst_all_closed
+            if ac < 0:
+                ac = 1 if self._buf_all_closed(buf, start, n) else 0
+                self._inst_all_closed = ac
+            if ac != 0:
+                nbody = self._inst_multi_buf_closed(
+                    body, buf, start, n, tag | 1, nr,
+                )
+            else:
+                nbody = self._inst_multi_buf_oneshot(
+                    body, buf, start, n, 1, tag >> 8, False, nr,
+                )
+        if na == a and nv == value and nbody == body:
+            return h
+        pair = self.cons(KIND_PAIR, nv, nbody)
+        return self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
 
     def _inst_multi_buf_closed(self, h, buf, start, n, tag, rdepth):
         """Hot specialization of `_inst_multi_buf_oneshot` when all substitutes
@@ -4497,9 +4668,7 @@ class TermStore(object):
                             na = self._inst_multi_buf_closed(cur, buf, start, n, tag, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cri)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -4598,29 +4767,31 @@ class TermStore(object):
             else:
                 r = self.cons(KIND_PROJ, na, b, _s32(self.recs[(ri << 2) + F_INFO]))
         else:
-            assert kind == KIND_LET
-            value = self.field_a(b)
-            body = self.field_b(b)
-            na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
-            nv = self._inst_multi_buf_closed(value, buf, start, n, tag, nr)
-            d1 = depth + 1
-            if self.loose_bvar_range(body) <= d1:
-                nbody = body
-            elif d1 < 256:
-                nbody = self._inst_multi_buf_closed(body, buf, start, n, tag + 1, nr)
-            else:
-                nbody = self._inst_multi_buf_oneshot(body, buf, start, n, d1, tag >> 8, True, nr)
-            if na == a and nv == value and nbody == body:
-                r = h
-            else:
-                pair = self.cons(KIND_PAIR, nv, nbody)
-                r = self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
+            r = self._inst_multi_buf_closed_let(h, ri, a, b, buf, start, n, tag, depth, nr)
         call_slot = self.call_slot
         if (call_slot[ri] >> 40) != (tag >> 8):
             call_slot[ri] = (tag << 32) | r
         else:
             self._call_memo.set((h << 16) | depth, r)
         return r
+
+    @dont_inline
+    def _inst_multi_buf_closed_let(self, h, ri, a, b, buf, start, n, tag, depth, nr):
+        value = self.field_a(b)
+        body = self.field_b(b)
+        na = self._inst_multi_buf_closed(a, buf, start, n, tag, nr)
+        nv = self._inst_multi_buf_closed(value, buf, start, n, tag, nr)
+        d1 = depth + 1
+        if self.loose_bvar_range(body) <= d1:
+            nbody = body
+        elif d1 < 256:
+            nbody = self._inst_multi_buf_closed(body, buf, start, n, tag + 1, nr)
+        else:
+            nbody = self._inst_multi_buf_oneshot(body, buf, start, n, d1, tag >> 8, True, nr)
+        if na == a and nv == value and nbody == body:
+            return h
+        pair = self.cons(KIND_PAIR, nv, nbody)
+        return self.cons(KIND_LET, na, pair, _s32(self.recs[(ri << 2) + F_INFO]))
 
     @dont_inline
     def _inst_multi_buf_oneshot(self, h, buf, start, n, depth, gen, all_closed, rdepth):
@@ -4729,9 +4900,7 @@ class TermStore(object):
                             na = self._inst_multi_buf_oneshot(cur, buf, start, n, depth, gen, all_closed, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -4971,9 +5140,7 @@ class TermStore(object):
                             na = self._inst_multi_rev_d0(cur, substs, n, tag, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cri)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -5189,9 +5356,7 @@ class TermStore(object):
                             na = self._inst_multi_rev_closed(cur, substs, n, tag, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cri)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -5421,9 +5586,7 @@ class TermStore(object):
                             na = self._inst_multi_rev_oneshot(cur, substs, n, depth, gen, all_closed, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -5666,9 +5829,7 @@ class TermStore(object):
                             na = self._instantiate_multi(cur, substs, n, chain, depth, all_closed, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[cbase + F_A])
@@ -5923,9 +6084,7 @@ class TermStore(object):
                             na = self._bind_fvar_oneshot(cur, fvar, depth, gen, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -6146,9 +6305,7 @@ class TermStore(object):
                             na = self._bind_fvars_oneshot(cur, fvars, n, depth, gen, nr)
                             break
                         if stop == self._subst_cap:
-                            ncap = self._subst_cap * 2
-                            self._subst_stack = _grow_u32_uninit(self._subst_stack, stop, ncap)
-                            self._subst_cap = ncap
+                            self._grow_subst_stack(stop)
                         self._subst_stack[stop] = _u32(cur)
                         stop += 1
                         cur = _s32(recs[(cri << 2) + F_A])
@@ -11575,34 +11732,29 @@ class Machine(object):
                 )
         body_ast = dt.body
         if body_ast.loose_bvar_range() == 0:
-            if expected != 0 and exp_n == 0:
-                if store.ast_inst_eq_buf(body_ast, params, clevels, 0, 0, expected):
-                    return expected
+            if expected != 0:
+                if exp_n == 0:
+                    if store.ast_inst_eq_buf(body_ast, params, clevels, 0, 0, expected):
+                        return expected
+                elif store.ast_inst_eq_inst_buf(
+                        body_ast, params, clevels, 0, 0,
+                        expected, exp_start, exp_n):
+                    return 0
             return store.import_const_term(e, decl, body_ast)
         if body_ast.__class__ is W_BVar:
             assert isinstance(body_ast, W_BVar)
             return arg if body_ast.id == 0 else store.bvar(body_ast.id - 1)
-        if expected != 0 and exp_n == 0:
-            sm = store._spine_top
-            store.spine_push(arg)
-            ok_exp = store.ast_inst_eq_buf(body_ast, params, clevels, sm, 1, expected)
-            store.unapp_pop(sm)
-            if ok_exp:
-                return expected
-        if expected != 0 and exp_n > 0:
-            body = store.import_const_term(e, decl, body_ast)
-            sm = store._spine_top
-            store.spine_push(arg)
-            ok_exp = store.inst_eq_inst_buf(
-                body, sm, 1, expected, exp_start, exp_n,
-            )
-            store.unapp_pop(sm)
-            if ok_exp:
-                return 0
-            return store.instantiate(body, arg, 0)
         sm = store._spine_top
         store.spine_push(arg)
         try:
+            if expected != 0:
+                if exp_n == 0:
+                    if store.ast_inst_eq_buf(body_ast, params, clevels, sm, 1, expected):
+                        return expected
+                elif store.ast_inst_eq_inst_buf(
+                        body_ast, params, clevels, sm, 1,
+                        expected, exp_start, exp_n):
+                    return 0
             return store.import_const_subst_buf(e, decl, body_ast, sm, 1)
         finally:
             store.unapp_pop(sm)
@@ -11747,18 +11899,15 @@ class Machine(object):
             assert isinstance(cur, W_BVar)
             bid = cur.id
             return store.spine_arg(mark + bid) if bid < plen else store.bvar(bid - plen)
-        if expected != 0 and exp_n == 0:
-            if store.ast_inst_eq_buf(cur, params, clevels, mark, plen, expected):
-                return expected
+        if expected != 0:
+            if exp_n == 0:
+                if store.ast_inst_eq_buf(cur, params, clevels, mark, plen, expected):
+                    return expected
+            elif store.ast_inst_eq_inst_buf(
+                    cur, params, clevels, mark, plen,
+                    expected, exp_start, exp_n):
+                return 0
         if plen > 0:
-            if expected != 0 and exp_n > 0:
-                fn_type = store.import_const_term(e, decl, cur)
-                if store.inst_eq_inst_buf(
-                        fn_type, mark, plen, expected, exp_start, exp_n):
-                    return 0
-                if plen == 1:
-                    return store.instantiate(fn_type, store.spine_arg(mark), 0)
-                return store.instantiate_multi_buf(fn_type, mark, plen, 0)
             return store.import_const_subst_buf(e, decl, cur, mark, plen)
         return store.import_const_term(e, decl, cur)
 
