@@ -9094,7 +9094,23 @@ class Machine(object):
                 if cb2 is None:
                     cb2 = c2_kind.init_ctor_body(decls)
                 m2 = cb2.m
-                if m2 < 0 or cb2.let_vals is not None or cb2.delegate_const is not None or n_app < m2:
+                if m2 < 0 or n_app < m2:
+                    break
+                if cb2.delegate_const is None or n_app == m2:
+                    bid2 = cb2.bvar_field(fidxs[rem - 1])
+                    if bid2 >= 0:
+                        steps = n_app - m2 + bid2
+                        cur_app = raw_field
+                        while steps > 0:
+                            assert isinstance(cur_app, W_App)
+                            cur_app = cur_app.fn
+                            steps -= 1
+                        assert isinstance(cur_app, W_App)
+                        raw_field = cur_app.arg
+                        rem -= 1
+                        popped += 1
+                        continue
+                if cb2.let_vals is not None or cb2.delegate_const is not None:
                     break
                 idx2 = cb2.num_params + fidxs[rem - 1]
                 nargs2 = len(cb2.args)
@@ -9209,14 +9225,15 @@ class Machine(object):
             store.unapp_pop(mark)
 
     def _eval_raw_field(self, j, const, decl, cb, raw_idx, raw_field,
-                        popped, arg_base, m, ptop):
+                        popped, arg_base, m, ptop, cur_nlets=-1):
         """Import and instantiate ``raw_field`` (originally ``cb.args[raw_idx]``,
         after ``popped`` projection peels) in ``cb``'s environment with ``m``
         lambda arguments at `_spine_buf[arg_base:arg_base+m]`."""
         store = self.store
         fidxs = self._proj_fidxs
         let_vals = cb.let_vals
-        if let_vals is None:
+        nlets = 0 if let_vals is None else (len(let_vals) if cur_nlets < 0 else cur_nlets)
+        if nlets == 0:
             if isinstance(raw_field, W_BVar):
                 bid = raw_field.id
                 if 0 <= bid < m:
@@ -9259,7 +9276,7 @@ class Machine(object):
             if m == 1:
                 return store.instantiate(fh, store.spine_arg(arg_base), 0)
             return store.instantiate_multi_buf(fh, arg_base, m, 0)
-        nlets = len(let_vals)
+        assert let_vals is not None
         if isinstance(raw_field, W_BVar):
             bid = raw_field.id
             if nlets <= bid < nlets + m:
@@ -9274,12 +9291,13 @@ class Machine(object):
             k += 1
         uses = cb.uses_lets
         assert uses is not None
-        uses_let = uses[raw_idx]
-        if uses_let and popped > 1:
-            uses_let = _expr_has_bvar_lt(raw_field, nlets, 0)
+        need_mask = uses[raw_idx] & ((1 << nlets) - 1)
+        if need_mask != 0 and popped > 1:
+            if not _expr_has_bvar_lt(raw_field, nlets, 0):
+                need_mask = 0
         store._spine_top = smark + total
         try:
-            if not uses_let:
+            if need_mask == 0:
                 li = 0
                 while li < nlets:
                     store._spine_buf[smark + li] = _u32(self.h_prop)
@@ -9287,6 +9305,10 @@ class Machine(object):
             else:
                 li = 0
                 while li < nlets:
+                    if (need_mask & (1 << li)) == 0:
+                        store._spine_buf[smark + nlets - 1 - li] = _u32(self.h_prop)
+                        li += 1
+                        continue
                     vh = store.import_const_term(const, decl, let_vals[li])
                     cnt = li + m
                     if cnt > 0 and store.loose_bvar_range(vh) > 0:
@@ -9425,12 +9447,25 @@ class Machine(object):
                     i += 1
                 self._proj_popped = 1
                 return res
+        raw = cb.args[idx]
+        cur_nlets = -1
+        let_vals = cb.let_vals
+        if let_vals is not None:
+            cur_nlets = len(let_vals)
+            while cur_nlets > 0 and isinstance(raw, W_BVar):
+                bid = raw.id
+                if 0 <= bid < cur_nlets:
+                    li = cur_nlets - 1 - bid
+                    raw = let_vals[li]
+                    cur_nlets = li
+                else:
+                    break
         raw_field = self._peel_nested_ctor_field(
-            cb.args[idx], fidxs, pbase, ptop,
+            raw, fidxs, pbase, ptop,
         )
         return self._eval_raw_field(
             j, const, decl, cb, idx, raw_field,
-            self._proj_popped, arg_base, m, ptop,
+            self._proj_popped, arg_base, m, ptop, cur_nlets,
         )
 
     def _eval_delegate_ctor_proj(self, j, const, decl, cb, arg_base, m, pbase, ptop):
@@ -9456,20 +9491,42 @@ class Machine(object):
         ibid = inner_cb.bvar_field(fidx)
         if ibid >= 0:
             arg_idx = inner_m - 1 - ibid
+            raw = cb.args[arg_idx]
+            cur_nlets = -1
+            let_vals = cb.let_vals
+            if let_vals is not None:
+                cur_nlets = len(let_vals)
+                while cur_nlets > 0 and isinstance(raw, W_BVar):
+                    bid = raw.id
+                    if 0 <= bid < cur_nlets:
+                        li = cur_nlets - 1 - bid
+                        raw = let_vals[li]
+                        cur_nlets = li
+                    else:
+                        break
             raw_field = self._peel_nested_ctor_field(
-                cb.args[arg_idx], fidxs, pbase, ptop,
+                raw, fidxs, pbase, ptop,
             )
             return self._eval_raw_field(
                 j, const, decl, cb, arg_idx, raw_field,
-                self._proj_popped, arg_base, m, ptop,
+                self._proj_popped, arg_base, m, ptop, cur_nlets,
             )
         inner_mask = inner_cb.field_mask(fidx)
         if inner_mask < 0:
             return 0
-        # If every argument of Inner is needed (0 skipped), fall back so normal
-        # unfolding does a single DAG-shared instantiation and caches `M_WHNF`.
-        if inner_m <= 62 and inner_mask == ((1 << inner_m) - 1):
-            return 0
+        # Only materialize a partial argument subset individually when it
+        # skips at least half of Inner's arguments; otherwise normal unfolding
+        # wins via single-pass DAG sharing across arguments and `M_WHNF` memo.
+        if inner_m <= 62:
+            if inner_mask == ((1 << inner_m) - 1):
+                return 0
+            used_cnt = 0
+            tmp_m = inner_mask
+            while tmp_m != 0:
+                tmp_m &= tmp_m - 1
+                used_cnt += 1
+            if used_cnt > 8 and used_cnt * 2 > inner_m:
+                return 0
         dkey = ((j + 1) << 22) | 1023
         inner_head = self._proj_field_cache.get(dkey, 0)
         if inner_head == 0:
@@ -9491,13 +9548,11 @@ class Machine(object):
                 env_total = nlets + m
                 uses = cb.uses_lets
                 assert uses is not None
-                need_lets = False
+                need_mask = 0
                 bid = 0
                 while bid < inner_m:
                     if inner_mask < 0 or (inner_mask & (1 << bid)) != 0:
-                        if uses[inner_m - 1 - bid]:
-                            need_lets = True
-                            break
+                        need_mask |= uses[inner_m - 1 - bid]
                     bid += 1
                 env_base = store._spine_top
                 store.ensure_spine_room(env_total)
@@ -9507,7 +9562,7 @@ class Machine(object):
                     buf[env_base + nlets + k] = buf[arg_base + k]
                     k += 1
                 store._spine_top = env_base + env_total
-                if not need_lets:
+                if need_mask == 0:
                     li = 0
                     while li < nlets:
                         store._spine_buf[env_base + li] = _u32(self.h_prop)
@@ -9515,6 +9570,10 @@ class Machine(object):
                 else:
                     li = 0
                     while li < nlets:
+                        if (need_mask & (1 << li)) == 0:
+                            store._spine_buf[env_base + nlets - 1 - li] = _u32(self.h_prop)
+                            li += 1
+                            continue
                         vh = store.import_const_term(const, decl, let_vals[li])
                         cnt = li + m
                         if cnt > 0 and store.loose_bvar_range(vh) > 0:

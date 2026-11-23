@@ -5483,23 +5483,38 @@ class _CtorBody(object):
         fm[fidx] = res
         return res
 
+    def _resolve_let_bvar(self, expr):
+        """If ``expr`` is a `W_BVar` pointing (possibly through `let_vals`) to
+        one of this `_CtorBody`'s ``m`` lambda arguments, return its lambda
+        BVar index ``0 <= bid < self.m``; otherwise return ``-1``."""
+        let_vals = self.let_vals
+        cur_nlets = 0 if let_vals is None else len(let_vals)
+        cur = expr
+        while isinstance(cur, W_BVar):
+            bid = cur.id
+            if cur_nlets <= bid < cur_nlets + self.m:
+                return bid - cur_nlets
+            if 0 <= bid < cur_nlets:
+                assert let_vals is not None
+                li = cur_nlets - 1 - bid
+                cur = let_vals[li]
+                cur_nlets = li
+                continue
+            return -1
+        return -1
+
     def bvar_field(self, fidx):
         """When this `_CtorBody` selects a single lambda argument ``BVar(bid)``
-        directly for structure field ``fidx`` (no lets, chaining through any
+        for structure field ``fidx`` (chaining through any `let_vals` and
         delegating `_CtorBody`s), return ``bid`` (``0 <= bid < self.m``);
         otherwise return ``-1``."""
-        if fidx < 0 or self.let_vals is not None:
+        if fidx < 0:
             return -1
         if self.delegate_const is None:
             idx = self.num_params + fidx
             if idx >= len(self.args):
                 return -1
-            arg = self.args[idx]
-            if isinstance(arg, W_BVar):
-                bid = arg.id
-                if 0 <= bid < self.m:
-                    return bid
-            return -1
+            return self._resolve_let_bvar(self.args[idx])
         inner_decl = self.delegate_decl
         assert inner_decl is not None
         inner_kind = inner_decl.w_kind
@@ -5509,25 +5524,67 @@ class _CtorBody(object):
         ibid = inner_cb.bvar_field(fidx)
         if ibid < 0:
             return -1
-        arg = self.args[inner_cb.m - 1 - ibid]
-        if isinstance(arg, W_BVar):
-            bid = arg.id
-            if 0 <= bid < self.m:
-                return bid
-        return -1
+        return self._resolve_let_bvar(self.args[inner_cb.m - 1 - ibid])
+
+    def _compute_let_masks(self):
+        """For each `let_vals[li]`, return the transitive bitmask of this
+        `_CtorBody`'s ``m`` lambda arguments it depends on (or ``-1``)."""
+        let_vals = self.let_vals
+        assert let_vals is not None
+        nlets = len(let_vals)
+        m = self.m
+        if m + nlets > 62:
+            return None
+        let_masks = [0] * nlets
+        li = 0
+        while li < nlets:
+            lm = _expr_bvar_mask(let_vals[li], m + li, 0, {})
+            if lm < 0:
+                let_masks[li] = -1
+            else:
+                rm = lm >> li
+                b = 0
+                while b < li:
+                    if (lm & (1 << b)) != 0:
+                        pm = let_masks[li - 1 - b]
+                        if pm < 0:
+                            rm = -1
+                            break
+                        rm |= pm
+                    b += 1
+                let_masks[li] = rm
+            li += 1
+        return let_masks
 
     def _compute_field_mask(self, fidx):
-        nlets = 0 if self.let_vals is None else len(self.let_vals)
+        let_vals = self.let_vals
+        nlets = 0 if let_vals is None else len(let_vals)
         if self.delegate_const is None:
             idx = self.num_params + fidx
             if idx >= len(self.args):
                 return -2
-            if nlets > 0:
-                uses = self.uses_lets
-                assert uses is not None
-                if uses[idx]:
-                    return -1
-            return _expr_bvar_mask(self.args[idx], self.m, nlets, {})
+            if nlets == 0:
+                return _expr_bvar_mask(self.args[idx], self.m, 0, {})
+            uses = self.uses_lets
+            assert uses is not None
+            if uses[idx] == 0:
+                return _expr_bvar_mask(self.args[idx], self.m, nlets, {})
+            let_masks = self._compute_let_masks()
+            if let_masks is None:
+                return -1
+            em = _expr_bvar_mask(self.args[idx], self.m + nlets, 0, {})
+            if em < 0:
+                return -1
+            rm = em >> nlets
+            b = 0
+            while b < nlets:
+                if (em & (1 << b)) != 0:
+                    pm = let_masks[nlets - 1 - b]
+                    if pm < 0:
+                        return -1
+                    rm |= pm
+                b += 1
+            return rm
         inner_decl = self.delegate_decl
         assert inner_decl is not None
         inner_kind = inner_decl.w_kind
@@ -5542,21 +5599,89 @@ class _CtorBody(object):
             return -1
         out_mask = 0
         uses = self.uses_lets
+        let_masks = None
         seen = {}
+        seen_lets = None
         bid = 0
         while bid < inner_m:
             if (inner_mask & (1 << bid)) != 0:
                 arg_idx = inner_m - 1 - bid
                 if nlets > 0:
                     assert uses is not None
-                    if uses[arg_idx]:
-                        return -1
+                    if uses[arg_idx] != 0:
+                        if let_masks is None:
+                            let_masks = self._compute_let_masks()
+                            if let_masks is None:
+                                return -1
+                            seen_lets = {}
+                        assert seen_lets is not None
+                        em = _expr_bvar_mask(
+                            self.args[arg_idx], self.m + nlets, 0, seen_lets,
+                        )
+                        if em < 0:
+                            return -1
+                        rm = em >> nlets
+                        b = 0
+                        while b < nlets:
+                            if (em & (1 << b)) != 0:
+                                pm = let_masks[nlets - 1 - b]
+                                if pm < 0:
+                                    return -1
+                                rm |= pm
+                            b += 1
+                        out_mask |= rm
+                        bid += 1
+                        continue
                 bm = _expr_bvar_mask(self.args[arg_idx], self.m, nlets, seen)
                 if bm < 0:
                     return -1
                 out_mask |= bm
             bid += 1
         return out_mask
+
+
+def _compute_uses_lets_masks(let_vals, args):
+    """Precompute for each `args[i]` an 8-bit bitmask of which `let_vals[li]`
+    (bit ``li``) it transitively depends on."""
+    nlets = len(let_vals)
+    # Transitive let-dependency mask of each let_vals[li] (bits 0..li-1).
+    let_deps = [0] * nlets
+    li = 1
+    while li < nlets:
+        lm = _expr_bvar_mask(let_vals[li], li, 0, {})
+        if lm < 0:
+            let_deps[li] = (1 << li) - 1
+        else:
+            d = 0
+            b = 0
+            while b < li:
+                if (lm & (1 << b)) != 0:
+                    prev = li - 1 - b
+                    d |= (1 << prev) | let_deps[prev]
+                b += 1
+            let_deps[li] = d
+        li += 1
+    seen = {}
+    out = []
+    i = 0
+    nargs = len(args)
+    while i < nargs:
+        bm = _expr_bvar_mask(args[i], nlets, 0, seen)
+        if bm < 0:
+            out.append((1 << nlets) - 1)
+        elif bm == 0:
+            out.append(0)
+        else:
+            d = 0
+            b = 0
+            while b < nlets:
+                if (bm & (1 << b)) != 0:
+                    prev = nlets - 1 - b
+                    d |= (1 << prev) | let_deps[prev]
+                b += 1
+            out.append(d)
+        i += 1
+    return out
 
 
 _NO_CTOR_BODY = _CtorBody(-1, 0, None, [], None)
@@ -5781,15 +5906,11 @@ class W_Definition(W_DeclarationKind):
             while i >= 0:
                 args.append(rev_args[i])
                 i -= 1
-            uses_lets = None
-            if let_vals is not None:
-                nlets = len(let_vals)
-                uses_lets = []
-                i = 0
-                nargs = len(args)
-                while i < nargs:
-                    uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
-                    i += 1
+            uses_lets = (
+                _compute_uses_lets_masks(let_vals, args)
+                if let_vals is not None
+                else None
+            )
             cb = _CtorBody(m, target_kind.num_params, let_vals, args, uses_lets)
             self._ctor_body = cb
             return cb
@@ -5808,15 +5929,11 @@ class W_Definition(W_DeclarationKind):
                 while i >= 0:
                     args.append(rev_args[i])
                     i -= 1
-                uses_lets = None
-                if let_vals is not None:
-                    nlets = len(let_vals)
-                    uses_lets = []
-                    i = 0
-                    nargs = len(args)
-                    while i < nargs:
-                        uses_lets.append(_expr_has_bvar_lt(args[i], nlets, 0))
-                        i += 1
+                uses_lets = (
+                    _compute_uses_lets_masks(let_vals, args)
+                    if let_vals is not None
+                    else None
+                )
                 cb = _CtorBody(m, 0, let_vals, args, uses_lets, node, target_decl)
                 self._ctor_body = cb
                 return cb
