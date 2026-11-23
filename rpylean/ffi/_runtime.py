@@ -75,7 +75,6 @@ from rpython.rtyper.lltypesystem import lltype, rffi
 
 from rpylean.ffi import _lltypes as _lean
 from rpylean.objects import (
-    Binder,
     HINT_ABBREV,
     HINT_OPAQUE,
     SAFETY_PARTIAL,
@@ -84,9 +83,13 @@ from rpylean.objects import (
     Name,
     W_LEVEL_ZERO,
     W_RecRule,
+    _BINDER_DEFAULT,
+    _BINDER_IMPLICIT,
+    _BINDER_INSTANCE,
+    _BINDER_STRICT_IMPLICIT,
     _mk_w_bvar,
-    _mk_w_forall,
-    _mk_w_lambda,
+    _mk_w_forall_flat,
+    _mk_w_lambda_flat,
     _mk_w_litnat,
     _mk_w_litstr,
 )
@@ -261,17 +264,15 @@ def _read_level_list(o):
     return out
 
 
-def _make_binder(scalar_byte, name, ty):
+def _binder_style(scalar_byte):
     # BinderInfo: 0=default 1=implicit 2=strictImplicit 3=instImplicit.
-    # Inlined dispatch (rather than returning a function) so RPython
-    # doesn't try to type-unify the four static-method signatures.
     if scalar_byte == 1:
-        return Binder.implicit(name, ty)
+        return _BINDER_IMPLICIT
     if scalar_byte == 2:
-        return Binder.strict_implicit(name, ty)
+        return _BINDER_STRICT_IMPLICIT
     if scalar_byte == 3:
-        return Binder.instance(name, ty)
-    return Binder.default(name, ty)
+        return _BINDER_INSTANCE
+    return _BINDER_DEFAULT
 
 
 def read_expr(o):
@@ -303,10 +304,10 @@ def _read_expr_uncached(o):
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))
         body = read_expr(_lean.ctor_get(o, 2))
-        binder = _make_binder(_lean.ctor_get_byte(o, 3, 8), name, ty)
+        style = _binder_style(_lean.ctor_get_byte(o, 3, 8))
         if tag == 6:
-            return _mk_w_lambda(binder, body)
-        return _mk_w_forall(binder, body)
+            return _mk_w_lambda_flat(name, style, ty, body)
+        return _mk_w_forall_flat(name, style, ty, body)
     if tag == 8:  # letE(name, type, value, body, nondep)
         name = read_name(_lean.ctor_get(o, 0))
         ty = read_expr(_lean.ctor_get(o, 1))

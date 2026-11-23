@@ -30,6 +30,7 @@ from rpylean.exceptions import (
     LooseBoundVariable,
 )
 from rpylean.objects import (
+    Binder,
     HINT_ABBREV,
     NAT,
     NAT_ZERO,
@@ -88,6 +89,13 @@ from rpylean.objects import (
 # marker of every table.
 
 INVALID = 0
+
+#: Shared placeholder binder used by `TermStore` / `Machine` during warm
+#: checking (`record_nodes=False`), where binder names and styles do not affect
+#: soundness and any error re-checks cold with `record_nodes=True` for exact
+#: diagnostics. Keeps `TermStore.infos` and `store.leaves` from pinning dead
+#: theorem AST subtrees across warm epochs.
+_ANON_BINDER = Binder.default(Name.ANONYMOUS, PROP)
 
 
 @always_inline
@@ -1576,9 +1584,11 @@ class TermStore(object):
 
     def binder_of(self, h):
         """The `Binder` recorded for a lambda or forall record."""
-        b = self.infos[self.info(h)]
-        assert b is not None
-        return b
+        idx = self.info(h)
+        if idx >= self.ninfos:
+            return _ANON_BINDER
+        info = self.infos[idx]
+        return _ANON_BINDER if info is None else info.get_binder()
 
     def name_of(self, h):
         """The `Name` recorded for a projection or let record."""
@@ -1864,7 +1874,7 @@ class TermStore(object):
         if idx + 1 >= _OTHER_PACK_LIMIT:
             return self._cons_general_wide(kind, a, b, info, binder)
         if binder is not None:
-            info = self._info_index(binder)
+            info = self._info_index(binder) if self.record_nodes else 0
         if idx == self.cap:
             self._grow_records()
         meta = self._meta_for(kind, a, b)
@@ -1958,7 +1968,7 @@ class TermStore(object):
                     return rec_handle(slot - 1)
             i = (i + 1) & tmask
         if binder is not None:
-            info = self._info_index(binder)
+            info = self._info_index(binder) if self.record_nodes else 0
         idx = self.nrecs
         if idx == self.cap:
             self._grow_records()
@@ -3347,7 +3357,7 @@ class TermStore(object):
                 return -1
             assert isinstance(pat, W_ForAll) or isinstance(pat, W_Lambda)
             budget = self._ast_inst_eq(
-                pat.binder.type, params, clevels, buf, start, n,
+                pat.type, params, clevels, buf, start, n,
                 _s32(recs[tbase + F_A]), depth, budget,
             )
             if budget < 0:
@@ -6210,8 +6220,7 @@ class TermStore(object):
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
-            binder = e.binder
-            btype = binder.type
+            btype = e.type
             tc = btype._cache
             type = (
                 tc & _TABLE_SLOT_MASK
@@ -6226,9 +6235,9 @@ class TermStore(object):
                 else self._import_rec(ebody, gen, nr)
             )
             if cls is W_Lambda:
-                h = self.lam(binder, type, body)
+                h = self.lam(e, type, body)
             else:
-                h = self.forall(binder, type, body)
+                h = self.forall(e, type, body)
         elif cls is W_Proj:
             assert isinstance(e, W_Proj)
             h = self.proj(
@@ -6494,8 +6503,7 @@ class TermStore(object):
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
-            binder = e.binder
-            btype = binder.type
+            btype = e.type
             if btype.loose_bvar_range() <= depth:
                 tc = btype._cache
                 type_h = (
@@ -6518,9 +6526,9 @@ class TermStore(object):
                 ndgen = self._fvar_gen_for_depth(ndepth)
                 body_h = self._import_fvars_rec(ebody, fvars, nf, ndepth, ndgen, nr)
             if cls is W_Lambda:
-                h = self.lam(binder, type_h, body_h)
+                h = self.lam(e, type_h, body_h)
             else:
-                h = self.forall(binder, type_h, body_h)
+                h = self.forall(e, type_h, body_h)
         elif cls is W_Proj:
             assert isinstance(e, W_Proj)
             h = self.proj(
@@ -6818,8 +6826,7 @@ class TermStore(object):
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
-            binder = e.binder
-            btype = binder.type
+            btype = e.type
             if btype.has_level_param():
                 tc = btype._cache
                 type_h = (
@@ -6850,9 +6857,9 @@ class TermStore(object):
                     else self._import_rec(ebody, sgen, nr)
                 )
             if cls is W_Lambda:
-                h = self.lam(binder, type_h, body_h)
+                h = self.lam(e, type_h, body_h)
             else:
-                h = self.forall(binder, type_h, body_h)
+                h = self.forall(e, type_h, body_h)
         elif cls is W_Proj:
             assert isinstance(e, W_Proj)
             h = self.proj(
@@ -7310,8 +7317,7 @@ class TermStore(object):
             return head
         if cls is W_Lambda or cls is W_ForAll:
             assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
-            binder = e.binder
-            btype = binder.type
+            btype = e.type
             if btype.loose_bvar_range() <= depth:
                 if has_lp and btype.has_level_param():
                     lgen = self._cs_lgen
@@ -7356,9 +7362,9 @@ class TermStore(object):
                 ndgen = self._cs_gen_for_depth(ndepth)
                 body_h = self._import_const_subst_rec(ebody, ndepth, ndgen, nr)
             if cls is W_Lambda:
-                h = self.lam(binder, type_h, body_h)
+                h = self.lam(e, type_h, body_h)
             else:
-                h = self.forall(binder, type_h, body_h)
+                h = self.forall(e, type_h, body_h)
         elif cls is W_Proj:
             assert isinstance(e, W_Proj)
             h = self.proj(
@@ -9778,15 +9784,18 @@ class Machine(object):
                 return fv
         self._fvar_reused = False
         store = self.store
-        binder = store.binder_of(h)
-        own = binder.fvar()
-        if store.has_fvar_leaf(own):
-            fv = store._new_fvar_leaf(W_FVar(binder))
+        if not store.record_nodes:
+            fv = store._new_fvar_leaf(W_FVar(_ANON_BINDER))
         else:
-            # The binder's own variable serves its first opening, so an
-            # error in it is marked where whoever opens the binder
-            # outside the machine (the printer, say) puts the variable.
-            fv = store._new_fvar_leaf(own)
+            binder = store.binder_of(h)
+            own = binder.fvar()
+            if store.has_fvar_leaf(own):
+                fv = store._new_fvar_leaf(W_FVar(binder))
+            else:
+                # The binder's own variable serves its first opening, so an
+                # error in it is marked where whoever opens the binder
+                # outside the machine (the printer, say) puts the variable.
+                fv = store._new_fvar_leaf(own)
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
@@ -9798,13 +9807,14 @@ class Machine(object):
         """Allocate a guaranteed-fresh free variable for binder ``h`` with
         domain ``domain`` without touching the reuse cache."""
         store = self.store
-        fv = store._new_fvar_leaf(W_FVar(store.binder_of(h)))
+        binder = store.binder_of(h) if store.record_nodes else _ANON_BINDER
+        fv = store._new_fvar_leaf(W_FVar(binder))
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
         return fv
 
-    def _top_fvar(self, idx, binder, domain):
+    def _top_fvar(self, idx, fun_expr, domain):
         """Canonical free variable for top-level telescope position ``idx``
         with domain handle ``domain``. Reused across declarations in the same
         warm epoch so shared file-level `variable` prefixes share their
@@ -9816,11 +9826,15 @@ class Machine(object):
                 self.store.leaf_checked[leaf_index(fv)] = _u32(self.check_gen)
                 return fv
         store = self.store
-        own = binder.fvar()
-        if store.has_fvar_leaf(own):
-            fv = store._new_fvar_leaf(W_FVar(binder))
+        if not store.record_nodes:
+            fv = store._new_fvar_leaf(W_FVar(_ANON_BINDER))
         else:
-            fv = store._new_fvar_leaf(own)
+            binder = fun_expr.get_binder()
+            own = binder.fvar()
+            if store.has_fvar_leaf(own):
+                fv = store._new_fvar_leaf(W_FVar(binder))
+            else:
+                fv = store._new_fvar_leaf(own)
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
@@ -11096,7 +11110,7 @@ class Machine(object):
             return store.instantiate(body, arg, 0)
         params = decl.levels
         clevels = e.levels
-        dom_ast = dt.binder.type
+        dom_ast = dt.type
         matched = False
         if (not is_leaf(arg)
                 and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_LAMBDA
@@ -11205,7 +11219,7 @@ class Machine(object):
                     head, mark, n, i, plen, fn_type, expected, exp_start, exp_n,
                 )
             arg = store.spine_arg(mark + i)
-            dom_ast = cur.binder.type
+            dom_ast = cur.type
             if plen > 0 and dom_ast.__class__ is W_BVar:
                 assert isinstance(dom_ast, W_BVar)
                 bid = dom_ast.id
@@ -12873,8 +12887,8 @@ class Machine(object):
         vcur = value
         try:
             while isinstance(tcur, W_ForAll) and isinstance(vcur, W_Lambda):
-                t_dom_ast = tcur.binder.type
-                v_dom_ast = vcur.binder.type
+                t_dom_ast = tcur.type
+                v_dom_ast = vcur.type
                 nf = len(fvars)
                 if t_dom_ast is v_dom_ast:
                     if nf == 0 or t_dom_ast.loose_bvar_range() == 0:
@@ -12913,7 +12927,7 @@ class Machine(object):
                     if nf > 0:
                         fvars = []
                 else:
-                    fvars.append(self._top_fvar(nf, vcur.binder, dom))
+                    fvars.append(self._top_fvar(nf, vcur, dom))
                 tcur = tnxt
                 vcur = vnxt
             if len(levels) == 0:

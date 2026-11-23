@@ -164,27 +164,23 @@ def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
         else:
             res = new_fn.app(new_arg)
     elif isinstance(expr, W_ForAll):
-        b = expr.binder
-        new_bt = _bind_fvars_prefix(b.type, fvar_idx, limit, depth, memo)
-        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
         new_body = _bind_fvars_prefix(
             expr.body, fvar_idx, limit, depth + 1, memo,
         )
-        if new_b is b and new_body is expr.body:
+        if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
-            res = _mk_w_forall(new_b, new_body)
+            res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Lambda):
-        b = expr.binder
-        new_bt = _bind_fvars_prefix(b.type, fvar_idx, limit, depth, memo)
-        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
         new_body = _bind_fvars_prefix(
             expr.body, fvar_idx, limit, depth + 1, memo,
         )
-        if new_b is b and new_body is expr.body:
+        if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
-            res = _mk_w_lambda(new_b, new_body)
+            res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Let):
         new_type = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
         new_val = _bind_fvars_prefix(expr.value, fvar_idx, limit, depth, memo)
@@ -225,23 +221,19 @@ def _inst_dag_rec(expr, val, depth, memo):
         else:
             res = new_fn.app(new_arg)
     elif isinstance(expr, W_ForAll):
-        b = expr.binder
-        new_bt = _inst_dag_rec(b.type, val, depth, memo)
-        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_bt = _inst_dag_rec(expr.type, val, depth, memo)
         new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
-        if new_b is b and new_body is expr.body:
+        if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
-            res = _mk_w_forall(new_b, new_body)
+            res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Lambda):
-        b = expr.binder
-        new_bt = _inst_dag_rec(b.type, val, depth, memo)
-        new_b = b if new_bt is b.type else b.with_type(new_bt)
+        new_bt = _inst_dag_rec(expr.type, val, depth, memo)
         new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
-        if new_b is b and new_body is expr.body:
+        if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
-            res = _mk_w_lambda(new_b, new_body)
+            res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Let):
         new_type = _inst_dag_rec(expr.type, val, depth, memo)
         new_val = _inst_dag_rec(expr.value, val, depth, memo)
@@ -381,7 +373,7 @@ def _alpha_eq_memo(a, b, seen):
             b = b.fn
         elif isinstance(a, W_FunBase):
             assert isinstance(b, W_FunBase)
-            if not _alpha_eq_memo(a.binder.type, b.binder.type, seen):
+            if not _alpha_eq_memo(a.type, b.type, seen):
                 return False
             a = a.body
             b = b.body
@@ -539,7 +531,7 @@ class _Block(object):
                     or self._has_occurrence_memo(expr.arg, seen)):
                 return True
         elif isinstance(expr, W_FunBase):
-            if (self._has_occurrence_memo(expr.binder.type, seen)
+            if (self._has_occurrence_memo(expr.type, seen)
                     or self._has_occurrence_memo(expr.body, seen)):
                 return True
         elif isinstance(expr, W_Let):
@@ -623,7 +615,7 @@ class _Block(object):
                 type = type.whnf(self.tc)
             if not isinstance(type, W_ForAll):
                 raise self.fail("the type has fewer binders than parameters")
-            param = _local_for(type.binder)
+            param = _local_for(type.get_binder())
             self.params.append(param)
             type = _instantiate_dag(type.body, param)
         for i in range(self.num_declared):
@@ -733,7 +725,7 @@ class _Block(object):
             for each in args:
                 self.check_uniform_occurrences(each, ctor_type, seen)
         elif isinstance(expr, W_FunBase):
-            self.check_uniform_occurrences(expr.binder.type, ctor_type, seen)
+            self.check_uniform_occurrences(expr.type, ctor_type, seen)
             self.check_uniform_occurrences(expr.body, ctor_type, seen)
         elif isinstance(expr, W_Let):
             self.check_uniform_occurrences(expr.type, ctor_type, seen)
@@ -753,7 +745,7 @@ class _Block(object):
             self.find_nested(expr.fn, seen)
             self.find_nested(expr.arg, seen)
         elif isinstance(expr, W_FunBase):
-            self.find_nested(expr.binder.type, seen)
+            self.find_nested(expr.type, seen)
             self.find_nested(expr.body, seen)
         elif isinstance(expr, W_Let):
             self.find_nested(expr.type, seen)
@@ -874,7 +866,7 @@ class _Block(object):
                 if 0 < i < self.num_declared:
                     assert isinstance(arg, W_FVar)
                     if not self.tc.def_eq(
-                        _consume_type_annotations(type.binder.type),
+                        _consume_type_annotations(type.type),
                         arg.binder.type,
                     ):
                         raise self.fail(
@@ -883,7 +875,7 @@ class _Block(object):
                 type = _instantiate_dag(type.body, arg)
             type = type.whnf(self.tc)
             while isinstance(type, W_ForAll):
-                index = _local_for(type.binder)
+                index = _local_for(type.get_binder())
                 member.indices.append(index)
                 type = _instantiate_dag(type.body, index).whnf(self.tc)
             if not isinstance(type, W_Sort):
@@ -932,12 +924,12 @@ class _Block(object):
                 number = 0
                 while isinstance(type, W_ForAll):
                     number += 1
-                    field_type = type.binder.type
+                    field_type = type.type
                     orig_field_type = field_type
                     if declared and isinstance(orig, W_ForAll):
-                        orig_field_type = orig.binder.type
+                        orig_field_type = orig.type
                         orig = orig.body
-                    field = _local_for(type.binder)
+                    field = _local_for(type.get_binder())
                     ctor.fields.append(field)
                     if self.has_occurrence(field_type):
                         recursive = True
@@ -1010,7 +1002,7 @@ class _Block(object):
         type = type.whnf(tc)
         while self.has_occurrence(type):
             if isinstance(type, W_ForAll):
-                if self.has_occurrence(type.binder.type) and not self.unsafe:
+                if self.has_occurrence(type.type) and not self.unsafe:
                     if declared:
                         raise W_NonPositiveOccurrence(
                             self.env, orig_field_type, field_number=number,
@@ -1019,7 +1011,7 @@ class _Block(object):
                         "field #%d of %s has a non-positive occurrence of "
                         "the types being declared" % (number, ctor.name.str()),
                     )
-                x = _local_for(type.binder)
+                x = _local_for(type.get_binder())
                 xs.append(x)
                 type = _instantiate_dag(type.body, x).whnf(tc)
                 continue

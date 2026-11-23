@@ -2,7 +2,7 @@ from rpython.rlib.jit import (
     dont_look_inside, elidable, promote, unroll_safe,
 )
 from rpython.rlib.objectmodel import (
-    always_inline, compute_hash, dont_inline, newlist_hint,
+    always_inline, compute_hash, dont_inline, instantiate, newlist_hint,
     not_rpython, specialize, we_are_translated,
 )
 from rpython.rlib.rbigint import rbigint
@@ -720,6 +720,9 @@ class _Item(object):
 
     _attrs_ = []
 
+    def get_binder(self):
+        raise NotImplementedError
+
     @not_rpython
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
@@ -1390,6 +1393,20 @@ def _mk_w_forall(binder, body):
     return W_ForAll(binder, body)
 
 
+@always_inline
+def _mk_w_lambda_flat(name, style, btype, body):
+    e = instantiate(W_Lambda)
+    e._init_flat(name, btype, body, style, None)
+    return e
+
+
+@always_inline
+def _mk_w_forall_flat(name, style, btype, body):
+    e = instantiate(W_ForAll)
+    e._init_flat(name, btype, body, style, None)
+    return e
+
+
 def _mk_w_proj(struct_name, field_index, struct_expr):
     assert isinstance(struct_name, Name)
     assert isinstance(struct_expr, W_Expr)
@@ -2033,6 +2050,9 @@ class Binder(_Item):
 
     def style(self):
         return self._pos_style & 3
+
+    def get_binder(self):
+        return self
 
     def left_bracket(self):
         return _BINDER_LEFT[self._pos_style & 3]
@@ -2802,15 +2822,18 @@ class W_LevelParam(W_Level):
 
 
 _LP_BIT = 1 << 62
-_LOOSE_MASK = 0x1FFFFFFF
+_STYLE_SHIFT = 60
+_LOOSE_MASK = 0x07FFFFFF
+_NON_STYLE_UPPER_MASK = (_LOOSE_MASK << 33) | (1 << 32) | _LP_BIT
 
 
 class W_Expr(_Item):
-    # Four per-node immutable scalars are packed into one `_packed` word:
+    # Five per-node immutable scalars are packed into one `_packed` word:
     #
     #   bits  0-31 : the content `hash()` (already masked to 32 bits)
     #   bit     32 : `has_fvar` (does any free variable occur)
-    #   bits 33-61 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bits 33-59 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bits 60-61 : `binder_style` (0..3 on `W_FunBase`, 0 elsewhere)
     #   bit     62 : `has_level_param` (does any universe level param occur)
     #
     # Each was its own machine word before (`_hash`, plus a `_bvar_fvar`
@@ -2913,7 +2936,7 @@ class W_Expr(_Item):
         fvars = []
         expr = self
         while isinstance(expr, W_ForAll):
-            fvar = expr.binder.fvar()
+            fvar = expr.get_binder().fvar()
             fvars.append(fvar)
             expr = expr.body.instantiate(fvar, 0)
         return fvars, expr
@@ -2944,7 +2967,7 @@ class W_Expr(_Item):
         i = 0
         while isinstance(expr, W_ForAll):
             if i == index:
-                return expr.binder.name.user_name().str()
+                return expr.name.user_name().str()
             i += 1
             expr = expr.body
         return None
@@ -3590,7 +3613,10 @@ class W_Proj(W_Expr):
         sp = struct_expr._packed
         h = (struct_name.hash() * 1000003) ^ field_index
         h = (h * 1000003) ^ (sp & 0xFFFFFFFF)
-        self._packed = (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF) | (sp & ~0xFFFFFFFF)
+        self._packed = (
+            (((h * 1000003) ^ 0x9709) & 0xFFFFFFFF)
+            | (sp & _NON_STYLE_UPPER_MASK)
+        )
 
 
     def contains_const(self, name):
@@ -3699,7 +3725,7 @@ def _is_prop_type(expr, constants):
         elif isinstance(current, W_ForAll):
             # imax(sort_of(A), sort_of(B)) = 0 whenever sort_of(B) = 0,
             # so \u2200 (x : A), B is Prop iff B is Prop.
-            stack.append(current.body.instantiate(current.binder.fvar()))
+            stack.append(current.body.instantiate(current.get_binder().fvar()))
         elif isinstance(current, W_Const) and current.name in constants:
             stack.append(constants[current.name].type)
         elif isinstance(current, W_App):
@@ -3739,8 +3765,8 @@ def _is_prop_type(expr, constants):
 
 # Used to abstract over W_ForAll and W_Lambda (which are often handled the same way)
 class W_FunBase(W_Expr):
-    _attrs_ = ['binder', 'body']
-    _immutable_fields_ = ['binder', 'body']
+    _attrs_ = ['name', 'type', 'body', '_binder']
+    _immutable_fields_ = ['name', 'type', 'body']
 
     # Subclasses set this to a distinct tag so structurally-equal
     # lambdas and foralls don't collide in the content hash.
@@ -3751,9 +3777,18 @@ class W_FunBase(W_Expr):
         if not we_are_translated():
             assert body is not None
             assert isinstance(binder, Binder)
-        self.binder = binder
+        self._init_flat(
+            binder.name, binder.type, body, binder._pos_style & 3, binder,
+        )
+
+    @always_inline
+    def _init_flat(self, name, btype, body, style, binder):
+        self._cache = 0
+        self.name = name
+        self.type = btype
         self.body = body
-        tp = binder.type._packed
+        self._binder = binder
+        tp = btype._packed
         bp = body._packed
         body_range = ((bp >> 33) & _LOOSE_MASK) - 1
         if body_range < 0:
@@ -3762,17 +3797,49 @@ class W_FunBase(W_Expr):
         loose = binder_range if binder_range > body_range else body_range
         flags = (tp | bp) & ((1 << 32) | _LP_BIT)
         # Content hash: mix binder's name + type + body.
-        h = (binder.name.hash() * 1000003) ^ (tp & 0xFFFFFFFF)
+        h = (name.hash() * 1000003) ^ (tp & 0xFFFFFFFF)
         h = (h * 1000003) ^ (bp & 0xFFFFFFFF)
-        self._packed = (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF) | (loose << 33) | flags
+        self._packed = (
+            (((h * 1000003) ^ self._hash_tag) & 0xFFFFFFFF)
+            | (loose << 33)
+            | ((style & 3) << _STYLE_SHIFT)
+            | flags
+        )
 
+    @always_inline
+    def binder_style(self):
+        return (self._packed >> _STYLE_SHIFT) & 3
+
+    def is_default_binder(self):
+        return self.binder_style() == _BINDER_DEFAULT
+
+    def is_instance_binder(self):
+        return self.binder_style() == _BINDER_INSTANCE
+
+    def get_binder(self):
+        b = self._binder
+        if b is None:
+            b = Binder(self.name, self.type, style=self.binder_style())
+            self._binder = b
+        return b
+
+    @not_rpython
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return (
+            self.binder_style() == other.binder_style()
+            and self.name == other.name
+            and self.type == other.type
+            and self.body == other.body
+        )
 
     def contains_const(self, name):
-        return (self.binder.type.contains_const(name)
+        return (self.type.contains_const(name)
                 or self.body.contains_const(name))
 
     def collect_consts_into(self, out, seen):
-        self.binder.type.collect_consts_into(out, seen)
+        self.type.collect_consts_into(out, seen)
         self.body.collect_consts_into(out, seen)
 
     # Subclasses (W_Lambda, W_ForAll) set this to their lean4export tag
@@ -3783,11 +3850,11 @@ class W_FunBase(W_Expr):
     _ie_first_tag = False
 
     def emit_to(self, exporter):
-        bnid = exporter.name_id(self.binder.name)
-        tid = exporter.expr_id(self.binder.type)
+        bnid = exporter.name_id(self.name)
+        tid = exporter.expr_id(self.type)
         bid = exporter.expr_id(self.body)
         eid = exporter.next_expr_id()
-        bi = self.binder.export_info_name()
+        bi = _BINDER_INFO_NAMES[self.binder_style()]
         if self._ie_first_tag:
             exporter.stream.write(
                 '{"ie":%d,"%s":{"binderInfo":"%s","body":%d,"name":%d,"type":%d}}\n'
@@ -3808,6 +3875,12 @@ class W_ForAll(W_FunBase):
     _ie_first_tag = False  # `'f' < 'i'`
     _hash_tag = 0xF0A1
 
+    def _rebuild(self, new_type, new_body):
+        b = self._binder
+        if b is not None:
+            new_b = b if new_type is self.type else b.with_type(new_type)
+            return _mk_w_forall(new_b, new_body)
+        return _mk_w_forall_flat(self.name, self.binder_style(), new_type, new_body)
 
     def expect_sort(self, env):
         return self.infer(env).whnf(env).expect_sort(env)
@@ -3815,42 +3888,46 @@ class W_ForAll(W_FunBase):
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
-        new_binder = self.binder.instantiate(expr, depth)
+        new_type = self.type.instantiate(expr, depth)
         new_body = self.body.instantiate(expr, depth + 1)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_forall(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
     def syntactic_eq(self, other):
         assert isinstance(other, W_ForAll)
-        return syntactic_eq(self.binder, other.binder) and syntactic_eq(
-            self.body, other.body
+        return (
+            self.binder_style() == other.binder_style()
+            and syntactic_eq(self.name, other.name)
+            and syntactic_eq(self.type, other.type)
+            and syntactic_eq(self.body, other.body)
         )
 
     def bind_fvar(self, fvar, depth):
         if not self.has_fvar():
             return self
-        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_type = self.type.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_forall(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range() <= depth:
             return self
-        return _mk_w_forall(self.binder.incr_free_bvars(count, depth),
+        return self._rebuild(
+            self.type.incr_free_bvars(count, depth),
             self.body.incr_free_bvars(count, depth + 1),
         )
 
     def subst_levels(self, levels):
         if not self.has_level_param():
             return self
-        new_binder = self.binder.subst_levels(levels)
+        new_type = self.type.subst_levels(levels)
         new_body = self.body.subst_levels(levels)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_forall(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
     def to_format(self, constants, marker):
         """
@@ -3872,7 +3949,7 @@ class W_ForAll(W_FunBase):
         is_forall, rhs = _forall_quantifier_step(self, constants)
         if is_forall:
             # Collect the maximal run of binders that each render as ∀.
-            binders = [self.binder]
+            binders = [self.get_binder()]
             current = rhs
             while isinstance(current, W_ForAll):
                 next_is_forall, next_rhs = _forall_quantifier_step(
@@ -3880,7 +3957,7 @@ class W_ForAll(W_FunBase):
                 )
                 if not next_is_forall:
                     break
-                binders.append(current.binder)
+                binders.append(current.get_binder())
                 current = next_rhs
             body = current
             # One `fill` over `∀ ppSpace binder ... , ppSpace term`, mirroring
@@ -3902,9 +3979,9 @@ class W_ForAll(W_FunBase):
             parts.append(_sub(marker, body, constants))
             return _format.fill(_format.nest(2, _format.concat(parts)))
         else:
-            if self.binder.is_default() and not self.body.loose_bvar_range() > 0:
-                wrap = isinstance(self.binder.type, W_ForAll)
-                inner = _sub(marker, self.binder.type, constants)
+            if self.is_default_binder() and not self.body.loose_bvar_range() > 0:
+                wrap = isinstance(self.type, W_ForAll)
+                inner = _sub(marker, self.type, constants)
                 if wrap:
                     lhs = _format.concat([
                         _format.text(PUNCT, "("),
@@ -3914,17 +3991,17 @@ class W_ForAll(W_FunBase):
                 else:
                     lhs = inner
             elif (
-                self.binder.is_instance()
+                self.is_instance_binder()
                 and not self.body.loose_bvar_range() > 0
-                and self.binder.name.has_macro_scopes()
+                and self.name.has_macro_scopes()
             ):
                 lhs = _format.concat([
                     _format.text(PUNCT, "["),
-                    _sub(marker, self.binder.type, constants),
+                    _sub(marker, self.type, constants),
                     _format.text(PUNCT, "]"),
                 ])
             else:
-                lhs = _sub(marker, self.binder, constants)
+                lhs = _sub(marker, self.get_binder(), constants)
             head = _format.concat([lhs, _format.text(OPERATOR, " →")])
             body = rhs
 
@@ -3977,7 +4054,7 @@ def _forall_quantifier_step(fa, constants):
     binding is a genuine quantification (its variable is used, or its domain
     is not itself a proposition).
     """
-    lhs_type = fa.binder.type
+    lhs_type = fa.type
     if isinstance(lhs_type, W_Const):
         # Tolerate names `constants` doesn't have (a partially registered
         # environment, e.g. mid-`ffi check`): rendering must never raise,
@@ -3987,7 +4064,7 @@ def _forall_quantifier_step(fa, constants):
             lhs_type = decl.type
     elif isinstance(lhs_type, W_FVar):
         lhs_type = lhs_type.binder.type
-    rhs = fa.body.instantiate(fa.binder.fvar())
+    rhs = fa.body.instantiate(fa.get_binder().fvar())
     is_forall = (
         (not _is_prop_type(lhs_type, constants)
          and _is_prop_type(rhs, constants))
@@ -4059,7 +4136,7 @@ class W_Lambda(W_FunBase):
         binder_used = []
         current = self
         while isinstance(current, W_Lambda):
-            binders.append(current.binder)
+            binders.append(current.get_binder())
             binder_used.append(current.body.loose_bvar_range() > 0)
             current = current.body
 
@@ -4142,46 +4219,56 @@ class W_Lambda(W_FunBase):
             _sub(marker, body, constants),
         ])
 
+    def _rebuild(self, new_type, new_body):
+        b = self._binder
+        if b is not None:
+            new_b = b if new_type is self.type else b.with_type(new_type)
+            return _mk_w_lambda(new_b, new_body)
+        return _mk_w_lambda_flat(self.name, self.binder_style(), new_type, new_body)
+
     def syntactic_eq(self, other):
         assert isinstance(other, W_Lambda)
-        return syntactic_eq(self.binder, other.binder) and syntactic_eq(
-            self.body, other.body
+        return (
+            self.binder_style() == other.binder_style()
+            and syntactic_eq(self.name, other.name)
+            and syntactic_eq(self.type, other.type)
+            and syntactic_eq(self.body, other.body)
         )
 
     def bind_fvar(self, fvar, depth):
         if not self.has_fvar():
             return self
-        new_binder = self.binder.bind_fvar(fvar, depth)
+        new_type = self.type.bind_fvar(fvar, depth)
         new_body = self.body.bind_fvar(fvar, depth + 1)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_lambda(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
     def instantiate(self, expr, depth=0):
         if self.loose_bvar_range() <= depth:
             return self
-        new_binder = self.binder.instantiate(expr, depth)
+        new_type = self.type.instantiate(expr, depth)
         new_body = self.body.instantiate(expr, depth + 1)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_lambda(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
     def incr_free_bvars(self, count, depth):
         if self.loose_bvar_range() <= depth:
             return self
-        return _mk_w_lambda(self.binder.incr_free_bvars(count, depth),
+        return self._rebuild(
+            self.type.incr_free_bvars(count, depth),
             self.body.incr_free_bvars(count, depth + 1),
         )
-
 
     def subst_levels(self, substs):
         if not self.has_level_param():
             return self
-        new_binder = self.binder.subst_levels(substs)
+        new_type = self.type.subst_levels(substs)
         new_body = self.body.subst_levels(substs)
-        if new_binder is self.binder and new_body is self.body:
+        if new_type is self.type and new_body is self.body:
             return self
-        return _mk_w_lambda(new_binder, new_body)
+        return self._rebuild(new_type, new_body)
 
 
 class W_Let(W_Expr):
@@ -4367,7 +4454,7 @@ class W_App(W_Expr):
                     decl_type = decl_type.subst_levels(substs)
                 for j in range(n - 1, -1, -1):
                     if isinstance(decl_type, W_ForAll):
-                        mask.append(decl_type.binder.is_default())
+                        mask.append(decl_type.is_default_binder())
                         decl_type = decl_type.body.instantiate(args[j])
                     else:
                         mask.append(True)
@@ -4794,7 +4881,7 @@ def _pm_tail_has_no_prop_args(cur, declarations, depth):
     # Handle `Set`-like aliases (`def Set (α : Type u) := α → Prop`) whose
     # sole unfolded binder domain is guaranteed non-Prop and ends in a Sort.
     if nargs == m and isinstance(val, W_ForAll) and isinstance(val.body, W_Sort):
-        vdom = val.binder.type
+        vdom = val.type
         if isinstance(vdom, W_BVar):
             pidx = m - 1 - vdom.id
             if 0 <= pidx < m:
@@ -4804,7 +4891,7 @@ def _pm_tail_has_no_prop_args(cur, declarations, depth):
                     tcur = tcur.body
                     ti += 1
                 if isinstance(tcur, W_ForAll):
-                    pdom = _pm_unwrap_id_wrapper(tcur.binder.type, declarations)
+                    pdom = _pm_unwrap_id_wrapper(tcur.type, declarations)
                     if isinstance(pdom, W_Sort) and pdom.level.is_not_zero():
                         return True
     return False
@@ -4859,7 +4946,7 @@ class W_Declaration(_Item):
         ok = True
         k = 0
         while isinstance(cur, W_ForAll) and k < 62:
-            dom = _pm_unwrap_id_wrapper(cur.binder.type, declarations)
+            dom = _pm_unwrap_id_wrapper(cur.type, declarations)
             inner = dom
             p = 0
             while isinstance(inner, W_ForAll):
@@ -5936,7 +6023,7 @@ def _expr_has_bvar_lt(e, k, depth):
         )
     if isinstance(e, W_FunBase):
         return (
-            _expr_has_bvar_lt(e.binder.type, k, depth)
+            _expr_has_bvar_lt(e.type, k, depth)
             or _expr_has_bvar_lt(e.body, k, depth + 1)
         )
     if isinstance(e, W_Let):
@@ -5977,7 +6064,7 @@ def _expr_bvar_mask(e, limit, depth, seen):
             m2 = _expr_bvar_mask(e.arg, limit, depth, seen)
             res = -1 if m2 < 0 else (m1 | m2)
     elif isinstance(e, W_FunBase):
-        m1 = _expr_bvar_mask(e.binder.type, limit, depth, seen)
+        m1 = _expr_bvar_mask(e.type, limit, depth, seen)
         if m1 < 0:
             res = -1
         else:
@@ -6081,7 +6168,7 @@ class W_Inductive(W_DeclarationKind):
         if ok:
             fi = 0
             while isinstance(cur, W_ForAll):
-                ft = cur.binder.type
+                ft = cur.type
                 fields.append(ft)
                 uses.append(_expr_has_bvar_lt(ft, fi, 0))
                 cur = cur.body
@@ -6331,7 +6418,7 @@ class W_Recursor(W_DeclarationKind):
             t = t.body
         if not isinstance(t, W_ForAll):
             return None
-        head = t.binder.type.head()
+        head = t.type.head()
         if not isinstance(head, W_Const):
             return None
         return head.name

@@ -851,11 +851,6 @@ def _ref_expr_fast(builder, eidx):
 
 
 @always_inline
-def _binder_from_code(name, code, type):
-    return objects.Binder(name, type, style=code)
-
-
-@always_inline
 def _scan_plain_str(line, start, end):
     """Scan an unescaped single-line JSON string body starting at ``start``.
     Returns the index of the closing ``"``, or ``-1`` on escape/newline/EOF."""
@@ -1511,28 +1506,22 @@ def _make_chunk_fast(mode):
                                         rc_len = target.length
                                         rc_cap = target.cap
                                 elif is_rc:
-                                    bound = _binder_from_code(
-                                        names[name_idx],
-                                        bcode,
-                                        _ref_expr_rc(exprs, rc_data, type_eidx),
-                                    )
                                     _reg_expr_rc(
                                         target, exprs, eidx,
-                                        objects.W_Lambda(
-                                            bound,
+                                        objects._mk_w_lambda_flat(
+                                            names[name_idx],
+                                            bcode,
+                                            _ref_expr_rc(exprs, rc_data, type_eidx),
                                             _ref_expr_rc(exprs, rc_data, body_eidx),
                                         ),
                                     )
                                 else:
-                                    bound = _binder_from_code(
-                                        target.names[name_idx],
-                                        bcode,
-                                        _ref_expr_fast(target, type_eidx),
-                                    )
                                     target.register_expr(
                                         eidx,
-                                        objects.W_Lambda(
-                                            bound,
+                                        objects._mk_w_lambda_flat(
+                                            target.names[name_idx],
+                                            bcode,
+                                            _ref_expr_fast(target, type_eidx),
                                             _ref_expr_fast(target, body_eidx),
                                         ),
                                     )
@@ -1591,28 +1580,22 @@ def _make_chunk_fast(mode):
                                         rc_len = target.length
                                         rc_cap = target.cap
                                 elif is_rc:
-                                    bound = _binder_from_code(
-                                        names[name_idx],
-                                        bcode,
-                                        _ref_expr_rc(exprs, rc_data, type_eidx),
-                                    )
                                     _reg_expr_rc(
                                         target, exprs, eidx,
-                                        objects.W_ForAll(
-                                            bound,
+                                        objects._mk_w_forall_flat(
+                                            names[name_idx],
+                                            bcode,
+                                            _ref_expr_rc(exprs, rc_data, type_eidx),
                                             _ref_expr_rc(exprs, rc_data, body_eidx),
                                         ),
                                     )
                                 else:
-                                    bound = _binder_from_code(
-                                        target.names[name_idx],
-                                        bcode,
-                                        _ref_expr_fast(target, type_eidx),
-                                    )
                                     target.register_expr(
                                         eidx,
-                                        objects.W_ForAll(
-                                            bound,
+                                        objects._mk_w_forall_flat(
+                                            target.names[name_idx],
+                                            bcode,
+                                            _ref_expr_fast(target, type_eidx),
                                             _ref_expr_fast(target, body_eidx),
                                         ),
                                     )
@@ -1924,27 +1907,28 @@ def _read_binder_expr(cursor, builder, is_lam):
         else:
             raise MalformedLine("unexpected key %s in binder" % key)
         if cursor.maybe('}'):
-            bound = _binder(
-                builder.names[name_idx],
-                binder_info,
-                builder.ref_expr(type_eidx),
-            )
+            bcode = _binder_style_code(binder_info)
+            btype = builder.ref_expr(type_eidx)
             body = builder.ref_expr(body_eidx)
             if is_lam:
-                return objects._mk_w_lambda(bound, body)
-            return objects._mk_w_forall(bound, body)
+                return objects._mk_w_lambda_flat(
+                    builder.names[name_idx], bcode, btype, body,
+                )
+            return objects._mk_w_forall_flat(
+                builder.names[name_idx], bcode, btype, body,
+            )
         cursor.expect(',')
 
 
-def _binder(name, info, type):
+def _binder_style_code(info):
     if info == "default":
-        return name.binder(type=type)
+        return objects._BINDER_DEFAULT
     if info == "implicit":
-        return name.implicit_binder(type=type)
+        return objects._BINDER_IMPLICIT
     if info == "strictImplicit":
-        return name.strict_implicit_binder(type=type)
+        return objects._BINDER_STRICT_IMPLICIT
     if info == "instImplicit":
-        return name.instance_binder(type=type)
+        return objects._BINDER_INSTANCE
     raise MalformedLine("Unknown binder info %s" % info)
 
 
