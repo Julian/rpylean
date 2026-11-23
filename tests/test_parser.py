@@ -530,3 +530,67 @@ def test_swar_find_nl_every_offset():
         assert parser._find_nl(buf, 0, len(buf)) == off + 1
     buf_no_nl = "x" * 20
     assert parser._find_nl(buf_no_nl, 0, len(buf_no_nl)) == len(buf_no_nl)
+
+
+def test_refcount_table_saturating_u8():
+    rc = parser.RefCountTable(16)
+    rc.ensure(10)
+    # Exact count up to 254
+    for _ in range(254):
+        rc.bump(0)
+    assert rc.get(0) == 254
+    for expected_rem in range(253, -1, -1):
+        assert rc.dec(0) == expected_rem
+    assert rc.get(0) == 0
+
+    # Saturation at 255: stays pinned forever across further bumps and decs
+    for _ in range(300):
+        rc.bump(1)
+    assert rc.get(1) == 255
+    for _ in range(300):
+        assert rc.dec(1) == 255
+    assert rc.get(1) == 255
+    rc.free()
+
+
+def test_streaming_prescan_with_saturated_and_dead_exprs():
+    # Create an export where expr 0 (`Prop`) is referenced 270 times (saturated
+    # at 255), expr 1 is dead (rc == 0), and 273 app nodes chain together.
+    lines = [
+        '{"in":1,"str":{"pre":0,"str":"P"}}',
+        '{"in":2,"str":{"pre":0,"str":"x"}}',
+        '{"ie":0,"sort":0}',
+        '{"ie":1,"sort":0}',  # never referenced (rc == 0)
+    ]
+    prev = 0
+    for ie in range(2, 275):
+        lines.append(
+            '{"app":{"arg":0,"fn":%d},"ie":%d}' % (prev, ie)
+        )
+        prev = ie
+    lines.append(
+        '{"axiom":{"isUnsafe":false,"levelParams":[],"name":1,"type":%d}}' % prev
+    )
+    body = "\n".join(lines) + "\n"
+
+    expected = EnvironmentBuilder()
+    expected.start_scan()
+    expected.consume(StringIO(body))
+    rc = parser.prescan_refcounts(StringIO(body))
+    assert rc == expected._refcount
+    assert rc.get(0) == 255
+    assert rc.get(1) == 0
+
+    b_rc = EnvironmentBuilder()
+    b_rc.set_refcount(rc)
+    b_rc.consume(StringIO(body))
+
+    b_plain = EnvironmentBuilder()
+    b_plain.consume(StringIO(body))
+    assert b_rc.declarations[0].type == b_plain.declarations[0].type
+    # Saturated expr 0 stayed pinned; single-use expr 2 was pruned to None.
+    assert b_rc.exprs[0] is not None
+    assert b_rc.exprs[2] is None
+
+    rc.free()
+    expected._refcount.free()
