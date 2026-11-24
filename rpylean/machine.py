@@ -12632,14 +12632,26 @@ class Machine(object):
         if not tracer.recording:
             if (self._is_scalar_target(h2) and self._is_closed_compound(h1)
                     and self._nat_succ_pred(h1) == 0):
-                ev = eval_closed_scalar(self, h1)
+                ev = store.memo(h1, M_WHNF)
+                if ev == 0:
+                    ev = self.try_reduce_nat_cheap(h1)
+                    if ev == 0:
+                        ev = eval_closed_scalar(self, h1)
+                    if ev != 0:
+                        store.set_memo(h1, M_WHNF, ev)
                 if ev != 0:
                     if ev == h2:
                         return True
                     h1 = ev
             elif (self._is_scalar_target(h1) and self._is_closed_compound(h2)
                     and self._nat_succ_pred(h2) == 0):
-                ev = eval_closed_scalar(self, h2)
+                ev = store.memo(h2, M_WHNF)
+                if ev == 0:
+                    ev = self.try_reduce_nat_cheap(h2)
+                    if ev == 0:
+                        ev = eval_closed_scalar(self, h2)
+                    if ev != 0:
+                        store.set_memo(h2, M_WHNF, ev)
                 if ev != 0:
                     if ev == h1:
                         return True

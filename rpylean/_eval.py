@@ -1002,6 +1002,7 @@ class CodeCache(object):
     _attrs_ = [
         'declarations', '_consts', '_induct_ids', '_ctor_ids', '_str_vals',
         'v_true', 'v_false',
+        '_ch_stack_h', '_ch_stack_st', '_ch_rev_args', '_ch_memo',
     ]
     _immutable_fields_ = ['declarations', 'v_true?', 'v_false?']
 
@@ -1013,6 +1014,10 @@ class CodeCache(object):
         self._str_vals = {}
         self.v_true = None
         self.v_false = None
+        self._ch_stack_h = []
+        self._ch_stack_st = []
+        self._ch_rev_args = []
+        self._ch_memo = {}
 
     def litstr_val(self, lit):
         val = self._str_vals.get(lit.val, None)
@@ -1319,141 +1324,153 @@ class CodeCache(object):
         from rpylean.machine import (
             KIND_APP, KIND_LAMBDA, KIND_LET, KIND_PROJ, is_leaf,
         )
-        memo = {}
-        stack_h = [root_h]
-        stack_st = [0]
-        while stack_h:
-            h = stack_h.pop()
-            st = stack_st.pop()
-            if h in memo:
-                continue
-            if st == 0:
-                if is_leaf(h):
-                    e = store.leaf(h)
-                    cls = e.__class__
-                    if cls is W_BVar:
-                        assert isinstance(e, W_BVar)
-                        memo[h] = _mk_bvar(e.id)
-                    elif cls is W_LitNat:
-                        assert isinstance(e, W_LitNat)
-                        memo[h] = CVal(mk_const_nat_from_bigint(e.val))
-                    elif cls is W_LitStr:
-                        assert isinstance(e, W_LitStr)
-                        memo[h] = CVal(self.litstr_val(e))
-                    elif cls is W_Const:
-                        assert isinstance(e, W_Const)
-                        node = self.const_node(e)
-                        if (isinstance(node, CCtor)
-                                and node.singleton_val is not None):
-                            memo[h] = CVal(node.singleton_val)
+        memo = self._ch_memo
+        stack_h = self._ch_stack_h
+        stack_st = self._ch_stack_st
+        rev_args = self._ch_rev_args
+        stack_h.append(root_h)
+        stack_st.append(0)
+        try:
+            while stack_h:
+                h = stack_h.pop()
+                st = stack_st.pop()
+                if h in memo:
+                    continue
+                if st == 0:
+                    if is_leaf(h):
+                        e = store.leaf(h)
+                        cls = e.__class__
+                        if cls is W_BVar:
+                            assert isinstance(e, W_BVar)
+                            memo[h] = _mk_bvar(e.id)
+                        elif cls is W_LitNat:
+                            assert isinstance(e, W_LitNat)
+                            memo[h] = CVal(mk_const_nat_from_bigint(e.val))
+                        elif cls is W_LitStr:
+                            assert isinstance(e, W_LitStr)
+                            memo[h] = CVal(self.litstr_val(e))
+                        elif cls is W_Const:
+                            assert isinstance(e, W_Const)
+                            node = self.const_node(e)
+                            if (isinstance(node, CCtor)
+                                    and node.singleton_val is not None):
+                                memo[h] = CVal(node.singleton_val)
+                            else:
+                                memo[h] = node
                         else:
-                            memo[h] = node
+                            memo[h] = CVal(VAtom(COpaque(None)))
+                        continue
+                    kind = store.kind(h)
+                    if kind == KIND_APP:
+                        cur = h
+                        del rev_args[:]
+                        while store.kind(cur) == KIND_APP:
+                            rev_args.append(store.field_b(cur))
+                            cur = store.field_a(cur)
+                        stack_h.append(h)
+                        stack_st.append(1)
+                        if cur not in memo:
+                            stack_h.append(cur)
+                            stack_st.append(0)
+                        for a in rev_args:
+                            if a not in memo:
+                                stack_h.append(a)
+                                stack_st.append(0)
+                    elif kind == KIND_LAMBDA:
+                        body = store.field_b(h)
+                        stack_h.append(h)
+                        stack_st.append(1)
+                        if body not in memo:
+                            stack_h.append(body)
+                            stack_st.append(0)
+                    elif kind == KIND_LET:
+                        pair = store.field_b(h)
+                        val_h = store.field_a(pair)
+                        body_h = store.field_b(pair)
+                        stack_h.append(h)
+                        stack_st.append(1)
+                        if val_h not in memo:
+                            stack_h.append(val_h)
+                            stack_st.append(0)
+                        if body_h not in memo:
+                            stack_h.append(body_h)
+                            stack_st.append(0)
+                    elif kind == KIND_PROJ:
+                        s_h = store.field_a(h)
+                        stack_h.append(h)
+                        stack_st.append(1)
+                        if s_h not in memo:
+                            stack_h.append(s_h)
+                            stack_st.append(0)
                     else:
                         memo[h] = CVal(VAtom(COpaque(None)))
-                    continue
-                kind = store.kind(h)
-                if kind == KIND_APP:
-                    cur = h
-                    rev_args = []
-                    while store.kind(cur) == KIND_APP:
-                        rev_args.append(store.field_b(cur))
-                        cur = store.field_a(cur)
-                    stack_h.append(h)
-                    stack_st.append(1)
-                    if cur not in memo:
-                        stack_h.append(cur)
-                        stack_st.append(0)
-                    for a in rev_args:
-                        if a not in memo:
-                            stack_h.append(a)
-                            stack_st.append(0)
-                elif kind == KIND_LAMBDA:
-                    body = store.field_b(h)
-                    stack_h.append(h)
-                    stack_st.append(1)
-                    if body not in memo:
-                        stack_h.append(body)
-                        stack_st.append(0)
-                elif kind == KIND_LET:
-                    pair = store.field_b(h)
-                    val_h = store.field_a(pair)
-                    body_h = store.field_b(pair)
-                    stack_h.append(h)
-                    stack_st.append(1)
-                    if val_h not in memo:
-                        stack_h.append(val_h)
-                        stack_st.append(0)
-                    if body_h not in memo:
-                        stack_h.append(body_h)
-                        stack_st.append(0)
-                elif kind == KIND_PROJ:
-                    s_h = store.field_a(h)
-                    stack_h.append(h)
-                    stack_st.append(1)
-                    if s_h not in memo:
-                        stack_h.append(s_h)
-                        stack_st.append(0)
                 else:
-                    memo[h] = CVal(VAtom(COpaque(None)))
-            else:
-                kind = store.kind(h)
-                if kind == KIND_APP:
-                    cur = h
-                    rev_args = []
-                    while store.kind(cur) == KIND_APP:
-                        rev_args.append(store.field_b(cur))
-                        cur = store.field_a(cur)
-                    fn_node = memo[cur]
-                    n = len(rev_args)
-                    cargs = [None] * n
-                    for i in range(n):
-                        cargs[i] = memo[rev_args[n - 1 - i]]
-                    if isinstance(fn_node, CCtor) and n == fn_node.total_arity:
-                        fields_closed = True
-                        np = fn_node.num_params
-                        for i in range(np, n):
-                            ah = rev_args[n - 1 - i]
-                            if (store.loose_bvar_range(ah) != 0
-                                    or store.has_fvar(ah)):
-                                fields_closed = False
-                                break
-                        memo[h] = _compile_full_ctor(
-                            fn_node, cargs, fields_closed,
+                    kind = store.kind(h)
+                    if kind == KIND_APP:
+                        cur = h
+                        del rev_args[:]
+                        while store.kind(cur) == KIND_APP:
+                            rev_args.append(store.field_b(cur))
+                            cur = store.field_a(cur)
+                        fn_node = memo[cur]
+                        n = len(rev_args)
+                        cargs = [None] * n
+                        for i in range(n):
+                            cargs[i] = memo[rev_args[n - 1 - i]]
+                        if isinstance(fn_node, CCtor) and n == fn_node.total_arity:
+                            fields_closed = True
+                            np = fn_node.num_params
+                            for i in range(np, n):
+                                ah = rev_args[n - 1 - i]
+                                if (store.loose_bvar_range(ah) != 0
+                                        or store.has_fvar(ah)):
+                                    fields_closed = False
+                                    break
+                            memo[h] = _compile_full_ctor(
+                                fn_node, cargs, fields_closed,
+                            )
+                        else:
+                            node = CApp(fn_node, cargs)
+                            if (h != root_h
+                                    and store.loose_bvar_range(h) == 0
+                                    and not store.has_fvar(h)):
+                                memo[h] = CThunk(Thunk(node, None))
+                            else:
+                                memo[h] = node
+                    elif kind == KIND_LAMBDA:
+                        is_closed = (
+                            store.loose_bvar_range(h) == 0
+                            and not store.has_fvar(h)
                         )
-                    else:
-                        node = CApp(fn_node, cargs)
+                        memo[h] = CLam(memo[store.field_b(h)], is_closed)
+                    elif kind == KIND_LET:
+                        pair = store.field_b(h)
+                        node = CLet(
+                            memo[store.field_a(pair)], memo[store.field_b(pair)],
+                        )
                         if (h != root_h
                                 and store.loose_bvar_range(h) == 0
                                 and not store.has_fvar(h)):
                             memo[h] = CThunk(Thunk(node, None))
                         else:
                             memo[h] = node
-                elif kind == KIND_LAMBDA:
-                    is_closed = (
-                        store.loose_bvar_range(h) == 0
-                        and not store.has_fvar(h)
-                    )
-                    memo[h] = CLam(memo[store.field_b(h)], is_closed)
-                elif kind == KIND_LET:
-                    pair = store.field_b(h)
-                    node = CLet(
-                        memo[store.field_a(pair)], memo[store.field_b(pair)],
-                    )
-                    if (h != root_h
-                            and store.loose_bvar_range(h) == 0
-                            and not store.has_fvar(h)):
-                        memo[h] = CThunk(Thunk(node, None))
-                    else:
-                        memo[h] = node
-                elif kind == KIND_PROJ:
-                    node = CProj(memo[store.field_a(h)], store.proj_index(h))
-                    if (h != root_h
-                            and store.loose_bvar_range(h) == 0
-                            and not store.has_fvar(h)):
-                        memo[h] = CThunk(Thunk(node, None))
-                    else:
-                        memo[h] = node
-        return memo[root_h]
+                    elif kind == KIND_PROJ:
+                        node = CProj(memo[store.field_a(h)], store.proj_index(h))
+                        if (h != root_h
+                                and store.loose_bvar_range(h) == 0
+                                and not store.has_fvar(h)):
+                            memo[h] = CThunk(Thunk(node, None))
+                        else:
+                            memo[h] = node
+            return memo[root_h]
+        finally:
+            if len(memo) > 2048:
+                self._ch_memo = {}
+            else:
+                memo.clear()
+            del stack_h[:]
+            del stack_st[:]
+            del rev_args[:]
 
 
 # ---- The meta-traced call-by-need abstract machine -----------------------
@@ -1573,6 +1590,105 @@ def _push_spine(cargs, env, args):
 
 
 @jit.unroll_safe
+def _push_spine_from(cargs, start, env, args):
+    i = len(cargs) - 1
+    while i >= start:
+        args = ArgNode(_arg_to_slot(cargs[i], env), args)
+        i -= 1
+    return args
+
+
+@jit.unroll_safe
+def _eval_prefix(cargs, skip, env):
+    prefix = [None] * skip
+    i = 0
+    while i < skip:
+        prefix[i] = _arg_to_slot(cargs[i], env)
+        i += 1
+    return prefix
+
+
+@jit.unroll_safe
+def _apply_cargs_to_lam(cur, cargs, call_env, target_env, args):
+    """Bind leading `CLam` parameters directly from `cargs` without allocating
+    throwaway `ArgNode`s; push any remaining trailing arguments onto `args`."""
+    n = len(cargs)
+    i = 0
+    while i < n and cur.tag == TAG_LAM:
+        assert isinstance(cur, CLam)
+        base = None if cur.closed_val is not None else target_env
+        target_env = extend_env(base, _arg_to_slot(cargs[i], call_env))
+        cur = cur.body
+        i += 1
+    if i < n:
+        args = _push_spine_from(cargs, i, call_env, args)
+    return cur, target_env, args
+
+
+@jit.unroll_safe
+def _bind_rec_rule(rhs, prefix, keep, val, nfields, trailing):
+    """Bind a recursor rule's leading `CLam`s directly from `prefix[0..keep)`
+    and `val`'s constructor fields without allocating intermediate `ArgNode`s."""
+    new_env = None
+    i = 0
+    while i < keep and rhs.tag == TAG_LAM:
+        assert isinstance(rhs, CLam)
+        base = None if rhs.closed_val is not None else new_env
+        new_env = extend_env(base, prefix[i])
+        rhs = rhs.body
+        i += 1
+    if i < keep:
+        new_args = trailing
+        if isinstance(val, VCtor1):
+            new_args = ArgNode(val.f0, new_args)
+        elif isinstance(val, VCtor2):
+            new_args = ArgNode(val.f0, ArgNode(val.f1, new_args))
+        elif isinstance(val, VCtorN):
+            new_args = _push_ctor_fields(val.fields, nfields, new_args)
+        j = keep - 1
+        while j >= i:
+            new_args = ArgNode(prefix[j], new_args)
+            j -= 1
+        return rhs, new_env, new_args
+    if isinstance(val, VCtor0):
+        return rhs, new_env, trailing
+    if isinstance(val, VCtor1):
+        if rhs.tag == TAG_LAM:
+            assert isinstance(rhs, CLam)
+            base = None if rhs.closed_val is not None else new_env
+            return rhs.body, extend_env(base, val.f0), trailing
+        return rhs, new_env, ArgNode(val.f0, trailing)
+    if isinstance(val, VCtor2):
+        if rhs.tag == TAG_LAM:
+            assert isinstance(rhs, CLam)
+            base = None if rhs.closed_val is not None else new_env
+            new_env = extend_env(base, val.f0)
+            rhs = rhs.body
+            if rhs.tag == TAG_LAM:
+                assert isinstance(rhs, CLam)
+                base = None if rhs.closed_val is not None else new_env
+                return rhs.body, extend_env(base, val.f1), trailing
+            return rhs, new_env, ArgNode(val.f1, trailing)
+        return rhs, new_env, ArgNode(val.f0, ArgNode(val.f1, trailing))
+    assert isinstance(val, VCtorN)
+    fields = val.fields
+    fi = 0
+    while fi < nfields and rhs.tag == TAG_LAM:
+        assert isinstance(rhs, CLam)
+        base = None if rhs.closed_val is not None else new_env
+        new_env = extend_env(base, fields[fi])
+        rhs = rhs.body
+        fi += 1
+    new_args = trailing
+    if fi < nfields:
+        j = nfields - 1
+        while j >= fi:
+            new_args = ArgNode(fields[j], new_args)
+            j -= 1
+    return rhs, new_env, new_args
+
+
+@jit.unroll_safe
 def _eval_ctor_fields(fc, env):
     nf = len(fc)
     out = [None] * nf
@@ -1601,15 +1717,6 @@ def _push_ctor_fields(fields, count, args):
     i = count - 1
     while i >= 0:
         args = ArgNode(fields[i], args)
-        i -= 1
-    return args
-
-
-@jit.unroll_safe
-def _push_prefix_keep(prefix, keep, args):
-    i = keep - 1
-    while i >= 0:
-        args = ArgNode(prefix[i], args)
         i -= 1
     return args
 
@@ -1703,16 +1810,44 @@ def eval_whnf(root_code, cache, tc):
                     args = None
                     env = None
                     slot = arg1
+                elif fn.is_compiled and not rec_edge:
+                    body = fn.body
+                    if body.tag == TAG_LAM:
+                        code, env, args = _apply_cargs_to_lam(
+                            body, cargs, env, None, args,
+                        )
+                    else:
+                        args = _push_spine(cargs, env, args)
+                        code = body
+                        env = None
+                    continue
                 else:
                     args = _push_spine(cargs, env, args)
                     code = fn
                     continue
-            elif fn_tag == TAG_LAM and len(cargs) == 1:
+            elif fn_tag == TAG_LAM:
                 assert isinstance(fn, CLam)
-                base_env = None if fn.closed_val is not None else env
-                env = extend_env(base_env, _arg_to_slot(cargs[0], env))
-                code = fn.body
+                code, env, args = _apply_cargs_to_lam(
+                    fn, cargs, env, env, args,
+                )
                 continue
+            elif fn_tag == TAG_REC:
+                assert isinstance(fn, CRec)
+                skip = fn.skip
+                if len(cargs) > skip:
+                    rec_edge = False
+                    prefix = _eval_prefix(cargs, skip, env)
+                    major = _arg_to_slot(cargs[skip], env)
+                    if len(cargs) > skip + 1:
+                        args = _push_spine_from(cargs, skip + 1, env, args)
+                    cont = KRecMajor(fn, prefix, args, cont)
+                    args = None
+                    env = None
+                    slot = major
+                else:
+                    args = _push_spine(cargs, env, args)
+                    code = fn
+                    continue
             else:
                 args = _push_spine(cargs, env, args)
                 code = fn
@@ -2004,30 +2139,21 @@ def eval_whnf(root_code, cache, tc):
                         if isinstance(val, VCtor0):
                             if nfields != 0:
                                 raise _EvalBail()
-                            new_args = trailing
                         elif isinstance(val, VCtor1):
                             if nfields != 1:
                                 raise _EvalBail()
-                            new_args = ArgNode(val.f0, trailing)
                         elif isinstance(val, VCtor2):
                             if nfields != 2:
                                 raise _EvalBail()
-                            new_args = ArgNode(val.f0, ArgNode(val.f1, trailing))
                         elif isinstance(val, VCtorN):
                             if nfields > len(val.fields):
                                 raise _EvalBail()
-                            new_args = _push_ctor_fields(
-                                val.fields, nfields, trailing,
-                            )
                         else:
                             raise _EvalBail()
-                        new_args = _push_prefix_keep(
-                            prefix, rec_node.keep, new_args,
+                        code, env, args = _bind_rec_rule(
+                            rhs, prefix, rec_node.keep, val, nfields, trailing,
                         )
-                        args = new_args
                         cont = next_cont
-                        code = rhs
-                        env = None
                         rec_edge = rec_node.rules_is_rec[ridx]
                         break
 

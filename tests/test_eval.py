@@ -324,3 +324,71 @@ def test_litstr_lazy_expansion():
     assert syntactic_eq(_eval(env, c0), W_LitNat.int(0xE9))
     assert syntactic_eq(_eval(env, c1), W_LitNat.int(0x20AC))
     assert syntactic_eq(_eval(env, c2), W_LitNat.int(0x1F600))
+
+
+def test_direct_lam_def_and_rec_binding_paths():
+    """Multi-arg CDef/CLam/CRec direct binding matches full, partial, and
+    over-applied calls, and closed scalar def_eq memoizes M_WHNF."""
+    x, y, z, n, ih = names("x", "y", "z", "n", "ih")
+    add = _NAT_ADD.const()
+    mul = _NAT_MUL.const()
+    tri = Name.simple("tri").definition(
+        type=forall(x.binder(NAT), y.binder(NAT), z.binder(NAT))(NAT),
+        value=fun(x.binder(NAT), y.binder(NAT), z.binder(NAT))(
+            add.app(mul.app(W_BVar(2), W_BVar(1)), W_BVar(0)),
+        ),
+    )
+    # Over-applied def returning a lambda: (apply2 x y) z = x + y + z
+    apply2 = Name.simple("apply2").definition(
+        type=forall(x.binder(NAT), y.binder(NAT))(forall(z.binder(NAT))(NAT)),
+        value=fun(x.binder(NAT), y.binder(NAT))(
+            fun(z.binder(NAT))(add.app(add.app(W_BVar(2), W_BVar(1)), W_BVar(0))),
+        ),
+    )
+    env = _bool_nat_env(extra=[tri, apply2])
+    # Full CDef direct binding: tri 6 7 3 == 45
+    assert syntactic_eq(
+        _eval(env, tri.name.const().app(W_LitNat.int(6), W_LitNat.int(7), W_LitNat.int(3))),
+        W_LitNat.int(45),
+    )
+    # Over-applied CDef -> inner CLam: apply2 10 20 12 == 42
+    assert syntactic_eq(
+        _eval(env, apply2.name.const().app(W_LitNat.int(10), W_LitNat.int(20), W_LitNat.int(12))),
+        W_LitNat.int(42),
+    )
+    # Multi-arg CLam beta: (fun x y z => x * y + z) 5 8 2 == 42
+    lam3 = fun(x.binder(NAT), y.binder(NAT), z.binder(NAT))(
+        add.app(mul.app(W_BVar(2), W_BVar(1)), W_BVar(0)),
+    )
+    assert syntactic_eq(
+        _eval(env, lam3.app(W_LitNat.int(5), W_LitNat.int(8), W_LitNat.int(2))),
+        W_LitNat.int(42),
+    )
+    # Direct CRec with trailing extra argument:
+    # (Nat.rec (fun _ => Nat -> Nat) (fun k => k) (fun n ih k => ih (k + 1)) 10) 32 == 42
+    u1 = Name.simple("u").as_level_param()
+    nat_rec = Name.simple("Nat").child("rec").const([u1])
+    rec_extra = nat_rec.app(
+        fun(n.binder(NAT))(forall(x.binder(NAT))(NAT)),
+        fun(x.binder(NAT))(W_BVar(0)),
+        fun(n.binder(NAT), ih.binder(forall(x.binder(NAT))(NAT)), x.binder(NAT))(
+            W_BVar(1).app(add.app(W_BVar(0), W_LitNat.int(1))),
+        ),
+        W_LitNat.int(10),
+        W_LitNat.int(32),
+    )
+    assert syntactic_eq(_eval(env, rec_extra), W_LitNat.int(42))
+
+    # def_eq caches M_WHNF for closed compound scalar comparisons
+    tc = TypeChecker(env, None)
+    try:
+        from rpylean.machine import M_WHNF
+
+        h = tc.machine.store.import_term(
+            tri.name.const().app(W_LitNat.int(6), W_LitNat.int(7), W_LitNat.int(3)),
+        )
+        h45 = tc.machine.store.import_term(W_LitNat.int(45))
+        assert tc.machine.def_eq(h, h45)
+        assert tc.machine.store.memo(h, M_WHNF) == h45
+    finally:
+        tc.free()
