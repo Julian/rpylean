@@ -222,6 +222,13 @@ class DeclarationHook(object):
         """Return a truthy value to abort the consume loop early."""
         return False
 
+    def finish(self):
+        """Flush any buffered work at end-of-stream. Return truthy if aborted."""
+        return False
+
+    def abort(self):
+        """Clean up any in-flight background work on unexpected exception."""
+
 
 class EnvironmentBuilder(object):
     """

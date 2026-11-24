@@ -17,7 +17,9 @@ A store is per declaration: the working set of one check, emptied
 for the next when the check ends.
 """
 
-from rpython.rlib.objectmodel import always_inline, dont_inline, newlist_hint, we_are_translated
+from rpython.rlib.objectmodel import (
+    always_inline, dont_inline, newlist_hint, r_dict, we_are_translated,
+)
 from rpython.rlib.rarithmetic import intmask, r_uint
 from rpython.rlib.rstack import stack_almost_full
 from rpython.rtyper.lltypesystem import lltype, rffi
@@ -488,6 +490,26 @@ _CHECKED_PERM = 0x7FFFFFFF
 #: any valid handle `< 2^25`). `_proj_field_cache` also uses `_LEAF_INFER_SEEN`.
 _LEAF_INFER_SEEN = 0x7FFFFFF0
 _LEAF_INFER_PROMOTE = 0x7FFFFFF1
+
+#: Worker-private 4-way set-associative caches for COW-free parallel checking
+#: (`TermStore._cow_mode`), replacing intrusive `W_Expr._cache` writes so
+#: forked workers never dirty shared parent heap pages.
+_COW_P_CAP = 1 << 17
+_COW_P_SET_MASK = _COW_P_CAP - 4
+_COW_P_DIRTY_CAP = 4096
+_COW_T_CAP = 1 << 14
+_COW_T_SET_MASK = _COW_T_CAP - 4
+_COW_T_DIRTY_CAP = 1024
+_COW_OVF_BIT = 1 << 62
+_COW_GEN_MASK = 0x3FFFFFFF
+
+
+def _expr_is(a, b):
+    return a is b
+
+
+def _expr_id_hash(e):
+    return e.hash()
 
 
 @always_inline
@@ -1157,6 +1179,9 @@ class TermStore(object):
         'rec_node', '_rec_node_dirty', 'nodes', 'record_nodes',
         '_inst_memo', '_shift_memo', '_bind_memo', '_multi_memo',
         '_call_memo', '_bind_lo', '_bind_span', '_inst_all_closed',
+        '_cow_mode',
+        '_cow_p_keys', '_cow_p_vals', '_cow_p_dirty', '_cow_p_dirty_n', '_cow_p_ovf',
+        '_cow_t_keys', '_cow_t_vals', '_cow_t_dirty', '_cow_t_dirty_n', '_cow_t_ovf',
         '_freed', 'initial_cap',
     ]
 
@@ -1269,6 +1294,287 @@ class TermStore(object):
         self._proj_overflow = []
         self._bvar_leaves = {}
         self.nodes = []
+        self._cow_mode = False
+        self._cow_p_keys = None
+        self._cow_p_vals = lltype.nullptr(_SIGNED_ARRAY)
+        self._cow_p_dirty = lltype.nullptr(_U32_ARRAY)
+        self._cow_p_dirty_n = 0
+        self._cow_p_ovf = None
+        self._cow_t_keys = None
+        self._cow_t_vals = lltype.nullptr(_SIGNED_ARRAY)
+        self._cow_t_dirty = lltype.nullptr(_U32_ARRAY)
+        self._cow_t_dirty_n = 0
+        self._cow_t_ovf = None
+        if tc is not None and tc.env.cow_mode:
+            self._enable_cow_mode()
+
+    @dont_inline
+    def _enable_cow_mode(self):
+        self._cow_mode = True
+        if self._cow_p_keys is None:
+            self._cow_p_keys = [None] * _COW_P_CAP
+            self._cow_p_vals = _alloc_words(_COW_P_CAP)
+            self._cow_p_dirty = _alloc_u32_uninit(_COW_P_DIRTY_CAP)
+            self._cow_p_dirty_n = 0
+            self._cow_t_keys = [None] * _COW_T_CAP
+            self._cow_t_vals = _alloc_words(_COW_T_CAP)
+            self._cow_t_dirty = _alloc_u32_uninit(_COW_T_DIRTY_CAP)
+            self._cow_t_dirty_n = 0
+
+    @dont_inline
+    def _clear_cow_caches(self):
+        dn = self._cow_p_dirty_n
+        if dn > 0:
+            keys = self._cow_p_keys
+            assert keys is not None
+            if dn <= _COW_P_DIRTY_CAP:
+                dirty = self._cow_p_dirty
+                i = 0
+                while i < dn:
+                    slot = _s32(dirty[i])
+                    assert slot >= 0
+                    keys[slot] = None
+                    i += 1
+            else:
+                i = 0
+                while i < _COW_P_CAP:
+                    keys[i] = None
+                    i += 1
+            self._cow_p_dirty_n = 0
+        if self._cow_p_ovf is not None:
+            self._cow_p_ovf = None
+        tdn = self._cow_t_dirty_n
+        if tdn > 0:
+            tkeys = self._cow_t_keys
+            assert tkeys is not None
+            if tdn <= _COW_T_DIRTY_CAP:
+                tdirty = self._cow_t_dirty
+                i = 0
+                while i < tdn:
+                    slot = _s32(tdirty[i])
+                    assert slot >= 0
+                    tkeys[slot] = None
+                    i += 1
+            else:
+                i = 0
+                while i < _COW_T_CAP:
+                    tkeys[i] = None
+                    i += 1
+            self._cow_t_dirty_n = 0
+        if self._cow_t_ovf is not None:
+            self._cow_t_ovf = None
+
+    @always_inline
+    def _cow_p_get(self, e, gen):
+        if gen <= 0:
+            return 0
+        keys = self._cow_p_keys
+        vals = self._cow_p_vals
+        assert keys is not None
+        sgen = self._store_gen
+        hh = e.hash() ^ intmask(gen * 1000003)
+        base = ((hh ^ (hh >> 15)) << 2) & _COW_P_SET_MASK
+        v0 = vals[base]
+        g0 = (v0 >> 32) & _COW_GEN_MASK
+        if g0 < sgen:
+            return 0
+        if g0 == gen and keys[base] is e:
+            return v0 & _TABLE_SLOT_MASK
+        v1 = vals[base + 1]
+        g1 = v1 >> 32
+        if g1 < sgen:
+            return 0
+        if g1 == gen and keys[base + 1] is e:
+            return v1 & _TABLE_SLOT_MASK
+        v2 = vals[base + 2]
+        g2 = v2 >> 32
+        if g2 < sgen:
+            return 0
+        if g2 == gen and keys[base + 2] is e:
+            return v2 & _TABLE_SLOT_MASK
+        v3 = vals[base + 3]
+        g3 = v3 >> 32
+        if g3 < sgen:
+            return 0
+        if g3 == gen and keys[base + 3] is e:
+            return v3 & _TABLE_SLOT_MASK
+        if (v0 & _COW_OVF_BIT) != 0 and self._cow_p_ovf is not None:
+            return self._cow_p_ovf_get(e, gen)
+        return 0
+
+    @dont_inline
+    def _cow_p_ovf_get(self, e, gen):
+        ovf = self._cow_p_ovf
+        if ovf is not None:
+            d = ovf.get(gen, None)
+            if d is not None:
+                return d.get(e, 0)
+        return 0
+
+    @dont_inline
+    def _cow_p_ovf_put(self, e, gen, h):
+        ovf = self._cow_p_ovf
+        if ovf is None:
+            ovf = self._cow_p_ovf = {}
+        d = ovf.get(gen, None)
+        if d is None:
+            d = ovf[gen] = r_dict(_expr_is, _expr_id_hash)
+        d[e] = h
+
+    @always_inline
+    def _cow_p_record_dirty(self, slot):
+        dn = self._cow_p_dirty_n
+        if dn < _COW_P_DIRTY_CAP:
+            self._cow_p_dirty[dn] = _u32(slot)
+            self._cow_p_dirty_n = dn + 1
+        elif dn == _COW_P_DIRTY_CAP:
+            self._cow_p_dirty_n = _COW_P_DIRTY_CAP + 1
+
+    @always_inline
+    def _cow_p_put(self, e, gen, h):
+        if gen <= 0:
+            return
+        keys = self._cow_p_keys
+        vals = self._cow_p_vals
+        assert keys is not None
+        hh = e.hash() ^ intmask(gen * 1000003)
+        base = ((hh ^ (hh >> 15)) << 2) & _COW_P_SET_MASK
+        sgen = self._store_gen
+        tagged = (gen << 32) | h
+        v0 = vals[base]
+        g0 = (v0 >> 32) & _COW_GEN_MASK
+        if g0 < sgen:
+            if keys[base] is None:
+                self._cow_p_record_dirty(base)
+            keys[base] = e
+            vals[base] = tagged
+            return
+        if g0 == gen and keys[base] is e:
+            vals[base] = (v0 & _COW_OVF_BIT) | tagged
+            return
+        i = 1
+        while i < 4:
+            slot = base + i
+            v = vals[slot]
+            vg = v >> 32
+            if vg < sgen:
+                if keys[slot] is None:
+                    self._cow_p_record_dirty(slot)
+                keys[slot] = e
+                vals[slot] = tagged
+                return
+            if vg == gen and keys[slot] is e:
+                vals[slot] = tagged
+                return
+            i += 1
+        vals[base] = v0 | _COW_OVF_BIT
+        self._cow_p_ovf_put(e, gen, h)
+
+    @always_inline
+    def _cow_t_get(self, e, gen, base_gen):
+        if gen <= 0:
+            return 0
+        keys = self._cow_t_keys
+        vals = self._cow_t_vals
+        assert keys is not None
+        floor = base_gen if base_gen > 0 else gen
+        hh = e.hash() ^ intmask(gen * 1000003)
+        base = ((hh ^ (hh >> 12)) << 2) & _COW_T_SET_MASK
+        v0 = vals[base]
+        g0 = (v0 >> 32) & _COW_GEN_MASK
+        if g0 < floor:
+            return 0
+        if g0 == gen and keys[base] is e:
+            return v0 & _TABLE_SLOT_MASK
+        v1 = vals[base + 1]
+        g1 = v1 >> 32
+        if g1 < floor:
+            return 0
+        if g1 == gen and keys[base + 1] is e:
+            return v1 & _TABLE_SLOT_MASK
+        v2 = vals[base + 2]
+        g2 = v2 >> 32
+        if g2 < floor:
+            return 0
+        if g2 == gen and keys[base + 2] is e:
+            return v2 & _TABLE_SLOT_MASK
+        v3 = vals[base + 3]
+        g3 = v3 >> 32
+        if g3 < floor:
+            return 0
+        if g3 == gen and keys[base + 3] is e:
+            return v3 & _TABLE_SLOT_MASK
+        if (v0 & _COW_OVF_BIT) != 0 and self._cow_t_ovf is not None:
+            return self._cow_t_ovf_get(e, gen)
+        return 0
+
+    @dont_inline
+    def _cow_t_ovf_get(self, e, gen):
+        ovf = self._cow_t_ovf
+        if ovf is not None:
+            d = ovf.get(gen, None)
+            if d is not None:
+                return d.get(e, 0)
+        return 0
+
+    @dont_inline
+    def _cow_t_ovf_put(self, e, gen, h):
+        ovf = self._cow_t_ovf
+        if ovf is None:
+            ovf = self._cow_t_ovf = {}
+        d = ovf.get(gen, None)
+        if d is None:
+            d = ovf[gen] = r_dict(_expr_is, _expr_id_hash)
+        d[e] = h
+
+    @always_inline
+    def _cow_t_record_dirty(self, slot):
+        dn = self._cow_t_dirty_n
+        if dn < _COW_T_DIRTY_CAP:
+            self._cow_t_dirty[dn] = _u32(slot)
+            self._cow_t_dirty_n = dn + 1
+        elif dn == _COW_T_DIRTY_CAP:
+            self._cow_t_dirty_n = _COW_T_DIRTY_CAP + 1
+
+    @always_inline
+    def _cow_t_put(self, e, gen, base_gen, h):
+        if gen <= 0:
+            return
+        keys = self._cow_t_keys
+        vals = self._cow_t_vals
+        assert keys is not None
+        hh = e.hash() ^ intmask(gen * 1000003)
+        base = ((hh ^ (hh >> 12)) << 2) & _COW_T_SET_MASK
+        floor = base_gen if base_gen > 0 else gen
+        tagged = (gen << 32) | h
+        v0 = vals[base]
+        g0 = (v0 >> 32) & _COW_GEN_MASK
+        if g0 < floor:
+            if keys[base] is None:
+                self._cow_t_record_dirty(base)
+            keys[base] = e
+            vals[base] = tagged
+            return
+        if g0 == gen and keys[base] is e:
+            vals[base] = (v0 & _COW_OVF_BIT) | tagged
+            return
+        i = 1
+        while i < 4:
+            slot = base + i
+            v = vals[slot]
+            vg = v >> 32
+            if vg < floor:
+                if keys[slot] is None:
+                    self._cow_t_record_dirty(slot)
+                keys[slot] = e
+                vals[slot] = tagged
+                return
+            if vg == gen and keys[slot] is e:
+                vals[slot] = tagged
+                return
+            i += 1
+        vals[base] = v0 | _COW_OVF_BIT
+        self._cow_t_ovf_put(e, gen, h)
 
     def _alloc_records(self, cap):
         self.cap = cap
@@ -1441,6 +1747,9 @@ class TermStore(object):
         self._bind_memo.clear()
         self._multi_memo.clear()
         self._call_memo.clear()
+        if (self._cow_p_dirty_n > 0 or self._cow_t_dirty_n > 0
+                or self._cow_p_ovf is not None or self._cow_t_ovf is not None):
+            self._clear_cow_caches()
         self._forget()
 
     def _clear_app_table(self, n):
@@ -1516,6 +1825,18 @@ class TermStore(object):
         self._bind_memo.free()
         self._multi_memo.free()
         self._call_memo.free()
+        if self._cow_p_vals:
+            _free_words(self._cow_p_vals)
+            self._cow_p_vals = lltype.nullptr(_SIGNED_ARRAY)
+        if self._cow_p_dirty:
+            _free_u32(self._cow_p_dirty)
+            self._cow_p_dirty = lltype.nullptr(_U32_ARRAY)
+        if self._cow_t_vals:
+            _free_words(self._cow_t_vals)
+            self._cow_t_vals = lltype.nullptr(_SIGNED_ARRAY)
+        if self._cow_t_dirty:
+            _free_u32(self._cow_t_dirty)
+            self._cow_t_dirty = lltype.nullptr(_U32_ARRAY)
 
     # ---- record access ---------------------------------------------------
 
@@ -2244,7 +2565,7 @@ class TermStore(object):
         h = self._new_leaf(fvar)
         self._fvar_uid.set(fvar._uid, h)
         gen = self._store_gen
-        if gen > 0:
+        if gen > 0 and not self._cow_mode:
             fvar._cache = (gen << 32) | h
         return h
 
@@ -2291,6 +2612,8 @@ class TermStore(object):
         c = e._cache
         if (c >> 32) == gen:
             return c & _TABLE_SLOT_MASK
+        if self._cow_mode:
+            return self._leaf_for_cow(e)
         if cls is W_FVar:
             assert isinstance(e, W_FVar)
             uid_key = e._uid
@@ -2337,6 +2660,56 @@ class TermStore(object):
             orig._cache = tagged
             if e is not orig:
                 e._cache = tagged
+        return h
+
+    @dont_inline
+    def _leaf_for_cow(self, e):
+        """COW-free mirror of `leaf_for`: memoises in `_cow_p` without writing
+        to shared `W_Expr._cache` fields."""
+        gen = self._store_gen
+        h = self._cow_p_get(e, gen)
+        if h != 0:
+            return h
+        cls = e.__class__
+        if cls is W_FVar:
+            assert isinstance(e, W_FVar)
+            uid_key = e._uid
+            h = self._fvar_uid.get(uid_key, 0)
+            if h == 0:
+                h = self._new_leaf(e)
+                self._fvar_uid.set(uid_key, h)
+            self._cow_p_put(e, gen, h)
+            return h
+        orig = e
+        if cls is W_Const:
+            assert isinstance(e, W_Const)
+            e = _canonical_const(e)
+        elif cls is W_Sort:
+            assert isinstance(e, W_Sort)
+            e = _canonical_sort(e)
+        if e is not orig:
+            h = self._cow_p_get(e, gen)
+            if h != 0:
+                self._cow_p_put(orig, gen, h)
+                return h
+        h31 = e.hash() & 0x7FFFFFFF
+        key = h31 if h31 != 0 else 1
+        head = self._content_head.get(key, 0)
+        cur = head
+        while cur != 0:
+            j = leaf_index(cur)
+            if syntactic_eq(self.leaves[j], e):
+                self._cow_p_put(orig, gen, cur)
+                if e is not orig:
+                    self._cow_p_put(e, gen, cur)
+                return cur
+            cur = _s32(self.leaf_next[j])
+        h = self._new_leaf(e)
+        self.leaf_next[leaf_index(h)] = _u32(head)
+        self._content_head.set(key, h)
+        self._cow_p_put(orig, gen, h)
+        if e is not orig:
+            self._cow_p_put(e, gen, h)
         return h
 
     def _const_leaf1(self, name, l0):
@@ -2562,6 +2935,71 @@ class TermStore(object):
             h = self.leaf_for(leaf_e)
         if lgen > 0:
             e._cache = (lgen << 32) | h
+        return h
+
+    @dont_inline
+    def _import_const_levels_cow(self, e, params, clevels, lgen):
+        """COW-free mirror of `_import_const_levels`."""
+        assert isinstance(e, W_Const)
+        lvls = e.levels
+        nlvls = len(lvls)
+        np = len(params)
+        h = 0
+        if nlvls == 1:
+            l0 = lvls[0]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            if nl0 is not l0:
+                h = self._const_leaf1(e.name, nl0)
+        elif nlvls == 2:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1:
+                h = self._const_leaf2(e.name, nl0, nl1)
+        elif nlvls == 3:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            l2 = lvls[2]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            nl2 = _subst_lvl_inline(l2, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1 or nl2 is not l2:
+                h = self._const_leaf3(e.name, nl0, nl1, nl2)
+        elif nlvls == 4:
+            l0 = lvls[0]
+            l1 = lvls[1]
+            l2 = lvls[2]
+            l3 = lvls[3]
+            nl0 = _subst_lvl_inline(l0, params, clevels, np)
+            nl1 = _subst_lvl_inline(l1, params, clevels, np)
+            nl2 = _subst_lvl_inline(l2, params, clevels, np)
+            nl3 = _subst_lvl_inline(l3, params, clevels, np)
+            if nl0 is not l0 or nl1 is not l1 or nl2 is not l2 or nl3 is not l3:
+                h = self._const_leaf4(e.name, nl0, nl1, nl2, nl3)
+        elif nlvls > 4:
+            h = self._const_leaf_many(e, params, clevels)
+        if h == 0:
+            h = self._cow_p_get(e, self._store_gen)
+            if h == 0:
+                h = self._leaf_for_cow(e)
+        self._cow_p_put(e, lgen, h)
+        return h
+
+    @dont_inline
+    def _import_sort_levels_cow(self, e, params, clevels, lgen):
+        """COW-free mirror of `_import_sort_levels`."""
+        assert isinstance(e, W_Sort)
+        leaf_e = e
+        lvl = e.level
+        if lvl.has_param:
+            nl = _subst_lvl_inline(lvl, params, clevels, len(params))
+            if nl is not lvl:
+                leaf_e = nl.sort()
+        h = self._cow_p_get(leaf_e, self._store_gen)
+        if h == 0:
+            h = self._leaf_for_cow(leaf_e)
+        self._cow_p_put(e, lgen, h)
         return h
 
     # ---- spines ----------------------------------------------------------
@@ -6448,6 +6886,8 @@ class TermStore(object):
         c = e._cache
         if (c >> 32) == gen:
             return c & _TABLE_SLOT_MASK
+        if self._cow_mode:
+            return self._import_term_cow(e)
         mark = self._import_spine_len
         try:
             return self._import_rec(e, gen, 0)
@@ -6651,6 +7091,8 @@ class TermStore(object):
         self._fvar_base_gen = 0
         if self._fvar_multi is not None:
             self._fvar_multi = None
+        if self._cow_t_ovf is not None:
+            self._cow_t_ovf = None
 
     def _fvar_gen_for_depth(self, depth):
         gens = self._fvar_gens
@@ -6692,6 +7134,8 @@ class TermStore(object):
             assert isinstance(e, W_BVar)
             bid = e.id
             return fvars[nf - 1 - bid] if bid < nf else self.bvar(bid - nf)
+        if self._cow_mode:
+            return self._import_term_fvars_cow(e, fvars, nf, fgen)
         if fgen > 0:
             c = e._cache
             if (c >> 32) == fgen:
@@ -7087,6 +7531,8 @@ class TermStore(object):
         lgen = self._level_cache_gen(params, clevels)
         mark = self._import_spine_len
         try:
+            if self._cow_mode:
+                return self._import_with_levels_cow(target, params, clevels, lgen, 0)
             return self._import_with_levels(target, params, clevels, lgen, 0)
         finally:
             if self._import_spine_len > mark:
@@ -7333,6 +7779,8 @@ class TermStore(object):
         self._cs_base_gen = 0
         if self._cs_multi is not None:
             self._cs_multi = None
+        if self._cow_t_ovf is not None and self._fvar_base_gen == 0:
+            self._cow_t_ovf = None
         if self._cs_has_lp:
             self._cs_params = None
             self._cs_clevels = None
@@ -7418,6 +7866,8 @@ class TermStore(object):
         self._cs_base_gen = fgen
         mark = self._import_spine_len
         try:
+            if self._cow_mode:
+                return self._import_const_subst_rec_cow(target, 0, fgen, 0)
             return self._import_const_subst_rec(target, 0, fgen, 0)
         finally:
             if self._import_spine_len > mark:
@@ -7873,6 +8323,1132 @@ class TermStore(object):
                     e._cache = (dgen << 32) | h
         return h
 
+    # ---- COW-free parallel import paths ---------------------------------
+    #
+    # Mirror `import_term`, `import_term_fvars`, `import_const_term`, and
+    # `import_const_subst_buf` using worker-private `_cow_p`/`_cow_t` tables
+    # so forked workers never mutate `W_Expr._cache` on shared parent pages.
+
+    @dont_inline
+    def _import_term_cow(self, e):
+        if e.__class__ is W_BVar:
+            assert isinstance(e, W_BVar)
+            id = e.id
+            if 0 <= id < _BVAR_ARR_LEN:
+                h = self._bvar_arr[id]
+                if h != 0:
+                    return h
+                h = self._new_leaf(e)
+                self._bvar_arr[id] = h
+                if id + 1 > self._bvar_max:
+                    self._bvar_max = id + 1
+                return h
+            return self.leaf_for(e)
+        gen = self._store_gen
+        h = self._cow_p_get(e, gen)
+        if h != 0:
+            return h
+        mark = self._import_spine_len
+        try:
+            return self._import_rec_cow(e, gen, 0)
+        finally:
+            if self._import_spine_len > mark:
+                self._clear_import_spine(mark)
+
+    @dont_inline
+    def _import_let_rec_cow(self, e, gen, nr):
+        assert isinstance(e, W_Let)
+        h = self.let(
+            e.name,
+            self._import_rec_cow(e.type, gen, nr),
+            self._import_rec_cow(e.value, gen, nr),
+            self._import_rec_cow(e.body, gen, nr),
+        )
+        self._cow_p_put(e, gen, h)
+        if self.record_nodes:
+            self.set_node(h, e)
+        return h
+
+    def _import_rec_cow(self, e, gen, rdepth):
+        cls = e.__class__
+        if cls is W_BVar:
+            assert isinstance(e, W_BVar)
+            id = e.id
+            if 0 <= id < _BVAR_ARR_LEN:
+                h = self._bvar_arr[id]
+                if h != 0:
+                    return h
+                h = self._new_leaf(e)
+                self._bvar_arr[id] = h
+                if id + 1 > self._bvar_max:
+                    self._bvar_max = id + 1
+                return h
+            return self.leaf_for(e)
+        h = self._cow_p_get(e, gen)
+        if h != 0:
+            return h
+        if cls is W_Const:
+            return self._leaf_for_cow(e)
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        nr = rdepth + 1
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            if fn.__class__ is W_BVar:
+                assert isinstance(fn, W_BVar)
+                bid = fn.id
+                if 0 <= bid < _BVAR_ARR_LEN:
+                    fn_h = self._bvar_arr[bid]
+                    if fn_h == 0:
+                        fn_h = self._new_leaf(fn)
+                        self._bvar_arr[bid] = fn_h
+                        if bid + 1 > self._bvar_max:
+                            self._bvar_max = bid + 1
+                else:
+                    fn_h = self.leaf_for(fn)
+            else:
+                fn_h = self._cow_p_get(fn, gen)
+                if fn_h == 0 and not isinstance(fn, W_App):
+                    fn_h = (
+                        self._leaf_for_cow(fn)
+                        if fn.__class__ is W_Const
+                        else self._import_rec_cow(fn, gen, nr)
+                    )
+            if fn_h != 0:
+                arg = e.arg
+                if arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    bid = arg.id
+                    if 0 <= bid < _BVAR_ARR_LEN:
+                        arg_h = self._bvar_arr[bid]
+                        if arg_h == 0:
+                            arg_h = self._new_leaf(arg)
+                            self._bvar_arr[bid] = arg_h
+                            if bid + 1 > self._bvar_max:
+                                self._bvar_max = bid + 1
+                    else:
+                        arg_h = self.leaf_for(arg)
+                else:
+                    arg_h = self._cow_p_get(arg, gen)
+                    if arg_h == 0:
+                        if arg.__class__ is W_Const:
+                            arg_h = self._leaf_for_cow(arg)
+                        else:
+                            arg_h = self._import_rec_cow(arg, gen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                self._cow_p_put(e, gen, head)
+                if self.record_nodes:
+                    self.set_node(head, e)
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                self._grow_import_spine(top, e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if not isinstance(cur, W_App):
+                    self._import_spine_len = top
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        bid = cur.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            head = self._bvar_arr[bid]
+                            if head == 0:
+                                head = self._new_leaf(cur)
+                                self._bvar_arr[bid] = head
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            head = self.leaf_for(cur)
+                    else:
+                        head = self._cow_p_get(cur, gen)
+                        if head == 0:
+                            if cur.__class__ is W_Const:
+                                head = self._leaf_for_cow(cur)
+                            else:
+                                head = self._import_rec_cow(cur, gen, nr)
+                    break
+                head = self._cow_p_get(cur, gen)
+                if head != 0:
+                    break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    self._grow_import_spine(top, cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    bid = arg.id
+                    if 0 <= bid < _BVAR_ARR_LEN:
+                        arg_h = self._bvar_arr[bid]
+                        if arg_h == 0:
+                            arg_h = self._new_leaf(arg)
+                            self._bvar_arr[bid] = arg_h
+                            if bid + 1 > self._bvar_max:
+                                self._bvar_max = bid + 1
+                    else:
+                        arg_h = self.leaf_for(arg)
+                else:
+                    arg_h = self._cow_p_get(arg, gen)
+                    if arg_h == 0:
+                        if arg.__class__ is W_Const:
+                            arg_h = self._leaf_for_cow(arg)
+                        else:
+                            self._import_spine_len = top
+                            arg_h = self._import_rec_cow(arg, gen, nr)
+                head = self.cons_app(head, arg_h)
+                self._cow_p_put(app, gen, head)
+                if self.record_nodes:
+                    self.set_node(head, app)
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            btype = e.type
+            type = self._cow_p_get(btype, gen)
+            if type == 0:
+                type = self._import_rec_cow(btype, gen, nr)
+            ebody = e.body
+            body = self._cow_p_get(ebody, gen)
+            if body == 0:
+                body = self._import_rec_cow(ebody, gen, nr)
+            if cls is W_Lambda:
+                h = self.lam(e, type, body)
+            else:
+                h = self.forall(e, type, body)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index, self._import_rec_cow(e.struct_expr, gen, nr),
+            )
+        elif cls is W_Let:
+            return self._import_let_rec_cow(e, gen, nr)
+        else:
+            return self._leaf_for_cow(e)
+        self._cow_p_put(e, gen, h)
+        if self.record_nodes:
+            self.set_node(h, e)
+        return h
+
+    @dont_inline
+    def _import_term_fvars_cow(self, e, fvars, nf, fgen):
+        if fgen > 0:
+            if self._fvar_base_gen == 0:
+                self._fvar_base_gen = fgen
+            h = self._cow_t_get(e, fgen, self._fvar_base_gen)
+            if h != 0:
+                return h
+        mark = self._import_spine_len
+        try:
+            return self._import_fvars_rec_cow(e, fvars, nf, 0, fgen, 0)
+        finally:
+            if self._import_spine_len > mark:
+                self._clear_import_spine(mark)
+
+    @dont_inline
+    def _import_let_fvars_cow(self, e, fvars, nf, depth, dgen, nr):
+        assert isinstance(e, W_Let)
+        sgen = self._store_gen
+        et = e.type
+        if et.loose_bvar_range() <= depth:
+            th = self._cow_p_get(et, sgen)
+            if th == 0:
+                th = self._import_rec_cow(et, sgen, nr)
+        else:
+            th = self._import_fvars_rec_cow(et, fvars, nf, depth, dgen, nr)
+        ev = e.value
+        if ev.loose_bvar_range() <= depth:
+            vh = self._cow_p_get(ev, sgen)
+            if vh == 0:
+                vh = self._import_rec_cow(ev, sgen, nr)
+        else:
+            vh = self._import_fvars_rec_cow(ev, fvars, nf, depth, dgen, nr)
+        eb = e.body
+        ndepth = depth + 1
+        if eb.loose_bvar_range() <= ndepth:
+            bh = self._cow_p_get(eb, sgen)
+            if bh == 0:
+                bh = self._import_rec_cow(eb, sgen, nr)
+        else:
+            ndgen = self._fvar_gen_for_depth(ndepth)
+            if self._fvar_base_gen == 0 and ndgen > 0:
+                self._fvar_base_gen = ndgen
+            bh = self._import_fvars_rec_cow(eb, fvars, nf, ndepth, ndgen, nr)
+        h = self.let(e.name, th, vh, bh)
+        if dgen > 0:
+            self._cow_t_put(e, dgen, self._fvar_base_gen, h)
+        return h
+
+    def _import_fvars_rec_cow(self, e, fvars, nf, depth, dgen, rdepth):
+        sgen = self._store_gen
+        cls = e.__class__
+        if e.loose_bvar_range() <= depth:
+            if cls is W_BVar:
+                assert isinstance(e, W_BVar)
+                bid = e.id
+                if 0 <= bid < _BVAR_ARR_LEN:
+                    h = self._bvar_arr[bid]
+                    if h != 0:
+                        return h
+                    h = self._new_leaf(e)
+                    self._bvar_arr[bid] = h
+                    if bid + 1 > self._bvar_max:
+                        self._bvar_max = bid + 1
+                    return h
+                return self.leaf_for(e)
+            h = self._cow_p_get(e, sgen)
+            if h != 0:
+                return h
+            if cls is W_Const:
+                return self._leaf_for_cow(e)
+            return self._import_rec_cow(e, sgen, rdepth)
+        if cls is W_BVar:
+            assert isinstance(e, W_BVar)
+            rel = e.id - depth
+            if rel < nf:
+                return fvars[nf - 1 - rel]
+            return self.bvar(e.id - nf)
+        floor = self._fvar_base_gen
+        if dgen > 0:
+            h = self._cow_t_get(e, dgen, floor)
+            if h != 0:
+                return h
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        nr = rdepth + 1
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            fn_h = 0
+            if fn.loose_bvar_range() <= depth:
+                if fn.__class__ is W_BVar:
+                    assert isinstance(fn, W_BVar)
+                    bid = fn.id
+                    if 0 <= bid < _BVAR_ARR_LEN:
+                        fn_h = self._bvar_arr[bid]
+                        if fn_h == 0:
+                            fn_h = self._new_leaf(fn)
+                            self._bvar_arr[bid] = fn_h
+                            if bid + 1 > self._bvar_max:
+                                self._bvar_max = bid + 1
+                    else:
+                        fn_h = self.leaf_for(fn)
+                else:
+                    fn_h = self._cow_p_get(fn, sgen)
+                    if fn_h == 0:
+                        if fn.__class__ is W_Const:
+                            fn_h = self._leaf_for_cow(fn)
+                        else:
+                            fn_h = self._import_rec_cow(fn, sgen, nr)
+            elif fn.__class__ is W_BVar:
+                assert isinstance(fn, W_BVar)
+                rel = fn.id - depth
+                fn_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(fn.id - nf)
+            else:
+                if dgen > 0:
+                    fn_h = self._cow_t_get(fn, dgen, floor)
+                if fn_h == 0 and not isinstance(fn, W_App):
+                    fn_h = self._import_fvars_rec_cow(fn, fvars, nf, depth, dgen, nr)
+            if fn_h != 0:
+                arg = e.arg
+                if arg.loose_bvar_range() <= depth:
+                    if arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    arg_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(arg.id - nf)
+                else:
+                    arg_h = self._cow_t_get(arg, dgen, floor) if dgen > 0 else 0
+                    if arg_h == 0:
+                        arg_h = self._import_fvars_rec_cow(arg, fvars, nf, depth, dgen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                if dgen > 0:
+                    self._cow_t_put(e, dgen, floor, head)
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                self._grow_import_spine(top, e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if cur.loose_bvar_range() <= depth:
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        bid = cur.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            head = self._bvar_arr[bid]
+                            if head == 0:
+                                head = self._new_leaf(cur)
+                                self._bvar_arr[bid] = head
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            head = self.leaf_for(cur)
+                    else:
+                        head = self._cow_p_get(cur, sgen)
+                        if head == 0:
+                            if cur.__class__ is W_Const:
+                                head = self._leaf_for_cow(cur)
+                            else:
+                                self._import_spine_len = top
+                                head = self._import_rec_cow(cur, sgen, nr)
+                    break
+                if not isinstance(cur, W_App):
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        rel = cur.id - depth
+                        head = fvars[nf - 1 - rel] if rel < nf else self.bvar(cur.id - nf)
+                    else:
+                        head = self._cow_t_get(cur, dgen, floor) if dgen > 0 else 0
+                        if head == 0:
+                            self._import_spine_len = top
+                            head = self._import_fvars_rec_cow(cur, fvars, nf, depth, dgen, nr)
+                    break
+                if dgen > 0:
+                    head = self._cow_t_get(cur, dgen, floor)
+                    if head != 0:
+                        break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    self._grow_import_spine(top, cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.loose_bvar_range() <= depth:
+                    if arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                self._import_spine_len = top
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    arg_h = fvars[nf - 1 - rel] if rel < nf else self.bvar(arg.id - nf)
+                else:
+                    arg_h = self._cow_t_get(arg, dgen, floor) if dgen > 0 else 0
+                    if arg_h == 0:
+                        self._import_spine_len = top
+                        arg_h = self._import_fvars_rec_cow(arg, fvars, nf, depth, dgen, nr)
+                head = self.cons_app(head, arg_h)
+                if dgen > 0:
+                    self._cow_t_put(app, dgen, floor, head)
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            btype = e.type
+            if btype.loose_bvar_range() <= depth:
+                type_h = self._cow_p_get(btype, sgen)
+                if type_h == 0:
+                    type_h = self._import_rec_cow(btype, sgen, nr)
+            else:
+                type_h = self._import_fvars_rec_cow(btype, fvars, nf, depth, dgen, nr)
+            ebody = e.body
+            ndepth = depth + 1
+            if ebody.loose_bvar_range() <= ndepth:
+                body_h = self._cow_p_get(ebody, sgen)
+                if body_h == 0:
+                    body_h = self._import_rec_cow(ebody, sgen, nr)
+            else:
+                ndgen = self._fvar_gen_for_depth(ndepth)
+                if self._fvar_base_gen == 0 and ndgen > 0:
+                    self._fvar_base_gen = ndgen
+                body_h = self._import_fvars_rec_cow(ebody, fvars, nf, ndepth, ndgen, nr)
+            if cls is W_Lambda:
+                h = self.lam(e, type_h, body_h)
+            else:
+                h = self.forall(e, type_h, body_h)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index,
+                self._import_fvars_rec_cow(e.struct_expr, fvars, nf, depth, dgen, nr),
+            )
+        elif cls is W_Let:
+            return self._import_let_fvars_cow(e, fvars, nf, depth, dgen, nr)
+        else:
+            return self._leaf_for_cow(e)
+        if dgen > 0:
+            self._cow_t_put(e, dgen, self._fvar_base_gen, h)
+        return h
+
+    @dont_inline
+    def _import_let_levels_cow(self, e, params, clevels, lgen, nr):
+        assert isinstance(e, W_Let)
+        h = self.let(
+            e.name,
+            self._import_with_levels_cow(e.type, params, clevels, lgen, nr),
+            self._import_with_levels_cow(e.value, params, clevels, lgen, nr),
+            self._import_with_levels_cow(e.body, params, clevels, lgen, nr),
+        )
+        self._cow_p_put(e, lgen, h)
+        return h
+
+    def _import_with_levels_cow(self, e, params, clevels, lgen, rdepth):
+        sgen = self._store_gen
+        if not e.has_level_param():
+            h = self._cow_p_get(e, sgen)
+            if h != 0:
+                return h
+            if e.__class__ is W_Const:
+                return self._leaf_for_cow(e)
+            return self._import_rec_cow(e, sgen, rdepth)
+        h = self._cow_p_get(e, lgen)
+        if h != 0:
+            return h
+        cls = e.__class__
+        if cls is W_Const:
+            return self._import_const_levels_cow(e, params, clevels, lgen)
+        if cls is W_Sort:
+            return self._import_sort_levels_cow(e, params, clevels, lgen)
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        nr = rdepth + 1
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            fn_h = 0
+            if fn.has_level_param():
+                fn_h = self._cow_p_get(fn, lgen)
+                if fn_h == 0 and not isinstance(fn, W_App):
+                    fn_h = (
+                        self._import_const_levels_cow(fn, params, clevels, lgen)
+                        if fn.__class__ is W_Const
+                        else self._import_with_levels_cow(fn, params, clevels, lgen, nr)
+                    )
+            else:
+                fn_h = self._cow_p_get(fn, sgen)
+                if fn_h == 0:
+                    if fn.__class__ is W_Const:
+                        fn_h = self._leaf_for_cow(fn)
+                    else:
+                        fn_h = self._import_rec_cow(fn, sgen, nr)
+            if fn_h != 0:
+                arg = e.arg
+                if arg.has_level_param():
+                    arg_h = self._cow_p_get(arg, lgen)
+                    if arg_h == 0:
+                        if arg.__class__ is W_Const:
+                            arg_h = self._import_const_levels_cow(arg, params, clevels, lgen)
+                        else:
+                            arg_h = self._import_with_levels_cow(arg, params, clevels, lgen, nr)
+                else:
+                    if arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                self._cow_p_put(e, lgen, head)
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                self._grow_import_spine(top, e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if not cur.has_level_param():
+                    head = self._cow_p_get(cur, sgen)
+                    if head == 0:
+                        if cur.__class__ is W_Const:
+                            head = self._leaf_for_cow(cur)
+                        else:
+                            self._import_spine_len = top
+                            head = self._import_rec_cow(cur, sgen, nr)
+                    break
+                if not isinstance(cur, W_App):
+                    head = self._cow_p_get(cur, lgen)
+                    if head == 0:
+                        if cur.__class__ is W_Const:
+                            head = self._import_const_levels_cow(cur, params, clevels, lgen)
+                        else:
+                            self._import_spine_len = top
+                            head = self._import_with_levels_cow(
+                                cur, params, clevels, lgen, nr,
+                            )
+                    break
+                head = self._cow_p_get(cur, lgen)
+                if head != 0:
+                    break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    self._grow_import_spine(top, cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.has_level_param():
+                    arg_h = self._cow_p_get(arg, lgen)
+                    if arg_h == 0:
+                        if arg.__class__ is W_Const:
+                            arg_h = self._import_const_levels_cow(arg, params, clevels, lgen)
+                        else:
+                            self._import_spine_len = top
+                            arg_h = self._import_with_levels_cow(
+                                arg, params, clevels, lgen, nr,
+                            )
+                else:
+                    if arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                self._import_spine_len = top
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                head = self.cons_app(head, arg_h)
+                self._cow_p_put(app, lgen, head)
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            btype = e.type
+            if btype.has_level_param():
+                type_h = self._cow_p_get(btype, lgen)
+                if type_h == 0:
+                    type_h = self._import_with_levels_cow(btype, params, clevels, lgen, nr)
+            else:
+                type_h = self._cow_p_get(btype, sgen)
+                if type_h == 0:
+                    type_h = self._import_rec_cow(btype, sgen, nr)
+            ebody = e.body
+            if ebody.has_level_param():
+                body_h = self._cow_p_get(ebody, lgen)
+                if body_h == 0:
+                    body_h = self._import_with_levels_cow(ebody, params, clevels, lgen, nr)
+            else:
+                body_h = self._cow_p_get(ebody, sgen)
+                if body_h == 0:
+                    body_h = self._import_rec_cow(ebody, sgen, nr)
+            if cls is W_Lambda:
+                h = self.lam(e, type_h, body_h)
+            else:
+                h = self.forall(e, type_h, body_h)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index,
+                self._import_with_levels_cow(
+                    e.struct_expr, params, clevels, lgen, nr,
+                ),
+            )
+        elif cls is W_Let:
+            return self._import_let_levels_cow(e, params, clevels, lgen, nr)
+        else:
+            h = self._leaf_for_cow(e)
+        self._cow_p_put(e, lgen, h)
+        return h
+
+    @dont_inline
+    def _import_let_cs_cow(self, e, depth, dgen, nr):
+        assert isinstance(e, W_Let)
+        sgen = self._store_gen
+        has_lp = self._cs_has_lp
+        et = e.type
+        if et.loose_bvar_range() <= depth:
+            if has_lp and et.has_level_param():
+                lgen = self._cs_lgen
+                th = self._cow_p_get(et, lgen)
+                if th == 0:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    th = self._import_with_levels_cow(et, params, clevels, lgen, nr)
+            else:
+                th = self._cow_p_get(et, sgen)
+                if th == 0:
+                    th = self._import_rec_cow(et, sgen, nr)
+        else:
+            th = self._import_const_subst_rec_cow(et, depth, dgen, nr)
+        ev = e.value
+        if ev.loose_bvar_range() <= depth:
+            if has_lp and ev.has_level_param():
+                lgen = self._cs_lgen
+                vh = self._cow_p_get(ev, lgen)
+                if vh == 0:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    vh = self._import_with_levels_cow(ev, params, clevels, lgen, nr)
+            else:
+                vh = self._cow_p_get(ev, sgen)
+                if vh == 0:
+                    vh = self._import_rec_cow(ev, sgen, nr)
+        else:
+            vh = self._import_const_subst_rec_cow(ev, depth, dgen, nr)
+        eb = e.body
+        ndepth = depth + 1
+        if eb.loose_bvar_range() <= ndepth:
+            if has_lp and eb.has_level_param():
+                lgen = self._cs_lgen
+                bh = self._cow_p_get(eb, lgen)
+                if bh == 0:
+                    params = self._cs_params
+                    clevels = self._cs_clevels
+                    assert params is not None and clevels is not None
+                    bh = self._import_with_levels_cow(eb, params, clevels, lgen, nr)
+            else:
+                bh = self._cow_p_get(eb, sgen)
+                if bh == 0:
+                    bh = self._import_rec_cow(eb, sgen, nr)
+        else:
+            ndgen = self._cs_gen_for_depth(ndepth)
+            bh = self._import_const_subst_rec_cow(eb, ndepth, ndgen, nr)
+        h = self.let(e.name, th, vh, bh)
+        if dgen > 0:
+            floor = self._fvar_base_gen if self._fvar_base_gen > 0 else self._cs_base_gen
+            self._cow_t_put(e, dgen, floor, h)
+        return h
+
+    def _import_const_subst_rec_cow(self, e, depth, dgen, rdepth):
+        sgen = self._store_gen
+        has_lp = self._cs_has_lp
+        cls = e.__class__
+        if e.loose_bvar_range() <= depth:
+            if has_lp and e.has_level_param():
+                lgen = self._cs_lgen
+                h = self._cow_p_get(e, lgen)
+                if h != 0:
+                    return h
+                params = self._cs_params
+                clevels = self._cs_clevels
+                assert params is not None and clevels is not None
+                if cls is W_Const:
+                    return self._import_const_levels_cow(e, params, clevels, lgen)
+                return self._import_with_levels_cow(e, params, clevels, lgen, rdepth)
+            if cls is W_BVar:
+                assert isinstance(e, W_BVar)
+                bid = e.id
+                if 0 <= bid < _BVAR_ARR_LEN:
+                    h = self._bvar_arr[bid]
+                    if h != 0:
+                        return h
+                    h = self._new_leaf(e)
+                    self._bvar_arr[bid] = h
+                    if bid + 1 > self._bvar_max:
+                        self._bvar_max = bid + 1
+                    return h
+                return self.leaf_for(e)
+            h = self._cow_p_get(e, sgen)
+            if h != 0:
+                return h
+            if cls is W_Const:
+                return self._leaf_for_cow(e)
+            return self._import_rec_cow(e, sgen, rdepth)
+        if cls is W_BVar:
+            assert isinstance(e, W_BVar)
+            rel = e.id - depth
+            m = self._cs_m
+            if rel < m:
+                sub = _s32(self._spine_buf[self._cs_base + rel])
+                if depth > 0 and self.loose_bvar_range(sub) > 0:
+                    return self.shift(sub, depth, 0)
+                return sub
+            return self.bvar(e.id - m)
+        floor = self._fvar_base_gen if self._fvar_base_gen > 0 else self._cs_base_gen
+        if dgen > 0:
+            h = self._cow_t_get(e, dgen, floor)
+            if h != 0:
+                return h
+        if (rdepth & 31) == 31:
+            _check_stack_store("import_term")
+        nr = rdepth + 1
+        if cls is W_App:
+            assert isinstance(e, W_App)
+            fn = e.fn
+            fn_h = 0
+            if fn.loose_bvar_range() <= depth:
+                if has_lp and fn.has_level_param():
+                    lgen = self._cs_lgen
+                    fn_h = self._cow_p_get(fn, lgen)
+                    if fn_h == 0:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        if fn.__class__ is W_Const:
+                            fn_h = self._import_const_levels_cow(fn, params, clevels, lgen)
+                        else:
+                            fn_h = self._import_with_levels_cow(fn, params, clevels, lgen, nr)
+                elif fn.__class__ is W_BVar:
+                    assert isinstance(fn, W_BVar)
+                    bid = fn.id
+                    if 0 <= bid < _BVAR_ARR_LEN:
+                        fn_h = self._bvar_arr[bid]
+                        if fn_h == 0:
+                            fn_h = self._new_leaf(fn)
+                            self._bvar_arr[bid] = fn_h
+                            if bid + 1 > self._bvar_max:
+                                self._bvar_max = bid + 1
+                    else:
+                        fn_h = self.leaf_for(fn)
+                else:
+                    fn_h = self._cow_p_get(fn, sgen)
+                    if fn_h == 0:
+                        if fn.__class__ is W_Const:
+                            fn_h = self._leaf_for_cow(fn)
+                        else:
+                            fn_h = self._import_rec_cow(fn, sgen, nr)
+            elif fn.__class__ is W_BVar:
+                assert isinstance(fn, W_BVar)
+                rel = fn.id - depth
+                m = self._cs_m
+                if rel < m:
+                    sub = _s32(self._spine_buf[self._cs_base + rel])
+                    if depth > 0 and self.loose_bvar_range(sub) > 0:
+                        fn_h = self.shift(sub, depth, 0)
+                    else:
+                        fn_h = sub
+                else:
+                    fn_h = self.bvar(fn.id - m)
+            else:
+                if dgen > 0:
+                    fn_h = self._cow_t_get(fn, dgen, floor)
+                if fn_h == 0 and not isinstance(fn, W_App):
+                    fn_h = self._import_const_subst_rec_cow(fn, depth, dgen, nr)
+            if fn_h != 0:
+                arg = e.arg
+                if arg.loose_bvar_range() <= depth:
+                    if has_lp and arg.has_level_param():
+                        lgen = self._cs_lgen
+                        arg_h = self._cow_p_get(arg, lgen)
+                        if arg_h == 0:
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            if arg.__class__ is W_Const:
+                                arg_h = self._import_const_levels_cow(arg, params, clevels, lgen)
+                            else:
+                                arg_h = self._import_with_levels_cow(arg, params, clevels, lgen, nr)
+                    elif arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    m = self._cs_m
+                    if rel < m:
+                        sub = _s32(self._spine_buf[self._cs_base + rel])
+                        if depth > 0 and self.loose_bvar_range(sub) > 0:
+                            arg_h = self.shift(sub, depth, 0)
+                        else:
+                            arg_h = sub
+                    else:
+                        arg_h = self.bvar(arg.id - m)
+                else:
+                    arg_h = self._cow_t_get(arg, dgen, floor) if dgen > 0 else 0
+                    if arg_h == 0:
+                        arg_h = self._import_const_subst_rec_cow(arg, depth, dgen, nr)
+                head = self.cons_app(fn_h, arg_h)
+                if dgen > 0:
+                    self._cow_t_put(e, dgen, floor, head)
+                return head
+            spine = self._import_spine
+            mark = self._import_spine_len
+            top = mark
+            assert top >= 0
+            if top < len(spine):
+                spine[top] = e
+            else:
+                self._grow_import_spine(top, e)
+            top += 1
+            cur = fn
+            head = 0
+            while True:
+                if cur.loose_bvar_range() <= depth:
+                    if has_lp and cur.has_level_param():
+                        lgen = self._cs_lgen
+                        head = self._cow_p_get(cur, lgen)
+                        if head == 0:
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            if cur.__class__ is W_Const:
+                                head = self._import_const_levels_cow(cur, params, clevels, lgen)
+                            else:
+                                self._import_spine_len = top
+                                head = self._import_with_levels_cow(cur, params, clevels, lgen, nr)
+                    elif cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        bid = cur.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            head = self._bvar_arr[bid]
+                            if head == 0:
+                                head = self._new_leaf(cur)
+                                self._bvar_arr[bid] = head
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            head = self.leaf_for(cur)
+                    else:
+                        head = self._cow_p_get(cur, sgen)
+                        if head == 0:
+                            if cur.__class__ is W_Const:
+                                head = self._leaf_for_cow(cur)
+                            else:
+                                self._import_spine_len = top
+                                head = self._import_rec_cow(cur, sgen, nr)
+                    break
+                if not isinstance(cur, W_App):
+                    if cur.__class__ is W_BVar:
+                        assert isinstance(cur, W_BVar)
+                        rel = cur.id - depth
+                        m = self._cs_m
+                        if rel < m:
+                            sub = _s32(self._spine_buf[self._cs_base + rel])
+                            if depth > 0 and self.loose_bvar_range(sub) > 0:
+                                head = self.shift(sub, depth, 0)
+                            else:
+                                head = sub
+                        else:
+                            head = self.bvar(cur.id - m)
+                    else:
+                        head = self._cow_t_get(cur, dgen, floor) if dgen > 0 else 0
+                        if head == 0:
+                            self._import_spine_len = top
+                            head = self._import_const_subst_rec_cow(cur, depth, dgen, nr)
+                    break
+                if dgen > 0:
+                    head = self._cow_t_get(cur, dgen, floor)
+                    if head != 0:
+                        break
+                assert top >= 0
+                if top < len(spine):
+                    spine[top] = cur
+                else:
+                    self._grow_import_spine(top, cur)
+                top += 1
+                cur = cur.fn
+            while top > mark:
+                top -= 1
+                assert top >= 0
+                app = spine[top]
+                spine[top] = None
+                arg = app.arg
+                if arg.loose_bvar_range() <= depth:
+                    if has_lp and arg.has_level_param():
+                        lgen = self._cs_lgen
+                        arg_h = self._cow_p_get(arg, lgen)
+                        if arg_h == 0:
+                            params = self._cs_params
+                            clevels = self._cs_clevels
+                            assert params is not None and clevels is not None
+                            if arg.__class__ is W_Const:
+                                arg_h = self._import_const_levels_cow(arg, params, clevels, lgen)
+                            else:
+                                self._import_spine_len = top
+                                arg_h = self._import_with_levels_cow(arg, params, clevels, lgen, nr)
+                    elif arg.__class__ is W_BVar:
+                        assert isinstance(arg, W_BVar)
+                        bid = arg.id
+                        if 0 <= bid < _BVAR_ARR_LEN:
+                            arg_h = self._bvar_arr[bid]
+                            if arg_h == 0:
+                                arg_h = self._new_leaf(arg)
+                                self._bvar_arr[bid] = arg_h
+                                if bid + 1 > self._bvar_max:
+                                    self._bvar_max = bid + 1
+                        else:
+                            arg_h = self.leaf_for(arg)
+                    else:
+                        arg_h = self._cow_p_get(arg, sgen)
+                        if arg_h == 0:
+                            if arg.__class__ is W_Const:
+                                arg_h = self._leaf_for_cow(arg)
+                            else:
+                                self._import_spine_len = top
+                                arg_h = self._import_rec_cow(arg, sgen, nr)
+                elif arg.__class__ is W_BVar:
+                    assert isinstance(arg, W_BVar)
+                    rel = arg.id - depth
+                    m = self._cs_m
+                    if rel < m:
+                        sub = _s32(self._spine_buf[self._cs_base + rel])
+                        if depth > 0 and self.loose_bvar_range(sub) > 0:
+                            arg_h = self.shift(sub, depth, 0)
+                        else:
+                            arg_h = sub
+                    else:
+                        arg_h = self.bvar(arg.id - m)
+                else:
+                    arg_h = self._cow_t_get(arg, dgen, floor) if dgen > 0 else 0
+                    if arg_h == 0:
+                        self._import_spine_len = top
+                        arg_h = self._import_const_subst_rec_cow(arg, depth, dgen, nr)
+                head = self.cons_app(head, arg_h)
+                if dgen > 0:
+                    self._cow_t_put(app, dgen, floor, head)
+            self._import_spine_len = mark
+            return head
+        if cls is W_Lambda or cls is W_ForAll:
+            assert isinstance(e, W_Lambda) or isinstance(e, W_ForAll)
+            btype = e.type
+            if btype.loose_bvar_range() <= depth:
+                if has_lp and btype.has_level_param():
+                    lgen = self._cs_lgen
+                    type_h = self._cow_p_get(btype, lgen)
+                    if type_h == 0:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        type_h = self._import_with_levels_cow(btype, params, clevels, lgen, nr)
+                else:
+                    type_h = self._cow_p_get(btype, sgen)
+                    if type_h == 0:
+                        type_h = self._import_rec_cow(btype, sgen, nr)
+            else:
+                type_h = self._import_const_subst_rec_cow(btype, depth, dgen, nr)
+            ebody = e.body
+            ndepth = depth + 1
+            if ebody.loose_bvar_range() <= ndepth:
+                if has_lp and ebody.has_level_param():
+                    lgen = self._cs_lgen
+                    body_h = self._cow_p_get(ebody, lgen)
+                    if body_h == 0:
+                        params = self._cs_params
+                        clevels = self._cs_clevels
+                        assert params is not None and clevels is not None
+                        body_h = self._import_with_levels_cow(ebody, params, clevels, lgen, nr)
+                else:
+                    body_h = self._cow_p_get(ebody, sgen)
+                    if body_h == 0:
+                        body_h = self._import_rec_cow(ebody, sgen, nr)
+            else:
+                ndgen = self._cs_gen_for_depth(ndepth)
+                body_h = self._import_const_subst_rec_cow(ebody, ndepth, ndgen, nr)
+            if cls is W_Lambda:
+                h = self.lam(e, type_h, body_h)
+            else:
+                h = self.forall(e, type_h, body_h)
+        elif cls is W_Proj:
+            assert isinstance(e, W_Proj)
+            h = self.proj(
+                e.struct_name, e.field_index,
+                self._import_const_subst_rec_cow(e.struct_expr, depth, dgen, nr),
+            )
+        elif cls is W_Let:
+            return self._import_let_cs_cow(e, depth, dgen, nr)
+        else:
+            return self._leaf_for_cow(e)
+        if dgen > 0:
+            floor = self._fvar_base_gen if self._fvar_base_gen > 0 else self._cs_base_gen
+            self._cow_t_put(e, dgen, floor, h)
+        return h
+
     def export_term(self, h):
         """The `W_Expr` for ``h``, memoised per record."""
         if is_leaf(h):
@@ -8140,7 +9716,9 @@ class Machine(object):
                 store.leaf_prop_mask[j] = dm
                 return dm
             if dm <= -2:
-                res = _PROP_MASK_PLANS[(-dm) - 2].eval(decl.levels, e.levels)
+                res = _PROP_MASK_PLANS.get((-dm) - 2).eval(
+                    decl.levels, e.levels,
+                )
                 store.leaf_prop_mask[j] = res
                 return res
         elif isinstance(e, W_FVar):
@@ -14011,6 +15589,14 @@ def acquire(tc, allow_warm=False):
     machine.tc = tc
     machine.store.tc = tc
     machine._def_eq_hooked = tc.def_eq_hooked
+    want_cow = tc.env.cow_mode
+    if machine.store._cow_mode != want_cow:
+        if not machine._is_clean:
+            machine.reset()
+        if want_cow:
+            machine.store._enable_cow_mode()
+        else:
+            machine.store._cow_mode = False
     decl = tc.decl
     if (allow_warm
             and decl is not None
@@ -14058,3 +15644,11 @@ def release(machine, failed=False, keep_warm=False):
         _SPARE.machine = machine
     else:
         machine.free()
+
+
+def reset_spare():
+    """Reset the cached spare machine, if any."""
+    machine = _SPARE.machine
+    if machine is not None:
+        machine.reset()
+        machine._last_env = None

@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 from functools import wraps
+from rpython.rlib.rstring import StringBuilder
 
 
 def ansi_prefix(default_color, bold):
@@ -226,38 +227,75 @@ def FORMAT_COLOR(tag, text):
     return _ansi_wrap(tag, text)
 
 
-class TokenWriter(object):
-    """A stream paired with a formatter, knowing how to write token streams."""
+class _TokenWriterBase(object):
+    """Base token writer shared by stream-backed and buffered writers."""
 
-    _attrs_ = ['stream', 'formatter']
+    _attrs_ = ['formatter']
 
-    def __init__(self, stream, formatter):
-        self.stream = stream
+    def __init__(self, formatter):
         self.formatter = formatter
 
+    def _write_raw(self, string):
+        raise NotImplementedError
+
     def write(self, tokens):
-        """Render tokens and write to stream."""
-        self.stream.write(self.formatter(tokens))
+        """Render tokens and write to output."""
+        self._write_raw(self.formatter(tokens))
 
     def writeline(self, tokens):
-        """Render tokens and write to stream followed by a newline."""
+        """Render tokens and write to output followed by a newline."""
         self.write(tokens)
-        self.stream.write("\n")
+        self._write_raw("\n")
 
     def writeline_diagnostic(self, diagnostic):
         """Render a ``Diagnostic`` and write a newline."""
-        self.stream.write(diagnostic.format_with(self.formatter))
-        self.stream.write("\n")
+        self._write_raw(diagnostic.format_with(self.formatter))
+        self._write_raw("\n")
 
     def write_plain(self, string):
         """
-        Write a plain string to the stream.
+        Write a plain string to the output.
         """
         return self.write([PLAIN.emit(string)])
 
     def flush(self):
+        """Flush any buffered output."""
+
+
+class TokenWriter(_TokenWriterBase):
+    """A stream paired with a formatter, knowing how to write token streams."""
+
+    _attrs_ = ['stream']
+
+    def __init__(self, stream, formatter):
+        _TokenWriterBase.__init__(self, formatter)
+        self.stream = stream
+
+    def _write_raw(self, string):
+        self.stream.write(string)
+
+    def flush(self):
         """Flush the underlying stream's buffers."""
         self.stream.flush()
+
+
+class BufferTokenWriter(_TokenWriterBase):
+    """An in-memory token writer backed by a ``StringBuilder``."""
+
+    _attrs_ = ['_buf']
+
+    def __init__(self, formatter):
+        _TokenWriterBase.__init__(self, formatter)
+        self._buf = StringBuilder()
+
+    def _write_raw(self, string):
+        self._buf.append(string)
+
+    def reset(self):
+        self._buf = StringBuilder()
+
+    def getvalue(self):
+        return self._buf.build()
 
 
 def writer_from_arg(string, stream):

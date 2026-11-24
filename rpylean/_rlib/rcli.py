@@ -123,7 +123,10 @@ class _CommandLike(object):
 
 
 class Command(_CommandLike):
-    _attrs_ = ['_help', '_metavars', '_options', '_run', '_flags']
+    _attrs_ = [
+        '_help', '_metavars', '_options', '_short_options',
+        '_long_to_short', '_run', '_flags',
+    ]
 
     def __init__(
         self,
@@ -135,6 +138,7 @@ class Command(_CommandLike):
         run,
         short_help=None,
         executable="rpylean",
+        short_options=None,
     ):
         if short_help is None:
             short_help = help.strip().split("\n", 1)[0]
@@ -145,6 +149,14 @@ class Command(_CommandLike):
         self._help = help
         self._metavars = metavars
         self._options = dict(options)
+        self._short_options = {}
+        self._long_to_short = {}
+        if short_options is not None:
+            for short_name, long_name in short_options:
+                assert len(short_name) == 1
+                assert long_name in self._options
+                self._short_options[short_name] = long_name
+                self._long_to_short[long_name] = short_name
         self._run = run
 
         self._flags = {}
@@ -191,6 +203,22 @@ class Command(_CommandLike):
                     i += 2
                 else:
                     self.usage_error("Unknown option: --%s" % opt)
+            elif len(arg) >= 2 and arg[0] == "-" and arg[1] != "-":
+                short = arg[1]
+                if short not in self._short_options:
+                    self.usage_error("Unknown option: -%s" % short)
+                opt = self._short_options[short]
+                if len(arg) > 2:
+                    if arg[2] == "=":
+                        options[opt] = arg[3:]
+                    else:
+                        options[opt] = arg[2:]
+                    i += 1
+                else:
+                    if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                        self.usage_error("Option -%s requires an argument" % short)
+                    options[opt] = args[i + 1]
+                    i += 2
             else:
                 positional.append(arg)
                 i += 1
@@ -216,10 +244,13 @@ class Command(_CommandLike):
 
     def help(self, executable):
         executable = _format_executable(executable, self._executable)
-        options = [
-            "  --%s: %s" % (opt, desc)
-            for opt, desc in self._options.iteritems()
-        ]
+        options = []
+        for opt, desc in self._options.iteritems():
+            short = self._long_to_short.get(opt, None)
+            if short is not None:
+                options.append("  -%s, --%s: %s" % (short, opt, desc))
+            else:
+                options.append("  --%s: %s" % (opt, desc))
 
         if self._flags:
             options.append("")
@@ -257,7 +288,10 @@ class CLI(object):
         self._default = default
         self._commands = {}
 
-    def subcommand(self, metavars, help, options=None, flags=None, name=None):
+    def subcommand(
+        self, metavars, help, options=None, flags=None, name=None,
+        short_options=None,
+    ):
         def _subcommand(fn):
             # Underscores in the function name become hyphens in the
             # subcommand name, matching the option-naming convention
@@ -272,6 +306,7 @@ class CLI(object):
                 flags=flags or [],
                 run=fn,
                 executable=self.executable,
+                short_options=short_options,
             )
             return command
 

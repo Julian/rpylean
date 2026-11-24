@@ -271,6 +271,7 @@ class Environment(object):
     _attrs_ = [
         'declarations', 'tracer',
         'max_wall_time', 'max_memory',
+        'cow_mode',
         '_code_cache', '_groups',
     ]
     # `declarations` is fully immutable: the reference is set in
@@ -283,6 +284,7 @@ class Environment(object):
         'tracer?',
         'max_wall_time?',
         'max_memory?',
+        'cow_mode?',
         '_code_cache?',
     ]
 
@@ -291,6 +293,7 @@ class Environment(object):
         self.tracer = tracer
         self.max_wall_time = 0.0
         self.max_memory = 0
+        self.cow_mode = False
         self._code_cache = None
         # Block name (see `W_Declaration.group_key`) -> group id, created
         # lazily when ordered registration encounters a block member.

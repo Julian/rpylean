@@ -782,3 +782,369 @@ class TestFFICollector(object):
         assert not aborted
         assert hook.seen == (registered,)
         assert env.declarations[A] is registered
+
+
+class TestShortOptionsAndJobs(object):
+    def test_short_option_forms_and_help(self):
+        cli = CLI()
+
+        @cli.subcommand(
+            ["*ARGS"],
+            options=[("jobs", "Worker count.")],
+            short_options=[("j", "jobs")],
+            help="Test short opts.",
+        )
+        def work(self, args, stdin, stdout, stderr):
+            stdout.write("jobs=%r varargs=%r\n" % (
+                args.options["jobs"], args.varargs,
+            ))
+            return 0
+
+        out, err = run(cli, ["prog", "work", "-j", "4", "a.ndjson"])
+        assert out == "jobs='4' varargs=['a.ndjson']\n" and err == ""
+        out, err = run(cli, ["prog", "work", "-j4", "a.ndjson"])
+        assert out == "jobs='4' varargs=['a.ndjson']\n" and err == ""
+        out, err = run(cli, ["prog", "work", "-j=4", "-"])
+        assert out == "jobs='4' varargs=['-']\n" and err == ""
+        _, err = run(cli, ["prog", "work", "-j"], exit=1)
+        assert "Option -j requires an argument" in err
+        _, err = run(cli, ["prog", "work", "-z", "x"], exit=1)
+        assert "Unknown option: -z" in err
+        _, err = run(cli, ["prog", "work", "--help"], exit=0)
+        assert "-j, --jobs:" in err
+
+    def test_parse_jobs_values(self):
+        from rpylean._parallel import detect_cpus, parse_jobs
+
+        assert parse_jobs(None) == 1
+        assert parse_jobs("1") == 1
+        assert parse_jobs("4") == 4
+        assert parse_jobs("auto") == detect_cpus()
+        assert parse_jobs("0") == detect_cpus()
+        for bad in ["-1", "nope", ""]:
+            try:
+                parse_jobs(bad)
+            except UsageError as err:
+                assert "Invalid --jobs" in err.message
+            else:
+                assert False, "expected UsageError for %r" % (bad,)
+
+    def test_break_at_rejects_parallel_jobs(self, tmpdir):
+        export = tmpdir.join("ok.ndjson")
+        export.write('{"meta":{"format":{"version":"3.1.0"}}}\n')
+        _, err = run(
+            rpylean_cli,
+            ["rpylean", "check", "-j", "2", "--break-at", "Foo", str(export)],
+            exit=1,
+        )
+        assert "--break-at cannot be combined with --jobs > 1" in err
+
+    def _write_multi_export(self, tmpdir, bad_indices=()):
+        """Build an export with 8 declarations (theorems + defs); indices in
+        ``bad_indices`` have ill-typed values."""
+        lines = [
+            '{"meta":{"format":{"version":"3.1.0"}}}',
+            '{"il":1,"succ":0}',
+            '{"in":100,"str":{"pre":0,"str":"p"}}',
+            '{"in":101,"str":{"pre":0,"str":"h"}}',
+            '{"ie":0,"sort":1}',  # Type 0 (Sort 1)
+            '{"ie":1,"sort":0}',  # Prop   (Sort 0)
+            '{"ie":2,"bvar":0}',
+            '{"ie":3,"bvar":1}',
+            # ie 4: ∀ (h : p), p  (under binder p : Prop)
+            '{"ie":4,"forallE":{"binderInfo":"default","body":3,"name":101,"type":2}}',
+            # ie 5: ∀ (p : Prop) (h : p), p  (: Prop)
+            '{"ie":5,"forallE":{"binderInfo":"default","body":4,"name":100,"type":1}}',
+            # ie 6: fun (h : p) => h
+            '{"ie":6,"lam":{"binderInfo":"default","body":2,"name":101,"type":2}}',
+            # ie 7: fun (p : Prop) (h : p) => h  (: ∀ (p : Prop) (h : p), p)
+            '{"ie":7,"lam":{"binderInfo":"default","body":6,"name":100,"type":1}}',
+        ]
+        for i in range(1, 9):
+            lines.append('{"in":%d,"str":{"pre":0,"str":"D%d"}}' % (i, i))
+            if i % 2 == 0:
+                # Valid theorem: type=ie 5 (∀ p, p → p), value=ie 7; invalid: value=ie 1 (Prop)
+                v_idx = 1 if i in bad_indices else 7
+                lines.append(
+                    '{"thm":{"all":[%d],"levelParams":[],"name":%d,'
+                    '"type":5,"value":%d}}' % (i, i, v_idx)
+                )
+            else:
+                # Valid def: type=Sort 1, value=Sort 0; invalid: type=Sort 0, value=Sort 0
+                t_idx = 1 if i in bad_indices else 0
+                lines.append(
+                    '{"def":{"all":[%d],"hints":"opaque","levelParams":[],'
+                    '"name":%d,"safety":"safe","type":%d,"value":1}}'
+                    % (i, i, t_idx)
+                )
+        export = tmpdir.join("multi.ndjson")
+        export.write("\n".join(lines) + "\n")
+        return str(export)
+
+    def test_parallel_check_passing_matches_sequential(self, tmpdir):
+        path = self._write_multi_export(tmpdir)
+        out1, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", path])
+        out4, err4 = run(
+            rpylean_cli, ["rpylean", "check", "--color=no", "-j", "4", path],
+        )
+        assert out1 == out4 == ""
+        assert "8/8 decls checked" in err1
+        assert "8/8 decls checked" in err4
+
+    def test_parallel_check_errors_deterministic_and_max_fail(self, tmpdir):
+        path = self._write_multi_export(tmpdir, bad_indices=(2, 5, 7))
+        _, err1 = run(
+            rpylean_cli, ["rpylean", "check", "--color=no", path], exit=1,
+        )
+        _, err4 = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", path],
+            exit=1,
+        )
+        # Strip the trailing timing line ("checked in ...s") for exact compare.
+        lines1 = [l for l in err1.splitlines() if not l.startswith("checked in ")]
+        lines4 = [l for l in err4.splitlines() if not l.startswith("checked in ")]
+        assert lines1 == lines4
+        assert err4.index("D2") < err4.index("D5") < err4.index("D7")
+
+        # --max-fail 1 must report ONLY the first failing decl (D2).
+        _, err_mf = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", "--max-fail", "1", path],
+            exit=1,
+        )
+        assert "D2" in err_mf
+        assert "D5" not in err_mf
+        assert "D7" not in err_mf
+
+    def test_parallel_print_and_filter_match_sequential(self, tmpdir):
+        path = self._write_multi_export(tmpdir, bad_indices=(4,))
+        out1, _ = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "--print", "name", path],
+            exit=1,
+        )
+        out4, _ = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", "--print", "name", path],
+            exit=1,
+        )
+        assert out1 == out4
+
+        out_f, err_f = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", "--filter", "D1,D3,D6", path],
+            exit=0,
+        )
+        assert out_f == ""
+        assert "3/8 decls checked" in err_f
+
+    def test_parallel_rejects_forward_reference_within_batch(self, tmpdir):
+        # D1 references D2 which is declared AFTER D1 in the same batch.
+        # Parallel batching must still reject D1 identically to -j 1.
+        export = tmpdir.join("fwd.ndjson")
+        export.write(
+            '{"meta":{"format":{"version":"3.1.0"}}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"in":1,"str":{"pre":0,"str":"D1"}}\n'
+            '{"in":2,"str":{"pre":0,"str":"D2"}}\n'
+            '{"ie":0,"sort":1}\n'
+            '{"ie":1,"sort":0}\n'
+            '{"ie":2,"const":{"name":2,"us":[]}}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":2}}\n'
+            '{"def":{"all":[2],"hints":"opaque","levelParams":[],"name":2,"safety":"safe","type":0,"value":1}}\n'
+        )
+        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", str(export)], exit=1)
+        _, err4 = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", str(export)],
+            exit=1,
+        )
+        # Both -j 1 (UnknownDeclaration) and -j 4 (W_NotYetDeclared) reject D1.
+        assert "D1" in err1 and "D2" in err1
+        assert "D1" in err4 and "D2" in err4
+        assert "2/2 decls checked" in err1 and "2/2 decls checked" in err4
+
+    def test_parallel_inductive_block_and_multi_batch_drop(self, tmpdir):
+        # Valid inductive `Unit` + 6 theorems checked with tiny batch_size=2
+        # to exercise multiple fork waves and proof dropping.
+        from rpylean.cli import _ParallelChecker
+        from rpylean.parser import EnvironmentBuilder, validate_export_metadata
+        from rpylean.objects import W_Theorem, name_dict
+        from rpython.rlib.streamio import open_file_as_stream
+
+        export = tmpdir.join("ind.ndjson")
+        export.write(
+            '{"meta":{"format":{"version":"3.1.0"}}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"in":1,"str":{"pre":0,"str":"U"}}\n'
+            '{"in":2,"str":{"pre":1,"str":"mk"}}\n'
+            '{"in":3,"str":{"pre":1,"str":"rec"}}\n'
+            '{"in":4,"str":{"pre":0,"str":"motive"}}\n'
+            '{"in":5,"str":{"pre":0,"str":"t"}}\n'
+            '{"in":6,"str":{"pre":0,"str":"u"}}\n'
+            '{"il":2,"param":6}\n'
+            '{"ie":0,"sort":1}\n'
+            '{"ie":1,"sort":0}\n'
+            '{"ie":2,"const":{"name":1,"us":[]}}\n'
+            '{"ie":3,"sort":2}\n'
+            '{"ie":4,"forallE":{"binderInfo":"default","body":3,"name":5,"type":2}}\n'
+            '{"ie":5,"bvar":0}\n'
+            '{"ie":6,"bvar":1}\n'
+            '{"ie":7,"bvar":2}\n'
+            '{"ie":8,"const":{"name":2,"us":[]}}\n'
+            '{"ie":9,"app":{"arg":8,"fn":5}}\n'
+            '{"ie":10,"app":{"arg":5,"fn":7}}\n'
+            '{"ie":11,"forallE":{"binderInfo":"default","body":10,"name":5,"type":2}}\n'
+            '{"ie":12,"forallE":{"binderInfo":"default","body":11,"name":2,"type":9}}\n'
+            '{"ie":13,"forallE":{"binderInfo":"implicit","body":12,"name":4,"type":4}}\n'
+            '{"ie":14,"lam":{"binderInfo":"default","body":5,"name":2,"type":9}}\n'
+            '{"ie":15,"lam":{"binderInfo":"implicit","body":14,"name":4,"type":4}}\n'
+            '{"ie":16,"forallE":{"binderInfo":"default","body":6,"name":5,"type":5}}\n'
+            '{"ie":17,"forallE":{"binderInfo":"default","body":16,"name":4,"type":1}}\n'
+            '{"ie":18,"lam":{"binderInfo":"default","body":5,"name":5,"type":5}}\n'
+            '{"ie":19,"lam":{"binderInfo":"default","body":18,"name":4,"type":1}}\n'
+            '{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":2}],'
+            '"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[6],"name":3,"numIndices":0,"numMinors":1,"numMotives":1,"numParams":0,'
+            '"rules":[{"ctor":2,"nfields":0,"rhs":15}],"type":13}],'
+            '"types":[{"all":[1],"ctors":[2],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}\n'
+            '{"in":10,"str":{"pre":0,"str":"T1"}}\n'
+            '{"in":11,"str":{"pre":0,"str":"T2"}}\n'
+            '{"in":12,"str":{"pre":0,"str":"T3"}}\n'
+            '{"in":13,"str":{"pre":0,"str":"T4"}}\n'
+            '{"thm":{"all":[10],"levelParams":[],"name":10,"type":17,"value":19}}\n'
+            '{"thm":{"all":[11],"levelParams":[],"name":11,"type":17,"value":19}}\n'
+            '{"thm":{"all":[12],"levelParams":[],"name":12,"type":17,"value":19}}\n'
+            '{"thm":{"all":[13],"levelParams":[],"name":13,"type":17,"value":19}}\n'
+        )
+        env = Environment(declarations=name_dict())
+        out_s, err_s = StringIO(), StringIO()
+        checker = _ParallelChecker(
+            env=env,
+            stdoutw=TokenWriter(out_s, FORMAT_PLAIN),
+            stderrw=TokenWriter(err_s, FORMAT_PLAIN),
+            printer=None,
+            slow_secs=-1.0,
+            filter_match=None,
+            filter_names=None,
+            abort_at=0,
+            break_at=None,
+            jobs=2,
+            print_mode=None,
+            batch_size=2,
+        )
+        stream = open_file_as_stream(str(export), "r", 0)
+        try:
+            validate_export_metadata(stream)
+            EnvironmentBuilder(env=env).consume(stream, hook=checker)
+            checker.finish()
+        finally:
+            stream.close()
+        assert checker.failures == 0, err_s.getvalue()
+        assert checker.n_checked == 7
+        for tname in ["T1", "T2", "T3", "T4"]:
+            wk = env.declarations[Name.simple(tname)].w_kind
+            assert isinstance(wk, W_Theorem)
+            assert wk.value is None
+
+    def test_parallel_flushes_buffered_decls_before_export_error(self, tmpdir):
+        # D1 fails type-checking; D2 duplicates D1 (ExportError during parse).
+        # With --jobs 4, D1 must still be checked before reporting ExportError.
+        export = tmpdir.join("dup.ndjson")
+        export.write(
+            '{"meta":{"format":{"version":"3.1.0"}}}\n'
+            '{"il":1,"succ":0}\n'
+            '{"in":1,"str":{"pre":0,"str":"D1"}}\n'
+            '{"ie":0,"sort":0}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":0}}\n'
+            '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":0}}\n'
+        )
+        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", str(export)], exit=1)
+        _, err4 = run(
+            rpylean_cli, ["rpylean", "check", "--color=no", "-j", "4", str(export)], exit=1,
+        )
+        assert "already declared" in err1 and "already declared" in err4
+        lines1 = [l for l in err1.splitlines() if not l.startswith("checked in ")]
+        lines4 = [l for l in err4.splitlines() if not l.startswith("checked in ")]
+        assert lines1 == lines4
+
+        # With --max-fail 1, D1 hits max-fail so AlreadyDeclared is suppressed.
+        _, err_mf1 = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "--max-fail", "1", str(export)],
+            exit=1,
+        )
+        _, err_mf4 = run(
+            rpylean_cli,
+            ["rpylean", "check", "--color=no", "-j", "4", "--max-fail", "1", str(export)],
+            exit=1,
+        )
+        assert "already declared" not in err_mf1
+        assert "already declared" not in err_mf4
+
+    def test_cow_mode_never_mutates_expr_cache(self):
+        from rpylean.objects import (
+            Binder, HINT_ABBREV, W_App, W_BVar, W_ForAll, W_Lambda, W_Let,
+            W_LEVEL_ZERO, W_Declaration, W_Definition, name_dict,
+        )
+        from rpylean.machine import reset_spare
+
+        reset_spare()
+        u = Name.simple("u")
+        u_lvl = u.level()
+        sort_u = u_lvl.sort()
+        # Polymorphic identity: id.{u} : (A : Sort u) -> (a : A) -> A := fun A a => a
+        id_name = Name.simple("id")
+        id_type = W_ForAll(
+            Binder(Name.simple("A"), sort_u),
+            W_ForAll(Binder(Name.simple("a"), W_BVar(0)), W_BVar(1)),
+        )
+        id_val = W_Lambda(
+            Binder(Name.simple("A"), sort_u),
+            W_Lambda(Binder(Name.simple("a"), W_BVar(0)), W_BVar(0)),
+        )
+        id_decl = W_Declaration(
+            name=id_name,
+            levels=[u],
+            type=id_type,
+            w_kind=W_Definition(value=id_val, hint=HINT_ABBREV),
+        )
+        # Consumer with shared DAG subterms, let, and polymorphic constant app
+        id_prop = id_name.const([W_LEVEL_ZERO.succ()])
+        prop = W_LEVEL_ZERO.sort()
+        shared = id_prop.app(prop)
+        body = W_Let(
+            Name.simple("z"),
+            W_ForAll(Binder(Name.simple("x"), prop), prop),
+            shared,
+            W_App(W_BVar(0), W_App(shared, W_BVar(1))),
+        )
+        use_type = W_ForAll(Binder(Name.simple("p"), prop), prop)
+        use_val = W_Lambda(Binder(Name.simple("p"), prop), body)
+        use_decl = W_Declaration(
+            name=Name.simple("use"),
+            levels=[],
+            type=use_type,
+            w_kind=W_Definition(value=use_val, hint=HINT_ABBREV),
+        )
+        env = Environment(declarations=name_dict())
+        env.cow_mode = True
+        env.register_declaration(id_decl)
+        env.register_declaration(use_decl)
+
+        # Ensure every W_Expr starts with _cache == 0
+        all_exprs = [
+            sort_u, id_type, id_type.body, id_val, id_val.body,
+            id_prop, prop, shared, body, body.type, body.body,
+            use_type, use_val,
+        ]
+        for e in all_exprs:
+            e._cache = 0
+
+        res1 = env.type_check_one(id_decl)
+        res2 = env.type_check_one(use_decl)
+        assert res1.error is None
+        assert res2.error is None
+        for e in all_exprs:
+            assert e._cache == 0, "cow_mode wrote _cache on %r" % (e,)
+        reset_spare()

@@ -3,7 +3,7 @@ from rpython.rlib.jit import (
 )
 from rpython.rlib.objectmodel import (
     always_inline, compute_hash, dont_inline, instantiate, newlist_hint,
-    not_rpython, specialize, we_are_translated,
+    not_rpython, r_dict, specialize, we_are_translated,
 )
 from rpython.rlib.rbigint import rbigint
 
@@ -4716,10 +4716,38 @@ _PM_SORT_PROP = 1
 _PM_SORT_NON_PROP = 2
 _PM_SORT_LEVEL = 3
 
-#: Side table of level-dependent `_PropMaskPlan`s indexed by `(-_prop_mask) - 2`
-#: so `W_Declaration` avoids carrying an extra GC pointer slot for the ~95% of
-#: declarations whose prop mask is level-independent.
-_PROP_MASK_PLANS = []
+class _PropMaskPlanTable(object):
+    """Runtime table of level-dependent `_PropMaskPlan`s indexed by
+    `(-_prop_mask) - 2` so `W_Declaration` avoids carrying an extra GC
+    pointer slot for the ~95% of declarations whose prop mask is
+    level-independent.
+
+    Held on an instance with a runtime-allocated list rather than a
+    module-level `[]` literal so RPython's flowspace cannot constant-fold
+    `len(...)` to 0 at translation time.
+    """
+
+    _attrs_ = ['plans']
+
+    def __init__(self):
+        self.plans = None
+
+    def add(self, plan):
+        plans = self.plans
+        if plans is None:
+            plans = []
+            self.plans = plans
+        idx = len(plans)
+        plans.append(plan)
+        return idx
+
+    def get(self, idx):
+        plans = self.plans
+        assert plans is not None
+        return plans[idx]
+
+
+_PROP_MASK_PLANS = _PropMaskPlanTable()
 
 #: Reusable scratch arrays for non-reentrant `W_Declaration.init_prop_mask`,
 #: avoiding per-declaration list allocations.
@@ -5075,8 +5103,7 @@ class W_Declaration(_Item):
         if cond_bits is None:
             self._prop_mask = base
             return base
-        idx = len(_PROP_MASK_PLANS)
-        _PROP_MASK_PLANS.append(
+        idx = _PROP_MASK_PLANS.add(
             _PropMaskPlan(base, cond_bits, cond_pidxs, cond_lvls),
         )
         dm = -(idx + 2)
@@ -6540,6 +6567,16 @@ def _pi(binders, body):
     return result
 
 
+def _decl_visible(current, target):
+    """Whether ``target`` is in scope when checking ``current`` (same block
+    or declared at or before ``current`` in an ordered stream)."""
+    if current is None or current.index < 0:
+        return True
+    if current.group >= 0 and target.group == current.group:
+        return True
+    return target.index <= current.index
+
+
 def _check_eq_for_quot(tc):
     """Verify ``Eq`` and its single constructor match Lean's prelude ``Eq``,
     as required by Lean's kernel before introducing ``Quot.lift``."""
@@ -6568,7 +6605,15 @@ def _check_eq_for_quot(tc):
     if not tc.def_eq(eq_decl.type, expected_eq_type):
         return "`Eq` does not have the expected type"
     eq_refl = find_decl(tc.declarations, eq_ind.ctor_names[0])
-    if eq_refl is None or not isinstance(eq_refl.w_kind, W_Constructor):
+    if (
+        eq_refl is None
+        or not isinstance(eq_refl.w_kind, W_Constructor)
+        or (
+            tc.decl is not None
+            and tc.decl.index >= 0
+            and eq_refl.index >= tc.decl.index
+        )
+    ):
         return "missing constructor for `Eq`"
     if len(eq_refl.levels) != 1:
         return "`Eq` constructor must have 1 universe parameter"
@@ -6843,16 +6888,37 @@ def _expr_has_bvar_lt(e, k, depth):
     return False
 
 
+class _CowFlag(object):
+    """Process-wide toggle disabling intrusive `W_Expr._cache` writes during
+    multi-process fork checking so workers never dirty shared parent pages."""
+
+    _attrs_ = ['enabled']
+
+    def __init__(self):
+        self.enabled = False
+
+
+_COW_FLAG = _CowFlag()
+
+
+def _mask_key_eq(a, b):
+    return a[0] is b[0] and a[1] == b[1]
+
+
+def _mask_key_hash(k):
+    return k[0].hash() ^ (k[1] * 1000003)
+
+
 class _MaskMemo(object):
     """Intrusive `W_Expr._cache` memo for `_expr_bvar_mask`: avoids Python
     dict / `(e, depth)` tuple / GC identity-hash shadow allocations on the
     99.9% single-depth path, falling back to a dict only on multi-depth
-    DAG collisions or cache-generation exhaustion."""
+    DAG collisions, COW-parallel mode, or cache-generation exhaustion."""
 
     _attrs_ = ['base_gen', 'gens', 'vals', 'overflow']
 
     def __init__(self):
-        g0 = _next_cache_gen()
+        g0 = 0 if _COW_FLAG.enabled else _next_cache_gen()
         self.base_gen = g0
         self.gens = [g0]
         self.vals = []
@@ -6938,12 +7004,12 @@ def _expr_bvar_mask(e, limit, depth, seen):
         elif cg != dgen:
             ov = seen.overflow
             if ov is None:
-                ov = seen.overflow = {}
+                ov = seen.overflow = r_dict(_mask_key_eq, _mask_key_hash)
             ov[(e, depth)] = res
     else:
         ov = seen.overflow
         if ov is None:
-            ov = seen.overflow = {}
+            ov = seen.overflow = r_dict(_mask_key_eq, _mask_key_hash)
         ov[(e, depth)] = res
     return res
 
@@ -7127,7 +7193,7 @@ class W_Inductive(W_DeclarationKind):
                 "%s is not listed in its own block" % self.name.str(),
             )
         first = find_decl(tc.declarations, self.all[0])
-        if first is None:
+        if first is None or not _decl_visible(tc.decl, first):
             return W_InvalidInductive(
                 tc.env,
                 "%s is not declared" % self.all[0].str(),
@@ -7180,7 +7246,7 @@ class W_Constructor(W_DeclarationKind):
         # really belongs to one, so an unattached constructor cannot
         # slip through unchecked.
         ind_decl = find_decl(tc.declarations, self.induct)
-        if ind_decl is None:
+        if ind_decl is None or not _decl_visible(tc.decl, ind_decl):
             return W_InvalidConstructorResult(tc.env, type)
         ind_kind = ind_decl.w_kind
         if not isinstance(ind_kind, W_Inductive):
@@ -7318,6 +7384,12 @@ class W_Recursor(W_DeclarationKind):
         try:
             first = get_decl(env.declarations, self.all[0])
         except UnknownDeclaration:
+            return W_InvalidRecursorRule(
+                env,
+                "recursor refers to %s which is not declared"
+                % self.all[0].str(),
+            )
+        if not _decl_visible(tc.decl, first):
             return W_InvalidRecursorRule(
                 env,
                 "recursor refers to %s which is not declared"

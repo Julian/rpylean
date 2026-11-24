@@ -13,21 +13,22 @@ from rpython.rlib.objectmodel import we_are_translated
 from rpython.rlib.rarithmetic import intmask
 from rpython.rlib.streamio import fdopen_as_stream, open_file_as_stream
 
-from rpylean import _format, _gcstats, _progress, parser
+from rpylean import _format, _gcstats, _parallel, _progress, parser
 from rpylean._rlib.rcli import CLI, UsageError
 from rpylean._rlib.rterminal import terminal_width
 from rpylean._tokens import (
-    ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3, HEAT_4,
-    PLAIN, writer_from_arg,
+    BufferTokenWriter, ERROR, FORMAT_PLAIN, HEAT_0, HEAT_1, HEAT_2, HEAT_3,
+    HEAT_4, PLAIN, writer_from_arg,
 )
 from rpylean._tracer import StreamTracer
 from rpylean.environment import Environment
 from rpylean.exceptions import ExportError
 from rpylean.exporter import Exporter, json_escape as _json_escape
 from rpylean.ffi import FFI, detect_prefix, read_constant_info
+from rpylean.machine import reset_spare
 from rpylean.parser import DeclarationHook, EnvironmentBuilder, from_export
 from rpylean.objects import (
-    Name, Resolver, name_dict, set_resolver,
+    Name, Resolver, _COW_FLAG, name_dict, set_resolver,
 )
 
 
@@ -148,11 +149,22 @@ def _emit_export(exporter, names=None):
         exporter.dump_all()
 
 
+JOBS = (
+    "jobs",
+    "number of parallel worker processes (positive integer, or 'auto'; "
+    "default: 1)",
+)
+CHECK_SHORT_OPTIONS = [
+    ("j", "jobs"),
+]
+
+
 @cli.subcommand(
     ["*EXPORT_FILES"],
     help="Type check an exported Lean environment.",
-    options=CHECK_OPTIONS,
+    options=CHECK_OPTIONS + [JOBS],
     flags=CHECK_FLAGS,
+    short_options=CHECK_SHORT_OPTIONS,
 )
 def check(self, args, stdin, stdout, stderr):
     if not args.varargs:
@@ -336,16 +348,7 @@ class _StreamingChecker(DeclarationHook):
         if we_are_translated():
             debug.debug_stop("rpylean-decl")
         if self.slow_secs >= 0.0 and result.elapsed > self.slow_secs:
-            self.stdoutw.write_plain(
-                "%f\t%f\t%d\t%d\t%d\t" % (
-                    result.elapsed,
-                    result.gc_elapsed,
-                    result.bytes_allocated,
-                    result.live_memory,
-                    result.peak_growth,
-                ),
-            )
-            self.stdoutw.writeline(decl.name.tokens(self.env.declarations))
+            _write_slow_row(self.stdoutw, decl, self.env, result)
             # Flush per row so a `timeout`-killed run's tsv reflects what
             # the worker actually saw, not just what filled the 8 KB stdio
             # buffer before the SIGTERM dropped the tail.
@@ -376,6 +379,347 @@ class _StreamingChecker(DeclarationHook):
             pdb.set_trace()
 
 
+def _write_slow_row(writer, decl, env, result):
+    writer.write_plain(
+        "%f\t%f\t%d\t%d\t%d\t" % (
+            result.elapsed,
+            result.gc_elapsed,
+            result.bytes_allocated,
+            result.live_memory,
+            result.peak_growth,
+        ),
+    )
+    writer.writeline(decl.name.tokens(env.declarations))
+
+
+class _DeclChunkRunner(_parallel.ChunkRunner):
+    """Per-worker declaration checker for ``_ParallelChecker``."""
+
+    _attrs_ = [
+        'env', 'batch', 'stdout_formatter', 'stderr_formatter',
+        'print_mode', 'slow_secs',
+    ]
+
+    def __init__(
+        self, env, batch, stdout_formatter, stderr_formatter,
+        print_mode, slow_secs,
+    ):
+        self.env = env
+        self.batch = batch
+        self.stdout_formatter = stdout_formatter
+        self.stderr_formatter = stderr_formatter
+        self.print_mode = print_mode
+        self.slow_secs = slow_secs
+
+    def run_chunk(self, start, end, sink):
+        env = self.env
+        batch = self.batch
+        slow_secs = self.slow_secs
+        out_buf = None
+        w_printer = None
+        if self.print_mode is not None or slow_secs >= 0.0:
+            out_buf = BufferTokenWriter(self.stdout_formatter)
+            if self.print_mode is not None:
+                w_printer = Printer.from_str(self.print_mode, out_buf)
+        err_buf = None
+        measure = w_printer is not None or slow_secs >= 0.0
+        i = start
+        while i < end:
+            decl = batch[i]
+            if out_buf is not None:
+                out_buf.reset()
+            if we_are_translated():
+                debug.debug_start("rpylean-decl")
+                if debug.have_debug_prints():
+                    debug.debug_print(decl.name.str())
+            result = env.type_check_one(
+                decl, printer=w_printer, measure=measure,
+            )
+            if we_are_translated():
+                debug.debug_stop("rpylean-decl")
+            sink.record_checked()
+            if slow_secs >= 0.0 and result.elapsed > slow_secs:
+                assert out_buf is not None
+                _write_slow_row(out_buf, decl, env, result)
+            if out_buf is not None:
+                out_text = out_buf.getvalue()
+                if out_text:
+                    sink.record_output(i, out_text)
+            if result.error is not None:
+                if err_buf is None:
+                    err_buf = BufferTokenWriter(self.stderr_formatter)
+                else:
+                    err_buf.reset()
+                result.error.write_to(err_buf)
+                sink.record_error(i, err_buf.getvalue())
+            i += 1
+
+
+class _ParallelChecker(_StreamingChecker):
+    """Pipelined batched fork-pool checker preserving deterministic order."""
+
+    _attrs_ = [
+        'jobs', 'print_mode', '_batch', '_batch_size', '_max_batch_size',
+        '_batch_start_live', '_inflight', '_inflight_batch',
+        '_gc_paused', '_gc_next_collect', '_prev_cow',
+    ]
+
+    def __init__(
+        self,
+        env,
+        stdoutw,
+        stderrw,
+        printer,
+        slow_secs,
+        filter_match,
+        filter_names,
+        abort_at,
+        break_at,
+        jobs,
+        print_mode,
+        batch_size=0,
+    ):
+        _StreamingChecker.__init__(
+            self,
+            env=env,
+            stdoutw=stdoutw,
+            stderrw=stderrw,
+            printer=printer,
+            slow_secs=slow_secs,
+            filter_match=filter_match,
+            filter_names=filter_names,
+            abort_at=abort_at,
+            break_at=break_at,
+        )
+        self.jobs = jobs
+        self.print_mode = print_mode
+        self._batch = []
+        if batch_size > 0:
+            self._batch_size = batch_size
+            self._max_batch_size = batch_size
+        else:
+            # Ramp batch size 8K -> 16K -> 32K -> 48K so worker children start
+            # almost immediately while later batches amortize fork/COW cost.
+            self._batch_size = _parallel.INITIAL_BATCH_SIZE
+            self._max_batch_size = _parallel.DEFAULT_BATCH_SIZE
+        self._batch_start_live = _gcstats.live_memory()
+        self._inflight = None
+        self._inflight_batch = None
+        self._gc_paused = False
+        self._gc_next_collect = _parallel.GC_INITIAL_COLLECT_THRESHOLD
+        self._prev_cow = _COW_FLAG.enabled
+        env.cow_mode = True
+        _COW_FLAG.enabled = True
+
+    def on_declaration(self, decl):
+        self.n_seen += 1
+        if _progress.poll():
+            _MB = 1024 * 1024
+            self.stderrw.write_plain(
+                "[progress] seen=%d checked=%d failures=%d "
+                "live=%dMB arena=%dMB rawmalloc=%dMB "
+                "cur=%s\n" % (
+                    self.n_seen, self.n_checked, self.failures,
+                    _gcstats.live_memory() // _MB,
+                    _gcstats.arena_memory() // _MB,
+                    _gcstats.rawmalloced_memory() // _MB,
+                    decl.name.str(),
+                ),
+            )
+            self.env.tracer.print_summary(self.stderrw)
+            if we_are_translated():
+                _write_progress_heap_dump(self.stderrw)
+            self.stderrw.flush()
+        if self.filter_match is not None and self.filter_match not in decl.name.str():
+            return False
+        if self.filter_names is not None and decl.name not in self.filter_names:
+            return False
+        batch = self._batch
+        batch.append(decl)
+        # Flush only at a clean non-grouped boundary so inductive blocks
+        # stay intact within a single batch.
+        if decl.group < 0:
+            blen = len(batch)
+            should_flush = blen >= self._batch_size
+            if (not should_flush
+                    and we_are_translated()
+                    and blen >= _parallel.MIN_MEM_FLUSH_BATCH
+                    and (_gcstats.live_memory() - self._batch_start_live
+                         >= _parallel.MAX_BATCH_LIVE_GROWTH)):
+                should_flush = True
+            if should_flush:
+                return self._dispatch_batch()
+        return False
+
+    def _dispatch_batch(self):
+        # Harvest any previously launched batch before starting the next wave.
+        if self._inflight is not None:
+            if self._finish_inflight():
+                self._batch = []
+                return True
+        if not self._batch:
+            return False
+        self._start_batch()
+        # Ramp up batch size after early waves.
+        next_size = self._batch_size * 2
+        if next_size > self._max_batch_size:
+            next_size = self._max_batch_size
+        self._batch_size = next_size
+        # When --max-fail is active, finish synchronously so we stop parsing
+        # as soon as the failure threshold is reached.
+        if self.abort_at > 0:
+            return self._finish_inflight()
+        return False
+
+    def finish(self):
+        try:
+            if self._inflight is not None:
+                is_last = len(self._batch) == 0
+                if self._finish_inflight(is_final=is_last):
+                    self._batch = []
+                    return True
+            if self._batch:
+                self._start_batch()
+                return self._finish_inflight(is_final=True)
+            return False
+        finally:
+            _COW_FLAG.enabled = self._prev_cow
+
+    def _resume_parent_gc(self):
+        if self._gc_paused:
+            self._gc_paused = False
+            rgc.enable()
+
+    def abort(self):
+        try:
+            if self._inflight is not None:
+                _parallel.abort_parallel_batch(self._inflight)
+                self._inflight = None
+                self._inflight_batch = None
+            self._resume_parent_gc()
+            self._batch = []
+        finally:
+            _COW_FLAG.enabled = self._prev_cow
+
+    def _start_batch(self):
+        batch = self._batch
+        self._batch = []
+        self.stdoutw.flush()
+        self.stderrw.flush()
+        # Pause incremental major GC in the parent while forked children share
+        # COW pages (minor nursery collections remain active), avoiding
+        # parent-side mark/sweep writes across the entire COW heap.
+        pause_gc = we_are_translated() and self.env.max_memory == 0
+        if pause_gc and not self._gc_paused and rgc.isenabled():
+            rgc.disable()
+            self._gc_paused = True
+        runner = _DeclChunkRunner(
+            env=self.env,
+            batch=batch,
+            stdout_formatter=self.stdoutw.formatter,
+            stderr_formatter=self.stderrw.formatter,
+            print_mode=self.print_mode,
+            slow_secs=self.slow_secs,
+        )
+        self._inflight_batch = batch
+        inflight = _parallel.start_parallel_batch(
+            batch,
+            self.jobs,
+            runner,
+            disable_major_gc_in_child=pause_gc,
+        )
+        self._inflight = inflight
+        if inflight.work_r < 0:
+            self._resume_parent_gc()
+        self._batch_start_live = _gcstats.live_memory()
+
+    def _finish_inflight(self, is_final=False):
+        inflight = self._inflight
+        batch = self._inflight_batch
+        self._inflight = None
+        self._inflight_batch = None
+        if inflight is None or batch is None:
+            self._resume_parent_gc()
+            return False
+        n = len(batch)
+        try:
+            res = _parallel.finish_parallel_batch(inflight)
+        finally:
+            # All children have exited and been reaped; COW sharing is over.
+            self._resume_parent_gc()
+        errors = res.errors
+        outputs = res.outputs
+        worker_errors = res.worker_errors
+        aborted = False
+        had_error = False
+        flush_stdout = self.printer is not None or self.slow_secs >= 0.0
+
+        if (errors is None and outputs is None
+                and worker_errors is None and res.total_checked == n):
+            self.n_checked += n
+            for decl in batch:
+                decl.w_kind.drop_checked_value()
+        else:
+            checked_in_batch = 0
+            for i in range(n):
+                checked_in_batch += 1
+                if outputs is not None:
+                    out_text = outputs[i]
+                    if out_text is not None:
+                        self.stdoutw.write_plain(out_text)
+                        if flush_stdout:
+                            self.stdoutw.flush()
+                if errors is not None and errors[i] is not None:
+                    had_error = True
+                    self.stderrw.write_plain(errors[i])
+                    self.failures += 1
+                    if 0 < self.abort_at <= self.failures:
+                        aborted = True
+                        break
+                elif worker_errors is None and res.total_checked == n:
+                    batch[i].w_kind.drop_checked_value()
+            if worker_errors is None and res.total_checked == n:
+                self.n_checked += checked_in_batch
+            else:
+                self.n_checked += res.total_checked
+
+        if worker_errors is not None:
+            had_error = True
+            for msg in worker_errors:
+                self.stderrw.write_plain("Error: %s\n" % msg)
+                self.failures += 1
+        elif res.total_checked != n:
+            had_error = True
+            self.stderrw.write_plain(
+                "Error: parallel batch checked %d/%d declarations\n" % (
+                    res.total_checked, n,
+                ),
+            )
+            self.failures += 1
+
+        if had_error:
+            reset_spare()
+            if 0 < self.abort_at <= self.failures:
+                aborted = True
+
+        # Reclaim dropped proof terms cleanly between waves while all pages
+        # are exclusively owned by the parent (zero COW faults).
+        if not is_final and we_are_translated() and self.env.max_memory == 0:
+            live = _gcstats.live_memory()
+            if live >= self._gc_next_collect:
+                reset_spare()
+                rgc.collect()
+                live = _gcstats.live_memory()
+                headroom = (live * 3) >> 2
+                if headroom < _parallel.GC_MIN_HEADROOM:
+                    headroom = _parallel.GC_MIN_HEADROOM
+                elif headroom > _parallel.GC_MAX_HEADROOM:
+                    headroom = _parallel.GC_MAX_HEADROOM
+                self._gc_next_collect = live + headroom
+        self._batch_start_live = _gcstats.live_memory()
+        return aborted
+
+
 class _CheckRun(object):
     """
     The option set shared by `check` and `ffi check`, parsed once, plus
@@ -388,8 +732,9 @@ class _CheckRun(object):
     _attrs_ = [
         'stdoutw', 'stderrw',
         'max_fail', 'max_wall_time', 'max_memory',
-        'printer', 'slow_secs',
+        'printer', 'print_mode', 'slow_secs',
         'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
+        'jobs',
     ]
 
     def __init__(self, args, stdoutw, stderrw):
@@ -401,7 +746,8 @@ class _CheckRun(object):
             args.options["max-wall-time-per-decl"],
         )
         self.max_memory = _parse_bytes(args.options["max-memory-per-decl"])
-        self.printer = Printer.from_str(args.options["print"], stdoutw)
+        self.print_mode = args.options["print"]
+        self.printer = Printer.from_str(self.print_mode, stdoutw)
         slower_than = args.options["slower-than"]
         self.slow_secs = (
             _parse_seconds(slower_than) if slower_than is not None else -1.0
@@ -425,6 +771,9 @@ class _CheckRun(object):
 
         self.trace = args.options["trace"]
         self.stats = args.options["stats"]
+        self.jobs = _parallel.parse_jobs(args.options.get("jobs", None))
+        if self.jobs > 1 and self.break_at is not None:
+            raise UsageError("--break-at cannot be combined with --jobs > 1")
 
     def start(self, abort_at):
         """
@@ -438,26 +787,44 @@ class _CheckRun(object):
             env.max_wall_time = self.max_wall_time
         if self.max_memory > 0:
             env.max_memory = self.max_memory
-        checker = _StreamingChecker(
-            env=env,
-            stdoutw=self.stdoutw,
-            stderrw=self.stderrw,
-            printer=self.printer,
-            slow_secs=self.slow_secs,
-            filter_match=self.filter_match,
-            filter_names=self.filter_names,
-            abort_at=abort_at,
-            break_at=self.break_at,
-        )
-        # When either --trace or --stats is set, install a `StreamTracer`.
-        # The writer is None for --stats-only (no stream output, just count);
-        # --trace points the writer at stderr. A single class covers both
-        # because counting is cheap and harmless to keep on whenever the
-        # stream tracer is active.
+        # When either --trace or --stats is set, install a `StreamTracer` and
+        # run sequentially so per-step trace/stats counters stay complete.
         tracer = None
         if self.trace or self.stats:
             tracer = StreamTracer(self.stderrw if self.trace else None)
             env.tracer = tracer
+        effective_jobs = (
+            self.jobs
+            if (_parallel.HAVE_FORK and tracer is None)
+            else 1
+        )
+        if effective_jobs > 1:
+            env.cow_mode = True
+            checker = _ParallelChecker(
+                env=env,
+                stdoutw=self.stdoutw,
+                stderrw=self.stderrw,
+                printer=self.printer,
+                slow_secs=self.slow_secs,
+                filter_match=self.filter_match,
+                filter_names=self.filter_names,
+                abort_at=abort_at,
+                break_at=self.break_at,
+                jobs=effective_jobs,
+                print_mode=self.print_mode,
+            )
+        else:
+            checker = _StreamingChecker(
+                env=env,
+                stdoutw=self.stdoutw,
+                stderrw=self.stderrw,
+                printer=self.printer,
+                slow_secs=self.slow_secs,
+                filter_match=self.filter_match,
+                filter_names=self.filter_names,
+                abort_at=abort_at,
+                break_at=self.break_at,
+            )
         return env, checker, tracer
 
     def summarize(self, checker, tracer, bytes_at_start):
@@ -560,7 +927,10 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
             try:
                 parser.validate_export_metadata(file)
                 builder.consume(file, hook=checker)
+                checker.finish()
             except ExportError as err:
+                if checker.finish():
+                    return checker.failures
                 run.stderrw.writeline(err.tokens())
                 run.stderrw.write_plain("\n")
                 return checker.failures + 1
@@ -574,6 +944,7 @@ def _check_one_file(path, stdin, stderr, run, abort_at):
                 stderr.write("Unexpected error during type checking\n")
                 raise
         finally:
+            checker.abort()
             if refcount is not None:
                 builder._refcount = None
                 refcount.free()

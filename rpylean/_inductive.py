@@ -45,11 +45,13 @@ from rpylean.objects import (
     W_UniverseTooHigh,
     W_LEVEL_ZERO,
     MESSAGE,
+    _COW_FLAG,
     _error_diagnostic,
     _mk_w_bvar,
     _mk_w_forall,
     _mk_w_lambda,
     _next_cache_gen,
+    _decl_visible,
     get_decl,
     find_decl,
     name_dict,
@@ -159,7 +161,7 @@ class _DepthMemo(object):
         self.reset()
 
     def reset(self):
-        g0 = _next_cache_gen()
+        g0 = 0 if _COW_FLAG.enabled else _next_cache_gen()
         self.base_gen = g0
         del self.gens[:]
         self.gens.append(g0)
@@ -493,7 +495,7 @@ class _AlphaMemo(object):
     _attrs_ = ['gen', 'partners', 'overflow']
 
     def __init__(self):
-        self.gen = _next_cache_gen()
+        self.gen = 0 if _COW_FLAG.enabled else _next_cache_gen()
         self.partners = []
         self.overflow = None
 
@@ -699,7 +701,7 @@ class _Block(object):
         self.result_level = W_LEVEL_ZERO
         self.elim_name = None
         self.elim_level = W_LEVEL_ZERO
-        self._occ_gen = _next_cache_gen()
+        self._occ_gen = 0 if _COW_FLAG.enabled else _next_cache_gen()
 
     def fail(self, summary):
         return W_InvalidInductive(self.env, summary)
@@ -781,6 +783,8 @@ class _Block(object):
             raise self.fail("the block does not begin with its first type")
         for name in all:
             decl = get_decl(declarations, name)
+            if not _decl_visible(self.first, decl):
+                raise self.fail("%s is not declared" % name.str())
             kind = decl.w_kind
             if not isinstance(kind, W_Inductive):
                 raise self.fail("%s is not an inductive type" % name.str())
@@ -875,6 +879,8 @@ class _Block(object):
                         )
                     seen_ctors[ctor_name] = True
                 ctor_decl = get_decl(declarations, ctor_name)
+                if declared and not _decl_visible(self.first, ctor_decl):
+                    raise self.fail("%s is not declared" % ctor_name.str())
                 ctor_kind = ctor_decl.w_kind
                 if not isinstance(ctor_kind, W_Constructor):
                     raise self.fail(
@@ -1038,6 +1044,8 @@ class _Block(object):
             return False
         decl = find_decl(self.tc.declarations, head.name)
         if decl is None:
+            return False
+        if self.first.index >= 0 and decl.index >= self.first.index:
             return False
         kind = decl.w_kind
         if not isinstance(kind, W_Inductive):
