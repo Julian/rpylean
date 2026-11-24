@@ -73,6 +73,7 @@ from rpylean.objects import (
     _mk_w_const1,
     _mk_w_const2,
     _mk_w_litnat,
+    _next_cache_gen,
     apply_const_level_params,
     find_decl,
     get_decl,
@@ -98,6 +99,12 @@ INVALID = 0
 #: diagnostics. Keeps `TermStore.infos` and `store.leaves` from pinning dead
 #: theorem AST subtrees across warm epochs.
 _ANON_BINDER = Binder.default(Name.ANONYMOUS, PROP)
+
+#: Shared sentinel `W_FVar` stored in `TermStore.leaves` for anonymous binder
+#: openings when `record_nodes=False`, avoiding per-binder `W_FVar` allocations
+#: and `_fvar_uid` hash insertions; `export_term` lazily materializes a unique
+#: `W_FVar` if ever exported.
+_ANON_FVAR = W_FVar(_ANON_BINDER)
 
 
 @always_inline
@@ -367,7 +374,6 @@ _OTHER_PACK_LIMIT = 1 << 20
 _OTHER_SLOT_MASK = (1 << 20) - 1
 _U32_KEY_LIMIT = 1 << 31
 _U32_VAL_MASK = 0xFFFFFFFF
-_CACHE_GEN_LIMIT = 1 << 31
 _BVAR_ARR_LEN = 256
 _LGEN_SIZE = 512
 _LGEN_MASK = _LGEN_SIZE - 1
@@ -435,23 +441,6 @@ def _level_subst_eq(lvl, params, clevels, target_lvl):
     return sub is target_lvl or sub.eq(target_lvl)
 
 
-class _CacheGen(object):
-    _attrs_ = ['count']
-
-    def __init__(self):
-        self.count = 0
-
-
-_CACHE_GEN = _CacheGen()
-
-
-@always_inline
-def _next_cache_gen():
-    g = _CACHE_GEN.count + 1
-    if g < _CACHE_GEN_LIMIT:
-        _CACHE_GEN.count = g
-        return g
-    return -1
 _LF_CLASSIFIED = 1
 _LF_RECURSOR = 2
 _LF_QUOT_LIFT = 4
@@ -2263,6 +2252,20 @@ class TermStore(object):
         if gen > 0:
             fvar._cache = (gen << 32) | h
         return h
+
+    def _new_anon_fvar_leaf(self):
+        """Allocate a fresh anonymous free-variable leaf handle when
+        `record_nodes` is false, avoiding GC allocation of `W_FVar` and
+        `_fvar_uid` hash insertion since no external caller holds a
+        reference to it."""
+        j = self.nleaves
+        if j == self.leaf_cap:
+            self._grow_leaves()
+        self.leaves[j] = _ANON_FVAR
+        self.leaf_meta[j] = _u32(1)
+        self.leaf_head_kind[j] = _u32(_LF_CLASSIFIED)
+        self.nleaves = j + 1
+        return leaf_handle(j)
 
     def leaf_for(self, e):
         """
@@ -7865,7 +7868,12 @@ class TermStore(object):
     def export_term(self, h):
         """The `W_Expr` for ``h``, memoised per record."""
         if is_leaf(h):
-            return self.leaves[leaf_index(h)]
+            j = leaf_index(h)
+            e = self.leaves[j]
+            if e is _ANON_FVAR:
+                e = W_FVar(_ANON_BINDER)
+                self.leaves[j] = e
+            return e
         cached = self.node_of(h)
         if cached is not None:
             return cached
@@ -10393,7 +10401,7 @@ class Machine(object):
         self._fvar_reused = False
         store = self.store
         if not store.record_nodes:
-            fv = store._new_fvar_leaf(W_FVar(_ANON_BINDER))
+            fv = store._new_anon_fvar_leaf()
         else:
             binder = store.binder_of(h)
             own = binder.fvar()
@@ -10415,8 +10423,10 @@ class Machine(object):
         """Allocate a guaranteed-fresh free variable for binder ``h`` with
         domain ``domain`` without touching the reuse cache."""
         store = self.store
-        binder = store.binder_of(h) if store.record_nodes else _ANON_BINDER
-        fv = store._new_fvar_leaf(W_FVar(binder))
+        if not store.record_nodes:
+            fv = store._new_anon_fvar_leaf()
+        else:
+            fv = store._new_fvar_leaf(W_FVar(store.binder_of(h)))
         j = leaf_index(fv)
         store.leaf_infer[j] = _u32(domain)
         store.leaf_checked[j] = _u32(self.check_gen)
@@ -10435,7 +10445,7 @@ class Machine(object):
                 return fv
         store = self.store
         if not store.record_nodes:
-            fv = store._new_fvar_leaf(W_FVar(_ANON_BINDER))
+            fv = store._new_anon_fvar_leaf()
         else:
             binder = fun_expr.get_binder()
             own = binder.fvar()

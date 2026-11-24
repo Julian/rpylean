@@ -2634,3 +2634,35 @@ class TestJointCheckAndInferExpected(object):
             )
         finally:
             tc.free()
+
+    def test_anon_fvar_leaf_avoids_alloc_and_exports_distinct(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.machine import _ANON_FVAR, leaf_index
+        from rpylean.objects import W_FVar
+
+        env = Environment.having([NAT.name.axiom(type=TYPE)])
+        tc = TypeChecker(env, None)
+        try:
+            m = tc.machine
+            store = m.store
+            store.record_nodes = False
+            dom = store.import_term(NAT)
+            pi1 = store.import_term(forall(x.binder(type=NAT))(NAT))
+            pi2 = store.import_term(forall(y.binder(type=NAT))(PROP))
+            fv1 = m.fvar_for_domain(pi1, dom)
+            fv2 = m.fvar_for_domain(pi2, dom)
+            fv3 = m._fresh_fvar(pi1, dom)
+            assert fv1 != fv2 and fv2 != fv3 and fv1 != fv3
+            assert store.leaves[leaf_index(fv1)] is _ANON_FVAR
+            assert store.leaves[leaf_index(fv2)] is _ANON_FVAR
+            assert store.leaves[leaf_index(fv3)] is _ANON_FVAR
+            assert store._fvar_uid.size == 0
+            assert store.has_fvar(fv1) and store.loose_bvar_range(fv1) == 0
+            # Lazy materialization on export yields distinct W_FVars.
+            e1 = store.export_term(fv1)
+            e2 = store.export_term(fv2)
+            assert isinstance(e1, W_FVar) and isinstance(e2, W_FVar)
+            assert e1 is not e2 and e1.id != e2.id
+            assert store.export_term(fv1) is e1
+        finally:
+            tc.free()

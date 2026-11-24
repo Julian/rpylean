@@ -49,6 +49,7 @@ from rpylean.objects import (
     _mk_w_bvar,
     _mk_w_forall,
     _mk_w_lambda,
+    _next_cache_gen,
     get_decl,
     find_decl,
     name_dict,
@@ -142,7 +143,49 @@ def _expr_pair_hash(a):
     return (compute_identity_hash(a[0]) * 1000003) ^ compute_identity_hash(a[1])
 
 
-def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
+class _DepthMemo(object):
+    """Intrusive `W_Expr._cache` memo keyed by `(expr, depth)`: avoids `r_dict`,
+    2-tuple keys, and GC identity-hash shadow allocations on the common
+    single-depth path, falling back to `r_dict` only on multi-depth DAG
+    collisions or cache-generation exhaustion."""
+
+    _attrs_ = ['base_gen', 'gens', 'results', 'overflow']
+
+    def __init__(self):
+        self.base_gen = 0
+        self.gens = []
+        self.results = []
+        self.overflow = None
+        self.reset()
+
+    def reset(self):
+        g0 = _next_cache_gen()
+        self.base_gen = g0
+        del self.gens[:]
+        self.gens.append(g0)
+        del self.results[:]
+        self.overflow = None
+
+    def gen(self, depth):
+        if self.base_gen <= 0:
+            return -1
+        gens = self.gens
+        while depth >= len(gens):
+            gens.append(0)
+        g = gens[depth]
+        if g == 0:
+            g = _next_cache_gen()
+            gens[depth] = g
+        return g
+
+    def put_overflow(self, expr, depth, res):
+        ov = self.overflow
+        if ov is None:
+            ov = self.overflow = r_dict(_expr_depth_eq, _expr_depth_hash)
+        ov[(expr, depth)] = res
+
+
+def _bind_fvars_prefix(expr, fvar_idx, limit, depth, dgen, memo):
     """DAG-memoized substitution of `fvars[0..limit-1]` with de Bruijn indices
     starting at ``depth`` (innermost `fvars[limit-1]` -> ``depth``)."""
     if limit <= 0 or not expr.has_fvar():
@@ -152,40 +195,55 @@ def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
         if 0 <= k < limit:
             return _mk_w_bvar(depth + limit - 1 - k)
         return expr
-    key = (expr, depth)
-    cached = memo.get(key, None)
-    if cached is not None:
-        return cached
+    if dgen > 0:
+        c = expr._cache
+        cg = c >> 32
+        if cg == dgen:
+            return memo.results[c & 0xFFFFFFFF]
+        if cg >= memo.base_gen and memo.overflow is not None:
+            cached = memo.overflow.get((expr, depth), None)
+            if cached is not None:
+                return cached
+    elif memo.overflow is not None:
+        cached = memo.overflow.get((expr, depth), None)
+        if cached is not None:
+            return cached
     if isinstance(expr, W_App):
-        new_fn = _bind_fvars_prefix(expr.fn, fvar_idx, limit, depth, memo)
-        new_arg = _bind_fvars_prefix(expr.arg, fvar_idx, limit, depth, memo)
+        new_fn = _bind_fvars_prefix(expr.fn, fvar_idx, limit, depth, dgen, memo)
+        new_arg = _bind_fvars_prefix(expr.arg, fvar_idx, limit, depth, dgen, memo)
         if new_fn is expr.fn and new_arg is expr.arg:
             res = expr
         else:
             res = new_fn.app(new_arg)
     elif isinstance(expr, W_ForAll):
-        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
+        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, dgen, memo)
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
         new_body = _bind_fvars_prefix(
-            expr.body, fvar_idx, limit, depth + 1, memo,
+            expr.body, fvar_idx, limit, ndepth, ndgen, memo,
         )
         if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
             res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Lambda):
-        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
+        new_bt = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, dgen, memo)
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
         new_body = _bind_fvars_prefix(
-            expr.body, fvar_idx, limit, depth + 1, memo,
+            expr.body, fvar_idx, limit, ndepth, ndgen, memo,
         )
         if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
             res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Let):
-        new_type = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, memo)
-        new_val = _bind_fvars_prefix(expr.value, fvar_idx, limit, depth, memo)
+        new_type = _bind_fvars_prefix(expr.type, fvar_idx, limit, depth, dgen, memo)
+        new_val = _bind_fvars_prefix(expr.value, fvar_idx, limit, depth, dgen, memo)
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
         new_body = _bind_fvars_prefix(
-            expr.body, fvar_idx, limit, depth + 1, memo,
+            expr.body, fvar_idx, limit, ndepth, ndgen, memo,
         )
         if (new_type is expr.type
                 and new_val is expr.value
@@ -195,49 +253,97 @@ def _bind_fvars_prefix(expr, fvar_idx, limit, depth, memo):
             res = expr.name.let(type=new_type, value=new_val, body=new_body)
     elif isinstance(expr, W_Proj):
         new_se = _bind_fvars_prefix(
-            expr.struct_expr, fvar_idx, limit, depth, memo,
+            expr.struct_expr, fvar_idx, limit, depth, dgen, memo,
         )
         res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
     else:
         res = expr
-    memo[key] = res
+    if dgen > 0:
+        cg = expr._cache >> 32
+        if cg < memo.base_gen:
+            idx = len(memo.results)
+            memo.results.append(res)
+            expr._cache = (dgen << 32) | idx
+        elif cg != dgen:
+            memo.put_overflow(expr, depth, res)
+    else:
+        memo.put_overflow(expr, depth, res)
     return res
 
 
-def _inst_dag_rec(expr, val, depth, memo):
+def _inst_multi_dag_rec(expr, vals, nvals, all_closed, depth, dgen, memo):
     if expr.loose_bvar_range() <= depth:
         return expr
     if isinstance(expr, W_BVar):
-        return expr.instantiate(val, depth)
-    key = (expr, depth)
-    cached = memo.get(key, None)
-    if cached is not None:
-        return cached
+        rel = expr.id - depth
+        if rel < nvals:
+            sub = vals[nvals - 1 - rel]
+            if depth > 0 and not all_closed and sub.loose_bvar_range() > 0:
+                return sub.incr_free_bvars(depth, 0)
+            return sub
+        return _mk_w_bvar(expr.id - nvals)
+    if dgen > 0:
+        c = expr._cache
+        cg = c >> 32
+        if cg == dgen:
+            return memo.results[c & 0xFFFFFFFF]
+        if cg >= memo.base_gen and memo.overflow is not None:
+            cached = memo.overflow.get((expr, depth), None)
+            if cached is not None:
+                return cached
+    elif memo.overflow is not None:
+        cached = memo.overflow.get((expr, depth), None)
+        if cached is not None:
+            return cached
     if isinstance(expr, W_App):
-        new_fn = _inst_dag_rec(expr.fn, val, depth, memo)
-        new_arg = _inst_dag_rec(expr.arg, val, depth, memo)
+        new_fn = _inst_multi_dag_rec(
+            expr.fn, vals, nvals, all_closed, depth, dgen, memo,
+        )
+        new_arg = _inst_multi_dag_rec(
+            expr.arg, vals, nvals, all_closed, depth, dgen, memo,
+        )
         if new_fn is expr.fn and new_arg is expr.arg:
             res = expr
         else:
             res = new_fn.app(new_arg)
     elif isinstance(expr, W_ForAll):
-        new_bt = _inst_dag_rec(expr.type, val, depth, memo)
-        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        new_bt = _inst_multi_dag_rec(
+            expr.type, vals, nvals, all_closed, depth, dgen, memo,
+        )
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
+        new_body = _inst_multi_dag_rec(
+            expr.body, vals, nvals, all_closed, ndepth, ndgen, memo,
+        )
         if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
             res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Lambda):
-        new_bt = _inst_dag_rec(expr.type, val, depth, memo)
-        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        new_bt = _inst_multi_dag_rec(
+            expr.type, vals, nvals, all_closed, depth, dgen, memo,
+        )
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
+        new_body = _inst_multi_dag_rec(
+            expr.body, vals, nvals, all_closed, ndepth, ndgen, memo,
+        )
         if new_bt is expr.type and new_body is expr.body:
             res = expr
         else:
             res = expr._rebuild(new_bt, new_body)
     elif isinstance(expr, W_Let):
-        new_type = _inst_dag_rec(expr.type, val, depth, memo)
-        new_val = _inst_dag_rec(expr.value, val, depth, memo)
-        new_body = _inst_dag_rec(expr.body, val, depth + 1, memo)
+        new_type = _inst_multi_dag_rec(
+            expr.type, vals, nvals, all_closed, depth, dgen, memo,
+        )
+        new_val = _inst_multi_dag_rec(
+            expr.value, vals, nvals, all_closed, depth, dgen, memo,
+        )
+        ndepth = depth + 1
+        ndgen = memo.gen(ndepth)
+        new_body = _inst_multi_dag_rec(
+            expr.body, vals, nvals, all_closed, ndepth, ndgen, memo,
+        )
         if (new_type is expr.type
                 and new_val is expr.value
                 and new_body is expr.body):
@@ -245,18 +351,50 @@ def _inst_dag_rec(expr, val, depth, memo):
         else:
             res = expr.name.let(type=new_type, value=new_val, body=new_body)
     elif isinstance(expr, W_Proj):
-        new_se = _inst_dag_rec(expr.struct_expr, val, depth, memo)
+        new_se = _inst_multi_dag_rec(
+            expr.struct_expr, vals, nvals, all_closed, depth, dgen, memo,
+        )
         res = expr if new_se is expr.struct_expr else expr.with_expr(new_se)
     else:
         res = expr
-    memo[key] = res
+    if dgen > 0:
+        cg = expr._cache >> 32
+        if cg < memo.base_gen:
+            idx = len(memo.results)
+            memo.results.append(res)
+            expr._cache = (dgen << 32) | idx
+        elif cg != dgen:
+            memo.put_overflow(expr, depth, res)
+    else:
+        memo.put_overflow(expr, depth, res)
     return res
+
+
+def _instantiate_multi_dag(expr, vals):
+    """Simultaneously instantiate outer bound variables `BVar(n-1)..BVar(0)`
+    with `vals[0..n-1]` (outermost first) in a single DAG pass."""
+    nvals = len(vals)
+    if nvals == 0 or expr.loose_bvar_range() == 0:
+        return expr
+    if isinstance(expr, W_BVar):
+        if expr.id < nvals:
+            return vals[nvals - 1 - expr.id]
+        return _mk_w_bvar(expr.id - nvals)
+    all_closed = True
+    for v in vals:
+        if v.loose_bvar_range() > 0:
+            all_closed = False
+            break
+    memo = _DepthMemo()
+    return _inst_multi_dag_rec(
+        expr, vals, nvals, all_closed, 0, memo.base_gen, memo,
+    )
 
 
 def _instantiate_dag(expr, val):
     if expr.loose_bvar_range() == 0:
         return expr
-    return _inst_dag_rec(expr, val, 0, r_dict(_expr_depth_eq, _expr_depth_hash))
+    return _instantiate_multi_dag(expr, [val])
 
 
 def _mk_pi(fvars, body):
@@ -268,18 +406,17 @@ def _mk_pi(fvars, body):
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         fvar_idx[fvar.id] = i
-    body = _bind_fvars_prefix(
-        body, fvar_idx, n, 0, r_dict(_expr_depth_eq, _expr_depth_hash),
-    )
+    memo = _DepthMemo()
+    body = _bind_fvars_prefix(body, fvar_idx, n, 0, memo.base_gen, memo)
     i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         binder = fvar.binder
         if i > 0 and binder.type.has_fvar():
+            memo.reset()
             new_type = _bind_fvars_prefix(
-                binder.type, fvar_idx, i, 0,
-                r_dict(_expr_depth_eq, _expr_depth_hash),
+                binder.type, fvar_idx, i, 0, memo.base_gen, memo,
             )
             if new_type is not binder.type:
                 binder = binder.with_type(new_type)
@@ -297,18 +434,17 @@ def _mk_lambda(fvars, body):
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         fvar_idx[fvar.id] = i
-    body = _bind_fvars_prefix(
-        body, fvar_idx, n, 0, r_dict(_expr_depth_eq, _expr_depth_hash),
-    )
+    memo = _DepthMemo()
+    body = _bind_fvars_prefix(body, fvar_idx, n, 0, memo.base_gen, memo)
     i = n - 1
     while i >= 0:
         fvar = fvars[i]
         assert isinstance(fvar, W_FVar)
         binder = fvar.binder
         if i > 0 and binder.type.has_fvar():
+            memo.reset()
             new_type = _bind_fvars_prefix(
-                binder.type, fvar_idx, i, 0,
-                r_dict(_expr_depth_eq, _expr_depth_hash),
+                binder.type, fvar_idx, i, 0, memo.base_gen, memo,
             )
             if new_type is not binder.type:
                 binder = binder.with_type(new_type)
@@ -349,39 +485,71 @@ def _levels_eq(levels, others):
     return True
 
 
-def _alpha_eq_memo(a, b, seen):
-    keys = None
+class _AlphaMemo(object):
+    """Intrusive `a._cache` memo for `alpha_eq`: stores each left node's first
+    proven alpha-equal partner in a flat list, spilling to `r_dict` only if
+    the same left node is paired with multiple distinct right nodes."""
+
+    _attrs_ = ['gen', 'partners', 'overflow']
+
+    def __init__(self):
+        self.gen = _next_cache_gen()
+        self.partners = []
+        self.overflow = None
+
+    def put_overflow(self, a, b):
+        ov = self.overflow
+        if ov is None:
+            ov = self.overflow = r_dict(_expr_pair_eq, _expr_pair_hash)
+        ov[(a, b)] = True
+
+
+def _alpha_eq_memo(a, b, memo):
+    gen = memo.gen
+    partners = memo.partners
+    keys_a = None
+    keys_b = None
     while True:
         if a is b:
             ok = True
             break
         if a.__class__ is not b.__class__:
             return False
-        key = (a, b)
-        if key in seen:
+        if gen > 0:
+            c = a._cache
+            if (c >> 32) == gen:
+                if partners[c & 0xFFFFFFFF] is b:
+                    ok = True
+                    break
+                if memo.overflow is not None and (a, b) in memo.overflow:
+                    ok = True
+                    break
+        elif memo.overflow is not None and (a, b) in memo.overflow:
             ok = True
             break
-        if keys is None:
-            keys = [key]
+        if keys_a is None:
+            keys_a = [a]
+            keys_b = [b]
         else:
-            keys.append(key)
+            keys_a.append(a)
+            keys_b.append(b)
         if isinstance(a, W_App):
             assert isinstance(b, W_App)
-            if not _alpha_eq_memo(a.arg, b.arg, seen):
+            if not _alpha_eq_memo(a.arg, b.arg, memo):
                 return False
             a = a.fn
             b = b.fn
         elif isinstance(a, W_FunBase):
             assert isinstance(b, W_FunBase)
-            if not _alpha_eq_memo(a.type, b.type, seen):
+            if not _alpha_eq_memo(a.type, b.type, memo):
                 return False
             a = a.body
             b = b.body
         elif isinstance(a, W_Let):
             assert isinstance(b, W_Let)
-            if not _alpha_eq_memo(a.type, b.type, seen):
+            if not _alpha_eq_memo(a.type, b.type, memo):
                 return False
-            if not _alpha_eq_memo(a.value, b.value, seen):
+            if not _alpha_eq_memo(a.value, b.value, memo):
                 return False
             a = a.body
             b = b.body
@@ -396,15 +564,32 @@ def _alpha_eq_memo(a, b, seen):
         else:
             ok = syntactic_eq(a, b)
             break
-    if ok and keys is not None:
-        for k in keys:
-            seen[k] = True
+    if ok and keys_a is not None:
+        assert keys_b is not None
+        i = 0
+        nk = len(keys_a)
+        while i < nk:
+            ka = keys_a[i]
+            kb = keys_b[i]
+            if gen > 0:
+                c = ka._cache
+                if (c >> 32) != gen:
+                    idx = len(partners)
+                    partners.append(kb)
+                    ka._cache = (gen << 32) | idx
+                elif partners[c & 0xFFFFFFFF] is not kb:
+                    memo.put_overflow(ka, kb)
+            else:
+                memo.put_overflow(ka, kb)
+            i += 1
     return ok
 
 
 def alpha_eq(a, b):
     """Whether two expressions differ at most in how binders are written."""
-    return _alpha_eq_memo(a, b, r_dict(_expr_pair_eq, _expr_pair_hash))
+    if a is b:
+        return True
+    return _alpha_eq_memo(a, b, _AlphaMemo())
 
 
 class _Member(object):
@@ -484,11 +669,17 @@ class RecursorSpec(object):
         self.num_minors = num_minors
 
 
+_OCC_KNOWN = 1
+_OCC_TRUE = 2
+_UNIFORM_SEEN = 4
+_NESTED_SEEN = 8
+
+
 class _Block(object):
     _attrs_ = [
         'tc', 'env', 'first', 'first_kind', 'num_params', 'unsafe',
         'level_names', 'levels', 'params', 'members', 'num_declared',
-        'result_level', 'elim_name', 'elim_level',
+        'result_level', 'elim_name', 'elim_level', '_occ_gen',
     ]
 
     def __init__(self, first, tc):
@@ -508,6 +699,7 @@ class _Block(object):
         self.result_level = W_LEVEL_ZERO
         self.elim_name = None
         self.elim_level = W_LEVEL_ZERO
+        self._occ_gen = _next_cache_gen()
 
     def fail(self, summary):
         return W_InvalidInductive(self.env, summary)
@@ -545,8 +737,41 @@ class _Block(object):
         seen[expr] = True
         return False
 
+    def _has_occurrence_gen(self, expr, gen):
+        c = expr._cache
+        if (c >> 32) == gen and (c & _OCC_KNOWN) != 0:
+            return (c & _OCC_TRUE) != 0
+        found = False
+        if isinstance(expr, W_Const):
+            found = self.is_declared_name(expr.name)
+        elif isinstance(expr, W_App):
+            found = (
+                self._has_occurrence_gen(expr.fn, gen)
+                or self._has_occurrence_gen(expr.arg, gen)
+            )
+        elif isinstance(expr, W_FunBase):
+            found = (
+                self._has_occurrence_gen(expr.type, gen)
+                or self._has_occurrence_gen(expr.body, gen)
+            )
+        elif isinstance(expr, W_Let):
+            found = (
+                self._has_occurrence_gen(expr.type, gen)
+                or self._has_occurrence_gen(expr.value, gen)
+                or self._has_occurrence_gen(expr.body, gen)
+            )
+        elif isinstance(expr, W_Proj):
+            found = self._has_occurrence_gen(expr.struct_expr, gen)
+        old = expr._cache
+        bits = (old & (_UNIFORM_SEEN | _NESTED_SEEN)) if (old >> 32) == gen else 0
+        expr._cache = (gen << 32) | bits | _OCC_KNOWN | (_OCC_TRUE if found else 0)
+        return found
+
     def has_occurrence(self, expr):
         """Whether ``expr`` mentions a type being declared."""
+        gen = self._occ_gen
+        if gen > 0:
+            return self._has_occurrence_gen(expr, gen)
         return self._has_occurrence_memo(expr, r_dict(_expr_is, _expr_id_hash))
 
     def collect_members(self):
@@ -609,15 +834,25 @@ class _Block(object):
             tc.allowed_levels = prev_levels
             tc.stage = STAGE_ALL
 
-        type = self.first.type
+        cur = self.first.type
+        pending = []
         for _ in range(self.num_params):
-            if not isinstance(type, W_ForAll):
-                type = type.whnf(self.tc)
-            if not isinstance(type, W_ForAll):
+            if not isinstance(cur, W_ForAll):
+                if pending:
+                    cur = _instantiate_multi_dag(cur, pending)
+                    del pending[:]
+                cur = cur.whnf(self.tc)
+            if not isinstance(cur, W_ForAll):
                 raise self.fail("the type has fewer binders than parameters")
-            param = _local_for(type.get_binder())
+            binder = cur.get_binder()
+            if pending:
+                btype = _instantiate_multi_dag(binder.type, pending)
+                if btype is not binder.type:
+                    binder = binder.with_type(btype)
+            param = _local_for(binder)
             self.params.append(param)
-            type = _instantiate_dag(type.body, param)
+            pending.append(param)
+            cur = cur.body
         for i in range(self.num_declared):
             self.members[i].args = self.params
 
@@ -676,22 +911,43 @@ class _Block(object):
                 type = ctor_decl.type
                 if substs is not None:
                     type = type.subst_levels(substs)
-                for arg in member.args:
-                    if not isinstance(type, W_ForAll):
-                        if declared:
-                            raise W_InvalidConstructorResult(
-                                self.env, ctor_decl.type,
+                nargs = len(member.args)
+                cur = type
+                peeled = 0
+                while peeled < nargs and isinstance(cur, W_ForAll):
+                    cur = cur.body
+                    peeled += 1
+                if peeled == nargs:
+                    type = (
+                        _instantiate_multi_dag(cur, member.args)
+                        if nargs > 0 else cur
+                    )
+                else:
+                    type = (
+                        _instantiate_multi_dag(cur, member.args[:peeled])
+                        if peeled > 0 else cur
+                    )
+                    for idx_a in range(peeled, nargs):
+                        if not isinstance(type, W_ForAll):
+                            if declared:
+                                raise W_InvalidConstructorResult(
+                                    self.env, ctor_decl.type,
+                                )
+                            raise self.fail(
+                                "%s has fewer binders than parameters"
+                                % ctor_name.str(),
                             )
-                        raise self.fail(
-                            "%s has fewer binders than parameters"
-                            % ctor_name.str(),
-                        )
-                    type = _instantiate_dag(type.body, arg)
+                        type = _instantiate_dag(type.body, member.args[idx_a])
+                occ_gen = self._occ_gen
                 if declared:
                     self.check_uniform_occurrences(
-                        type, ctor_decl.type, r_dict(_expr_is, _expr_id_hash),
+                        type, ctor_decl.type,
+                        None if occ_gen > 0 else r_dict(_expr_is, _expr_id_hash),
                     )
-                self.find_nested(type, r_dict(_expr_is, _expr_id_hash))
+                self.find_nested(
+                    type,
+                    None if occ_gen > 0 else r_dict(_expr_is, _expr_id_hash),
+                )
                 member.ctors.append(_Ctor(ctor_decl, member.levels, type))
             qhead += 1
 
@@ -700,9 +956,19 @@ class _Block(object):
         Every occurrence of a type being declared must be applied to
         the block's universe levels and parameters.
         """
-        if expr in seen:
-            return
-        seen[expr] = True
+        if seen is None:
+            gen = self._occ_gen
+            c = expr._cache
+            if (c >> 32) == gen:
+                if (c & _UNIFORM_SEEN) != 0:
+                    return
+                expr._cache = c | _UNIFORM_SEEN
+            else:
+                expr._cache = (gen << 32) | _UNIFORM_SEEN
+        else:
+            if expr in seen:
+                return
+            seen[expr] = True
         if isinstance(expr, W_App) or isinstance(expr, W_Const):
             head, args = _args_of(expr)
             if isinstance(head, W_Const) and self.is_declared_name(head.name):
@@ -736,9 +1002,19 @@ class _Block(object):
 
     def find_nested(self, expr, seen):
         """Add a member for each container the block occurs nested in."""
-        if expr in seen:
-            return
-        seen[expr] = True
+        if seen is None:
+            gen = self._occ_gen
+            c = expr._cache
+            if (c >> 32) == gen:
+                if (c & _NESTED_SEEN) != 0:
+                    return
+                expr._cache = c | _NESTED_SEEN
+            else:
+                expr._cache = (gen << 32) | _NESTED_SEEN
+        else:
+            if expr in seen:
+                return
+            seen[expr] = True
         if isinstance(expr, W_App):
             if self.add_if_nested(expr):
                 return
@@ -855,24 +1131,35 @@ class _Block(object):
                 for j in range(len(names)):
                     substs[names[j]] = member.levels[j]
                 type = type.subst_levels(substs)
+            cur = type
+            pending = []
             for arg in member.args:
-                if not isinstance(type, W_ForAll):
-                    type = type.whnf(self.tc)
-                if not isinstance(type, W_ForAll):
+                if not isinstance(cur, W_ForAll):
+                    if pending:
+                        cur = _instantiate_multi_dag(cur, pending)
+                        del pending[:]
+                    cur = cur.whnf(self.tc)
+                if not isinstance(cur, W_ForAll):
                     raise self.fail(
                         "%s has fewer binders than parameters"
                         % member.name.str(),
                     )
                 if 0 < i < self.num_declared:
                     assert isinstance(arg, W_FVar)
+                    dom = (
+                        _instantiate_multi_dag(cur.type, pending)
+                        if pending else cur.type
+                    )
                     if not self.tc.def_eq(
-                        _consume_type_annotations(type.type),
+                        _consume_type_annotations(dom),
                         arg.binder.type,
                     ):
                         raise self.fail(
                             "the types of the block differ in parameter types",
                         )
-                type = _instantiate_dag(type.body, arg)
+                pending.append(arg)
+                cur = cur.body
+            type = _instantiate_multi_dag(cur, pending) if pending else cur
             type = type.whnf(self.tc)
             while isinstance(type, W_ForAll):
                 index = _local_for(type.get_binder())
@@ -920,24 +1207,32 @@ class _Block(object):
                     for _ in range(len(member.args)):
                         assert isinstance(orig, W_ForAll)
                         orig = orig.body
-                type = ctor.type
+                cur = ctor.type
+                fields = ctor.fields
                 number = 0
-                while isinstance(type, W_ForAll):
+                while isinstance(cur, W_ForAll):
                     number += 1
-                    field_type = type.type
+                    field_type = (
+                        _instantiate_multi_dag(cur.type, fields)
+                        if fields else cur.type
+                    )
                     orig_field_type = field_type
                     if declared and isinstance(orig, W_ForAll):
                         orig_field_type = orig.type
                         orig = orig.body
-                    field = _local_for(type.get_binder())
-                    ctor.fields.append(field)
+                    binder = cur.get_binder()
+                    if field_type is not binder.type:
+                        binder = binder.with_type(field_type)
+                    field = _local_for(binder)
+                    fields.append(field)
                     if self.has_occurrence(field_type):
                         recursive = True
                         self.check_field(
                             ctor, field, field_type, orig_field_type,
                             number, declared,
                         )
-                    type = _instantiate_dag(type.body, field)
+                    cur = cur.body
+                type = _instantiate_multi_dag(cur, fields) if fields else cur
                 if declared and len(ctor.fields) != ctor_kind.num_fields:
                     raise W_ConstructorFieldCountMismatch(
                         self.env, ctor.decl.type,
@@ -1136,7 +1431,7 @@ class _Block(object):
                 result = _mk_app(
                     member.motive, ctor.result_indices,
                 ).app(built)
-                minor_type = _mk_pi(ctor.fields, _mk_pi(ihs, result))
+                minor_type = _mk_pi(ctor.fields + ihs, result)
                 minors.append(_local("minor", minor_type))
 
         if self.elim_name is None:
@@ -1147,13 +1442,12 @@ class _Block(object):
         specs = []
         minor_index = 0
         k = self.is_k_target()
+        prefix_binders = self.params + motives + minors
         for member in members:
             type = _mk_app(member.motive, member.indices).app(member.major)
-            type = _mk_pi([member.major], type)
-            type = _mk_pi(member.indices, type)
-            type = _mk_pi(minors, type)
-            type = _mk_pi(motives, type)
-            type = _mk_pi(self.params, type)
+            type = _mk_pi(
+                prefix_binders + member.indices + [member.major], type,
+            )
 
             rules = []
             for ctor in member.ctors:
@@ -1169,10 +1463,7 @@ class _Block(object):
                     rec = rec.app(_mk_app(ctor.rec_fields[j], xs))
                     ihs.append(_mk_lambda(xs, rec))
                 rhs = _mk_app(_mk_app(minors[minor_index], ctor.fields), ihs)
-                rhs = _mk_lambda(ctor.fields, rhs)
-                rhs = _mk_lambda(minors, rhs)
-                rhs = _mk_lambda(motives, rhs)
-                rhs = _mk_lambda(self.params, rhs)
+                rhs = _mk_lambda(prefix_binders + ctor.fields, rhs)
                 rules.append(W_RecRule(ctor.name, len(ctor.fields), rhs))
                 minor_index += 1
 

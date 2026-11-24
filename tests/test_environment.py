@@ -2211,3 +2211,54 @@ class TestRegisterDeclaration(object):
         assert b_decl.index == 1
         with pytest.raises(AlreadyDeclared):
             env.register_declaration(a_decl, ordered=False)
+
+
+class TestInductiveDagMemos(object):
+    """Intrusive `_cache` DAG memos in `rpylean._inductive`: simultaneous
+    multi-instantiation, multi-depth sharing, and multi-partner `alpha_eq`."""
+
+    def test_instantiate_multi_dag_and_multi_depth_collision(self):
+        from rpylean._inductive import (
+            _instantiate_dag,
+            _instantiate_multi_dag,
+            _mk_pi,
+            alpha_eq,
+        )
+
+        f = Name.simple("f").const()
+        p = Name.simple("p").const()
+        q = Name.simple("q").const()
+        b0, b1 = W_BVar(0), W_BVar(1)
+        # Same shared sub-DAG visited at depth 0 AND depth 1.
+        shared = f.app(b0, b1)
+        term = f.app(shared, forall(x.binder(type=NAT))(shared))
+        got = _instantiate_multi_dag(term, [p, q])
+        # Outermost-first [p, q] matches peeling `forall x, forall y, term`
+        # with `x := p`, then `y := q` (i.e. BVar(1) -> p, BVar(0) -> q).
+        t1 = _instantiate_dag(forall(y.binder(type=NAT))(term), p)
+        expected = _instantiate_dag(t1.body, q)
+        assert alpha_eq(got, expected)
+
+        # Multi-depth collision in `_mk_pi` binding two fvars.
+        fv0 = x.binder(type=NAT).fvar()
+        fv1 = y.binder(type=f.app(fv0)).fvar()
+        shared_fv = f.app(fv0, fv1)
+        body = f.app(shared_fv, forall(x.binder(type=NAT))(shared_fv))
+        pi_combined = _mk_pi([fv0, fv1], body)
+        pi_nested = _mk_pi([fv0], _mk_pi([fv1], body))
+        assert alpha_eq(pi_combined, pi_nested)
+
+    def test_alpha_eq_multi_partner_overflow(self):
+        from rpylean._inductive import alpha_eq
+
+        f = Name.simple("f").const()
+        lam_a = fun(x.binder(type=NAT))(W_BVar(0))
+        lam_b1 = fun(y.binder(type=NAT))(W_BVar(0))
+        lam_b2 = fun(Name.simple("z").binder(type=NAT))(W_BVar(0))
+        # Same left node `lam_a` paired against two distinct right nodes.
+        lhs = f.app(lam_a, lam_a)
+        rhs = f.app(lam_b1, lam_b2)
+        assert alpha_eq(lhs, rhs)
+        # And mismatching second partner must still return False.
+        lam_bad = fun(y.binder(type=PROP))(W_BVar(0))
+        assert not alpha_eq(lhs, f.app(lam_b1, lam_bad))

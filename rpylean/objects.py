@@ -44,6 +44,28 @@ def _safety_of(is_unsafe):
     return SAFETY_UNSAFE if is_unsafe else SAFETY_SAFE
 
 
+_CACHE_GEN_LIMIT = 1 << 31
+
+
+class _CacheGen(object):
+    _attrs_ = ['count']
+
+    def __init__(self):
+        self.count = 0
+
+
+_CACHE_GEN = _CacheGen()
+
+
+@always_inline
+def _next_cache_gen():
+    g = _CACHE_GEN.count + 1
+    if g < _CACHE_GEN_LIMIT:
+        _CACHE_GEN.count = g
+        return g
+    return -1
+
+
 def get_decl(declarations, name):
     """
     Look up a declaration by name.
@@ -5737,11 +5759,11 @@ class _CtorBody(object):
         """Return the bitmask of this `_CtorBody`'s ``m`` lambda arguments
         referenced by ``expr`` at ``cur_nlets`` active let bindings (or ``-1``)."""
         if cur_nlets == 0:
-            return _expr_bvar_mask(expr, self.m, 0, {})
+            return _expr_bvar_mask(expr, self.m, 0, _MaskMemo())
         let_masks = self._compute_let_masks()
         if let_masks is None:
             return -1
-        em = _expr_bvar_mask(expr, self.m + cur_nlets, 0, {})
+        em = _expr_bvar_mask(expr, self.m + cur_nlets, 0, _MaskMemo())
         if em < 0:
             return -1
         rm = em >> cur_nlets
@@ -5803,7 +5825,7 @@ class _CtorBody(object):
         out_mask = 0
         uses = self.uses_lets
         let_masks = None
-        seen = {}
+        seen = _MaskMemo()
         seen_lets = None
         bid = 0
         while bid < inner_m:
@@ -5816,7 +5838,7 @@ class _CtorBody(object):
                             let_masks = self._compute_let_masks()
                             if let_masks is None:
                                 return -1
-                            seen_lets = {}
+                            seen_lets = _MaskMemo()
                         assert seen_lets is not None
                         em = _expr_bvar_mask(
                             self.args[arg_idx], self.m + nlets, 0, seen_lets,
@@ -5921,7 +5943,7 @@ class _CtorBody(object):
         let_masks = [0] * nlets
         li = 0
         while li < nlets:
-            lm = _expr_bvar_mask(let_vals[li], m + li, 0, {})
+            lm = _expr_bvar_mask(let_vals[li], m + li, 0, _MaskMemo())
             if lm < 0:
                 let_masks[li] = -1
             else:
@@ -5947,15 +5969,15 @@ class _CtorBody(object):
             if idx >= len(self.args):
                 return -2
             if nlets == 0:
-                return _expr_bvar_mask(self.args[idx], self.m, 0, {})
+                return _expr_bvar_mask(self.args[idx], self.m, 0, _MaskMemo())
             uses = self.uses_lets
             assert uses is not None
             if uses[idx] == 0:
-                return _expr_bvar_mask(self.args[idx], self.m, nlets, {})
+                return _expr_bvar_mask(self.args[idx], self.m, nlets, _MaskMemo())
             let_masks = self._compute_let_masks()
             if let_masks is None:
                 return -1
-            em = _expr_bvar_mask(self.args[idx], self.m + nlets, 0, {})
+            em = _expr_bvar_mask(self.args[idx], self.m + nlets, 0, _MaskMemo())
             if em < 0:
                 return -1
             rm = em >> nlets
@@ -5983,7 +6005,7 @@ class _CtorBody(object):
         out_mask = 0
         uses = self.uses_lets
         let_masks = None
-        seen = {}
+        seen = _MaskMemo()
         seen_lets = None
         bid = 0
         while bid < inner_m:
@@ -5996,7 +6018,7 @@ class _CtorBody(object):
                             let_masks = self._compute_let_masks()
                             if let_masks is None:
                                 return -1
-                            seen_lets = {}
+                            seen_lets = _MaskMemo()
                         assert seen_lets is not None
                         em = _expr_bvar_mask(
                             self.args[arg_idx], self.m + nlets, 0, seen_lets,
@@ -6031,7 +6053,7 @@ def _compute_uses_lets_masks(let_vals, args):
     let_deps = [0] * nlets
     li = 1
     while li < nlets:
-        lm = _expr_bvar_mask(let_vals[li], li, 0, {})
+        lm = _expr_bvar_mask(let_vals[li], li, 0, _MaskMemo())
         if lm < 0:
             let_deps[li] = (1 << li) - 1
         else:
@@ -6044,7 +6066,7 @@ def _compute_uses_lets_masks(let_vals, args):
                 b += 1
             let_deps[li] = d
         li += 1
-    seen = {}
+    seen = _MaskMemo()
     out = []
     i = 0
     nargs = len(args)
@@ -6816,10 +6838,37 @@ def _expr_has_bvar_lt(e, k, depth):
     return False
 
 
+class _MaskMemo(object):
+    """Intrusive `W_Expr._cache` memo for `_expr_bvar_mask`: avoids Python
+    dict / `(e, depth)` tuple / GC identity-hash shadow allocations on the
+    99.9% single-depth path, falling back to a dict only on multi-depth
+    DAG collisions or cache-generation exhaustion."""
+
+    _attrs_ = ['base_gen', 'gens', 'vals', 'overflow']
+
+    def __init__(self):
+        g0 = _next_cache_gen()
+        self.base_gen = g0
+        self.gens = [g0]
+        self.vals = []
+        self.overflow = None
+
+    def gen_for_depth(self, depth):
+        gens = self.gens
+        while depth >= len(gens):
+            gens.append(0)
+        g = gens[depth]
+        if g == 0:
+            g = _next_cache_gen()
+            gens[depth] = g
+        return g
+
+
 def _expr_bvar_mask(e, limit, depth, seen):
     """Bitmask of bound-variable indices ``b`` in ``[0, limit)`` occurring
-    free in ``e`` at binder depth ``depth``. Memoized on ``seen`` keyed by
-    ``(e, depth)`` so shared DAGs run in O(nodes) instead of exponentially."""
+    free in ``e`` at binder depth ``depth``. Memoized intrusively on
+    `W_Expr._cache` via ``seen`` so shared DAGs run in O(nodes) with zero
+    GC shadow allocations."""
     if limit <= 0 or e.loose_bvar_range() <= depth:
         return 0
     if limit > 62 or depth > 128:
@@ -6829,11 +6878,22 @@ def _expr_bvar_mask(e, limit, depth, seen):
         if 0 <= b < limit:
             return 1 << b
         return 0
-    key = (e, depth)
-    cached = seen.get(key, -2)
-    if cached != -2:
-        return cached
-    if len(seen) >= 4096:
+    dgen = seen.gen_for_depth(depth) if seen.base_gen > 0 else -1
+    if dgen > 0:
+        c = e._cache
+        cg = c >> 32
+        if cg == dgen:
+            return seen.vals[c & 0xFFFFFFFF]
+        if cg >= seen.base_gen and seen.overflow is not None:
+            cached = seen.overflow.get((e, depth), -2)
+            if cached != -2:
+                return cached
+    elif seen.overflow is not None:
+        cached = seen.overflow.get((e, depth), -2)
+        if cached != -2:
+            return cached
+    total = len(seen.vals) + (len(seen.overflow) if seen.overflow is not None else 0)
+    if total >= 4096:
         return -1
     if isinstance(e, W_App):
         m1 = _expr_bvar_mask(e.fn, limit, depth, seen)
@@ -6864,7 +6924,22 @@ def _expr_bvar_mask(e, limit, depth, seen):
         res = _expr_bvar_mask(e.struct_expr, limit, depth, seen)
     else:
         res = 0
-    seen[key] = res
+    if dgen > 0:
+        cg = e._cache >> 32
+        if cg < seen.base_gen:
+            idx = len(seen.vals)
+            seen.vals.append(res)
+            e._cache = (dgen << 32) | idx
+        elif cg != dgen:
+            ov = seen.overflow
+            if ov is None:
+                ov = seen.overflow = {}
+            ov[(e, depth)] = res
+    else:
+        ov = seen.overflow
+        if ov is None:
+            ov = seen.overflow = {}
+        ov[(e, depth)] = res
     return res
 
 
