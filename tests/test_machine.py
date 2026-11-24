@@ -2205,7 +2205,9 @@ class TestJointCheckAndInferExpected(object):
     def test_infer_app_const_ast_skips_domain_imports_and_checks_soundly(self):
         from rpylean.environment import Environment, TypeChecker
         from rpylean.exceptions import UndeclaredLevelParam, W_InvalidDeclaration
-        from rpylean.machine import KIND_FORALL, _LEAF_INFER_SEEN, _s32, leaf_index
+        from rpylean.machine import (
+            KIND_FORALL, _LEAF_INFER_PROMOTE, _LEAF_INFER_SEEN, _s32, leaf_index,
+        )
         from rpylean.objects import (
             SAFETY_SAFE,
             SAFETY_UNSAFE,
@@ -2301,11 +2303,23 @@ class TestJointCheckAndInferExpected(object):
             assert store.nrecs == nrecs_before
             pf_head = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]))
             assert _s32(store.leaf_infer[leaf_index(pf_head)]) == _LEAF_INFER_SEEN
-            # Second application of `pf` promotes `leaf_infer` to a real imported handle.
-            pf_app2 = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]).app(NAT, BX, a_my.name.const()))
-            assert m.infer(pf_app2, True) == store.import_term(
+            # Applications 2..6 stay on AST-direct; the 7th promotes `leaf_infer`
+            # to a real imported handle (`0 < li < _LEAF_INFER_SEEN`).
+            from rpylean.machine import M_CHECKED_GEN, M_INFER, MEMO_SLOTS, _u32, rec_index
+            expected_my = store.import_term(
                 res_decl.name.const([W_LEVEL_ZERO]).app(NAT, a_my.name.const()),
             )
+            pf_app2 = store.import_term(pf_decl.name.const([W_LEVEL_ZERO]).app(NAT, BX, a_my.name.const()))
+            mb2 = rec_index(pf_app2) * MEMO_SLOTS
+            for step in range(1, _LEAF_INFER_PROMOTE - _LEAF_INFER_SEEN + 1):
+                store.memos[mb2 + M_CHECKED_GEN] = _u32(0)
+                store.memos[mb2 + M_INFER] = _u32(0)
+                assert m.infer(pf_app2, True) == expected_my
+                assert _s32(store.leaf_infer[leaf_index(pf_head)]) == _LEAF_INFER_SEEN + step
+            assert _s32(store.leaf_infer[leaf_index(pf_head)]) == _LEAF_INFER_PROMOTE
+            store.memos[mb2 + M_CHECKED_GEN] = _u32(0)
+            store.memos[mb2 + M_INFER] = _u32(0)
+            assert m.infer(pf_app2, True) == expected_my
             li2 = _s32(store.leaf_infer[leaf_index(pf_head)])
             assert 0 < li2 < _LEAF_INFER_SEEN
 
@@ -2664,5 +2678,91 @@ class TestJointCheckAndInferExpected(object):
             assert isinstance(e1, W_FVar) and isinstance(e2, W_FVar)
             assert e1 is not e2 and e1.id != e2.id
             assert store.export_term(fv1) is e1
+        finally:
+            tc.free()
+
+    def test_ast_lambda_expected_and_lgen_cache(self):
+        from rpylean.environment import Environment, TypeChecker
+        from rpylean.objects import W_LEVEL_ZERO, W_TypeError
+
+        a, b, c, d, e, z = names("a", "b", "c", "d", "e", "z")
+        u = Name.simple("u")
+        u_l = u.as_level_param()
+        u_s = u_l.sort()
+        # `MyNat := Nat` for def_eq fallback tests.
+        my_nat = Name.simple("MyNat").definition(type=TYPE, value=NAT)
+        box_decl = Name.simple("Box").axiom(
+            type=forall(x.binder(type=u_s))(u_s),
+            levels=[u],
+        )
+        mk_box = Name.simple("mkBox").axiom(
+            type=forall(x.binder(type=u_s))(box_decl.name.const([u_l]).app(W_BVar(0))),
+            levels=[u],
+        )
+        # Higher-order polymorphic function:
+        #   ho.{u} (α : Sort u) (f1 : α -> Box.{u} α) (f2 : α -> α -> α) (f3 : Nat -> Nat) : Box.{u} α
+        box_b1 = box_decl.name.const([u_l]).app(W_BVar(1))
+        box_b3 = box_decl.name.const([u_l]).app(W_BVar(3))
+        ho_decl = Name.simple("ho").axiom(
+            type=forall(x.binder(type=u_s))(
+                forall(y.binder(type=forall(z.binder(type=W_BVar(0)))(box_b1)))(
+                    forall(a.binder(type=forall(b.binder(type=W_BVar(1)))(
+                        forall(c.binder(type=W_BVar(2)))(W_BVar(3)),
+                    )))(
+                        forall(d.binder(type=forall(e.binder(type=NAT))(NAT)))(
+                            box_b3,
+                        ),
+                    ),
+                ),
+            ),
+            levels=[u],
+        )
+        f_bad_host = Name.simple("fBad").axiom(
+            type=forall(x.binder(type=forall(y.binder(type=NAT))(NAT)))(NAT),
+        )
+        z_nat = Name.simple("zNat").axiom(type=NAT)
+        env = Environment.having([
+            NAT.name.axiom(type=TYPE), my_nat, box_decl, mk_box,
+            ho_decl, f_bad_host, z_nat,
+        ])
+        tc = TypeChecker(env, None)
+        try:
+            m = tc.machine
+            store = m.store
+            u1 = W_LEVEL_ZERO.succ()
+            box_nat_ast = box_decl.name.const([u_l]).app(NAT)
+            h_box_nat = store.import_const_term(
+                box_decl.name.const([u1]), box_decl, box_nat_ast,
+            )
+            # Spine-prefix cache hit in `_ast_inst_eq`: monomorphic closed subterm.
+            mono_sub = box_decl.name.const([u1]).app(NAT)
+            h_mono = store.import_term(mono_sub)
+            assert store.ast_inst_eq_buf(mono_sub, [], [], 0, 0, h_mono)
+
+            # Check `ho.{1} Nat (fun _ : Nat => mkBox.{1} Nat) (fun x y : Nat => x) (fun x : MyNat => x)`
+            # Exercising: single-binder open codomain, multi-binder BVar codomain,
+            # and non-structural domain fallback (`MyNat` vs `Nat`).
+            lam1 = fun(z.binder(type=NAT))(mk_box.name.const([u1]).app(NAT))
+            lam2 = fun(b.binder(type=NAT))(fun(c.binder(type=NAT))(W_BVar(1)))
+            lam3_defeq = fun(e.binder(type=my_nat.name.const()))(W_BVar(0))
+            app_ok = store.import_term(
+                ho_decl.name.const([u1]).app(NAT, lam1, lam2, lam3_defeq),
+            )
+            assert m.infer_expected(app_ok, h_box_nat) == h_box_nat
+
+            # Already-checked lambda passed again succeeds without re-importing `dom_ast`.
+            lam3_nat = fun(e.binder(type=NAT))(W_BVar(0))
+            h_lam3 = store.import_term(lam3_nat)
+            m.infer(h_lam3, True)
+            app_ok2 = store.import_term(
+                ho_decl.name.const([u1]).app(NAT, lam1, lam2, lam3_nat),
+            )
+            assert m.infer(app_ok2, True) == h_box_nat
+
+            # Genuine ill-typed lambda argument must still raise W_TypeError!
+            lam_bad = fun(y.binder(type=NAT))(NAT)  # returns Type, not Nat!
+            h_bad = store.import_term(f_bad_host.name.const().app(lam_bad))
+            with pytest.raises(W_TypeError):
+                m.infer(h_bad, True)
         finally:
             tc.free()

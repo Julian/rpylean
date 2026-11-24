@@ -478,12 +478,15 @@ _WARM_MAX_FAILED = 1 << 17
 #: `W_LevelParam`s, and `decl.index < current.index`. Valid across all
 #: subsequent monotonic warm declarations even after `check_gen` bumps.
 _CHECKED_PERM = 0x7FFFFFFF
-#: Sentinel stored in `TermStore.leaf_infer[j]` after a `W_Const` leaf has been
-#: checked once via the AST-direct `_infer_app` path. Single-use constants
-#: (~78% of `_infer_leaf` records) never import their `decl.type`, while a
-#: second application promotes the constant into `TermStore` for fast flat
-#: `u32` checking and `_infer_app_expected_pat` reuse.
-_LEAF_INFER_SEEN = 0x7FFFFFFF
+#: Sentinels stored in `TermStore.leaf_infer[j]` while a `W_Const` leaf stays
+#: on the AST-direct `_infer_app` path. Constants used <= 2 times per warm
+#: epoch never import their `decl.type` (`KIND_FORALL` wrappers and matched
+#: binder domains), while the 3rd application promotes the constant into
+#: `TermStore` for flat `u32` checking and `_infer_app_expected_pat` reuse.
+#: Values in `[0x7FFFFFF0 .. 0x7FFFFFFF]` are reserved sentinels (well above
+#: any valid handle `< 2^25`). `_proj_field_cache` also uses `_LEAF_INFER_SEEN`.
+_LEAF_INFER_SEEN = 0x7FFFFFF0
+_LEAF_INFER_PROMOTE = 0x7FFFFFF1
 
 
 @always_inline
@@ -1154,7 +1157,7 @@ class TermStore(object):
         '_fvar_gens', '_fvar_gens_len', '_fvar_base_gen', '_fvar_multi',
         '_cs_gens', '_cs_gens_len', '_cs_base_gen', '_cs_multi',
         '_cs_params', '_cs_clevels', '_cs_has_lp', '_cs_lgen',
-        '_cs_base', '_cs_m', '_cs_all_closed',
+        '_cs_base', '_cs_m',
         '_lgen1_p', '_lgen1_l', '_lgen1_g', '_lgen1_dirty',
         '_lgen2_p0', '_lgen2_p1', '_lgen2_l0', '_lgen2_l1', '_lgen2_g', '_lgen2_dirty',
         '_lgenN_p', '_lgenN_l', '_lgenN_g', '_lgenN_dirty',
@@ -1232,7 +1235,6 @@ class TermStore(object):
         self._cs_lgen = 0
         self._cs_base = 0
         self._cs_m = 0
-        self._cs_all_closed = True
         #: Direct-mapped per-epoch level-substitution generation caches so
         #: polymorphic DAG subterms shared across declarations at the same
         #: concrete universe levels reuse `W_Expr._cache` hits.
@@ -3425,9 +3427,10 @@ class TermStore(object):
         ) >= 0
 
     def _ast_inst_eq(self, pat, params, clevels, buf, start, n, target, depth, budget):
+        sgen = self._store_gen
         if not pat.has_level_param() and pat.loose_bvar_range() <= depth:
             c = pat._cache
-            if (c >> 32) == self._store_gen:
+            if (c >> 32) == sgen:
                 return budget if (c & _TABLE_SLOT_MASK) == target else -1
         cls = pat.__class__
         if cls is W_BVar:
@@ -3489,6 +3492,10 @@ class TermStore(object):
                 pf = cur.fn
                 ta = _s32(recs[tbase + F_A])
                 if pf.__class__ is W_App:
+                    if not pf.has_level_param() and pf.loose_bvar_range() <= depth:
+                        fc = pf._cache
+                        if (fc >> 32) == sgen:
+                            return budget if (fc & _TABLE_SLOT_MASK) == ta else -1
                     if is_leaf(ta):
                         return -1
                     tbase = rec_index(ta) << 2
@@ -3507,7 +3514,7 @@ class TermStore(object):
                 return -1
             assert isinstance(pat, W_Const)
             assert isinstance(te, W_Const)
-            if not pat.name.syntactic_eq(te.name):
+            if pat.name is not te.name:
                 return -1
             plvls = pat.levels
             tlvls = te.levels
@@ -3577,7 +3584,7 @@ class TermStore(object):
             assert isinstance(pat, W_Proj)
             if self.proj_index(target) != pat.field_index:
                 return -1
-            if not self.name_of(target).syntactic_eq(pat.struct_name):
+            if self.name_of(target) is not pat.struct_name:
                 return -1
             return self._ast_inst_eq(
                 pat.struct_expr, params, clevels, buf, start, n,
@@ -3772,7 +3779,7 @@ class TermStore(object):
             assert isinstance(pat, W_Proj)
             if self.proj_index(h2) != pat.field_index:
                 return -1
-            if not self.name_of(h2).syntactic_eq(pat.struct_name):
+            if self.name_of(h2) is not pat.struct_name:
                 return -1
             return self._ast_inst_eq_inst(
                 pat.struct_expr, params, clevels, buf, s1, n1,
@@ -6840,12 +6847,14 @@ class TermStore(object):
                     arg_h = self._import_fvars_rec(arg, fvars, nf, depth, dgen, nr)
                 head = self.cons_app(fn_h, arg_h)
                 if dgen > 0:
-                    if (self._fvar_base_gen > 0
-                            and (e._cache >> 32) >= self._fvar_base_gen
-                            and (e._cache >> 32) != dgen):
-                        self._fvar_cache_put(e, depth, dgen, head)
-                    else:
+                    if self._fvar_gens_len == 0:
                         e._cache = (dgen << 32) | head
+                    else:
+                        ec = e._cache >> 32
+                        if self._fvar_base_gen > 0 and ec >= self._fvar_base_gen and ec != dgen:
+                            self._fvar_cache_put(e, depth, dgen, head)
+                        else:
+                            e._cache = (dgen << 32) | head
                 return head
             spine = self._import_spine
             mark = self._import_spine_len
@@ -6931,12 +6940,14 @@ class TermStore(object):
                     arg_h = self._import_fvars_rec(arg, fvars, nf, depth, dgen, nr)
                 head = self.cons_app(head, arg_h)
                 if dgen > 0:
-                    if (self._fvar_base_gen > 0
-                            and (app._cache >> 32) >= self._fvar_base_gen
-                            and (app._cache >> 32) != dgen):
-                        self._fvar_cache_put(app, depth, dgen, head)
-                    else:
+                    if self._fvar_gens_len == 0:
                         app._cache = (dgen << 32) | head
+                    else:
+                        ec = app._cache >> 32
+                        if self._fvar_base_gen > 0 and ec >= self._fvar_base_gen and ec != dgen:
+                            self._fvar_cache_put(app, depth, dgen, head)
+                        else:
+                            app._cache = (dgen << 32) | head
             self._import_spine_len = mark
             return head
         if cls is W_Lambda or cls is W_ForAll:
@@ -6978,12 +6989,14 @@ class TermStore(object):
         else:
             return self.leaf_for(e)
         if dgen > 0:
-            if (self._fvar_base_gen > 0
-                    and (e._cache >> 32) >= self._fvar_base_gen
-                    and (e._cache >> 32) != dgen):
-                self._fvar_cache_put(e, depth, dgen, h)
-            else:
+            if self._fvar_gens_len == 0:
                 e._cache = (dgen << 32) | h
+            else:
+                ec = e._cache >> 32
+                if self._fvar_base_gen > 0 and ec >= self._fvar_base_gen and ec != dgen:
+                    self._fvar_cache_put(e, depth, dgen, h)
+                else:
+                    e._cache = (dgen << 32) | h
         return h
 
     def _level_cache_gen(self, params, clevels):
@@ -7327,9 +7340,11 @@ class TermStore(object):
         self._cs_base_gen = 0
         if self._cs_multi is not None:
             self._cs_multi = None
-        self._cs_params = None
-        self._cs_clevels = None
-        self._cs_lgen = 0
+        if self._cs_has_lp:
+            self._cs_params = None
+            self._cs_clevels = None
+            self._cs_has_lp = False
+            self._cs_lgen = 0
 
     def _cs_gen_for_depth(self, depth):
         gens = self._cs_gens
@@ -7397,22 +7412,16 @@ class TermStore(object):
             if not identity:
                 has_lp = True
                 lgen = self._level_cache_gen(params, clevels)
-        buf = self._spine_buf
-        all_closed = True
-        k = 0
-        while k < m:
-            if self.loose_bvar_range(_s32(buf[arg_base + k])) > 0:
-                all_closed = False
-                break
-            k += 1
         fgen = _next_cache_gen()
-        self._cs_params = params
-        self._cs_clevels = clevels
-        self._cs_has_lp = has_lp
-        self._cs_lgen = lgen
+        if has_lp:
+            self._cs_params = params
+            self._cs_clevels = clevels
+            self._cs_has_lp = True
+            self._cs_lgen = lgen
+        else:
+            self._cs_has_lp = False
         self._cs_base = arg_base
         self._cs_m = m
-        self._cs_all_closed = all_closed
         self._cs_base_gen = fgen
         mark = self._import_spine_len
         try:
@@ -7550,7 +7559,7 @@ class TermStore(object):
             m = self._cs_m
             if rel < m:
                 sub = _s32(self._spine_buf[self._cs_base + rel])
-                if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                if depth > 0 and self.loose_bvar_range(sub) > 0:
                     return self.shift(sub, depth, 0)
                 return sub
             return self.bvar(e.id - m)
@@ -7589,7 +7598,7 @@ class TermStore(object):
                     m = self._cs_m
                     if rel < m:
                         sub = _s32(self._spine_buf[self._cs_base + rel])
-                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                        if depth > 0 and self.loose_bvar_range(sub) > 0:
                             fn_h = self.shift(sub, depth, 0)
                         else:
                             fn_h = sub
@@ -7639,7 +7648,7 @@ class TermStore(object):
                     m = self._cs_m
                     if rel < m:
                         sub = _s32(self._spine_buf[self._cs_base + rel])
-                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                        if depth > 0 and self.loose_bvar_range(sub) > 0:
                             arg_h = self.shift(sub, depth, 0)
                         else:
                             arg_h = sub
@@ -7651,12 +7660,14 @@ class TermStore(object):
                     arg_h = self._import_const_subst_rec(arg, depth, dgen, nr)
                 head = self.cons_app(fn_h, arg_h)
                 if dgen > 0:
-                    if (self._cs_base_gen > 0
-                            and (e._cache >> 32) >= self._cs_base_gen
-                            and (e._cache >> 32) != dgen):
-                        self._cs_cache_put(e, depth, dgen, head)
-                    else:
+                    if self._cs_gens_len == 0:
                         e._cache = (dgen << 32) | head
+                    else:
+                        ec = e._cache >> 32
+                        if self._cs_base_gen > 0 and ec >= self._cs_base_gen and ec != dgen:
+                            self._cs_cache_put(e, depth, dgen, head)
+                        else:
+                            e._cache = (dgen << 32) | head
                 return head
             spine = self._import_spine
             mark = self._import_spine_len
@@ -7710,7 +7721,7 @@ class TermStore(object):
                         m = self._cs_m
                         if rel < m:
                             sub = _s32(self._spine_buf[self._cs_base + rel])
-                            if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                            if depth > 0 and self.loose_bvar_range(sub) > 0:
                                 head = self.shift(sub, depth, 0)
                             else:
                                 head = sub
@@ -7775,7 +7786,7 @@ class TermStore(object):
                     m = self._cs_m
                     if rel < m:
                         sub = _s32(self._spine_buf[self._cs_base + rel])
-                        if depth > 0 and not self._cs_all_closed and self.loose_bvar_range(sub) > 0:
+                        if depth > 0 and self.loose_bvar_range(sub) > 0:
                             arg_h = self.shift(sub, depth, 0)
                         else:
                             arg_h = sub
@@ -7788,12 +7799,14 @@ class TermStore(object):
                     arg_h = self._import_const_subst_rec(arg, depth, dgen, nr)
                 head = self.cons_app(head, arg_h)
                 if dgen > 0:
-                    if (self._cs_base_gen > 0
-                            and (app._cache >> 32) >= self._cs_base_gen
-                            and (app._cache >> 32) != dgen):
-                        self._cs_cache_put(app, depth, dgen, head)
-                    else:
+                    if self._cs_gens_len == 0:
                         app._cache = (dgen << 32) | head
+                    else:
+                        ec = app._cache >> 32
+                        if self._cs_base_gen > 0 and ec >= self._cs_base_gen and ec != dgen:
+                            self._cs_cache_put(app, depth, dgen, head)
+                        else:
+                            app._cache = (dgen << 32) | head
             self._import_spine_len = mark
             return head
         if cls is W_Lambda or cls is W_ForAll:
@@ -7857,12 +7870,14 @@ class TermStore(object):
         else:
             return self.leaf_for(e)
         if dgen > 0:
-            if (self._cs_base_gen > 0
-                    and (e._cache >> 32) >= self._cs_base_gen
-                    and (e._cache >> 32) != dgen):
-                self._cs_cache_put(e, depth, dgen, h)
-            else:
+            if self._cs_gens_len == 0:
                 e._cache = (dgen << 32) | h
+            else:
+                ec = e._cache >> 32
+                if self._cs_base_gen > 0 and ec >= self._cs_base_gen and ec != dgen:
+                    self._cs_cache_put(e, depth, dgen, h)
+                else:
+                    e._cache = (dgen << 32) | h
         return h
 
     def export_term(self, h):
@@ -11086,6 +11101,283 @@ class Machine(object):
         return r
 
     @dont_inline
+    def _infer_lambda_expected_ast(self, h, const_e, decl, dom_ast,
+                                   params, clevels, exp_start, exp_n):
+        """Check `KIND_LAMBDA` record ``h`` expecting its type to equal
+        raw `W_ForAll` AST ``dom_ast`` instantiated with ``params -> clevels``
+        and `_spine_buf[exp_start:exp_start+exp_n]`, matching leading binder
+        domains and the codomain directly via `ast_inst_eq_buf` so matched
+        `dom_ast` trees are never imported into `TermStore`.
+
+        Returns 0 on verified match (leaving `M_INFER == 0` and marking
+        `M_CHECKED_GEN`), else returns the materialized type handle."""
+        assert isinstance(dom_ast, W_ForAll)
+        store = self.store
+        ri = rec_index(h)
+        mbase = ri * MEMO_SLOTS
+        memos = store.memos
+        cg = _s32(memos[mbase + M_CHECKED_GEN])
+        if cg >= self.check_gen:
+            if cg != _CHECKED_PERM:
+                self._saw_nonperm = True
+            t = _s32(memos[mbase + M_INFER])
+            if t != 0:
+                return t
+            return self._infer_miss(h, ri, mbase, False)
+        if (store.nrecs - self._decl_start_recs >= _OPEN_RECORDS
+                and store.is_heavy(h)):
+            return self._infer_miss(h, ri, mbase, True)
+        if not store.ast_inst_eq_buf(
+                dom_ast.type, params, clevels, exp_start, exp_n,
+                store.field_a(h)):
+            return self._infer_miss(h, ri, mbase, True)
+        tick = (self._stack_tick + 1) & 31
+        self._stack_tick = tick
+        if tick == 0:
+            self._check_stack_slow("infer")
+        prev_np = self._saw_nonperm
+        self._saw_nonperm = False
+        vc = store.field_b(h)
+        tc_ast = dom_ast.body
+        # Fast path for single-binder lambda.
+        if store.kind(vc) != KIND_LAMBDA or not isinstance(tc_ast, W_ForAll):
+            domain = store.field_a(h)
+            self._ensure_sort(domain, True)
+            if tc_ast.loose_bvar_range() == 0:
+                fvar = 0
+                if store.loose_bvar_range(vc) > 0:
+                    fvar = self.fvar_for_domain(h, domain)
+                    if self._fvar_reused and (
+                            store.has_fvar(h) or tc_ast.has_fvar()):
+                        fvar = self._fresh_fvar(h, domain)
+                    vc = store.instantiate(vc, fvar, 0)
+                exp_h = 0
+                if not tc_ast.has_level_param():
+                    tc_c = tc_ast._cache
+                    if (tc_c >> 32) == store._store_gen:
+                        exp_h = tc_c & _TABLE_SLOT_MASK
+                if exp_h != 0:
+                    r = self._cheap_beta(self.infer_expected(vc, exp_h))
+                    matched = (r == exp_h or self.def_eq(exp_h, r))
+                else:
+                    r = self._cheap_beta(self.infer(vc, True))
+                    if store.ast_inst_eq_buf(tc_ast, params, clevels, 0, 0, r):
+                        matched = True
+                    else:
+                        exp_body = store.import_const_term(const_e, decl, tc_ast)
+                        matched = (r == exp_body or self.def_eq(exp_body, r))
+            elif tc_ast.__class__ is W_BVar:
+                assert isinstance(tc_ast, W_BVar)
+                vb_open = store.loose_bvar_range(vc) > 0
+                bid = tc_ast.id
+                if bid == 0:
+                    exp_body = 0
+                    tb_needs_fv = True
+                else:
+                    exp_body = (
+                        store.spine_arg(exp_start + bid - 1)
+                        if bid - 1 < exp_n
+                        else store.bvar(bid - 1 - exp_n)
+                    )
+                    tb_needs_fv = False
+                fvar = 0
+                if vb_open or tb_needs_fv:
+                    fvar = self.fvar_for_domain(h, domain)
+                    if self._fvar_reused and (
+                            store.has_fvar(h)
+                            or (exp_body != 0 and store.has_fvar(exp_body))):
+                        fvar = self._fresh_fvar(h, domain)
+                    if vb_open:
+                        vc = store.instantiate(vc, fvar, 0)
+                    if tb_needs_fv:
+                        exp_body = fvar
+                r = self._cheap_beta(self.infer_expected(vc, exp_body))
+                matched = (r == exp_body or self.def_eq(exp_body, r))
+            else:
+                smark = store._spine_top
+                total = 1 + exp_n
+                store.ensure_spine_room(total)
+                buf = store._spine_buf
+                has_fv = store.has_fvar(h) or tc_ast.has_fvar()
+                j = 0
+                while j < exp_n:
+                    a = _s32(buf[exp_start + j])
+                    if not has_fv and store.has_fvar(a):
+                        has_fv = True
+                    buf[smark + 1 + j] = _u32(a)
+                    j += 1
+                fvar = self.fvar_for_domain(h, domain)
+                if self._fvar_reused and has_fv:
+                    fvar = self._fresh_fvar(h, domain)
+                buf[smark] = _u32(fvar)
+                store._spine_top = smark + total
+                matched = False
+                r = 0
+                try:
+                    if store.loose_bvar_range(vc) > 0:
+                        vc = store.instantiate(vc, fvar, 0)
+                    r = self._cheap_beta(self.infer(vc, True))
+                    if store.ast_inst_eq_buf(
+                            tc_ast, params, clevels, smark, total, r):
+                        matched = True
+                    else:
+                        exp_body = store.import_const_subst_buf(
+                            const_e, decl, tc_ast, smark, total,
+                        )
+                        matched = (r == exp_body or self.def_eq(exp_body, r))
+                finally:
+                    store.unapp_pop(smark)
+            child_np = self._saw_nonperm
+            self._saw_nonperm = prev_np or child_np
+            memos = store.memos
+            if matched:
+                if (not child_np
+                        and self._can_perm
+                        and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                    memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+                else:
+                    memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+                return 0
+            if fvar != 0:
+                r = store.bind_fvar(r, fvar, 0)
+            r = store.cons(KIND_FORALL, domain, r, store.info(h))
+            memos = store.memos
+            memos[mbase + M_INFER] = _u32(r)
+            if (not child_np
+                    and self._can_perm
+                    and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+            else:
+                memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+            return r
+        # Multi-binder telescope checked directly against `W_ForAll` AST chain.
+        k = 2
+        vc = store.field_b(vc)
+        tc_ast = tc_ast.body
+        while store.kind(vc) == KIND_LAMBDA and isinstance(tc_ast, W_ForAll):
+            k += 1
+            vc = store.field_b(vc)
+            tc_ast = tc_ast.body
+        smark = store._spine_top
+        total = k + exp_n
+        store.ensure_spine_room(total)
+        buf = store._spine_buf
+        has_fv = store.has_fvar(h) or dom_ast.has_fvar()
+        j = 0
+        while j < exp_n:
+            a = _s32(buf[exp_start + j])
+            if not has_fv and store.has_fvar(a):
+                has_fv = True
+            buf[smark + k + j] = _u32(a)
+            j += 1
+        store._spine_top = smark + total
+        records = []
+        fvars = []
+        m = 0
+        matched = False
+        r = 0
+        try:
+            vcur = h
+            tcur_ast = dom_ast
+            while m < k:
+                assert isinstance(tcur_ast, W_ForAll)
+                orig_d = store.field_a(vcur)
+                if m > 0 and store.loose_bvar_range(orig_d) > 0:
+                    if is_leaf(orig_d):
+                        bid = (_s32(store.leaf_meta[leaf_index(orig_d)]) >> 1) - 1
+                        domain = fvars[m - 1 - bid] if bid < m else store.bvar(bid - m)
+                    else:
+                        domain = store.instantiate_multi_rev(orig_d, fvars, m, 0)
+                else:
+                    domain = orig_d
+                if m > 0:
+                    if not store.ast_inst_eq_buf(
+                            tcur_ast.type, params, clevels,
+                            smark + k - m, m + exp_n, domain):
+                        break
+                self._ensure_sort(domain, True)
+                fvar = self.fvar_for_domain(vcur, domain)
+                if self._fvar_reused and has_fv:
+                    fvar = self._fresh_fvar(vcur, domain)
+                records.append(vcur)
+                fvars.append(fvar)
+                m += 1
+                store._spine_buf[smark + k - m] = _u32(fvar)
+                vcur = store.field_b(vcur)
+                tcur_ast = tcur_ast.body
+            if store.loose_bvar_range(vcur) > 0:
+                if m == 1:
+                    vcur = store.instantiate(vcur, fvars[0], 0)
+                else:
+                    vcur = store.instantiate_multi_rev(vcur, fvars, m, 0)
+            cur_start = smark + k - m
+            cur_n = m + exp_n
+            if tcur_ast.loose_bvar_range() == 0:
+                exp_h = 0
+                if not tcur_ast.has_level_param():
+                    tc_c = tcur_ast._cache
+                    if (tc_c >> 32) == store._store_gen:
+                        exp_h = tc_c & _TABLE_SLOT_MASK
+                if exp_h != 0:
+                    r = self._cheap_beta(self.infer_expected(vcur, exp_h))
+                    matched = (r == exp_h or self.def_eq(exp_h, r))
+                else:
+                    r = self._cheap_beta(self.infer(vcur, True))
+                    if store.ast_inst_eq_buf(tcur_ast, params, clevels, 0, 0, r):
+                        matched = True
+                    else:
+                        exp_body = store.import_const_term(const_e, decl, tcur_ast)
+                        matched = (r == exp_body or self.def_eq(exp_body, r))
+            elif tcur_ast.__class__ is W_BVar:
+                assert isinstance(tcur_ast, W_BVar)
+                bid = tcur_ast.id
+                exp_body = (
+                    store.spine_arg(cur_start + bid)
+                    if bid < cur_n
+                    else store.bvar(bid - cur_n)
+                )
+                r = self._cheap_beta(self.infer_expected(vcur, exp_body))
+                matched = (r == exp_body or self.def_eq(exp_body, r))
+            else:
+                r = self._cheap_beta(self.infer(vcur, True))
+                if store.ast_inst_eq_buf(
+                        tcur_ast, params, clevels, cur_start, cur_n, r):
+                    matched = True
+                else:
+                    exp_body = store.import_const_subst_buf(
+                        const_e, decl, tcur_ast, cur_start, cur_n,
+                    )
+                    matched = (r == exp_body or self.def_eq(exp_body, r))
+        finally:
+            store.unapp_pop(smark)
+        child_np = self._saw_nonperm
+        self._saw_nonperm = prev_np or child_np
+        memos = store.memos
+        if matched:
+            if (not child_np
+                    and self._can_perm
+                    and (_s32(store.recs[ri << 2]) >> 3) == 0):
+                memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+            else:
+                memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+            return 0
+        r = store.bind_fvars(r, fvars, 0, m)
+        i = m - 1
+        while i >= 0:
+            rec = records[i]
+            r = store.cons(KIND_FORALL, store.field_a(rec), r, store.info(rec))
+            i -= 1
+        memos = store.memos
+        memos[mbase + M_INFER] = _u32(r)
+        if (not child_np
+                and self._can_perm
+                and (_s32(store.recs[ri << 2]) >> 3) == 0):
+            memos[mbase + M_CHECKED_GEN] = _u32(_CHECKED_PERM)
+        else:
+            memos[mbase + M_CHECKED_GEN] = _u32(self.check_gen)
+        return r
+
+    @dont_inline
     def _infer_miss(self, h, ri, mbase, check):
         tick = (self._stack_tick + 1) & 31
         self._stack_tick = tick
@@ -11451,13 +11743,15 @@ class Machine(object):
             if is_leaf(fn):
                 j = leaf_index(fn)
                 fn_type = _s32(store.leaf_infer[j])
-                if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
+                if fn_type == 0 or fn_type >= _LEAF_INFER_SEEN:
                     if not check:
                         return self._infer_app1_only_leaf(fn, j, arg)
-                    if fn_type == 0 and not self._def_eq_hooked:
+                    if fn_type < _LEAF_INFER_PROMOTE and not self._def_eq_hooked:
                         e = store.leaves[j]
                         if isinstance(e, W_Const):
-                            store.leaf_infer[j] = _u32(_LEAF_INFER_SEEN)
+                            store.leaf_infer[j] = _u32(
+                                _LEAF_INFER_SEEN if fn_type == 0 else fn_type + 1,
+                            )
                             return self._infer_app1_const_ast(
                                 fn, j, e, arg, expected, exp_start, exp_n,
                             )
@@ -11523,7 +11817,7 @@ class Machine(object):
                 if is_leaf(head):
                     j = leaf_index(head)
                     fn_type = _s32(store.leaf_infer[j])
-                    if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
+                    if fn_type == 0 or fn_type >= _LEAF_INFER_SEEN:
                         return self._infer_app_only_leaf_buf(head, j, mark, n)
                     return self._infer_app_only_buf(head, mark, n, fn_type, n)
                 fn_type = self.infer(head, False)
@@ -11531,11 +11825,13 @@ class Machine(object):
             if is_leaf(head):
                 j = leaf_index(head)
                 fn_type = _s32(store.leaf_infer[j])
-                if fn_type == 0 or fn_type == _LEAF_INFER_SEEN:
-                    if fn_type == 0 and not self._def_eq_hooked:
+                if fn_type == 0 or fn_type >= _LEAF_INFER_SEEN:
+                    if fn_type < _LEAF_INFER_PROMOTE and not self._def_eq_hooked:
                         e = store.leaves[j]
                         if isinstance(e, W_Const):
-                            store.leaf_infer[j] = _u32(_LEAF_INFER_SEEN)
+                            store.leaf_infer[j] = _u32(
+                                _LEAF_INFER_SEEN if fn_type == 0 else fn_type + 1,
+                            )
                             return self._infer_app_const_ast_buf(
                                 head, j, e, mark, n, expected, exp_start, exp_n,
                             )
@@ -11733,8 +12029,14 @@ class Machine(object):
         if (not is_leaf(arg)
                 and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_LAMBDA
                 and isinstance(dom_ast, W_ForAll)):
-            domain = store.import_const_term(e, decl, dom_ast)
-            arg_type = self.infer_expected(arg, domain)
+            arg_type = self._infer_lambda_expected_ast(
+                arg, e, decl, dom_ast, params, clevels, 0, 0,
+            )
+            if (arg_type == 0
+                    or store.ast_inst_eq_buf(dom_ast, params, clevels, 0, 0, arg_type)):
+                matched = True
+            else:
+                domain = store.import_const_term(e, decl, dom_ast)
         else:
             arg_type = self.infer(arg, True)
             if store.ast_inst_eq_buf(dom_ast, params, clevels, 0, 0, arg_type):
@@ -11844,39 +12146,28 @@ class Machine(object):
             elif (not is_leaf(arg)
                     and (_s32(store.recs[rec_index(arg) << 2]) & _KIND_MASK) == KIND_LAMBDA
                     and isinstance(dom_ast, W_ForAll)):
-                dom_h = store.import_const_term(e, decl, dom_ast)
-                if plen == 0 or store.loose_bvar_range(dom_h) == 0:
-                    domain = dom_h
-                    arg_type = self.infer_expected(arg, domain)
-                else:
-                    arg_type = self._infer_lambda_expected_pat(
-                        arg, dom_h, mark + i + 1, plen,
-                    )
-                    if arg_type == 0:
-                        cur = cur.body
-                        if cur.loose_bvar_range() == 0:
-                            plen = 0
-                        else:
-                            plen += 1
-                        i -= 1
-                        continue
-                    if (not is_leaf(arg_type)
-                            and store.inst_eq_buf(dom_h, mark + i + 1, plen, arg_type)):
-                        cur = cur.body
-                        if cur.loose_bvar_range() == 0:
-                            plen = 0
-                        else:
-                            plen += 1
-                        i -= 1
-                        continue
-                    if plen == 1:
-                        domain = store.instantiate(
-                            dom_h, store.spine_arg(mark + i + 1), 0,
-                        )
+                dom_n = 0 if (plen == 0 or dom_ast.loose_bvar_range() == 0) else plen
+                arg_type = self._infer_lambda_expected_ast(
+                    arg, e, decl, dom_ast, params, clevels,
+                    mark + i + 1, dom_n,
+                )
+                if (arg_type == 0
+                        or store.ast_inst_eq_buf(
+                            dom_ast, params, clevels, mark + i + 1, dom_n,
+                            arg_type)):
+                    cur = cur.body
+                    if cur.loose_bvar_range() == 0:
+                        plen = 0
                     else:
-                        domain = store.instantiate_multi_buf(
-                            dom_h, mark + i + 1, plen, 0,
-                        )
+                        plen += 1
+                    i -= 1
+                    continue
+                if dom_n == 0:
+                    domain = store.import_const_term(e, decl, dom_ast)
+                else:
+                    domain = store.import_const_subst_buf(
+                        e, decl, dom_ast, mark + i + 1, dom_n,
+                    )
             elif plen == 0 or dom_ast.loose_bvar_range() == 0:
                 arg_type = self.infer(arg, True)
                 if store.ast_inst_eq_buf(dom_ast, params, clevels, mark + i + 1, 0, arg_type):
