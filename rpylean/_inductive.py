@@ -16,7 +16,7 @@ constructors. Members found this way get the recursors `T.rec_1`,
 `T.rec_2`, … in order of discovery.
 """
 
-from rpython.rlib.objectmodel import compute_identity_hash, r_dict
+from rpython.rlib.objectmodel import r_dict
 
 from rpylean.objects import (
     Binder,
@@ -124,7 +124,7 @@ def _expr_is(a, b):
 
 
 def _expr_id_hash(a):
-    return compute_identity_hash(a)
+    return a.hash()
 
 
 def _expr_depth_eq(a, b):
@@ -132,7 +132,7 @@ def _expr_depth_eq(a, b):
 
 
 def _expr_depth_hash(a):
-    return (compute_identity_hash(a[0]) * 1000003) ^ a[1]
+    return (a[0].hash() * 1000003) ^ a[1]
 
 
 def _expr_pair_eq(a, b):
@@ -140,7 +140,7 @@ def _expr_pair_eq(a, b):
 
 
 def _expr_pair_hash(a):
-    return (compute_identity_hash(a[0]) * 1000003) ^ compute_identity_hash(a[1])
+    return (a[0].hash() * 1000003) ^ a[1].hash()
 
 
 class _DepthMemo(object):

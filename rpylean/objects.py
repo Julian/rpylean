@@ -2845,7 +2845,8 @@ class W_LevelParam(W_Level):
 
 _LP_BIT = 1 << 62
 _STYLE_SHIFT = 60
-_LOOSE_MASK = 0x07FFFFFF
+_CANON_BIT = 1 << 59
+_LOOSE_MASK = 0x03FFFFFF
 _NON_STYLE_UPPER_MASK = (_LOOSE_MASK << 33) | (1 << 32) | _LP_BIT
 
 
@@ -2854,7 +2855,8 @@ class W_Expr(_Item):
     #
     #   bits  0-31 : the content `hash()` (already masked to 32 bits)
     #   bit     32 : `has_fvar` (does any free variable occur)
-    #   bits 33-59 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bits 33-58 : `loose_bvar_range` (largest loose de-Bruijn index + 1)
+    #   bit     59 : `_CANON_BIT` (on `W_Const`/`W_Sort`: levels already normal)
     #   bits 60-61 : `binder_style` (0..3 on `W_FunBase`, 0 elsewhere)
     #   bit     62 : `has_level_param` (does any universe level param occur)
     #
@@ -3231,14 +3233,16 @@ class W_LitStr(W_Expr):
 
 
 class W_Sort(W_Expr):
-    _attrs_ = ['level', '_canonical']
+    _attrs_ = ['level']
     _immutable_fields_ = ['level']
 
     def __init__(self, level):
         self.level = level
-        self._canonical = None
         lp = _LP_BIT if level.has_param else 0
-        self._packed = (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | lp
+        canon = _CANON_BIT if level._normal is level else 0
+        self._packed = (
+            (((level.hash() * 1000003) ^ 0x5071) & 0xFFFFFFFF) | lp | canon
+        )
 
     def __repr__(self):
         # No class name here, as we wouldn't want to see <Sort Type>
@@ -3320,22 +3324,23 @@ def apply_const_level_params(const, target, env):
 
 
 class W_Const(W_Expr):
-    _attrs_ = ['name', 'levels', '_canonical']
+    _attrs_ = ['name', 'levels']
     _immutable_fields_ = ['name', 'levels']
 
     def __init__(self, name, levels):
         self.name = name
         lp = 0
+        canon = _CANON_BIT
+        h = name.hash()
         for each in levels:
             assert isinstance(each, W_Level), "%s is not a W_Level" % (each,)
             if each.has_param:
                 lp = _LP_BIT
+            if each._normal is not each:
+                canon = 0
+            h = (h * 1000003) ^ each.hash()
         self.levels = levels
-        self._canonical = self if not levels else None
-        h = name.hash()
-        for lvl in levels:
-            h = (h * 1000003) ^ lvl.hash()
-        self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | lp
+        self._packed = (((h * 1000003) ^ 0xC057) & 0xFFFFFFFF) | lp | canon
 
     def __repr__(self):
         return "`%s" % self.str()

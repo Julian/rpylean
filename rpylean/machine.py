@@ -63,6 +63,7 @@ from rpylean.objects import (
     W_LEVEL_ZERO,
     _BOOL_FALSE,
     _BOOL_TRUE,
+    _CANON_BIT,
     pack_proj_chain_key,
     _NAT_REC_NAME,
     _NAT_SUCC_NAME,
@@ -540,9 +541,8 @@ def _canonical_const(const):
     ``const`` with its universe levels in normal form, so constants at
     equal universes written differently share one leaf.
     """
-    c = const._canonical
-    if c is not None:
-        return c
+    if (const._packed & _CANON_BIT) != 0:
+        return const
     levels = const.levels
     n = len(levels)
     normalized = None
@@ -555,22 +555,15 @@ def _canonical_const(const):
                 normalized = list(levels)
             normalized[i] = nl
         i += 1
-    c = const if normalized is None else const.name.const(normalized)
-    const._canonical = c
-    c._canonical = c
-    return c
+    return const if normalized is None else const.name.const(normalized)
 
 
 def _canonical_sort(sort):
     """``sort`` with its level in normal form (see `_canonical_const`)."""
-    c = sort._canonical
-    if c is not None:
-        return c
+    if (sort._packed & _CANON_BIT) != 0:
+        return sort
     n = sort.level.normalize()
-    c = sort if n is sort.level else n.sort()
-    sort._canonical = c
-    c._canonical = c
-    return c
+    return sort if n is sort.level else n.sort()
 
 
 class IntMap(object):
@@ -2213,7 +2206,7 @@ class TermStore(object):
         if j == self.leaf_cap:
             self._grow_leaves()
         self.leaves[j] = e
-        self.leaf_meta[j] = _u32((e._packed >> 32) & 0x3FFFFFFF)
+        self.leaf_meta[j] = _u32((e._packed >> 32) & 0x07FFFFFF)
         self.leaf_head_kind[j] = _u32(
             0 if e.__class__ is W_Const else _LF_CLASSIFIED,
         )

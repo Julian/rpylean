@@ -392,3 +392,74 @@ def test_direct_lam_def_and_rec_binding_paths():
         assert tc.machine.store.memo(h, M_WHNF) == h45
     finally:
         tc.free()
+
+
+def test_unused_binders_bvar_closure_and_canon_bit():
+    """Unused lambda/let/Nat.casesOn binders skip argument/IH thunks, CBVar
+    closures bind directly, and `_CANON_BIT` preserves level normalization."""
+    from rpylean.machine import _canonical_const, _canonical_sort
+    from rpylean.objects import W_LEVEL_ZERO, W_Let, W_LevelMax, _CANON_BIT
+
+    a, b, f, n, ih, x = names("a", "b", "f", "n", "ih", "x")
+    add = _NAT_ADD.const()
+    # Function with unused first & third parameters and higher-order CBVar call:
+    #   ho (a : Type) (f : Nat -> Nat -> Nat) (unused : Nat) (x : Nat) :=
+    #     let dead := Nat.add 1 2; f x x
+    ho = Name.simple("ho").definition(
+        type=forall(
+            a.binder(TYPE),
+            f.binder(forall(x.binder(NAT), b.binder(NAT))(NAT)),
+            b.binder(NAT),
+            x.binder(NAT),
+        )(NAT),
+        value=fun(
+            a.binder(TYPE),
+            f.binder(forall(x.binder(NAT), b.binder(NAT))(NAT)),
+            b.binder(NAT),
+            x.binder(NAT),
+        )(
+            W_Let(
+                ih, NAT, add.app(W_LitNat.int(1), W_LitNat.int(2)),
+                W_BVar(3).app(W_BVar(1), W_BVar(1)),
+            ),
+        ),
+    )
+    # Non-recursive Nat.rec (Nat.casesOn pattern): `ih` is unused!
+    u0 = W_LEVEL_ZERO
+    u1 = u0.succ()
+    nat_rec = Name.simple("Nat").child("rec").const([u1])
+    pred_or_99 = nat_rec.app(
+        fun(n.binder(NAT))(NAT),
+        W_LitNat.int(99),
+        fun(n.binder(NAT), ih.binder(NAT))(W_BVar(1)),
+        W_LitNat.int(43),
+    )
+    env = _bool_nat_env(extra=[ho])
+    # Verify ho passes an opaque/stuck expression in unused positions without forcing it
+    res = _eval(
+        env,
+        ho.name.const().app(
+            NAT,
+            fun(x.binder(NAT), b.binder(NAT))(add.app(W_BVar(1), W_BVar(0))),
+            NAT,
+            W_LitNat.int(21),
+        ),
+    )
+    assert syntactic_eq(res, W_LitNat.int(42))
+    assert syntactic_eq(_eval(env, pred_or_99), W_LitNat.int(42))
+
+    # `_CANON_BIT` fast path vs non-normal `W_LevelMax` normalization
+    c_norm = Name.simple("Poly").const([u1])
+    assert (c_norm._packed & _CANON_BIT) != 0
+    assert _canonical_const(c_norm) is c_norm
+    max_raw = W_LevelMax(u0, u1)
+    c_raw = Name.simple("Poly").const([max_raw])
+    assert (c_raw._packed & _CANON_BIT) == 0
+    c_can = _canonical_const(c_raw)
+    assert syntactic_eq(c_can, c_norm)
+    assert (c_can._packed & _CANON_BIT) != 0
+    s_raw = max_raw.sort()
+    assert (s_raw._packed & _CANON_BIT) == 0
+    s_can = _canonical_sort(s_raw)
+    assert syntactic_eq(s_can, u1.sort())
+    assert (s_can._packed & _CANON_BIT) != 0

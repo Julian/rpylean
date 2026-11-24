@@ -18,7 +18,7 @@ checking pays negligible JIT bookkeeping overhead.
 """
 
 from rpython.rlib import jit
-from rpython.rlib.objectmodel import compute_identity_hash, r_dict
+from rpython.rlib.objectmodel import r_dict
 from rpython.rlib.rarithmetic import LONG_BIT, ovfcheck
 from rpython.rlib.rbigint import rbigint
 
@@ -37,6 +37,7 @@ from rpylean.objects import (
     W_Recursor,
     _BOOL_FALSE,
     _BOOL_TRUE,
+    _CANON_BIT,
     _NAT_ADD,
     _NAT_BEQ,
     _NAT_BLE,
@@ -65,7 +66,7 @@ def _expr_is(a, b):
 
 
 def _expr_id_hash(a):
-    return compute_identity_hash(a)
+    return a.hash()
 
 
 # ---- Bail signal ---------------------------------------------------------
@@ -482,10 +483,16 @@ class KQuotLift(Cont):
 
 # ---- Immutable CodeNode graph --------------------------------------------
 
+#: Sticky bit in `CodeNode._bvar_mask` indicating a free `BVar(idx)` with
+#: `idx >= 61` (conservative: treated as potentially referencing any binder).
+_BVAR_OVERFLOW_BIT = 1 << 61
+
+
 class CodeNode(object):
-    _attrs_ = ['tag', 'jit_hot']
-    _immutable_fields_ = ['tag', 'jit_hot?']
+    _attrs_ = ['tag', 'jit_hot', '_bvar_mask']
+    _immutable_fields_ = ['tag', 'jit_hot?', '_bvar_mask']
     jit_hot = False
+    _bvar_mask = 0
 
 
 class CVal(CodeNode):
@@ -494,6 +501,7 @@ class CVal(CodeNode):
 
     def __init__(self, val):
         self.tag = TAG_VAL
+        self._bvar_mask = 0
         self.val = val
 
 
@@ -505,6 +513,7 @@ class CThunk(CodeNode):
 
     def __init__(self, thunk):
         self.tag = TAG_THUNK
+        self._bvar_mask = 0
         self.thunk = thunk
 
 
@@ -515,16 +524,21 @@ class CBVar(CodeNode):
     def __init__(self, idx):
         self.tag = TAG_BVAR
         self.idx = idx
+        self._bvar_mask = (1 << idx) if idx < 61 else _BVAR_OVERFLOW_BIT
 
 
 class CLam(CodeNode):
-    _attrs_ = ['body', 'closed_val']
-    _immutable_fields_ = ['body', 'closed_val']
+    _attrs_ = ['body', 'closed_val', 'uses_arg']
+    _immutable_fields_ = ['body', 'closed_val', 'uses_arg']
 
     def __init__(self, body, is_closed=False):
         self.tag = TAG_LAM
         self.body = body
-        self.closed_val = VClosure(self, None) if is_closed else None
+        bm = body._bvar_mask
+        self.uses_arg = (bm & 1) != 0 or (bm & _BVAR_OVERFLOW_BIT) != 0
+        out_mask = (bm >> 1) | (bm & _BVAR_OVERFLOW_BIT)
+        self._bvar_mask = out_mask
+        self.closed_val = VClosure(self, None) if (is_closed or out_mask == 0) else None
 
 
 class CApp(CodeNode):
@@ -537,16 +551,23 @@ class CApp(CodeNode):
         self.tag = TAG_APP
         self.fn = fn
         self.args = args
+        m = fn._bvar_mask
+        for a in args:
+            m |= a._bvar_mask
+        self._bvar_mask = m
 
 
 class CLet(CodeNode):
-    _attrs_ = ['val_code', 'body']
-    _immutable_fields_ = ['val_code', 'body']
+    _attrs_ = ['val_code', 'body', 'uses_val']
+    _immutable_fields_ = ['val_code', 'body', 'uses_val']
 
     def __init__(self, val_code, body):
         self.tag = TAG_LET
         self.val_code = val_code
         self.body = body
+        bm = body._bvar_mask
+        self.uses_val = (bm & 1) != 0 or (bm & _BVAR_OVERFLOW_BIT) != 0
+        self._bvar_mask = val_code._bvar_mask | (bm >> 1) | (bm & _BVAR_OVERFLOW_BIT)
 
 
 class CProj(CodeNode):
@@ -557,6 +578,7 @@ class CProj(CodeNode):
         self.tag = TAG_PROJ
         self.struct_code = struct_code
         self.field_idx = field_idx
+        self._bvar_mask = struct_code._bvar_mask
 
 
 class CCtor(CodeNode):
@@ -572,6 +594,7 @@ class CCtor(CodeNode):
     def __init__(self, cidx, ctor_id, induct_id, num_params, num_fields,
                  tag_kind, const):
         self.tag = TAG_CTOR
+        self._bvar_mask = 0
         self.cidx = cidx
         self.ctor_id = ctor_id
         self.induct_id = induct_id
@@ -602,6 +625,10 @@ class CFullCtor(CodeNode):
         self.tag = TAG_FULL_CTOR
         self.ctor_node = ctor_node
         self.field_codes = field_codes
+        m = 0
+        for f in field_codes:
+            m |= f._bvar_mask
+        self._bvar_mask = m
 
 
 class CNatOp(CodeNode):
@@ -613,6 +640,7 @@ class CNatOp(CodeNode):
     def __init__(self, op_id):
         self.tag = TAG_NAT_OP
         self.op_id = op_id
+        self._bvar_mask = 3
 
 
 _NAT_OP_BODIES = [CLam(CLam(CNatOp(op_id)), True) for op_id in range(15)]
@@ -630,6 +658,7 @@ class CDef(CodeNode):
 
     def __init__(self, const, decl, nat_op):
         self.tag = TAG_DEF
+        self._bvar_mask = 0
         self.const = const
         self.decl = decl
         self.nat_op = nat_op
@@ -661,6 +690,7 @@ class CRec(CodeNode):
                  num_indices, is_nat_rec, is_k, is_simple_cidx,
                  rules_rhs, rules_nfields, rules_ctor_ids, rules_is_rec):
         self.tag = TAG_REC
+        self._bvar_mask = 0
         self.const = const
         self.induct_id = induct_id
         self.num_params = num_params
@@ -902,9 +932,9 @@ def _name_hash(a):
 
 
 def _canonical_const(const):
-    levels = const.levels
-    if not levels:
+    if (const._packed & _CANON_BIT) != 0:
         return const
+    levels = const.levels
     changed = False
     normalized = []
     for level in levels:
@@ -1608,16 +1638,25 @@ def _eval_prefix(cargs, skip, env):
     return prefix
 
 
+_UNUSED_SLOT = VAtom(COpaque(None))
+
+
 @jit.unroll_safe
 def _apply_cargs_to_lam(cur, cargs, call_env, target_env, args):
     """Bind leading `CLam` parameters directly from `cargs` without allocating
-    throwaway `ArgNode`s; push any remaining trailing arguments onto `args`."""
+    throwaway `ArgNode`s (and skipping `_arg_to_slot` for unused binders);
+    push any remaining trailing arguments onto `args`."""
     n = len(cargs)
     i = 0
     while i < n and cur.tag == TAG_LAM:
         assert isinstance(cur, CLam)
         base = None if cur.closed_val is not None else target_env
-        target_env = extend_env(base, _arg_to_slot(cargs[i], call_env))
+        if cur.uses_arg:
+            target_env = extend_env(base, _arg_to_slot(cargs[i], call_env))
+        elif base is not None or cur.body._bvar_mask != 0:
+            target_env = extend_env(base, _UNUSED_SLOT)
+        else:
+            target_env = None
         cur = cur.body
         i += 1
     if i < n:
@@ -1634,7 +1673,12 @@ def _bind_rec_rule(rhs, prefix, keep, val, nfields, trailing):
     while i < keep and rhs.tag == TAG_LAM:
         assert isinstance(rhs, CLam)
         base = None if rhs.closed_val is not None else new_env
-        new_env = extend_env(base, prefix[i])
+        if rhs.uses_arg:
+            new_env = extend_env(base, prefix[i])
+        elif base is not None or rhs.body._bvar_mask != 0:
+            new_env = extend_env(base, _UNUSED_SLOT)
+        else:
+            new_env = None
         rhs = rhs.body
         i += 1
     if i < keep:
@@ -1656,18 +1700,35 @@ def _bind_rec_rule(rhs, prefix, keep, val, nfields, trailing):
         if rhs.tag == TAG_LAM:
             assert isinstance(rhs, CLam)
             base = None if rhs.closed_val is not None else new_env
-            return rhs.body, extend_env(base, val.f0), trailing
+            if rhs.uses_arg:
+                new_env = extend_env(base, val.f0)
+            elif base is not None or rhs.body._bvar_mask != 0:
+                new_env = extend_env(base, _UNUSED_SLOT)
+            else:
+                new_env = None
+            return rhs.body, new_env, trailing
         return rhs, new_env, ArgNode(val.f0, trailing)
     if isinstance(val, VCtor2):
         if rhs.tag == TAG_LAM:
             assert isinstance(rhs, CLam)
             base = None if rhs.closed_val is not None else new_env
-            new_env = extend_env(base, val.f0)
+            if rhs.uses_arg:
+                new_env = extend_env(base, val.f0)
+            elif base is not None or rhs.body._bvar_mask != 0:
+                new_env = extend_env(base, _UNUSED_SLOT)
+            else:
+                new_env = None
             rhs = rhs.body
             if rhs.tag == TAG_LAM:
                 assert isinstance(rhs, CLam)
                 base = None if rhs.closed_val is not None else new_env
-                return rhs.body, extend_env(base, val.f1), trailing
+                if rhs.uses_arg:
+                    new_env = extend_env(base, val.f1)
+                elif base is not None or rhs.body._bvar_mask != 0:
+                    new_env = extend_env(base, _UNUSED_SLOT)
+                else:
+                    new_env = None
+                return rhs.body, new_env, trailing
             return rhs, new_env, ArgNode(val.f1, trailing)
         return rhs, new_env, ArgNode(val.f0, ArgNode(val.f1, trailing))
     assert isinstance(val, VCtorN)
@@ -1676,7 +1737,12 @@ def _bind_rec_rule(rhs, prefix, keep, val, nfields, trailing):
     while fi < nfields and rhs.tag == TAG_LAM:
         assert isinstance(rhs, CLam)
         base = None if rhs.closed_val is not None else new_env
-        new_env = extend_env(base, fields[fi])
+        if rhs.uses_arg:
+            new_env = extend_env(base, fields[fi])
+        elif base is not None or rhs.body._bvar_mask != 0:
+            new_env = extend_env(base, _UNUSED_SLOT)
+        else:
+            new_env = None
         rhs = rhs.body
         fi += 1
     new_args = trailing
@@ -1707,6 +1773,24 @@ def _pop_prefix(args, skip):
         if args is None:
             raise _EvalBail()
         prefix[i] = args.slot
+        args = args.tail
+        i += 1
+    return prefix, args
+
+
+@jit.unroll_safe
+def _pop_prefix_keep(args, skip, keep):
+    prefix = [None] * keep
+    i = 0
+    while i < keep:
+        if args is None:
+            raise _EvalBail()
+        prefix[i] = args.slot
+        args = args.tail
+        i += 1
+    while i < skip:
+        if args is None:
+            raise _EvalBail()
         args = args.tail
         i += 1
     return prefix, args
@@ -1831,12 +1915,25 @@ def eval_whnf(root_code, cache, tc):
                     fn, cargs, env, env, args,
                 )
                 continue
+            elif fn_tag == TAG_BVAR and not rec_edge:
+                assert isinstance(fn, CBVar)
+                fslot = lookup_env(env, fn.idx)
+                if isinstance(fslot, VClosure):
+                    lam = jit.promote(fslot.lam_node)
+                    code, env, args = _apply_cargs_to_lam(
+                        lam, cargs, env, fslot.env, args,
+                    )
+                    continue
+                args = _push_spine(cargs, env, args)
+                rec_edge = False
+                env = None
+                slot = fslot
             elif fn_tag == TAG_REC:
                 assert isinstance(fn, CRec)
                 skip = fn.skip
                 if len(cargs) > skip:
                     rec_edge = False
-                    prefix = _eval_prefix(cargs, skip, env)
+                    prefix = _eval_prefix(cargs, fn.keep, env)
                     major = _arg_to_slot(cargs[skip], env)
                     if len(cargs) > skip + 1:
                         args = _push_spine_from(cargs, skip + 1, env, args)
@@ -1857,7 +1954,12 @@ def eval_whnf(root_code, cache, tc):
             assert isinstance(code, CLam)
             if args is not None:
                 base_env = None if code.closed_val is not None else env
-                env = extend_env(base_env, args.slot)
+                if code.uses_arg:
+                    env = extend_env(base_env, args.slot)
+                elif base_env is not None or code.body._bvar_mask != 0:
+                    env = extend_env(base_env, _UNUSED_SLOT)
+                else:
+                    env = None
                 args = args.tail
                 code = code.body
                 continue
@@ -1944,7 +2046,7 @@ def eval_whnf(root_code, cache, tc):
         elif tag == TAG_REC:
             assert isinstance(code, CRec)
             rec_edge = False
-            prefix, rem = _pop_prefix(args, code.skip)
+            prefix, rem = _pop_prefix_keep(args, code.skip, code.keep)
             if rem is None:
                 raise _EvalBail()
             major = rem.slot
@@ -1973,8 +2075,13 @@ def eval_whnf(root_code, cache, tc):
 
         elif tag == TAG_LET:
             assert isinstance(code, CLet)
-            val_slot = _arg_to_slot(code.val_code, env)
-            env = extend_env(env, val_slot)
+            if code.uses_val:
+                val_slot = _arg_to_slot(code.val_code, env)
+                env = extend_env(env, val_slot)
+            elif env is not None or code.body._bvar_mask != 0:
+                env = extend_env(env, _UNUSED_SLOT)
+            else:
+                env = None
             code = code.body
             continue
 
@@ -2039,7 +2146,13 @@ def eval_whnf(root_code, cache, tc):
                 if args is not None:
                     if isinstance(val, VClosure):
                         lam = jit.promote(val.lam_node)
-                        env = extend_env(val.env, args.slot)
+                        base = None if lam.closed_val is not None else val.env
+                        if lam.uses_arg:
+                            env = extend_env(base, args.slot)
+                        elif base is not None or lam.body._bvar_mask != 0:
+                            env = extend_env(base, _UNUSED_SLOT)
+                        else:
+                            env = None
                         args = args.tail
                         code = lam.body
                         if rec_edge:
@@ -2086,46 +2199,69 @@ def eval_whnf(root_code, cache, tc):
                         if isinstance(val, VSmallNat):
                             n = val.n
                             if n == 0:
-                                target = prefix[1]
+                                cont = next_cont
                                 args = trailing
                                 rec_edge = False
-                            else:
-                                pred = mk_small_nat(n - 1)
-                                ih = RecNatThunk(
-                                    rec_node, prefix[0], prefix[1], prefix[2], pred,
-                                )
-                                target = prefix[2]
-                                args = ArgNode(pred, ArgNode(ih, trailing))
-                                rec_edge = True
+                                slot = prefix[1]
+                                continue
+                            pred = mk_small_nat(n - 1)
                         elif isinstance(val, VBigNat):
                             if val.big.eq(_BIG_ZERO):
-                                target = prefix[1]
+                                cont = next_cont
                                 args = trailing
                                 rec_edge = False
-                            else:
-                                pred = mk_nat_from_bigint(val.big.sub(_BIG_ONE))
-                                ih = RecNatThunk(
-                                    rec_node, prefix[0], prefix[1], prefix[2], pred,
-                                )
-                                target = prefix[2]
-                                args = ArgNode(pred, ArgNode(ih, trailing))
-                                rec_edge = True
+                                slot = prefix[1]
+                                continue
+                            pred = mk_nat_from_bigint(val.big.sub(_BIG_ONE))
                         elif isinstance(val, VCtor1):
                             cnode = jit.promote(val.ctor_node)
                             if cnode.tag_kind == CTOR_NAT_SUCC:
                                 pred = val.f0
-                                ih = RecNatThunk(
-                                    rec_node, prefix[0], prefix[1], prefix[2], pred,
-                                )
-                                target = prefix[2]
-                                args = ArgNode(pred, ArgNode(ih, trailing))
-                                rec_edge = True
                             else:
                                 raise _EvalBail()
                         else:
                             raise _EvalBail()
 
+                        target = prefix[2]
                         cont = next_cont
+                        if isinstance(target, VClosure):
+                            lam = jit.promote(target.lam_node)
+                            base = None if lam.closed_val is not None else target.env
+                            if lam.uses_arg:
+                                env = extend_env(base, pred)
+                            elif base is not None or lam.body._bvar_mask != 0:
+                                env = extend_env(base, _UNUSED_SLOT)
+                            else:
+                                env = None
+                            body = lam.body
+                            if body.tag == TAG_LAM:
+                                assert isinstance(body, CLam)
+                                base2 = None if body.closed_val is not None else env
+                                if body.uses_arg:
+                                    ih = RecNatThunk(
+                                        rec_node, prefix[0], prefix[1], target, pred,
+                                    )
+                                    env = extend_env(base2, ih)
+                                elif base2 is not None or body.body._bvar_mask != 0:
+                                    env = extend_env(base2, _UNUSED_SLOT)
+                                else:
+                                    env = None
+                                code = body.body
+                                args = trailing
+                            else:
+                                ih = RecNatThunk(
+                                    rec_node, prefix[0], prefix[1], target, pred,
+                                )
+                                code = body
+                                args = ArgNode(ih, trailing)
+                            rec_edge = False
+                            is_backedge = True
+                            break
+                        ih = RecNatThunk(
+                            rec_node, prefix[0], prefix[1], target, pred,
+                        )
+                        args = ArgNode(pred, ArgNode(ih, trailing))
+                        rec_edge = True
                         slot = target
                         continue
 
