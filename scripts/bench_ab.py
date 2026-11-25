@@ -205,6 +205,14 @@ def binary_version(path: Path) -> str:
     return ""
 
 
+def binary_supports_jobs(path: Path) -> bool:
+    try:
+        r = subprocess.run([str(path), "check", "--help"], capture_output=True, text=True, timeout=5)
+        return "--jobs" in (r.stdout or "") + (r.stderr or "")
+    except Exception:
+        return False
+
+
 def _extract_stats(stdout: str, stderr: str) -> list[str]:
     return [
         line.strip()
@@ -712,6 +720,13 @@ def render_summary(
     help="Path to lean-kernel-arena `_build/tests` (or set LEAN_KERNEL_ARENA_TESTS).",
 )
 @click.option(
+    "-j",
+    "--jobs",
+    default="1",
+    show_default=True,
+    help="Worker count passed via -j for A/B corpus runs ('1' for single-threaded counters, or 'auto'/N).",
+)
+@click.option(
     "--runs",
     type=click.IntRange(min=1),
     default=1,
@@ -783,6 +798,7 @@ def main(
     baseline_label: str | None,
     corpora: tuple[str, ...],
     tests_dir: Path | None,
+    jobs: str,
     runs: int,
     warmup: bool,
     skip_perf: bool,
@@ -818,12 +834,23 @@ def main(
     new_label = label or new_bin.name
     resolved_tests_dir = find_tests_dir(tests_dir)
 
+    old_has_jobs = binary_supports_jobs(old_bin)
+    new_has_jobs = binary_supports_jobs(new_bin)
+    if jobs != "1":
+        if not old_has_jobs:
+            raise click.ClickException(f"Baseline binary {old_bin} does not support --jobs")
+        if not new_has_jobs:
+            raise click.ClickException(f"Candidate binary {new_bin} does not support --jobs")
+    old_jobs_extra: tuple[str, ...] = ("-j", jobs) if old_has_jobs else ()
+    new_jobs_extra: tuple[str, ...] = ("-j", jobs) if new_has_jobs else ()
+
     old_sha = binary_sha256(old_bin)
     new_sha = binary_sha256(new_bin)
     old_ver = binary_version(old_bin)
     new_ver = binary_version(new_bin)
     console.print(
         f"[bold]Host:[/bold] {platform.system()} {platform.machine()}  "
+        f"[bold]Jobs:[/bold] {jobs}  "
         f"[bold]Baseline:[/bold] {old_label} ({old_sha}{f', {old_ver}' if old_ver else ''})  "
         f"[bold]Candidate:[/bold] {new_label} ({new_sha}{f', {new_ver}' if new_ver else ''})"
     )
@@ -847,22 +874,22 @@ def main(
     results: dict[str, tuple[AggregateMetrics, AggregateMetrics]] = {}
     for corpus_name, corpus_path in resolved_corpora:
         if warmup:
-            run_one(new_label, new_bin, corpus_name, corpus_path, quiet=True)
+            run_one(new_label, new_bin, corpus_name, corpus_path, extra=new_jobs_extra, quiet=True)
         old_runs: list[RunMetrics] = []
         new_runs: list[RunMetrics] = []
         for i in range(runs):
             # Alternate A/B then B/A across passes to cancel thermal/load drift.
             if i % 2 == 0:
-                old_runs.append(run_one(old_label, old_bin, corpus_name, corpus_path))
-                new_runs.append(run_one(new_label, new_bin, corpus_name, corpus_path))
+                old_runs.append(run_one(old_label, old_bin, corpus_name, corpus_path, extra=old_jobs_extra))
+                new_runs.append(run_one(new_label, new_bin, corpus_name, corpus_path, extra=new_jobs_extra))
             else:
-                new_runs.append(run_one(new_label, new_bin, corpus_name, corpus_path))
-                old_runs.append(run_one(old_label, old_bin, corpus_name, corpus_path))
+                new_runs.append(run_one(new_label, new_bin, corpus_name, corpus_path, extra=new_jobs_extra))
+                old_runs.append(run_one(old_label, old_bin, corpus_name, corpus_path, extra=old_jobs_extra))
         results[corpus_name] = (aggregate(old_runs), aggregate(new_runs))
 
     if stats and resolved_corpora:
         last_name, last_path = resolved_corpora[-1]
-        run_one(f"{new_label}-st", new_bin, last_name, last_path, extra=("--stats",))
+        run_one(f"{new_label}-st", new_bin, last_name, last_path, extra=new_jobs_extra + ("--stats",))
 
     regressions = render_summary(
         old_label,
@@ -878,7 +905,7 @@ def main(
         jit_results: dict[str, tuple[AggregateMetrics, AggregateMetrics]] = {}
         console.print("\n[bold]JIT Impact Check (`--jit off` vs `JIT on` on candidate):[/bold]")
         for corpus_name, corpus_path in resolved_corpora:
-            off_m = run_one(f"{new_label}:off", new_bin, corpus_name, corpus_path, pre_args=("--jit", "off"), track_jit=False)
+            off_m = run_one(f"{new_label}:off", new_bin, corpus_name, corpus_path, extra=new_jobs_extra, pre_args=("--jit", "off"), track_jit=False)
             jit_results[corpus_name] = (aggregate([off_m]), results[corpus_name][1])
         render_summary(f"{new_label} (--jit off)", f"{new_label} (JIT on)", jit_results, 1, None, None, None)
 

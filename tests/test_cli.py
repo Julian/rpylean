@@ -816,7 +816,7 @@ class TestShortOptionsAndJobs(object):
     def test_parse_jobs_values(self):
         from rpylean._parallel import detect_cpus, parse_jobs
 
-        assert parse_jobs(None) == 1
+        assert parse_jobs(None) == detect_cpus()
         assert parse_jobs("1") == 1
         assert parse_jobs("4") == 4
         assert parse_jobs("auto") == detect_cpus()
@@ -829,15 +829,52 @@ class TestShortOptionsAndJobs(object):
             else:
                 assert False, "expected UsageError for %r" % (bad,)
 
-    def test_break_at_rejects_parallel_jobs(self, tmpdir):
+    def test_break_at_falls_back_on_default_jobs_and_rejects_explicit_parallel(self, tmpdir):
         export = tmpdir.join("ok.ndjson")
         export.write('{"meta":{"format":{"version":"3.1.0"}}}\n')
+        # Without explicit -j, --break-at falls back to single-process checking.
+        out, err = run(
+            rpylean_cli,
+            ["rpylean", "check", "--break-at", "Foo", str(export)],
+            exit=0,
+        )
+        assert out == ""
+        assert "0/0 decls checked" in err
+        # Explicit -j > 1 with --break-at is still rejected.
         _, err = run(
             rpylean_cli,
             ["rpylean", "check", "-j", "2", "--break-at", "Foo", str(export)],
             exit=1,
         )
         assert "--break-at cannot be combined with --jobs > 1" in err
+
+    def test_auto_default_skips_fork_for_tiny_batches(self, tmpdir):
+        from rpylean._parallel import MIN_FORK_DECLS, start_parallel_batch, finish_parallel_batch
+        from rpylean.cli import _DeclChunkRunner
+        from rpylean.objects import name_dict
+
+        path = self._write_multi_export(tmpdir)
+        # Default (no -j) runs cleanly on tiny exports (< MIN_FORK_DECLS) without forking.
+        out_def, err_def = run(rpylean_cli, ["rpylean", "check", "--color=no", path])
+        out1, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", "-j", "1", path])
+        assert out_def == out1 == ""
+        assert "8/8 decls checked" in err_def
+        assert "8/8 decls checked" in err1
+        # Verify start_parallel_batch skips fork below MIN_FORK_DECLS even for non-empty batches.
+        from rpylean.objects import W_Axiom, W_Declaration, W_LEVEL_ZERO
+        env = Environment(declarations=name_dict())
+        tiny = [
+            W_Declaration(Name.simple("A"), W_LEVEL_ZERO.sort(), W_Axiom(), []),
+            W_Declaration(Name.simple("B"), W_LEVEL_ZERO.sort(), W_Axiom(), []),
+        ]
+        for d in tiny:
+            env.register_declaration(d)
+        runner = _DeclChunkRunner(env, tiny, FORMAT_PLAIN, FORMAT_PLAIN, None, -1.0)
+        inflight = start_parallel_batch(tiny, 4, runner, min_fork_decls=MIN_FORK_DECLS)
+        assert inflight.work_r == -1
+        res = finish_parallel_batch(inflight)
+        assert res.total_checked == 2
+        assert res.errors is None
 
     def _write_multi_export(self, tmpdir, bad_indices=()):
         """Build an export with 8 declarations (theorems + defs); indices in
@@ -883,7 +920,7 @@ class TestShortOptionsAndJobs(object):
 
     def test_parallel_check_passing_matches_sequential(self, tmpdir):
         path = self._write_multi_export(tmpdir)
-        out1, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", path])
+        out1, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", "-j", "1", path])
         out4, err4 = run(
             rpylean_cli, ["rpylean", "check", "--color=no", "-j", "4", path],
         )
@@ -894,7 +931,7 @@ class TestShortOptionsAndJobs(object):
     def test_parallel_check_errors_deterministic_and_max_fail(self, tmpdir):
         path = self._write_multi_export(tmpdir, bad_indices=(2, 5, 7))
         _, err1 = run(
-            rpylean_cli, ["rpylean", "check", "--color=no", path], exit=1,
+            rpylean_cli, ["rpylean", "check", "--color=no", "-j", "1", path], exit=1,
         )
         _, err4 = run(
             rpylean_cli,
@@ -921,7 +958,7 @@ class TestShortOptionsAndJobs(object):
         path = self._write_multi_export(tmpdir, bad_indices=(4,))
         out1, _ = run(
             rpylean_cli,
-            ["rpylean", "check", "--color=no", "--print", "name", path],
+            ["rpylean", "check", "--color=no", "-j", "1", "--print", "name", path],
             exit=1,
         )
         out4, _ = run(
@@ -954,7 +991,7 @@ class TestShortOptionsAndJobs(object):
             '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":2}}\n'
             '{"def":{"all":[2],"hints":"opaque","levelParams":[],"name":2,"safety":"safe","type":0,"value":1}}\n'
         )
-        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", str(export)], exit=1)
+        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", "-j", "1", str(export)], exit=1)
         _, err4 = run(
             rpylean_cli,
             ["rpylean", "check", "--color=no", "-j", "4", str(export)],
@@ -1059,7 +1096,7 @@ class TestShortOptionsAndJobs(object):
             '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":0}}\n'
             '{"def":{"all":[1],"hints":"opaque","levelParams":[],"name":1,"safety":"safe","type":0,"value":0}}\n'
         )
-        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", str(export)], exit=1)
+        _, err1 = run(rpylean_cli, ["rpylean", "check", "--color=no", "-j", "1", str(export)], exit=1)
         _, err4 = run(
             rpylean_cli, ["rpylean", "check", "--color=no", "-j", "4", str(export)], exit=1,
         )
@@ -1071,7 +1108,7 @@ class TestShortOptionsAndJobs(object):
         # With --max-fail 1, D1 hits max-fail so AlreadyDeclared is suppressed.
         _, err_mf1 = run(
             rpylean_cli,
-            ["rpylean", "check", "--color=no", "--max-fail", "1", str(export)],
+            ["rpylean", "check", "--color=no", "-j", "1", "--max-fail", "1", str(export)],
             exit=1,
         )
         _, err_mf4 = run(

@@ -35,6 +35,9 @@ _SC_NPROCESSORS_ONLN = getattr(rposix, "sysconf_names", {}).get(
 #: pipelined parsing, then grow to amortize fork and COW overhead.
 INITIAL_BATCH_SIZE = 8192
 DEFAULT_BATCH_SIZE = 98304
+#: Minimum declarations in a batch before auto-parallel mode forks workers
+#: (avoids paying `fork()` startup overhead on tiny export files).
+MIN_FORK_DECLS = 256
 #: Minimum declarations in a batch before memory-growth flushing triggers.
 MIN_MEM_FLUSH_BATCH = 4096
 #: Flush early if live heap grew by at least this many bytes during a batch.
@@ -63,11 +66,9 @@ def detect_cpus():
 def parse_jobs(jobs_arg):
     """Parse ``-j`` / ``--jobs`` into a positive worker count.
 
-    ``None`` defaults to ``1``; ``"auto"`` or ``"0"`` selects online CPU count.
+    ``None``, ``"auto"``, or ``"0"`` selects the online CPU count.
     """
-    if jobs_arg is None:
-        return 1
-    if jobs_arg == "auto" or jobs_arg == "0":
+    if jobs_arg is None or jobs_arg == "auto" or jobs_arg == "0":
         return detect_cpus()
     try:
         n = int(jobs_arg)
@@ -343,16 +344,22 @@ def _merge_child_payload(data, sink, batch_len):
     return child_checked, None
 
 
-def start_parallel_batch(batch, jobs, runner, disable_major_gc_in_child=True):
+def start_parallel_batch(
+    batch, jobs, runner, disable_major_gc_in_child=True, min_fork_decls=0,
+):
     """Fork up to ``jobs - 1`` worker children for ``batch`` and return an
     ``InFlightBatch`` handle immediately so the parent may overlap parsing the
     next batch before calling ``finish_parallel_batch``."""
     n = len(batch)
+    if n == 0:
+        return InFlightBatch(0, [], [], runner, -1, [], [])
+    if not HAVE_FORK or jobs <= 1 or n < min_fork_decls:
+        return InFlightBatch(n, [0], [n], runner, -1, [], [])
     chunk_starts, chunk_ends = build_chunks(batch, jobs)
     nchunks = len(chunk_starts)
     nworkers = jobs if jobs < nchunks else nchunks
 
-    if not HAVE_FORK or nworkers <= 1 or n == 0:
+    if nworkers <= 1:
         return InFlightBatch(n, chunk_starts, chunk_ends, runner, -1, [], [])
 
     return _start_fork_pool(

@@ -218,6 +218,18 @@ def _parse_sample_output(txt: str) -> tuple[int, list[tuple[str, int]], dict[str
     return total_samples, self_rows, direct_callers, high_callers
 
 
+def _single_thread_args(binary: Path) -> tuple[str, ...]:
+    """Return `('-j', '1')` if `binary` supports `--jobs`, so single-PID
+    profilers (`sample`, `lldb`, `perf`, `PYPYLOG`) measure one process cleanly."""
+    try:
+        r = subprocess.run([str(binary), "check", "--help"], capture_output=True, text=True, timeout=5)
+        if "--jobs" in (r.stdout or "") + (r.stderr or ""):
+            return ("-j", "1")
+    except Exception:
+        pass
+    return ()
+
+
 def _run_native_sample(binary: Path, corpus_name: str, corpus_path: Path, top_n: int, interval_ms: int) -> None:
     if platform.system() != "Darwin" or not shutil.which("sample"):
         raise click.ClickException("`xray.py native` currently requires macOS `/usr/bin/sample`.")
@@ -228,7 +240,7 @@ def _run_native_sample(binary: Path, corpus_name: str, corpus_path: Path, top_n:
         env = dict(os.environ)
         env["RPYLEAN_STACK_GROWN"] = "1"
         proc = subprocess.Popen(
-            [str(binary), "check", str(corpus_path)],
+            [str(binary), "check", *_single_thread_args(binary), str(corpus_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
@@ -785,6 +797,8 @@ def _run_gc_allocs_darwin(
     fd_cmd, cmd_file = tempfile.mkstemp(prefix="rpylean-lldb-", suffix=".lldb")
     os.close(fd_cmd)
     try:
+        jobs_prefix = " ".join(_single_thread_args(binary))
+        run_args = f"check {jobs_prefix} {corpus_path}" if jobs_prefix else f"check {corpus_path}"
         # Use LLDB's built-in Python script callback to capture compact frames
         # without noisy full stop-info banners on every nursery refill.
         script = f"""settings set target.env-vars RPYLEAN_STACK_GROWN=1
@@ -803,7 +817,7 @@ breakpoint command add -s python 1
   sys.stdout.write("GCSTACK:" + "|".join(out) + "\\n")
   return False
 DONE
-run check {corpus_path}
+run {run_args}
 quit
 """
         Path(cmd_file).write_text(script)
@@ -880,7 +894,7 @@ def _run_gc_allocs_linux(
                 "perf", "record", "-o", perf_file,
                 "-e", f"mem:{addr}:x", "-c", "1",
                 "--call-graph", "dwarf,16384", "--",
-                str(binary), "check", str(corpus_path),
+                str(binary), "check", *_single_thread_args(binary), str(corpus_path),
             ],
             capture_output=True,
             text=True,
@@ -965,7 +979,7 @@ def _measure_jit_run(
         os.close(fd)
         env["PYPYLOG"] = f"{pypylog_prefix}:{log_path}"
     try:
-        cmd = [str(binary), *jit_args, "check", str(corpus_path)]
+        cmd = [str(binary), *jit_args, "check", *_single_thread_args(binary), str(corpus_path)]
         if platform.system() == "Darwin":
             r = subprocess.run(
                 ["/usr/bin/time", "-l", *cmd],

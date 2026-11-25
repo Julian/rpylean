@@ -152,7 +152,7 @@ def _emit_export(exporter, names=None):
 JOBS = (
     "jobs",
     "number of parallel worker processes (positive integer, or 'auto'; "
-    "default: 1)",
+    "default: auto)",
 )
 CHECK_SHORT_OPTIONS = [
     ("j", "jobs"),
@@ -459,8 +459,8 @@ class _ParallelChecker(_StreamingChecker):
     """Pipelined batched fork-pool checker preserving deterministic order."""
 
     _attrs_ = [
-        'jobs', 'print_mode', '_batch', '_batch_size', '_max_batch_size',
-        '_batch_start_live', '_inflight', '_inflight_batch',
+        'jobs', 'min_fork_decls', 'print_mode', '_batch', '_batch_size',
+        '_max_batch_size', '_batch_start_live', '_inflight', '_inflight_batch',
         '_gc_paused', '_gc_next_collect', '_prev_cow',
     ]
 
@@ -478,6 +478,7 @@ class _ParallelChecker(_StreamingChecker):
         jobs,
         print_mode,
         batch_size=0,
+        min_fork_decls=0,
     ):
         _StreamingChecker.__init__(
             self,
@@ -492,14 +493,15 @@ class _ParallelChecker(_StreamingChecker):
             break_at=break_at,
         )
         self.jobs = jobs
+        self.min_fork_decls = min_fork_decls
         self.print_mode = print_mode
         self._batch = []
         if batch_size > 0:
             self._batch_size = batch_size
             self._max_batch_size = batch_size
         else:
-            # Ramp batch size 8K -> 16K -> 32K -> 48K so worker children start
-            # almost immediately while later batches amortize fork/COW cost.
+            # Ramp batch size 8K -> 16K -> 32K -> 64K -> 96K so worker children
+            # start quickly while later batches amortize fork/COW cost.
             self._batch_size = _parallel.INITIAL_BATCH_SIZE
             self._max_batch_size = _parallel.DEFAULT_BATCH_SIZE
         self._batch_start_live = _gcstats.live_memory()
@@ -508,8 +510,6 @@ class _ParallelChecker(_StreamingChecker):
         self._gc_paused = False
         self._gc_next_collect = _parallel.GC_INITIAL_COLLECT_THRESHOLD
         self._prev_cow = _COW_FLAG.enabled
-        env.cow_mode = True
-        _COW_FLAG.enabled = True
 
     def on_declaration(self, decl):
         self.n_seen += 1
@@ -606,10 +606,19 @@ class _ParallelChecker(_StreamingChecker):
         self._batch = []
         self.stdoutw.flush()
         self.stderrw.flush()
+        will_fork = (
+            _parallel.HAVE_FORK
+            and self.jobs > 1
+            and len(batch) >= self.min_fork_decls
+            and len(batch) > 0
+        )
+        if will_fork and not self.env.cow_mode:
+            self.env.cow_mode = True
+            _COW_FLAG.enabled = True
         # Pause incremental major GC in the parent while forked children share
         # COW pages (minor nursery collections remain active), avoiding
         # parent-side mark/sweep writes across the entire COW heap.
-        pause_gc = we_are_translated() and self.env.max_memory == 0
+        pause_gc = will_fork and we_are_translated() and self.env.max_memory == 0
         if pause_gc and not self._gc_paused and rgc.isenabled():
             rgc.disable()
             self._gc_paused = True
@@ -627,6 +636,7 @@ class _ParallelChecker(_StreamingChecker):
             self.jobs,
             runner,
             disable_major_gc_in_child=pause_gc,
+            min_fork_decls=self.min_fork_decls,
         )
         self._inflight = inflight
         if inflight.work_r < 0:
@@ -734,7 +744,7 @@ class _CheckRun(object):
         'max_fail', 'max_wall_time', 'max_memory',
         'printer', 'print_mode', 'slow_secs',
         'filter_match', 'filter_names', 'break_at', 'trace', 'stats',
-        'jobs',
+        'jobs', 'min_fork_decls',
     ]
 
     def __init__(self, args, stdoutw, stderrw):
@@ -771,9 +781,24 @@ class _CheckRun(object):
 
         self.trace = args.options["trace"]
         self.stats = args.options["stats"]
-        self.jobs = _parallel.parse_jobs(args.options.get("jobs", None))
-        if self.jobs > 1 and self.break_at is not None:
-            raise UsageError("--break-at cannot be combined with --jobs > 1")
+        if "jobs" in args.options:
+            raw_jobs = args.options["jobs"]
+            if self.break_at is not None and raw_jobs is None:
+                self.jobs = 1
+            else:
+                self.jobs = _parallel.parse_jobs(raw_jobs)
+                if self.jobs > 1 and self.break_at is not None:
+                    raise UsageError(
+                        "--break-at cannot be combined with --jobs > 1"
+                    )
+            self.min_fork_decls = (
+                _parallel.MIN_FORK_DECLS
+                if (raw_jobs is None or raw_jobs == "auto" or raw_jobs == "0")
+                else 0
+            )
+        else:
+            self.jobs = 1
+            self.min_fork_decls = 0
 
     def start(self, abort_at):
         """
@@ -799,7 +824,6 @@ class _CheckRun(object):
             else 1
         )
         if effective_jobs > 1:
-            env.cow_mode = True
             checker = _ParallelChecker(
                 env=env,
                 stdoutw=self.stdoutw,
@@ -812,6 +836,7 @@ class _CheckRun(object):
                 break_at=self.break_at,
                 jobs=effective_jobs,
                 print_mode=self.print_mode,
+                min_fork_decls=self.min_fork_decls,
             )
         else:
             checker = _StreamingChecker(
